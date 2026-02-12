@@ -3,8 +3,9 @@ import { processUntrackedReply } from "@/lib/processing/untracked";
 import { logError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
+  let payload: unknown;
   try {
-    const payload = await req.json();
+    payload = await req.json();
 
     // Validate required fields
     if (!payload?.data?.reply || !payload?.data?.sender_email) {
@@ -17,7 +18,10 @@ export async function POST(req: NextRequest) {
     await processUntrackedReply(payload);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    await logError("untracked", "webhook", (error as Error).message);
+    // Store payload for retry — the processing module already logged the detailed error
+    await logError("untracked", "webhook", (error as Error).message, {
+      _webhook_payload: payload,
+    });
     return NextResponse.json({ error: "Processing failed" }, { status: 500 });
   }
 }
