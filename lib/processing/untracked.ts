@@ -1,0 +1,153 @@
+import { shouldFilter } from "./bounce-filter";
+import { detectCompanyCode } from "./company-code-resolver";
+import { extractRecipients } from "./recipient-extractor";
+import { cleanReply } from "./reply-cleaner";
+import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
+import { sendToClayWebhook } from "@/lib/clay";
+import { logError, logActivity } from "@/lib/errors";
+import db from "@/lib/db";
+import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
+
+async function getUntrackedConfig(): Promise<UntrackedConfig> {
+  const result = await db.execute("SELECT * FROM untracked_config WHERE id = 1");
+  const row = result.rows[0];
+  return {
+    id: row.id as number,
+    airtable_base_id: row.airtable_base_id as string,
+    airtable_table_id: row.airtable_table_id as string,
+    meeting_ready_table_id: row.meeting_ready_table_id as string,
+    clay_webhook_url: row.clay_webhook_url as string | null,
+  };
+}
+
+export async function processUntrackedReply(payload: EmailBisonUntrackedPayload) {
+  const { reply, sender_email } = payload.data;
+
+  // 1. Bounce filtering
+  const toAddress = reply.to?.[0]?.address || "";
+  const filtered = await shouldFilter({
+    from_name: reply.from_name,
+    from_email: reply.from_email_address,
+    text_body: reply.text_body,
+    subject: reply.email_subject,
+    to_address: toAddress,
+  });
+
+  if (filtered) {
+    await logActivity("untracked", "filtered", {
+      lead_email: reply.from_email_address,
+      details: { from_name: reply.from_name, subject: reply.email_subject },
+    });
+    return;
+  }
+
+  // 2. Detect company code
+  const { code: companyCode } = await detectCompanyCode(
+    reply.from_email_address,
+    reply.text_body
+  );
+
+  // 3. Get untracked config (single section)
+  const config = await getUntrackedConfig();
+
+  // 4. Extract name
+  const nameParts = (reply.from_name || "").trim().split(/\s+/);
+  const firstName = nameParts[0] || "";
+  const lastName = nameParts.slice(1).join(" ") || "";
+
+  // 5. Extract recipients + clean reply
+  const recipients = extractRecipients(reply.to, reply.cc);
+  const cleanedReply = cleanReply(reply.text_body, reply.html_body);
+
+  // 6. Build Airtable fields
+  const baseFields: Record<string, unknown> = {
+    "Lead Email": reply.from_email_address,
+    "Lead Name": reply.from_name,
+    "Sender Email": sender_email.email,
+    "Sender ID": sender_email.id,
+    "Sender Name": sender_email.name,
+    "Email Subject": reply.email_subject,
+    "Reply we got": cleanedReply,
+    "Reply ID": reply.id,
+    "From Name": reply.from_name,
+    "From Email": reply.from_email_address,
+    "To Email": recipients.toEmails,
+    "To Name": recipients.toNames,
+    "Prospect CC email": recipients.ccEmails,
+    "Prospect CC name": recipients.ccNames,
+    "Reply Time": recipients.replyTime,
+    "Client Tag": companyCode,
+    "Lead Category": "Open Response",
+  };
+
+  // 7. Search for existing record
+  let recordId: string | undefined;
+  let action: string;
+
+  try {
+    const escapedEmail = reply.from_email_address.replace(/"/g, '\\"');
+    const escapedTag = companyCode.replace(/"/g, '\\"');
+    const existingRecords = await searchRecords(
+      config.airtable_base_id,
+      config.airtable_table_id,
+      `AND({Lead Email} = "${escapedEmail}", {Client Tag} = "${escapedTag}")`
+    );
+
+    if (existingRecords.length > 0) {
+      recordId = existingRecords[0].id;
+      await updateRecord(config.airtable_base_id, config.airtable_table_id, recordId, {
+        ...baseFields,
+        "Reply Status": "Pending again",
+      });
+      action = "updated";
+    } else {
+      recordId = await createRecord(config.airtable_base_id, config.airtable_table_id, {
+        ...baseFields,
+        "Reply Status": "Pending",
+      });
+      action = "created";
+    }
+  } catch (error) {
+    await logError("untracked", "airtable", (error as Error).message, {
+      company_code: companyCode,
+      lead_email: reply.from_email_address,
+    });
+    throw error;
+  }
+
+  // 8. Send to Clay
+  if (config.clay_webhook_url) {
+    try {
+      const senderNameParts = (sender_email.name || "").split(" ");
+      await sendToClayWebhook(config.clay_webhook_url, {
+        record_id: recordId,
+        reply_we_got: reply.text_body,
+        reply_subject: reply.email_subject,
+        from_email: reply.from_email_address,
+        sender_email: sender_email.email,
+        client_tag: companyCode,
+        first_name: firstName,
+        last_name: lastName,
+        cc_names: recipients.ccNames,
+        cc_emails: recipients.ccEmails,
+        full_sender_name: sender_email.name,
+        sender_first_name: senderNameParts[0] || "",
+        "Meeting-Ready Lead": "No",
+        "from full name": reply.from_name,
+      });
+    } catch (error) {
+      await logError("untracked", "clay", (error as Error).message, {
+        company_code: companyCode,
+        record_id: recordId,
+      });
+    }
+  }
+
+  // 9. Log activity
+  await logActivity("untracked", action, {
+    client_tag: companyCode,
+    section_name: "Untracked",
+    lead_email: reply.from_email_address,
+    details: { airtable_base_id: config.airtable_base_id, record_id: recordId },
+  });
+}
