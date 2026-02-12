@@ -3,7 +3,8 @@ import { processUntrackedReply } from "@/lib/processing/untracked";
 import { logError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
-  let payload: unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let payload: any;
   try {
     payload = await req.json();
 
