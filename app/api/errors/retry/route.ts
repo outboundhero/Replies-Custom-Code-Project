@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { processTrackedReply } from "@/lib/processing/tracked";
 import { processUntrackedReply } from "@/lib/processing/untracked";
+import { sendToClayWebhook } from "@/lib/clay";
 
 export async function POST(req: NextRequest) {
   const { id } = await req.json();
@@ -21,10 +22,36 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Error entry not found" }, { status: 404 });
   }
 
-  // Look for the webhook-level error that has _webhook_payload
-  // If this entry doesn't have a payload, search for sibling webhook entry
-  let payload: unknown = null;
+  const stage = entry.stage as string;
   const entryPayload = entry.payload as string | null;
+
+  // Check if this is a Clay error with retry data
+  if (stage === "clay" && entryPayload) {
+    try {
+      const parsed = JSON.parse(entryPayload);
+      if (parsed._clay_retry_data) {
+        const { webhook_url, data } = parsed._clay_retry_data;
+        try {
+          await sendToClayWebhook(webhook_url, data);
+          await db.execute({
+            sql: "DELETE FROM error_log WHERE id = ?",
+            args: [id],
+          });
+          return NextResponse.json({ ok: true, message: "Clay retry successful" });
+        } catch (error) {
+          return NextResponse.json(
+            { error: `Clay retry failed: ${(error as Error).message}` },
+            { status: 500 }
+          );
+        }
+      }
+    } catch {
+      // not valid JSON or no retry data
+    }
+  }
+
+  // Webhook-level retry (full pipeline replay)
+  let payload: unknown = null;
 
   if (entryPayload) {
     try {
@@ -61,7 +88,7 @@ export async function POST(req: NextRequest) {
 
   if (!payload) {
     return NextResponse.json(
-      { error: "No webhook payload found for retry. Only errors with stored payloads can be retried." },
+      { error: "No retry data found. Only webhook or Clay errors with stored payloads can be retried." },
       { status: 400 }
     );
   }
@@ -77,7 +104,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Unknown workflow: ${workflow}` }, { status: 400 });
     }
 
-    // Success — delete the error entries (both the airtable-stage and webhook-stage ones)
+    // Success — delete the error entry
     await db.execute({
       sql: "DELETE FROM error_log WHERE id = ?",
       args: [id],

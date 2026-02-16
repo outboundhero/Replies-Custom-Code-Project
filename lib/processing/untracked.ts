@@ -119,7 +119,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   if (config.clay_webhook_url) {
     try {
       const senderNameParts = (sender_email.name || "").split(" ");
-      await sendToClayWebhook(config.clay_webhook_url, {
+      const clayData = {
         record_id: recordId,
         reply_we_got: reply.text_body,
         reply_subject: reply.email_subject,
@@ -134,11 +134,31 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
         sender_first_name: senderNameParts[0] || "",
         "Meeting-Ready Lead": "No",
         "from full name": reply.from_name,
-      });
+      };
+      await sendToClayWebhook(config.clay_webhook_url, clayData);
     } catch (error) {
       await logError("untracked", "clay", (error as Error).message, {
         company_code: companyCode,
         record_id: recordId,
+        _clay_retry_data: {
+          webhook_url: config.clay_webhook_url,
+          data: {
+            record_id: recordId,
+            reply_we_got: reply.text_body,
+            reply_subject: reply.email_subject,
+            from_email: reply.from_email_address,
+            sender_email: sender_email.email,
+            client_tag: companyCode,
+            first_name: firstName,
+            last_name: lastName,
+            cc_names: recipients.ccNames,
+            cc_emails: recipients.ccEmails,
+            full_sender_name: sender_email.name,
+            sender_first_name: (sender_email.name || "").split(" ")[0] || "",
+            "Meeting-Ready Lead": "No",
+            "from full name": reply.from_name,
+          },
+        },
       });
     }
   }

@@ -103,7 +103,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   if (section.clay_webhook_url_tracked) {
     try {
       const senderNameParts = (sender_email.name || "").split(" ");
-      await sendToClayWebhook(section.clay_webhook_url_tracked, {
+      const clayData = {
         record_id: recordId,
         reply_we_got: reply.text_body,
         reply_subject: reply.email_subject,
@@ -125,12 +125,39 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
         sender_first_name: senderNameParts[0] || "",
         "Meeting-Ready Lead": "No",
         "from full name": reply.from_name,
-      });
+      };
+      await sendToClayWebhook(section.clay_webhook_url_tracked, clayData);
     } catch (error) {
       await logError("tracked", "clay", (error as Error).message, {
         tag: campaignTag,
         section: section.name,
         record_id: recordId,
+        _clay_retry_data: {
+          webhook_url: section.clay_webhook_url_tracked,
+          data: {
+            record_id: recordId,
+            reply_we_got: reply.text_body,
+            reply_subject: reply.email_subject,
+            from_email: reply.from_email_address,
+            sender_email: sender_email.email,
+            client_tag: campaignTag,
+            first_name: lead.first_name,
+            last_name: lead.last_name,
+            company: lead.company,
+            company_phone: customVars.phone,
+            linkedin: customVars.linkedin,
+            cc_names: recipients.ccNames,
+            cc_emails: recipients.ccEmails,
+            city: customVars.city,
+            state: customVars.state,
+            google_maps_url: customVars.google_maps_url,
+            address: customVars.address,
+            full_sender_name: sender_email.name,
+            sender_first_name: (sender_email.name || "").split(" ")[0] || "",
+            "Meeting-Ready Lead": "No",
+            "from full name": reply.from_name,
+          },
+        },
       });
       // Clay failure does NOT block — already wrote to Airtable
     }

@@ -81,7 +81,7 @@ export default function ErrorsPage() {
     if (!entry.payload) return false;
     try {
       const parsed = JSON.parse(entry.payload);
-      return !!parsed._webhook_payload;
+      return !!parsed._webhook_payload || !!parsed._clay_retry_data;
     } catch {
       return false;
     }
@@ -143,7 +143,7 @@ export default function ErrorsPage() {
           ) : (
             <div className="space-y-2">
               {errors.map((entry) => {
-                const canRetry = entry.stage === "webhook" && hasRetryPayload(entry);
+                const canRetry = (entry.stage === "webhook" || entry.stage === "clay") && hasRetryPayload(entry);
                 return (
                   <div
                     key={entry.id}
