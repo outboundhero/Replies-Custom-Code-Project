@@ -104,6 +104,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     try {
       const senderNameParts = (sender_email.name || "").split(" ");
       const clayData = {
+        // Existing keys (do not rename — mapped in Clay)
         record_id: recordId,
         reply_we_got: reply.text_body,
         reply_subject: reply.email_subject,
@@ -125,6 +126,21 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
         sender_first_name: senderNameParts[0] || "",
         "Meeting-Ready Lead": "No",
         "from full name": reply.from_name,
+        // Additional fields
+        lead_email: lead.email,
+        lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
+        lead_id: lead.id,
+        campaign_name: campaign.name,
+        campaign_id: campaign.id,
+        sender_id: sender_email.id,
+        sender_name: sender_email.name,
+        reply_id: reply.id,
+        to_email: recipients.toEmails,
+        to_name: recipients.toNames,
+        reply_time: recipients.replyTime,
+        lead_category: "Open Response",
+        reply_status: action === "created" ? "Pending" : "Pending again",
+        reply_cleaned: cleanedReply,
       };
       await sendToClayWebhook(section.clay_webhook_url_tracked, clayData);
     } catch (error) {
@@ -156,6 +172,20 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
             sender_first_name: (sender_email.name || "").split(" ")[0] || "",
             "Meeting-Ready Lead": "No",
             "from full name": reply.from_name,
+            lead_email: lead.email,
+            lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
+            lead_id: lead.id,
+            campaign_name: campaign.name,
+            campaign_id: campaign.id,
+            sender_id: sender_email.id,
+            sender_name: sender_email.name,
+            reply_id: reply.id,
+            to_email: recipients.toEmails,
+            to_name: recipients.toNames,
+            reply_time: recipients.replyTime,
+            lead_category: "Open Response",
+            reply_status: action === "created" ? "Pending" : "Pending again",
+            reply_cleaned: cleanedReply,
           },
         },
       });
