@@ -63,12 +63,17 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   const recipients = extractRecipients(reply.to, reply.cc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
 
-  // Fetch client config by company code
-  const clientConfigResult = await db.execute({
-    sql: "SELECT * FROM client_config WHERE client_tag = ?",
-    args: [companyCode],
-  });
-  const clientConfig = clientConfigResult.rows[0] || null;
+  // Fetch client config by company code (non-fatal — table may not exist on fresh deploy)
+  let clientConfig = null;
+  try {
+    const clientConfigResult = await db.execute({
+      sql: "SELECT * FROM client_config WHERE client_tag = ?",
+      args: [companyCode],
+    });
+    clientConfig = clientConfigResult.rows[0] || null;
+  } catch {
+    // Skip client config gracefully if table is missing
+  }
 
   // 6. Build Airtable fields
   const baseFields: Record<string, unknown> = {

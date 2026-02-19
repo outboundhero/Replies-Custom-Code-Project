@@ -9,11 +9,16 @@ import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
 
 async function getClientConfig(tag: string) {
-  const result = await db.execute({
-    sql: "SELECT * FROM client_config WHERE client_tag = ?",
-    args: [tag],
-  });
-  return result.rows[0] || null;
+  try {
+    const result = await db.execute({
+      sql: "SELECT * FROM client_config WHERE client_tag = ?",
+      args: [tag],
+    });
+    return result.rows[0] || null;
+  } catch {
+    // Table may not exist yet on a fresh deployment — skip client config gracefully
+    return null;
+  }
 }
 
 export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
