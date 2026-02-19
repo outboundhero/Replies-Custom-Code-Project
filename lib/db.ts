@@ -70,7 +70,27 @@ export async function initializeDatabase() {
       details TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS client_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_tag TEXT NOT NULL UNIQUE,
+      cc_name_1 TEXT,
+      cc_email_1 TEXT,
+      cc_name_2 TEXT,
+      cc_email_2 TEXT,
+      cc_name_3 TEXT,
+      cc_email_3 TEXT,
+      cc_name_4 TEXT,
+      cc_email_4 TEXT,
+      bcc_name_1 TEXT,
+      bcc_email_1 TEXT,
+      bcc_name_2 TEXT,
+      bcc_email_2 TEXT,
+      reply_template TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE INDEX IF NOT EXISTS idx_client_tags_tag ON client_tags(tag);
+    CREATE INDEX IF NOT EXISTS idx_client_config_tag ON client_config(client_tag);
     CREATE INDEX IF NOT EXISTS idx_company_codes_priority ON company_codes(priority DESC);
     CREATE INDEX IF NOT EXISTS idx_error_log_timestamp ON error_log(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_activity_log_timestamp ON activity_log(timestamp DESC);

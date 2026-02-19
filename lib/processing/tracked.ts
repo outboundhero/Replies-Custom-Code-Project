@@ -5,7 +5,16 @@ import { cleanReply } from "./reply-cleaner";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { logError, logActivity } from "@/lib/errors";
+import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
+
+async function getClientConfig(tag: string) {
+  const result = await db.execute({
+    sql: "SELECT * FROM client_config WHERE client_tag = ?",
+    args: [tag],
+  });
+  return result.rows[0] || null;
+}
 
 export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   const { lead, reply, campaign, sender_email } = payload.data;
@@ -35,6 +44,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   const customVars = extractCustomVars(lead.custom_variables);
   const recipients = extractRecipients(reply.to, reply.cc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
+  const clientConfig = await getClientConfig(campaignTag);
 
   // 4. Build Airtable field values
   const baseFields: Record<string, unknown> = {
@@ -61,6 +71,20 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     "Reply Time": recipients.replyTime,
     "Client Tag": campaignTag,
     "Lead Category": "Open Response",
+    // Client config fields
+    ...(clientConfig?.cc_name_1 && { "CC Name 1": clientConfig.cc_name_1 }),
+    ...(clientConfig?.cc_email_1 && { "CC Email 1": clientConfig.cc_email_1 }),
+    ...(clientConfig?.cc_name_2 && { "CC Name 2": clientConfig.cc_name_2 }),
+    ...(clientConfig?.cc_email_2 && { "CC Email 2": clientConfig.cc_email_2 }),
+    ...(clientConfig?.cc_name_3 && { "CC Name 3": clientConfig.cc_name_3 }),
+    ...(clientConfig?.cc_email_3 && { "CC Email 3": clientConfig.cc_email_3 }),
+    ...(clientConfig?.cc_name_4 && { "CC Name 4": clientConfig.cc_name_4 }),
+    ...(clientConfig?.cc_email_4 && { "CC Email 4": clientConfig.cc_email_4 }),
+    ...(clientConfig?.bcc_name_1 && { "BCC Name 1": clientConfig.bcc_name_1 }),
+    ...(clientConfig?.bcc_email_1 && { "BCC Email 1": clientConfig.bcc_email_1 }),
+    ...(clientConfig?.bcc_name_2 && { "BCC Name 2": clientConfig.bcc_name_2 }),
+    ...(clientConfig?.bcc_email_2 && { "BCC Email 2": clientConfig.bcc_email_2 }),
+    ...(clientConfig?.reply_template && { "Our Reply": clientConfig.reply_template }),
   };
 
   // 5. Search for existing record

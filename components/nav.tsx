@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 
 const links = [
   { href: "/", label: "Dashboard" },
+  { href: "/clients", label: "Clients" },
   { href: "/sections", label: "Sections & Tags" },
   { href: "/untracked", label: "Untracked Config" },
   { href: "/errors", label: "Error Log" },

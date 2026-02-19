@@ -59,6 +59,13 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   const recipients = extractRecipients(reply.to, reply.cc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
 
+  // Fetch client config by company code
+  const clientConfigResult = await db.execute({
+    sql: "SELECT * FROM client_config WHERE client_tag = ?",
+    args: [companyCode],
+  });
+  const clientConfig = clientConfigResult.rows[0] || null;
+
   // 6. Build Airtable fields
   const baseFields: Record<string, unknown> = {
     "Lead Email": reply.from_email_address,
@@ -78,6 +85,20 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     "Reply Time": recipients.replyTime,
     "Client Tag": companyCode,
     "Lead Category": "Open Response",
+    // Client config fields
+    ...(clientConfig?.cc_name_1 && { "CC Name 1": clientConfig.cc_name_1 }),
+    ...(clientConfig?.cc_email_1 && { "CC Email 1": clientConfig.cc_email_1 }),
+    ...(clientConfig?.cc_name_2 && { "CC Name 2": clientConfig.cc_name_2 }),
+    ...(clientConfig?.cc_email_2 && { "CC Email 2": clientConfig.cc_email_2 }),
+    ...(clientConfig?.cc_name_3 && { "CC Name 3": clientConfig.cc_name_3 }),
+    ...(clientConfig?.cc_email_3 && { "CC Email 3": clientConfig.cc_email_3 }),
+    ...(clientConfig?.cc_name_4 && { "CC Name 4": clientConfig.cc_name_4 }),
+    ...(clientConfig?.cc_email_4 && { "CC Email 4": clientConfig.cc_email_4 }),
+    ...(clientConfig?.bcc_name_1 && { "BCC Name 1": clientConfig.bcc_name_1 }),
+    ...(clientConfig?.bcc_email_1 && { "BCC Email 1": clientConfig.bcc_email_1 }),
+    ...(clientConfig?.bcc_name_2 && { "BCC Name 2": clientConfig.bcc_name_2 }),
+    ...(clientConfig?.bcc_email_2 && { "BCC Email 2": clientConfig.bcc_email_2 }),
+    ...(clientConfig?.reply_template && { "Our Reply": clientConfig.reply_template }),
   };
 
   // 7. Search for existing record
