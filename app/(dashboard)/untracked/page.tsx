@@ -15,10 +15,28 @@ import {
 } from "@/components/ui/select";
 import { toast } from "sonner";
 
-interface UntrackedConfig {
-  airtable_base_id: string;
-  airtable_table_id: string;
-  clay_webhook_url: string | null;
+/**
+ * Convert comma-separated human input to a regex pattern stored in DB.
+ * e.g. "analyzecorp.com, analyze360" → "analyzecorp\.com|analyze360"
+ */
+function humanToPattern(human: string): string {
+  return human
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => s.replaceAll(".", "\\.").replaceAll("/", "\\/"))
+    .join("|");
+}
+
+/**
+ * Convert a regex pattern from DB to human-readable comma-separated form.
+ * e.g. "analyzecorp\.com|analyze360" → "analyzecorp.com, analyze360"
+ */
+function patternToHuman(pattern: string): string {
+  return pattern
+    .split("|")
+    .map((s) => s.replaceAll("\\.", ".").replaceAll("\\/", "/"))
+    .join(", ");
 }
 
 interface CompanyCodeRow {
@@ -36,7 +54,6 @@ interface BounceFilterRow {
 }
 
 export default function UntrackedPage() {
-  const [config, setConfig] = useState<UntrackedConfig | null>(null);
   const [codes, setCodes] = useState<CompanyCodeRow[]>([]);
   const [filters, setFilters] = useState<BounceFilterRow[]>([]);
 
@@ -46,8 +63,12 @@ export default function UntrackedPage() {
     clay_webhook_url: "",
   });
 
-  // New company code form
-  const [newCode, setNewCode] = useState({ code: "", pattern: "", priority: "0" });
+  // Add new company code
+  const [newCode, setNewCode] = useState({ code: "", humanPattern: "" });
+
+  // Inline edit for existing company codes
+  const [editingCodeId, setEditingCodeId] = useState<number | null>(null);
+  const [editCodeForm, setEditCodeForm] = useState({ code: "", humanPattern: "" });
 
   // New bounce filter form
   const [newFilter, setNewFilter] = useState({ field: "text_body", value: "", match_type: "notContains" });
@@ -60,7 +81,6 @@ export default function UntrackedPage() {
     ]);
     if (cfgRes.ok) {
       const cfg = await cfgRes.json();
-      setConfig(cfg);
       if (cfg) setConfigForm({ airtable_base_id: cfg.airtable_base_id, clay_webhook_url: cfg.clay_webhook_url || "" });
     }
     if (codesRes.ok) setCodes(await codesRes.json());
@@ -80,13 +100,49 @@ export default function UntrackedPage() {
   }
 
   async function addCompanyCode() {
-    if (!newCode.code || !newCode.pattern) { toast.error("Code and pattern required"); return; }
+    if (!newCode.code.trim() || !newCode.humanPattern.trim()) {
+      toast.error("Code and domains/keywords are required");
+      return;
+    }
+    const pattern = humanToPattern(newCode.humanPattern);
+    // New codes get priority 0 (lowest) — user can reorder if needed
     const res = await fetch("/api/config/company-codes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...newCode, priority: Number(newCode.priority) }),
+      body: JSON.stringify({ code: newCode.code.trim().toUpperCase(), pattern, priority: 0 }),
     });
-    if (res.ok) { toast.success("Company code added"); setNewCode({ code: "", pattern: "", priority: "0" }); loadData(); }
+    if (res.ok) {
+      toast.success("Company code added");
+      setNewCode({ code: "", humanPattern: "" });
+      loadData();
+    } else {
+      toast.error("Failed to add company code");
+    }
+  }
+
+  function startEditCode(row: CompanyCodeRow) {
+    setEditingCodeId(row.id);
+    setEditCodeForm({ code: row.code, humanPattern: patternToHuman(row.pattern) });
+  }
+
+  async function saveEditCode(id: number) {
+    if (!editCodeForm.code.trim() || !editCodeForm.humanPattern.trim()) {
+      toast.error("Code and domains/keywords are required");
+      return;
+    }
+    const pattern = humanToPattern(editCodeForm.humanPattern);
+    const res = await fetch("/api/config/company-codes", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, code: editCodeForm.code.trim().toUpperCase(), pattern }),
+    });
+    if (res.ok) {
+      toast.success("Updated");
+      setEditingCodeId(null);
+      loadData();
+    } else {
+      toast.error("Failed to update");
+    }
   }
 
   async function deleteCompanyCode(id: number) {
@@ -156,57 +212,102 @@ export default function UntrackedPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">Company Codes</CardTitle>
+            <div>
+              <CardTitle className="text-base">Company Codes</CardTitle>
+              <p className="text-xs text-muted-foreground mt-1">
+                Matched against: sender domain + redirect URL + email body. Higher priority = matched first.
+              </p>
+            </div>
             <Badge variant="secondary">{codes.length} rules</Badge>
           </div>
         </CardHeader>
         <CardContent>
+          {/* Add new code */}
           <div className="flex gap-2 mb-4">
             <Input
               placeholder="Code (e.g. AC)"
               value={newCode.code}
               onChange={(e) => setNewCode({ ...newCode, code: e.target.value })}
-              className="w-24"
+              className="w-28"
             />
             <Input
-              placeholder="Regex pattern (e.g. analyzecorp\.com)"
-              value={newCode.pattern}
-              onChange={(e) => setNewCode({ ...newCode, pattern: e.target.value })}
+              placeholder="Domains/keywords, comma-separated (e.g. analyzecorp.com, analyze360)"
+              value={newCode.humanPattern}
+              onChange={(e) => setNewCode({ ...newCode, humanPattern: e.target.value })}
               className="flex-1"
-            />
-            <Input
-              placeholder="Priority"
-              type="number"
-              value={newCode.priority}
-              onChange={(e) => setNewCode({ ...newCode, priority: e.target.value })}
-              className="w-20"
             />
             <Button variant="secondary" onClick={addCompanyCode}>Add</Button>
           </div>
-          <div className="border rounded-md max-h-[400px] overflow-y-auto">
+
+          {/* Table */}
+          <div className="border rounded-md max-h-[500px] overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="bg-muted/50 sticky top-0">
                 <tr>
-                  <th className="text-left p-2 font-medium">Code</th>
-                  <th className="text-left p-2 font-medium">Pattern</th>
-                  <th className="text-left p-2 font-medium">Priority</th>
-                  <th className="p-2 w-16"></th>
+                  <th className="text-left p-2 font-medium w-20">Priority</th>
+                  <th className="text-left p-2 font-medium w-24">Code</th>
+                  <th className="text-left p-2 font-medium">Domains / Keywords</th>
+                  <th className="p-2 w-28"></th>
                 </tr>
               </thead>
               <tbody>
-                {codes.map((code) => (
-                  <tr key={code.id} className="border-t">
-                    <td className="p-2 font-mono">{code.code}</td>
-                    <td className="p-2 font-mono text-xs text-muted-foreground">{code.pattern}</td>
-                    <td className="p-2">{code.priority}</td>
-                    <td className="p-2">
-                      <button
-                        onClick={() => deleteCompanyCode(code.id)}
-                        className="text-xs text-destructive hover:underline"
-                      >
-                        Delete
-                      </button>
-                    </td>
+                {codes.map((row) => (
+                  <tr key={row.id} className="border-t">
+                    {editingCodeId === row.id ? (
+                      <>
+                        <td className="p-2 text-xs text-muted-foreground">{row.priority}</td>
+                        <td className="p-1">
+                          <Input
+                            value={editCodeForm.code}
+                            onChange={(e) => setEditCodeForm({ ...editCodeForm, code: e.target.value })}
+                            className="h-7 text-xs font-mono"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <Input
+                            value={editCodeForm.humanPattern}
+                            onChange={(e) => setEditCodeForm({ ...editCodeForm, humanPattern: e.target.value })}
+                            className="h-7 text-xs"
+                          />
+                        </td>
+                        <td className="p-1 flex gap-1">
+                          <button
+                            onClick={() => saveEditCode(row.id)}
+                            className="text-xs text-primary hover:underline"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={() => setEditingCodeId(null)}
+                            className="text-xs text-muted-foreground hover:underline"
+                          >
+                            Cancel
+                          </button>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="p-2 text-xs text-muted-foreground">{row.priority}</td>
+                        <td className="p-2 font-mono font-medium text-xs">{row.code}</td>
+                        <td className="p-2 text-xs text-muted-foreground">
+                          {patternToHuman(row.pattern)}
+                        </td>
+                        <td className="p-2 flex gap-2">
+                          <button
+                            onClick={() => startEditCode(row)}
+                            className="text-xs text-muted-foreground hover:text-foreground"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => deleteCompanyCode(row.id)}
+                            className="text-xs text-destructive hover:underline"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>

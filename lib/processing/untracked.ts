@@ -1,5 +1,6 @@
 import { shouldFilter } from "./bounce-filter";
 import { detectCompanyCode } from "./company-code-resolver";
+import { resolveRedirectLink } from "./redirect-resolver";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
@@ -41,10 +42,13 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     return;
   }
 
-  // 2. Detect company code
+  // 2. Resolve redirect link from sender email domain, then detect company code
+  const senderDomain = reply.from_email_address.split("@")[1] || "";
+  const redirectLink = await resolveRedirectLink(senderDomain);
   const { code: companyCode } = await detectCompanyCode(
     reply.from_email_address,
-    reply.text_body
+    reply.text_body,
+    redirectLink
   );
 
   // 3. Get untracked config (single section)
