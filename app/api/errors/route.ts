@@ -3,7 +3,7 @@ import db from "@/lib/db";
 
 export async function GET(req: NextRequest) {
   const since = req.nextUrl.searchParams.get("since");
-  const limit = req.nextUrl.searchParams.get("limit") || "50";
+  const limit = req.nextUrl.searchParams.get("limit") || "5000";
   const workflow = req.nextUrl.searchParams.get("workflow");
 
   let sql = "SELECT * FROM error_log";

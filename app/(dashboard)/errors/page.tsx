@@ -19,10 +19,12 @@ export default function ErrorsPage() {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [filter, setFilter] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<number | null>(null);
+  const [retryingAll, setRetryingAll] = useState(false);
+  const [retryAllProgress, setRetryAllProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [retryResult, setRetryResult] = useState<{ id: number; success: boolean; message: string } | null>(null);
 
   const loadErrors = useCallback(async () => {
-    let url = "/api/errors?limit=200";
+    let url = "/api/errors?limit=5000";
     if (filter) url += `&workflow=${filter}`;
     const res = await fetch(url);
     if (res.ok) setErrors(await res.json());
@@ -87,16 +89,46 @@ export default function ErrorsPage() {
     }
   }
 
+  async function retryAll() {
+    const retryable = errors.filter(hasRetryPayload);
+    if (retryable.length === 0) return;
+    if (!confirm(`Retry all ${retryable.length} retryable errors?`)) return;
+
+    setRetryingAll(true);
+    setRetryAllProgress({ done: 0, total: retryable.length, failed: 0 });
+
+    let failed = 0;
+    for (let i = 0; i < retryable.length; i++) {
+      try {
+        const res = await fetch("/api/errors/retry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: retryable[i].id }),
+        });
+        if (!res.ok) failed++;
+      } catch {
+        failed++;
+      }
+      setRetryAllProgress({ done: i + 1, total: retryable.length, failed });
+    }
+
+    setRetryingAll(false);
+    setTimeout(() => setRetryAllProgress(null), 5000);
+    loadErrors();
+  }
+
+  const retryableCount = errors.filter(hasRetryPayload).length;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Error Log</h2>
           <p className="text-sm text-muted-foreground">
-            Auto-refreshes every 3 seconds
+            Auto-refreshes every 3 seconds · All errors stored
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
           <Button
             variant={filter === null ? "default" : "outline"}
             size="sm"
@@ -118,6 +150,19 @@ export default function ErrorsPage() {
           >
             Untracked
           </Button>
+          {retryableCount > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={retryAll}
+              disabled={retryingAll}
+              className="border-blue-300 text-blue-700 hover:bg-blue-50"
+            >
+              {retryingAll && retryAllProgress
+                ? `Retrying ${retryAllProgress.done}/${retryAllProgress.total}...`
+                : `Retry All (${retryableCount})`}
+            </Button>
+          )}
           {errors.length > 0 && (
             <Button variant="destructive" size="sm" onClick={clearAll}>
               Clear All
@@ -125,6 +170,13 @@ export default function ErrorsPage() {
           )}
         </div>
       </div>
+
+      {retryAllProgress && !retryingAll && (
+        <div className={`text-sm px-3 py-2 rounded-md border ${retryAllProgress.failed === 0 ? "bg-green-50 text-green-700 border-green-200" : "bg-yellow-50 text-yellow-800 border-yellow-200"}`}>
+          Retry All complete: {retryAllProgress.done - retryAllProgress.failed} succeeded
+          {retryAllProgress.failed > 0 && `, ${retryAllProgress.failed} failed`}
+        </div>
+      )}
 
       <Card>
         <CardHeader>
@@ -143,7 +195,7 @@ export default function ErrorsPage() {
           ) : (
             <div className="space-y-2">
               {errors.map((entry) => {
-                const canRetry = (entry.stage === "webhook" || entry.stage === "clay") && hasRetryPayload(entry);
+                const canRetry = hasRetryPayload(entry);
                 return (
                   <div
                     key={entry.id}
@@ -166,7 +218,7 @@ export default function ErrorsPage() {
                       {canRetry && (
                         <button
                           onClick={(e) => { e.stopPropagation(); retryError(entry.id); }}
-                          disabled={retrying === entry.id}
+                          disabled={retrying === entry.id || retryingAll}
                           className="text-xs font-medium text-blue-600 hover:text-blue-800 disabled:opacity-50 px-2 py-0.5 rounded border border-blue-200 bg-blue-50 hover:bg-blue-100"
                         >
                           {retrying === entry.id ? "Retrying..." : "Retry"}
