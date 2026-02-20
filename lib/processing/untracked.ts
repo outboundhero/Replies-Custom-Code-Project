@@ -53,8 +53,44 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     redirectLink
   );
 
-  // 3. Get untracked config (single section)
-  const config = await getUntrackedConfig();
+  // 3. Resolve routing destination:
+  //    - If client tag matched → route to that client's section (Airtable base + Clay URL)
+  //    - If N/A → fall back to the global untracked config
+  let airtableBaseId: string;
+  let airtableTableId: string;
+  let clayWebhookUrl: string | null;
+  let sectionName: string;
+
+  if (companyCode !== "N/A") {
+    const sectionResult = await db.execute({
+      sql: `SELECT s.name, s.airtable_base_id, s.airtable_table_id, s.clay_webhook_url_tracked
+            FROM sections s
+            JOIN client_tags ct ON ct.section_id = s.id
+            WHERE ct.tag = ?`,
+      args: [companyCode],
+    });
+
+    if (sectionResult.rows.length > 0) {
+      const sec = sectionResult.rows[0];
+      airtableBaseId = sec.airtable_base_id as string;
+      airtableTableId = sec.airtable_table_id as string;
+      clayWebhookUrl = sec.clay_webhook_url_tracked as string | null;
+      sectionName = sec.name as string;
+    } else {
+      // Tag found by regex but not in client_tags — fall back to untracked
+      const config = await getUntrackedConfig();
+      airtableBaseId = config.airtable_base_id;
+      airtableTableId = config.airtable_table_id;
+      clayWebhookUrl = config.clay_webhook_url;
+      sectionName = "Untracked";
+    }
+  } else {
+    const config = await getUntrackedConfig();
+    airtableBaseId = config.airtable_base_id;
+    airtableTableId = config.airtable_table_id;
+    clayWebhookUrl = config.clay_webhook_url;
+    sectionName = "Untracked";
+  }
 
   // 4. Extract name
   const nameParts = (reply.from_name || "").trim().split(/\s+/);
@@ -112,7 +148,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     ...(clientConfig?.reply_template && { "Our Reply": clientConfig.reply_template }),
   };
 
-  // 7. Search for existing record
+  // 7. Search for existing record in the resolved Airtable base and create/update
   let recordId: string | undefined;
   let action: string;
 
@@ -120,20 +156,20 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     const escapedEmail = reply.from_email_address.replace(/"/g, '\\"');
     const escapedTag = companyCode.replace(/"/g, '\\"');
     const existingRecords = await searchRecords(
-      config.airtable_base_id,
-      config.airtable_table_id,
+      airtableBaseId,
+      airtableTableId,
       `AND({Lead Email} = "${escapedEmail}", {Client Tag} = "${escapedTag}")`
     );
 
     if (existingRecords.length > 0) {
       recordId = existingRecords[0].id;
-      await updateRecord(config.airtable_base_id, config.airtable_table_id, recordId, {
+      await updateRecord(airtableBaseId, airtableTableId, recordId, {
         ...baseFields,
         "Reply Status": "Pending again",
       });
       action = "updated";
     } else {
-      recordId = await createRecord(config.airtable_base_id, config.airtable_table_id, {
+      recordId = await createRecord(airtableBaseId, airtableTableId, {
         ...baseFields,
         "Reply Status": "Pending",
       });
@@ -147,83 +183,58 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     throw error;
   }
 
-  // 8. Send to Clay
-  if (config.clay_webhook_url) {
+  // 8. Send to Clay (use section's tracked Clay URL if matched, else untracked Clay URL)
+  if (clayWebhookUrl) {
+    const senderNameParts = (sender_email.name || "").split(" ");
+    const clayData = {
+      // Existing keys (do not rename — mapped in Clay)
+      record_id: recordId,
+      reply_we_got: reply.text_body,
+      reply_subject: reply.email_subject,
+      from_email: reply.from_email_address,
+      sender_email: sender_email.email,
+      client_tag: companyCode,
+      first_name: firstName,
+      last_name: lastName,
+      cc_names: recipients.ccNames,
+      cc_emails: recipients.ccEmails,
+      full_sender_name: sender_email.name,
+      sender_first_name: senderNameParts[0] || "",
+      "Meeting-Ready Lead": "No",
+      "from full name": reply.from_name,
+      // Additional fields
+      lead_email: reply.from_email_address,
+      lead_name: reply.from_name,
+      sender_id: sender_email.id,
+      sender_name: sender_email.name,
+      reply_id: reply.id,
+      to_email: recipients.toEmails,
+      to_name: recipients.toNames,
+      reply_time: recipients.replyTime,
+      lead_category: "Open Response",
+      reply_status: action === "created" ? "Pending" : "Pending again",
+      reply_cleaned: cleanedReply,
+    };
+
     try {
-      const senderNameParts = (sender_email.name || "").split(" ");
-      const clayData = {
-        // Existing keys (do not rename — mapped in Clay)
-        record_id: recordId,
-        reply_we_got: reply.text_body,
-        reply_subject: reply.email_subject,
-        from_email: reply.from_email_address,
-        sender_email: sender_email.email,
-        client_tag: companyCode,
-        first_name: firstName,
-        last_name: lastName,
-        cc_names: recipients.ccNames,
-        cc_emails: recipients.ccEmails,
-        full_sender_name: sender_email.name,
-        sender_first_name: senderNameParts[0] || "",
-        "Meeting-Ready Lead": "No",
-        "from full name": reply.from_name,
-        // Additional fields
-        lead_email: reply.from_email_address,
-        lead_name: reply.from_name,
-        sender_id: sender_email.id,
-        sender_name: sender_email.name,
-        reply_id: reply.id,
-        to_email: recipients.toEmails,
-        to_name: recipients.toNames,
-        reply_time: recipients.replyTime,
-        lead_category: "Open Response",
-        reply_status: action === "created" ? "Pending" : "Pending again",
-        reply_cleaned: cleanedReply,
-      };
-      await sendToClayWebhook(config.clay_webhook_url, clayData);
+      await sendToClayWebhook(clayWebhookUrl, clayData);
     } catch (error) {
       await logError("untracked", "clay", (error as Error).message, {
         company_code: companyCode,
         record_id: recordId,
         _clay_retry_data: {
-          webhook_url: config.clay_webhook_url,
-          data: {
-            record_id: recordId,
-            reply_we_got: reply.text_body,
-            reply_subject: reply.email_subject,
-            from_email: reply.from_email_address,
-            sender_email: sender_email.email,
-            client_tag: companyCode,
-            first_name: firstName,
-            last_name: lastName,
-            cc_names: recipients.ccNames,
-            cc_emails: recipients.ccEmails,
-            full_sender_name: sender_email.name,
-            sender_first_name: (sender_email.name || "").split(" ")[0] || "",
-            "Meeting-Ready Lead": "No",
-            "from full name": reply.from_name,
-            lead_email: reply.from_email_address,
-            lead_name: reply.from_name,
-            sender_id: sender_email.id,
-            sender_name: sender_email.name,
-            reply_id: reply.id,
-            to_email: recipients.toEmails,
-            to_name: recipients.toNames,
-            reply_time: recipients.replyTime,
-            lead_category: "Open Response",
-            reply_status: action === "created" ? "Pending" : "Pending again",
-            reply_cleaned: cleanedReply,
-          },
+          webhook_url: clayWebhookUrl,
+          data: clayData,
         },
       });
     }
   }
 
-  // 9. Log activity
+  // 9. Log activity with the resolved section name
   await logActivity("untracked", action, {
     client_tag: companyCode,
-    section_name: "Untracked",
+    section_name: sectionName,
     lead_email: reply.from_email_address,
-    details: { airtable_base_id: config.airtable_base_id, record_id: recordId },
+    details: { airtable_base_id: airtableBaseId, record_id: recordId },
   });
 }
