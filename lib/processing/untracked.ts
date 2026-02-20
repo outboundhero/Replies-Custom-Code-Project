@@ -42,8 +42,10 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     return;
   }
 
-  // 2. Resolve redirect link from sender email domain, then detect company code
-  const senderDomain = reply.from_email_address.split("@")[1] || "";
+  // 2. Resolve redirect link from the CLIENT's sending domain (sender_email),
+  //    NOT the prospect's from_email_address. e.g. tdawson@elitecustodialcare.co
+  //    redirects to https://absolutefsinc.com/ which identifies the client.
+  const senderDomain = sender_email.email.split("@")[1] || "";
   const redirectLink = await resolveRedirectLink(senderDomain);
   const { code: companyCode } = await detectCompanyCode(
     reply.from_email_address,
