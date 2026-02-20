@@ -53,7 +53,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
 
   // 4. Build Airtable field values
   const baseFields: Record<string, unknown> = {
-    "Lead Email": lead.email,
+    "Lead Email": reply.from_email_address,
     "Lead Name": `${lead.first_name} ${lead.last_name}`.trim(),
     "Lead ID": lead.id,
     "Company Name": lead.company,
@@ -156,7 +156,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
         "Meeting-Ready Lead": "No",
         "from full name": reply.from_name,
         // Additional fields
-        lead_email: lead.email,
+        lead_email: reply.from_email_address,
         lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
         lead_id: lead.id,
         campaign_name: campaign.name,
@@ -201,7 +201,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
             sender_first_name: (sender_email.name || "").split(" ")[0] || "",
             "Meeting-Ready Lead": "No",
             "from full name": reply.from_name,
-            lead_email: lead.email,
+            lead_email: reply.from_email_address,
             lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
             lead_id: lead.id,
             campaign_name: campaign.name,
@@ -226,7 +226,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   await logActivity("tracked", action, {
     client_tag: campaignTag,
     section_name: section.name,
-    lead_email: lead.email,
+    lead_email: reply.from_email_address,
     details: { airtable_base_id: section.airtable_base_id, record_id: recordId },
   });
 }
