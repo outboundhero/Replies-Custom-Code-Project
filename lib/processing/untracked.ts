@@ -145,7 +145,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     ...(clientConfig?.bcc_email_1 && { "BCC email 1": clientConfig.bcc_email_1 }),
     ...(clientConfig?.bcc_name_2 && { "BCC name 2": clientConfig.bcc_name_2 }),
     ...(clientConfig?.bcc_email_2 && { "BCC email 2": clientConfig.bcc_email_2 }),
-    ...(clientConfig?.reply_template && { "Our Reply": clientConfig.reply_template }),
+    ...(clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
   };
 
   // 7. Search for existing record in the resolved Airtable base and create/update
