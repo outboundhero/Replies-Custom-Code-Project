@@ -216,7 +216,7 @@ const configs: ClientConfig[] = [
     bcc_name_2: "", bcc_email_2: "",
   },
   {
-    tag: "JPCKA",
+    tag: "JPC&A",
     reply_template: `Hi {},\nI'm CCing my bosses Patrick and Bobby to this email since you're interested in {CONTEXT} for {}.\nPatrick and Bobby, can you please take it from here? Looks like a good number to call is {}\nBest,\n{SENDER NAME}\nJan-Pro Development of Columbus, Central GA and Auburn, AL\nO: 706-940-0220 (Columbus) | O: 478-259-7125 (Central GA)`,
     cc_name_1: "Patrick Gilbert", cc_email_1: "patrick.gilbert@jan-pro.com",
     cc_name_2: "Bobby Springer", cc_email_2: "bobby.springer@jan-pro.com",
@@ -686,7 +686,7 @@ const configs: ClientConfig[] = [
     bcc_name_2: "", bcc_email_2: "",
   },
   {
-    tag: "KLCS",
+    tag: "K&LCS",
     reply_template: `Hi {},\n\nI'm CCing my boss Kristopher and Lisa to this email since you're interested in having a conversation about cleaning for {}.\n\nKristopher and Lisa, can you please take it from here? Looks like a good number to call is {}.\n\nK&L Cleaning\nPhone: (432) 529-4325\n14218 West County Rd 177, Odessa, Texas 79766`,
     cc_name_1: "Kristopher Jackson", cc_email_1: "krisjackson@kandcleaningservicesapp.com",
     cc_name_2: "Lisa Jackson", cc_email_2: "lisajackson1321@knlcleaning.com",

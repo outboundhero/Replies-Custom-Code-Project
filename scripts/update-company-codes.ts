@@ -77,7 +77,7 @@ const companyCodes: Array<{ code: string; pattern: string }> = [
   { code: "JPLV",  pattern: "jan-pro\\.com\\/lasvegas" },
   { code: "JPC",   pattern: "jan-pro\\.com\\/charlotte" },
   { code: "JPP",   pattern: "jan-pro\\.com\\/philadelphia" },
-  { code: "JPCKA", pattern: "jan-pro\\.com\\/columbusga" },
+  { code: "JPC&A", pattern: "jan-pro\\.com\\/columbusga" },
   { code: "JPGW",  pattern: "jan-pro\\.com\\/wichita" },
   { code: "JPWM",  pattern: "jan-pro\\.com\\/westmichigan" },
   { code: "JPU",   pattern: "jan-pro\\.com\\/utah" },
