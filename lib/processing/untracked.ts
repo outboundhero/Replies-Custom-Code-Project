@@ -3,6 +3,7 @@ import { detectCompanyCode } from "./company-code-resolver";
 import { resolveRedirectLink } from "./redirect-resolver";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
+import { categorizeReply, CC_BCC_CATEGORIES } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { logError, logActivity } from "@/lib/errors";
@@ -101,6 +102,15 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   const recipients = extractRecipients(reply.to, reply.cc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
 
+  // 5b. AI categorization (bounce already filtered above)
+  const aiCategory = await categorizeReply(
+    reply.from_email_address,
+    recipients.ccEmails || "",
+    reply.email_subject,
+    cleanedReply,
+  );
+  const includeClientConfig = CC_BCC_CATEGORIES.includes(aiCategory as typeof CC_BCC_CATEGORIES[number]);
+
   // Fetch client config by company code (non-fatal — table may not exist on fresh deploy)
   let clientConfig = null;
   try {
@@ -132,20 +142,21 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     "Reply Time": recipients.replyTime,
     "Client Tag": companyCode,
     "Lead Category": "Open Response",
-    // Client config fields
-    ...(clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),
-    ...(clientConfig?.cc_email_1 && { "CC email 1": clientConfig.cc_email_1 }),
-    ...(clientConfig?.cc_name_2 && { "CC name 2": clientConfig.cc_name_2 }),
-    ...(clientConfig?.cc_email_2 && { "CC email 2": clientConfig.cc_email_2 }),
-    ...(clientConfig?.cc_name_3 && { "CC name 3": clientConfig.cc_name_3 }),
-    ...(clientConfig?.cc_email_3 && { "CC email 3": clientConfig.cc_email_3 }),
-    ...(clientConfig?.cc_name_4 && { "CC name 4": clientConfig.cc_name_4 }),
-    ...(clientConfig?.cc_email_4 && { "CC email 4": clientConfig.cc_email_4 }),
-    ...(clientConfig?.bcc_name_1 && { "BCC name 1": clientConfig.bcc_name_1 }),
-    ...(clientConfig?.bcc_email_1 && { "BCC email 1": clientConfig.bcc_email_1 }),
-    ...(clientConfig?.bcc_name_2 && { "BCC name 2": clientConfig.bcc_name_2 }),
-    ...(clientConfig?.bcc_email_2 && { "BCC email 2": clientConfig.bcc_email_2 }),
-    ...(clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
+    "AI Categorized Lead Category": aiCategory,
+    // Client config fields — only for actionable AI categories
+    ...(includeClientConfig && clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),
+    ...(includeClientConfig && clientConfig?.cc_email_1 && { "CC email 1": clientConfig.cc_email_1 }),
+    ...(includeClientConfig && clientConfig?.cc_name_2 && { "CC name 2": clientConfig.cc_name_2 }),
+    ...(includeClientConfig && clientConfig?.cc_email_2 && { "CC email 2": clientConfig.cc_email_2 }),
+    ...(includeClientConfig && clientConfig?.cc_name_3 && { "CC name 3": clientConfig.cc_name_3 }),
+    ...(includeClientConfig && clientConfig?.cc_email_3 && { "CC email 3": clientConfig.cc_email_3 }),
+    ...(includeClientConfig && clientConfig?.cc_name_4 && { "CC name 4": clientConfig.cc_name_4 }),
+    ...(includeClientConfig && clientConfig?.cc_email_4 && { "CC email 4": clientConfig.cc_email_4 }),
+    ...(includeClientConfig && clientConfig?.bcc_name_1 && { "BCC name 1": clientConfig.bcc_name_1 }),
+    ...(includeClientConfig && clientConfig?.bcc_email_1 && { "BCC email 1": clientConfig.bcc_email_1 }),
+    ...(includeClientConfig && clientConfig?.bcc_name_2 && { "BCC name 2": clientConfig.bcc_name_2 }),
+    ...(includeClientConfig && clientConfig?.bcc_email_2 && { "BCC email 2": clientConfig.bcc_email_2 }),
+    ...(includeClientConfig && clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
   };
 
   // 7. Search for existing record in the resolved Airtable base and create/update

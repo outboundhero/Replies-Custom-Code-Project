@@ -2,6 +2,8 @@ import { extractTagFromCampaignName, resolveSection } from "./tag-resolver";
 import { extractCustomVars } from "./custom-vars-extractor";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
+import { shouldFilter } from "./bounce-filter";
+import { categorizeReply, CC_BCC_CATEGORIES } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { logError, logActivity } from "@/lib/errors";
@@ -51,6 +53,22 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
   const clientConfig = await getClientConfig(campaignTag);
 
+  // 3b. Bounce check + AI categorization
+  const isBounce = await shouldFilter({
+    from_name: reply.from_name,
+    from_email: reply.from_email_address,
+    text_body: reply.text_body,
+    subject: reply.email_subject,
+    to_address: reply.to?.[0]?.address || "",
+  });
+  const aiCategory = isBounce ? null : await categorizeReply(
+    reply.from_email_address,
+    recipients.ccEmails || "",
+    reply.email_subject,
+    cleanedReply,
+  );
+  const includeClientConfig = aiCategory !== null && CC_BCC_CATEGORIES.includes(aiCategory as typeof CC_BCC_CATEGORIES[number]);
+
   // 4. Build Airtable field values
   const baseFields: Record<string, unknown> = {
     "Lead Email": reply.from_email_address,
@@ -76,20 +94,21 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     "Reply Time": recipients.replyTime,
     "Client Tag": campaignTag,
     "Lead Category": "Open Response",
-    // Client config fields
-    ...(clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),
-    ...(clientConfig?.cc_email_1 && { "CC email 1": clientConfig.cc_email_1 }),
-    ...(clientConfig?.cc_name_2 && { "CC name 2": clientConfig.cc_name_2 }),
-    ...(clientConfig?.cc_email_2 && { "CC email 2": clientConfig.cc_email_2 }),
-    ...(clientConfig?.cc_name_3 && { "CC name 3": clientConfig.cc_name_3 }),
-    ...(clientConfig?.cc_email_3 && { "CC email 3": clientConfig.cc_email_3 }),
-    ...(clientConfig?.cc_name_4 && { "CC name 4": clientConfig.cc_name_4 }),
-    ...(clientConfig?.cc_email_4 && { "CC email 4": clientConfig.cc_email_4 }),
-    ...(clientConfig?.bcc_name_1 && { "BCC name 1": clientConfig.bcc_name_1 }),
-    ...(clientConfig?.bcc_email_1 && { "BCC email 1": clientConfig.bcc_email_1 }),
-    ...(clientConfig?.bcc_name_2 && { "BCC name 2": clientConfig.bcc_name_2 }),
-    ...(clientConfig?.bcc_email_2 && { "BCC email 2": clientConfig.bcc_email_2 }),
-    ...(clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
+    ...(aiCategory && { "AI Categorized Lead Category": aiCategory }),
+    // Client config fields — only for actionable AI categories
+    ...(includeClientConfig && clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),
+    ...(includeClientConfig && clientConfig?.cc_email_1 && { "CC email 1": clientConfig.cc_email_1 }),
+    ...(includeClientConfig && clientConfig?.cc_name_2 && { "CC name 2": clientConfig.cc_name_2 }),
+    ...(includeClientConfig && clientConfig?.cc_email_2 && { "CC email 2": clientConfig.cc_email_2 }),
+    ...(includeClientConfig && clientConfig?.cc_name_3 && { "CC name 3": clientConfig.cc_name_3 }),
+    ...(includeClientConfig && clientConfig?.cc_email_3 && { "CC email 3": clientConfig.cc_email_3 }),
+    ...(includeClientConfig && clientConfig?.cc_name_4 && { "CC name 4": clientConfig.cc_name_4 }),
+    ...(includeClientConfig && clientConfig?.cc_email_4 && { "CC email 4": clientConfig.cc_email_4 }),
+    ...(includeClientConfig && clientConfig?.bcc_name_1 && { "BCC name 1": clientConfig.bcc_name_1 }),
+    ...(includeClientConfig && clientConfig?.bcc_email_1 && { "BCC email 1": clientConfig.bcc_email_1 }),
+    ...(includeClientConfig && clientConfig?.bcc_name_2 && { "BCC name 2": clientConfig.bcc_name_2 }),
+    ...(includeClientConfig && clientConfig?.bcc_email_2 && { "BCC email 2": clientConfig.bcc_email_2 }),
+    ...(includeClientConfig && clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
   };
 
   // 5. Search for existing record
