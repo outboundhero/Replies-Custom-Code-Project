@@ -105,6 +105,21 @@ export default function DashboardPage() {
                   {activity.map((entry) => {
                     const details = entry.details ? (() => { try { return JSON.parse(entry.details); } catch { return null; } })() : null;
                     const baseId = details?.airtable_base_id;
+                    const aiCategory = details?.ai_category as string | null | undefined;
+                    const aiCategoryColor: Record<string, string> = {
+                      "Interested": "text-green-700 bg-green-50",
+                      "Meeting Request": "text-green-700 bg-green-50",
+                      "Follow Up at a Later Date": "text-blue-700 bg-blue-50",
+                      "Not Interested": "text-gray-500 bg-gray-100",
+                      "Out Of Office": "text-yellow-700 bg-yellow-50",
+                      "Wrong Person": "text-orange-700 bg-orange-50",
+                      "Wrong Person (Change of Target)": "text-orange-700 bg-orange-50",
+                      "Mailbox No Longer Active": "text-gray-500 bg-gray-100",
+                      "Automated Error Message": "text-gray-500 bg-gray-100",
+                      "Automated Catch-All Message": "text-gray-500 bg-gray-100",
+                      "Do Not Contact": "text-red-700 bg-red-50",
+                      "Unrecognizable by AI": "text-purple-700 bg-purple-50",
+                    };
                     return (
                       <div
                         key={entry.id}
@@ -125,6 +140,11 @@ export default function DashboardPage() {
                         {entry.lead_email && (
                           <span className="text-muted-foreground truncate max-w-[200px]">
                             {entry.lead_email}
+                          </span>
+                        )}
+                        {aiCategory && (
+                          <span className={`text-xs font-medium px-1.5 py-0.5 rounded whitespace-nowrap ${aiCategoryColor[aiCategory] || "text-gray-500 bg-gray-100"}`}>
+                            {aiCategory}
                           </span>
                         )}
                         {(entry.section_name || baseId) && (

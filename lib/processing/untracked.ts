@@ -246,6 +246,6 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     client_tag: companyCode,
     section_name: sectionName,
     lead_email: reply.from_email_address,
-    details: { airtable_base_id: airtableBaseId, record_id: recordId },
+    details: { airtable_base_id: airtableBaseId, record_id: recordId, ai_category: aiCategory },
   });
 }

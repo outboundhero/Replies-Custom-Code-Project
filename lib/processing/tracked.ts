@@ -246,6 +246,6 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     client_tag: campaignTag,
     section_name: section.name,
     lead_email: reply.from_email_address,
-    details: { airtable_base_id: section.airtable_base_id, record_id: recordId },
+    details: { airtable_base_id: section.airtable_base_id, record_id: recordId, ai_category: aiCategory },
   });
 }
