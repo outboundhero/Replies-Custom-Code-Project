@@ -6,6 +6,7 @@ import { cleanReply } from "./reply-cleaner";
 import { categorizeReply, CC_BCC_CATEGORIES } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
+import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
@@ -237,6 +238,31 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
           webhook_url: clayWebhookUrl,
           data: clayData,
         },
+      });
+    }
+  }
+
+  // 8b. Extra Clay webhook for ESJ/JPSD/JPWPB
+  if (ESJ_CLIENT_TAGS.includes(companyCode)) {
+    try {
+      await sendEsjWebhook({
+        reply_we_got: reply.text_body,
+        reply_subject: reply.email_subject,
+        reply_cleaned: cleanedReply,
+        from_email: reply.from_email_address,
+        "from full name": reply.from_name,
+        first_name: firstName,
+        last_name: lastName,
+        lead_email: reply.from_email_address,
+        client_tag: companyCode,
+        reply_id: reply.id,
+        reply_time: recipients.replyTime,
+        ai_lead_category: aiCategory,
+      });
+    } catch (error) {
+      await logError("untracked", "esj-clay", (error as Error).message, {
+        company_code: companyCode,
+        lead_email: reply.from_email_address,
       });
     }
   }

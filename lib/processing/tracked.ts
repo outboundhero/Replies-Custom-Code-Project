@@ -6,6 +6,7 @@ import { shouldFilter } from "./bounce-filter";
 import { categorizeReply, CC_BCC_CATEGORIES } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
+import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
@@ -238,6 +239,36 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
         },
       });
       // Clay failure does NOT block — already wrote to Airtable
+    }
+  }
+
+  // 6b. Extra Clay webhook for ESJ/JPSD/JPWPB
+  if (ESJ_CLIENT_TAGS.includes(campaignTag)) {
+    try {
+      await sendEsjWebhook({
+        record_id: recordId,
+        reply_we_got: reply.text_body,
+        reply_subject: reply.email_subject,
+        reply_cleaned: cleanedReply,
+        from_email: reply.from_email_address,
+        "from full name": reply.from_name,
+        lead_id: lead.id,
+        first_name: lead.first_name,
+        last_name: lead.last_name,
+        lead_email: reply.from_email_address,
+        company: lead.company,
+        campaign_id: campaign.id,
+        campaign_name: campaign.name,
+        client_tag: campaignTag,
+        reply_id: reply.id,
+        reply_time: recipients.replyTime,
+        ai_lead_category: aiCategory,
+      });
+    } catch (error) {
+      await logError("tracked", "esj-clay", (error as Error).message, {
+        campaign_tag: campaignTag,
+        lead_email: reply.from_email_address,
+      });
     }
   }
 
