@@ -80,6 +80,7 @@ export default function DashboardPage() {
     unroutable: "bg-yellow-100 text-yellow-800",
     error: "bg-red-100 text-red-800",
     "domain-blacklisted": "bg-red-200 text-red-900",
+    "domain-already-blacklisted": "bg-orange-100 text-orange-800",
   };
 
   return (

@@ -189,6 +189,17 @@ export async function blacklistDomain(
 
     if (!res.ok) {
       const body = await res.text();
+      // 422 "already been taken" = domain already blacklisted — treat as success
+      if (res.status === 422 && body.includes("already been taken")) {
+        // Still log activity so dashboard shows it was already blacklisted
+        await logActivity(workflow, "domain-already-blacklisted", {
+          client_tag: opts?.client_tag,
+          section_name: opts?.section_name,
+          lead_email: fromEmail,
+          details: { domain, matched_phrase: matchedPhrase },
+        });
+        return;
+      }
       throw new Error(`Blacklist API failed (${res.status}): ${body}`);
     }
 
