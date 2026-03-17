@@ -129,6 +129,24 @@ const BLACKLIST_TRIGGERS = [
   "your emails are unwelcome at our",
 ];
 
+/** Personal/free email domains — never blacklist these */
+const PROTECTED_DOMAINS = new Set([
+  "gmail.com", "googlemail.com", "yahoo.com", "yahoo.ca", "ymail.com", "rocketmail.com",
+  "aol.com", "aim.com", "outlook.com", "hotmail.com", "hotmail.ca", "live.com", "msn.com",
+  "icloud.com", "me.com", "mac.com", "att.net", "currently.com", "comcast.net", "xfinity.com",
+  "verizon.net", "sbcglobal.net", "bellsouth.net", "cox.net", "charter.net", "spectrum.net",
+  "frontier.com", "frontiernet.net", "optonline.net", "roadrunner.com", "rr.com", "twc.com",
+  "centurylink.net", "q.com", "embarqmail.com", "earthlink.net", "juno.com", "netzero.net",
+  "peoplepc.com", "myway.com", "gmx.com", "gmx.us", "mail.com", "email.com", "inbox.com",
+  "usa.net", "zoho.com", "protonmail.com", "proton.me", "pm.me", "fastmail.com", "fastmail.fm",
+  "hushmail.com", "hush.com", "hey.com", "pobox.com", "lycos.com", "excite.com", "cs.com",
+  "vfemail.net", "duck.com", "relay.firefox.com", "mailfence.com", "startmail.com",
+  "tutanota.com", "tutamail.com", "mailbox.org", "posteo.net", "runbox.com", "safe-mail.net",
+  "lavabit.com", "iname.com", "consultant.com", "accountant.com", "engineer.com",
+  "executive.com", "dr.com", "writeme.com", "programmer.net", "linuxmail.org", "rogers.com",
+  "bell.net", "sympatico.ca", "shaw.ca", "telus.net", "videotron.ca",
+]);
+
 /**
  * Check if the reply body or subject contains any blacklist trigger phrase.
  */
@@ -157,6 +175,7 @@ export async function blacklistDomain(
 ): Promise<void> {
   const domain = extractDomain(fromEmail);
   if (!domain) return;
+  if (PROTECTED_DOMAINS.has(domain)) return;
 
   try {
     const res = await fetch(BLACKLIST_API_URL, {
