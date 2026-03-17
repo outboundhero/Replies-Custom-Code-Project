@@ -3,7 +3,7 @@ import { detectCompanyCode } from "./company-code-resolver";
 import { resolveRedirectLink } from "./redirect-resolver";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
-import { categorizeReply, CC_BCC_CATEGORIES } from "./lead-categorizer";
+import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
@@ -142,7 +142,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     "Prospect CC name": recipients.ccNames,
     "Reply Time": recipients.replyTime,
     "Client Tag": companyCode,
-    "Lead Category": "Open Response",
+    "Lead Category": getLeadCategory(aiCategory),
     "AI Categorized Lead Category": aiCategory,
     // Client config fields — only for actionable AI categories
     ...(includeClientConfig && clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),

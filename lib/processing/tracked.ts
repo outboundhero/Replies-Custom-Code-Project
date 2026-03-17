@@ -3,7 +3,7 @@ import { extractCustomVars } from "./custom-vars-extractor";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { shouldFilter } from "./bounce-filter";
-import { categorizeReply, CC_BCC_CATEGORIES } from "./lead-categorizer";
+import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
@@ -100,7 +100,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     "City": customVars.city,
     "State": customVars.state,
     "Google Maps URL": customVars.google_maps_url,
-    "Lead Category": "Open Response",
+    "Lead Category": getLeadCategory(aiCategory),
     ...(aiCategory && { "AI Categorized Lead Category": aiCategory }),
     // Client config fields — only for actionable AI categories
     ...(includeClientConfig && clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),

@@ -23,6 +23,22 @@ export const CC_BCC_CATEGORIES: LeadCategory[] = [
   "Unrecognizable by AI",
 ];
 
+/** Maps AI category → Lead Category (overrides "Open Response") */
+const LEAD_CATEGORY_MAP: Partial<Record<LeadCategory, string>> = {
+  "Out Of Office": "Out Of Office",
+  "Do Not Contact": "Do Not Contact",
+  "Mailbox No Longer Active": "Mailbox No Longer Active",
+  "Automated Error Message": "Automated Reply",
+  "Automated Catch-All Message": "Automated Reply",
+};
+
+export function getLeadCategory(aiCategory: LeadCategory | null): string {
+  if (aiCategory && LEAD_CATEGORY_MAP[aiCategory]) {
+    return LEAD_CATEGORY_MAP[aiCategory]!;
+  }
+  return "Open Response";
+}
+
 function buildSystemPrompt(fromEmail: string, ccEmails: string): string {
   return `#CONTEXT#
 
