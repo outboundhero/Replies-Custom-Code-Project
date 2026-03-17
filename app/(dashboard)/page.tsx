@@ -79,6 +79,7 @@ export default function DashboardPage() {
     filtered: "bg-gray-100 text-gray-600",
     unroutable: "bg-yellow-100 text-yellow-800",
     error: "bg-red-100 text-red-800",
+    "domain-blacklisted": "bg-red-200 text-red-900",
   };
 
   return (
@@ -105,6 +106,7 @@ export default function DashboardPage() {
                   {activity.map((entry) => {
                     const details = entry.details ? (() => { try { return JSON.parse(entry.details); } catch { return null; } })() : null;
                     const baseId = details?.airtable_base_id;
+                    const blacklistedDomain = details?.domain as string | null | undefined;
                     const aiCategory = details?.ai_category as string | null | undefined;
                     const aiCategoryColor: Record<string, string> = {
                       "Interested": "text-green-700 bg-green-50",
@@ -140,6 +142,11 @@ export default function DashboardPage() {
                         {entry.lead_email && (
                           <span className="text-muted-foreground truncate max-w-[200px]">
                             {entry.lead_email}
+                          </span>
+                        )}
+                        {blacklistedDomain && (
+                          <span className="text-xs font-medium px-1.5 py-0.5 rounded whitespace-nowrap text-red-700 bg-red-50">
+                            {blacklistedDomain}
                           </span>
                         )}
                         {aiCategory && (

@@ -7,6 +7,7 @@ import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-cate
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
+import { shouldBlacklistDomain, blacklistDomain } from "./domain-blacklist";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
@@ -265,6 +266,15 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
         lead_email: reply.from_email_address,
       });
     }
+  }
+
+  // 8c. Domain blacklisting
+  const blacklistMatch = shouldBlacklistDomain(reply.email_subject, reply.text_body);
+  if (blacklistMatch) {
+    await blacklistDomain(reply.from_email_address, blacklistMatch, "untracked", {
+      client_tag: companyCode,
+      section_name: sectionName,
+    });
   }
 
   // 9. Log activity with the resolved section name

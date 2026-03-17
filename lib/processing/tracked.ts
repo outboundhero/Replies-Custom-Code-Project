@@ -7,6 +7,7 @@ import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-cate
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
+import { shouldBlacklistDomain, blacklistDomain } from "./domain-blacklist";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
@@ -276,6 +277,15 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
         lead_email: reply.from_email_address,
       });
     }
+  }
+
+  // 6c. Domain blacklisting
+  const blacklistMatch = shouldBlacklistDomain(reply.email_subject, reply.text_body);
+  if (blacklistMatch) {
+    await blacklistDomain(reply.from_email_address, blacklistMatch, "tracked", {
+      client_tag: campaignTag,
+      section_name: section.name,
+    });
   }
 
   // 7. Log activity
