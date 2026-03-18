@@ -25,8 +25,8 @@ export function extractCustomVars(
     const nameLower = name.toLowerCase();
     if (nameLower === "company phone") result.phone = value || "";
     if (nameLower === "linkedin url") result.linkedin = value || "";
-    if (name === "City") result.city = value || "";
-    if (name === "State") result.state = value || "";
+    if (nameLower === "city") result.city = value || "";
+    if (nameLower === "state") result.state = value || "";
     if (nameLower === "google maps url") result.google_maps_url = value || "";
     if (nameLower === "address") result.address = value || "";
   }
