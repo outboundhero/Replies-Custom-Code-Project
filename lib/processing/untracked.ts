@@ -243,6 +243,49 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     }
   }
 
+  // 8a-2. Send to master Clay table (all sections)
+  try {
+    const senderNameParts2 = (sender_email.name || "").split(" ");
+    await sendToClayWebhook(
+      "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-50ef291a-c367-42cd-96ef-60e8eb2fd970",
+      {
+        record_id: recordId,
+        reply_we_got: reply.text_body,
+        reply_subject: reply.email_subject,
+        from_email: reply.from_email_address,
+        sender_email: sender_email.email,
+        client_tag: companyCode,
+        first_name: firstName,
+        last_name: lastName,
+        cc_names: recipients.ccNames,
+        cc_emails: recipients.ccEmails,
+        full_sender_name: sender_email.name,
+        sender_first_name: senderNameParts2[0] || "",
+        "Meeting-Ready Lead": "No",
+        "from full name": reply.from_name,
+        lead_email: reply.from_email_address,
+        lead_name: reply.from_name,
+        sender_id: sender_email.id,
+        sender_name: sender_email.name,
+        reply_id: reply.id,
+        to_email: recipients.toEmails,
+        to_name: recipients.toNames,
+        reply_time: recipients.replyTime,
+        lead_category: "Open Response",
+        reply_status: action === "created" ? "Pending" : "Pending again",
+        reply_cleaned: cleanedReply,
+        ai_lead_category: aiCategory,
+        airtable_base_id: airtableBaseId,
+        section_name: sectionName,
+      }
+    );
+  } catch (error) {
+    await logError("untracked", "master-clay", (error as Error).message, {
+      company_code: companyCode,
+      record_id: recordId,
+    });
+  }
+
   // 8b. Extra Clay webhook for ESJ/JPSD/JPWPB
   if (ESJ_CLIENT_TAGS.includes(companyCode)) {
     try {

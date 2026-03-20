@@ -249,6 +249,59 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     }
   }
 
+  // 6a-2. Send to master Clay table (all sections)
+  try {
+    const senderNameParts2 = (sender_email.name || "").split(" ");
+    await sendToClayWebhook(
+      "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-50ef291a-c367-42cd-96ef-60e8eb2fd970",
+      {
+        record_id: recordId,
+        reply_we_got: reply.text_body,
+        reply_subject: reply.email_subject,
+        from_email: reply.from_email_address,
+        sender_email: sender_email.email,
+        client_tag: campaignTag,
+        first_name: lead.first_name,
+        last_name: lead.last_name,
+        company: lead.company,
+        company_phone: customVars.phone,
+        linkedin: customVars.linkedin,
+        cc_names: recipients.ccNames,
+        cc_emails: recipients.ccEmails,
+        city: customVars.city,
+        state: customVars.state,
+        google_maps_url: customVars.google_maps_url,
+        address: customVars.address,
+        full_sender_name: sender_email.name,
+        sender_first_name: senderNameParts2[0] || "",
+        "Meeting-Ready Lead": "No",
+        "from full name": reply.from_name,
+        lead_email: reply.from_email_address,
+        lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
+        lead_id: lead.id,
+        campaign_name: campaign.name,
+        campaign_id: campaign.id,
+        sender_id: sender_email.id,
+        sender_name: sender_email.name,
+        reply_id: reply.id,
+        to_email: recipients.toEmails,
+        to_name: recipients.toNames,
+        reply_time: recipients.replyTime,
+        lead_category: "Open Response",
+        reply_status: action === "created" ? "Pending" : "Pending again",
+        reply_cleaned: cleanedReply,
+        ai_lead_category: aiCategory,
+        airtable_base_id: section.airtable_base_id,
+        section_name: section.name,
+      }
+    );
+  } catch (error) {
+    await logError("tracked", "master-clay", (error as Error).message, {
+      tag: campaignTag,
+      record_id: recordId,
+    });
+  }
+
   // 6b. Extra Clay webhook for ESJ/JPSD/JPWPB
   if (ESJ_CLIENT_TAGS.includes(campaignTag)) {
     try {
