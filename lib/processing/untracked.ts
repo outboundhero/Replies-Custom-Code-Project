@@ -243,47 +243,67 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     }
   }
 
-  // 8a-2. Send to master Clay table (all sections)
-  try {
-    const senderNameParts2 = (sender_email.name || "").split(" ");
-    await sendToClayWebhook(
-      "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-50ef291a-c367-42cd-96ef-60e8eb2fd970",
-      {
+  // 8a-2. Send to master Clay table (all sections) — only for qualified replies
+  const replyBodyLower = (reply.text_body || "").toLowerCase();
+  const fromEmailLower = (reply.from_email_address || "").toLowerCase();
+  const senderEmailLower = (sender_email.email || "").toLowerCase();
+  const bouncePattern = /could not be delivered|DMARC|Error message|This is the mail system|automated message|I wasn't able to|Failed to deliver|aggregate report from|Permanent fatal|Fatal Error|Permanent error|Report domain:|couldn't be delivered|delivery has failed|temporary problem|not delivered|please try again|Empty Response|Error Type|undeliverable|address not found|to postmaster|message blocked|Address not reachable|Address not found|Delivery Status Notification|message bounced/i;
+  const fromEmailBlockPattern = /(@inbox|inbox\.com|inboxes\.com|@inboxes|dmarc|daemon|maildeliverysystem|postmaster)/;
+  const senderEmailBlockPattern = /inbox\.com|@inbox|inboxes\.com|@inboxes/i;
+  const qualifiedCategories = ["interested", "meeting request", "follow up at a later date"];
+
+  const shouldSendToMasterClay =
+    !!reply.text_body &&
+    !replyBodyLower.includes("stick-enjoy") &&
+    !replyBodyLower.includes("steep-swung") &&
+    !bouncePattern.test(reply.text_body) &&
+    !fromEmailBlockPattern.test(fromEmailLower) &&
+    !senderEmailBlockPattern.test(senderEmailLower) &&
+    !!aiCategory &&
+    qualifiedCategories.includes(aiCategory.toLowerCase());
+
+  if (shouldSendToMasterClay) {
+    try {
+      const senderNameParts2 = (sender_email.name || "").split(" ");
+      await sendToClayWebhook(
+        "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-50ef291a-c367-42cd-96ef-60e8eb2fd970",
+        {
+          record_id: recordId,
+          reply_we_got: reply.text_body,
+          reply_subject: reply.email_subject,
+          from_email: reply.from_email_address,
+          sender_email: sender_email.email,
+          client_tag: companyCode,
+          first_name: firstName,
+          last_name: lastName,
+          cc_names: recipients.ccNames,
+          cc_emails: recipients.ccEmails,
+          full_sender_name: sender_email.name,
+          sender_first_name: senderNameParts2[0] || "",
+          "Meeting-Ready Lead": "No",
+          "from full name": reply.from_name,
+          lead_email: reply.from_email_address,
+          lead_name: reply.from_name,
+          sender_id: sender_email.id,
+          sender_name: sender_email.name,
+          reply_id: reply.id,
+          to_email: recipients.toEmails,
+          to_name: recipients.toNames,
+          reply_time: recipients.replyTime,
+          lead_category: "Open Response",
+          reply_status: action === "created" ? "Pending" : "Pending again",
+          reply_cleaned: cleanedReply,
+          ai_lead_category: aiCategory,
+          airtable_base_id: airtableBaseId,
+          section_name: sectionName,
+        }
+      );
+    } catch (error) {
+      await logError("untracked", "master-clay", (error as Error).message, {
+        company_code: companyCode,
         record_id: recordId,
-        reply_we_got: reply.text_body,
-        reply_subject: reply.email_subject,
-        from_email: reply.from_email_address,
-        sender_email: sender_email.email,
-        client_tag: companyCode,
-        first_name: firstName,
-        last_name: lastName,
-        cc_names: recipients.ccNames,
-        cc_emails: recipients.ccEmails,
-        full_sender_name: sender_email.name,
-        sender_first_name: senderNameParts2[0] || "",
-        "Meeting-Ready Lead": "No",
-        "from full name": reply.from_name,
-        lead_email: reply.from_email_address,
-        lead_name: reply.from_name,
-        sender_id: sender_email.id,
-        sender_name: sender_email.name,
-        reply_id: reply.id,
-        to_email: recipients.toEmails,
-        to_name: recipients.toNames,
-        reply_time: recipients.replyTime,
-        lead_category: "Open Response",
-        reply_status: action === "created" ? "Pending" : "Pending again",
-        reply_cleaned: cleanedReply,
-        ai_lead_category: aiCategory,
-        airtable_base_id: airtableBaseId,
-        section_name: sectionName,
-      }
-    );
-  } catch (error) {
-    await logError("untracked", "master-clay", (error as Error).message, {
-      company_code: companyCode,
-      record_id: recordId,
-    });
+      });
+    }
   }
 
   // 8b. Extra Clay webhook for ESJ/JPSD/JPWPB

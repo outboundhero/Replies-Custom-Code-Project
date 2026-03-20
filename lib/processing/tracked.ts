@@ -249,7 +249,26 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     }
   }
 
-  // 6a-2. Send to master Clay table (all sections)
+  // 6a-2. Send to master Clay table (all sections) — only for qualified replies
+  const replyBodyLower = (reply.text_body || "").toLowerCase();
+  const fromEmailLower = (reply.from_email_address || "").toLowerCase();
+  const senderEmailLower = (sender_email.email || "").toLowerCase();
+  const bouncePattern = /could not be delivered|DMARC|Error message|This is the mail system|automated message|I wasn't able to|Failed to deliver|aggregate report from|Permanent fatal|Fatal Error|Permanent error|Report domain:|couldn't be delivered|delivery has failed|temporary problem|not delivered|please try again|Empty Response|Error Type|undeliverable|address not found|to postmaster|message blocked|Address not reachable|Address not found|Delivery Status Notification|message bounced/i;
+  const fromEmailBlockPattern = /(@inbox|inbox\.com|inboxes\.com|@inboxes|dmarc|daemon|maildeliverysystem|postmaster)/;
+  const senderEmailBlockPattern = /inbox\.com|@inbox|inboxes\.com|@inboxes/i;
+  const qualifiedCategories = ["interested", "meeting request", "follow up at a later date"];
+
+  const shouldSendToMasterClay =
+    !!reply.text_body &&
+    !replyBodyLower.includes("stick-enjoy") &&
+    !replyBodyLower.includes("steep-swung") &&
+    !bouncePattern.test(reply.text_body) &&
+    !fromEmailBlockPattern.test(fromEmailLower) &&
+    !senderEmailBlockPattern.test(senderEmailLower) &&
+    !!aiCategory &&
+    qualifiedCategories.includes(aiCategory.toLowerCase());
+
+  if (shouldSendToMasterClay) {
   try {
     const senderNameParts2 = (sender_email.name || "").split(" ");
     await sendToClayWebhook(
@@ -300,6 +319,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
       tag: campaignTag,
       record_id: recordId,
     });
+  }
   }
 
   // 6b. Extra Clay webhook for ESJ/JPSD/JPWPB
