@@ -88,7 +88,6 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     const config = await getUntrackedConfig();
     airtableBaseId = config.airtable_base_id;
     airtableTableId = config.airtable_table_id;
-    clayWebhookUrl = config.clay_webhook_url;
     sectionName = "Untracked";
   }
 
