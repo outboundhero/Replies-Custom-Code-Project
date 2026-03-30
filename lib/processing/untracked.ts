@@ -61,7 +61,6 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   //    - If N/A → fall back to the global untracked config
   let airtableBaseId: string;
   let airtableTableId: string;
-  let clayWebhookUrl: string | null;
   let sectionName: string;
 
   if (companyCode !== "N/A") {
@@ -77,14 +76,12 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
       const sec = sectionResult.rows[0];
       airtableBaseId = sec.airtable_base_id as string;
       airtableTableId = sec.airtable_table_id as string;
-      clayWebhookUrl = sec.clay_webhook_url_tracked as string | null;
       sectionName = sec.name as string;
     } else {
       // Tag found by regex but not in client_tags — fall back to untracked
       const config = await getUntrackedConfig();
       airtableBaseId = config.airtable_base_id;
       airtableTableId = config.airtable_table_id;
-      clayWebhookUrl = config.clay_webhook_url;
       sectionName = "Untracked";
     }
   } else {
@@ -200,54 +197,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     throw error;
   }
 
-  // 8. Send to Clay (use section's tracked Clay URL if matched, else untracked Clay URL)
-  if (clayWebhookUrl) {
-    const senderNameParts = (sender_email.name || "").split(" ");
-    const clayData = {
-      // Existing keys (do not rename — mapped in Clay)
-      record_id: recordId,
-      reply_we_got: reply.text_body,
-      reply_subject: reply.email_subject,
-      from_email: reply.from_email_address,
-      sender_email: sender_email.email,
-      client_tag: companyCode,
-      first_name: firstName,
-      last_name: lastName,
-      cc_names: recipients.ccNames,
-      cc_emails: recipients.ccEmails,
-      full_sender_name: sender_email.name,
-      sender_first_name: senderNameParts[0] || "",
-      "Meeting-Ready Lead": "No",
-      "from full name": reply.from_name,
-      // Additional fields
-      lead_email: reply.from_email_address,
-      lead_name: reply.from_name,
-      sender_id: sender_email.id,
-      sender_name: sender_email.name,
-      reply_id: reply.id,
-      to_email: recipients.toEmails,
-      to_name: recipients.toNames,
-      reply_time: recipients.replyTime,
-      lead_category: "Open Response",
-      reply_status: action === "created" ? "Pending" : "Pending again",
-      reply_cleaned: cleanedReply,
-    };
-
-    try {
-      await sendToClayWebhook(clayWebhookUrl, clayData);
-    } catch (error) {
-      await logError("untracked", "clay", (error as Error).message, {
-        company_code: companyCode,
-        record_id: recordId,
-        _clay_retry_data: {
-          webhook_url: clayWebhookUrl,
-          data: clayData,
-        },
-      });
-    }
-  }
-
-  // 8a-2. Send to master Clay table (all sections) — only for qualified replies
+  // 8. Send to master Clay table (all sections) — only for qualified replies
   const replyBodyLower = (reply.text_body || "").toLowerCase();
   const fromEmailLower = (reply.from_email_address || "").toLowerCase();
   const senderEmailLower = (sender_email.email || "").toLowerCase();
