@@ -16,6 +16,8 @@ export async function GET() {
       cc.cc_name_2, cc.cc_email_2,
       cc.cc_name_3, cc.cc_email_3,
       cc.cc_name_4, cc.cc_email_4,
+      cc.cc_name_5, cc.cc_email_5,
+      cc.cc_name_6, cc.cc_email_6,
       cc.bcc_name_1, cc.bcc_email_1,
       cc.bcc_name_2, cc.bcc_email_2,
       cc.reply_template,
@@ -58,6 +60,8 @@ export async function PUT(req: NextRequest) {
     cc_name_2, cc_email_2,
     cc_name_3, cc_email_3,
     cc_name_4, cc_email_4,
+    cc_name_5, cc_email_5,
+    cc_name_6, cc_email_6,
     bcc_name_1, bcc_email_1,
     bcc_name_2, bcc_email_2,
     reply_template,
@@ -71,9 +75,10 @@ export async function PUT(req: NextRequest) {
     sql: `INSERT INTO client_config
             (client_tag, cc_name_1, cc_email_1, cc_name_2, cc_email_2,
              cc_name_3, cc_email_3, cc_name_4, cc_email_4,
+             cc_name_5, cc_email_5, cc_name_6, cc_email_6,
              bcc_name_1, bcc_email_1, bcc_name_2, bcc_email_2,
              reply_template, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
           ON CONFLICT(client_tag) DO UPDATE SET
             cc_name_1 = excluded.cc_name_1,
             cc_email_1 = excluded.cc_email_1,
@@ -83,6 +88,10 @@ export async function PUT(req: NextRequest) {
             cc_email_3 = excluded.cc_email_3,
             cc_name_4 = excluded.cc_name_4,
             cc_email_4 = excluded.cc_email_4,
+            cc_name_5 = excluded.cc_name_5,
+            cc_email_5 = excluded.cc_email_5,
+            cc_name_6 = excluded.cc_name_6,
+            cc_email_6 = excluded.cc_email_6,
             bcc_name_1 = excluded.bcc_name_1,
             bcc_email_1 = excluded.bcc_email_1,
             bcc_name_2 = excluded.bcc_name_2,
@@ -95,6 +104,8 @@ export async function PUT(req: NextRequest) {
       cc_name_2 || null, cc_email_2 || null,
       cc_name_3 || null, cc_email_3 || null,
       cc_name_4 || null, cc_email_4 || null,
+      cc_name_5 || null, cc_email_5 || null,
+      cc_name_6 || null, cc_email_6 || null,
       bcc_name_1 || null, bcc_email_1 || null,
       bcc_name_2 || null, bcc_email_2 || null,
       reply_template || null,

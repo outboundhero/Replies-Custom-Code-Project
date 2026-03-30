@@ -22,6 +22,8 @@ interface Client {
   cc_name_2: string | null; cc_email_2: string | null;
   cc_name_3: string | null; cc_email_3: string | null;
   cc_name_4: string | null; cc_email_4: string | null;
+  cc_name_5: string | null; cc_email_5: string | null;
+  cc_name_6: string | null; cc_email_6: string | null;
   bcc_name_1: string | null; bcc_email_1: string | null;
   bcc_name_2: string | null; bcc_email_2: string | null;
   reply_template: string | null;
@@ -39,6 +41,8 @@ type ConfigForm = {
   cc_name_2: string; cc_email_2: string;
   cc_name_3: string; cc_email_3: string;
   cc_name_4: string; cc_email_4: string;
+  cc_name_5: string; cc_email_5: string;
+  cc_name_6: string; cc_email_6: string;
   bcc_name_1: string; bcc_email_1: string;
   bcc_name_2: string; bcc_email_2: string;
   reply_template: string;
@@ -49,6 +53,8 @@ const emptyForm = (): ConfigForm => ({
   cc_name_2: "", cc_email_2: "",
   cc_name_3: "", cc_email_3: "",
   cc_name_4: "", cc_email_4: "",
+  cc_name_5: "", cc_email_5: "",
+  cc_name_6: "", cc_email_6: "",
   bcc_name_1: "", bcc_email_1: "",
   bcc_name_2: "", bcc_email_2: "",
   reply_template: "",
@@ -95,6 +101,10 @@ export default function ClientsPage() {
       cc_email_3: client.cc_email_3 || "",
       cc_name_4: client.cc_name_4 || "",
       cc_email_4: client.cc_email_4 || "",
+      cc_name_5: client.cc_name_5 || "",
+      cc_email_5: client.cc_email_5 || "",
+      cc_name_6: client.cc_name_6 || "",
+      cc_email_6: client.cc_email_6 || "",
       bcc_name_1: client.bcc_name_1 || "",
       bcc_email_1: client.bcc_email_1 || "",
       bcc_name_2: client.bcc_name_2 || "",
@@ -201,9 +211,9 @@ export default function ClientsPage() {
                       {client.reply_template && (
                         <Badge variant="secondary" className="text-xs">Reply Template ✓</Badge>
                       )}
-                      {(client.cc_email_1 || client.cc_email_2 || client.cc_email_3 || client.cc_email_4) && (
+                      {(client.cc_email_1 || client.cc_email_2 || client.cc_email_3 || client.cc_email_4 || client.cc_email_5 || client.cc_email_6) && (
                         <Badge variant="secondary" className="text-xs">
-                          CC: {[client.cc_email_1, client.cc_email_2, client.cc_email_3, client.cc_email_4].filter(Boolean).length}
+                          CC: {[client.cc_email_1, client.cc_email_2, client.cc_email_3, client.cc_email_4, client.cc_email_5, client.cc_email_6].filter(Boolean).length}
                         </Badge>
                       )}
                       {(client.bcc_email_1 || client.bcc_email_2) && (
@@ -232,7 +242,7 @@ export default function ClientsPage() {
                           <div>
                             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">CC Recipients</p>
                             <div className="grid grid-cols-2 gap-3">
-                              {([1, 2, 3, 4] as const).map((n) => (
+                              {([1, 2, 3, 4, 5, 6] as const).map((n) => (
                                 <div key={n} className="flex gap-2">
                                   <Input
                                     placeholder={`CC Name ${n}`}
@@ -298,7 +308,7 @@ export default function ClientsPage() {
                       ) : (
                         <div className="space-y-3">
                           {/* Read-only view */}
-                          {[1, 2, 3, 4].some((n) => client[`cc_email_${n}` as keyof Client]) && (
+                          {[1, 2, 3, 4, 5, 6].some((n) => client[`cc_email_${n}` as keyof Client]) && (
                             <div>
                               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">CC Recipients</p>
                               <div className="space-y-1">
@@ -330,7 +340,7 @@ export default function ClientsPage() {
                               <p className="text-xs bg-white border rounded p-2 whitespace-pre-wrap">{client.reply_template}</p>
                             </div>
                           )}
-                          {!client.reply_template && ![1, 2, 3, 4].some((n) => client[`cc_email_${n}` as keyof Client]) && (
+                          {!client.reply_template && ![1, 2, 3, 4, 5, 6].some((n) => client[`cc_email_${n}` as keyof Client]) && (
                             <p className="text-xs text-muted-foreground">No config set yet.</p>
                           )}
                           <Button size="sm" variant="outline" onClick={() => startEdit(client)}>

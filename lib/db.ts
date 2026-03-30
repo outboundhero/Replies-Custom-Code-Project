@@ -81,6 +81,10 @@ export async function initializeDatabase() {
       cc_email_3 TEXT,
       cc_name_4 TEXT,
       cc_email_4 TEXT,
+      cc_name_5 TEXT,
+      cc_email_5 TEXT,
+      cc_name_6 TEXT,
+      cc_email_6 TEXT,
       bcc_name_1 TEXT,
       bcc_email_1 TEXT,
       bcc_name_2 TEXT,
@@ -95,4 +99,14 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_error_log_timestamp ON error_log(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_activity_log_timestamp ON activity_log(timestamp DESC);
   `);
+
+  // Add CC 5/6 columns if missing (ALTER TABLE ADD COLUMN errors if column exists, so catch silently)
+  const newColumns = ["cc_name_5", "cc_email_5", "cc_name_6", "cc_email_6"];
+  for (const col of newColumns) {
+    try {
+      await db.execute(`ALTER TABLE client_config ADD COLUMN ${col} TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
 }
