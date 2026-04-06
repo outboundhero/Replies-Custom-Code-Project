@@ -11,7 +11,7 @@ interface ErrorEntry {
   workflow: string;
   stage: string;
   message: string;
-  payload: string | null;
+  has_payload: number;
 }
 
 export default function ErrorsPage() {
@@ -22,6 +22,8 @@ export default function ErrorsPage() {
   const [retryingAll, setRetryingAll] = useState(false);
   const [retryAllProgress, setRetryAllProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [retryResult, setRetryResult] = useState<{ id: number; success: boolean; message: string } | null>(null);
+  const [payloadCache, setPayloadCache] = useState<Record<number, string | null>>({});
+  const [loadingPayload, setLoadingPayload] = useState<number | null>(null);
 
   const [fetchError, setFetchError] = useState<string | null>(null);
 
@@ -87,14 +89,21 @@ export default function ErrorsPage() {
     }
   }
 
-  function hasRetryPayload(entry: ErrorEntry): boolean {
-    if (!entry.payload) return false;
+  async function fetchPayload(id: number) {
+    if (payloadCache[id] !== undefined) return;
+    setLoadingPayload(id);
     try {
-      const parsed = JSON.parse(entry.payload);
-      return !!parsed._webhook_payload || !!parsed._clay_retry_data;
-    } catch {
-      return false;
-    }
+      const res = await fetch(`/api/errors?id=${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setPayloadCache((prev) => ({ ...prev, [id]: data?.payload || null }));
+      }
+    } catch { /* ignore */ }
+    setLoadingPayload(null);
+  }
+
+  function hasRetryPayload(entry: ErrorEntry): boolean {
+    return !!entry.has_payload;
   }
 
   async function retryAll() {
@@ -217,7 +226,11 @@ export default function ErrorsPage() {
                   >
                     <div
                       className="flex items-center gap-3 py-2 px-3 cursor-pointer hover:bg-muted/50 text-sm"
-                      onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
+                      onClick={() => {
+                        const next = expanded === entry.id ? null : entry.id;
+                        setExpanded(next);
+                        if (next && entry.has_payload) fetchPayload(entry.id);
+                      }}
                     >
                       <Badge variant="outline">{entry.workflow}</Badge>
                       <span className="text-xs font-mono text-muted-foreground">
@@ -250,27 +263,31 @@ export default function ErrorsPage() {
                         {retryResult.message}
                       </div>
                     )}
-                    {expanded === entry.id && entry.payload && (
-                      <pre className="bg-muted/30 p-3 text-xs overflow-x-auto border-t">
-                        {(() => {
-                          try {
-                            const parsed = JSON.parse(entry.payload!);
-                            if (parsed._webhook_payload) {
-                              const { _webhook_payload, ...context } = parsed;
-                              const leadEmail = _webhook_payload?.data?.lead?.email
-                                || _webhook_payload?.data?.reply?.from_email_address
-                                || "stored";
-                              return JSON.stringify(
-                                { ...context, _webhook_payload: `[payload for ${leadEmail} — click Retry to reprocess]` },
-                                null, 2
-                              );
+                    {expanded === entry.id && entry.has_payload && (
+                      loadingPayload === entry.id ? (
+                        <div className="px-3 py-2 text-xs text-muted-foreground border-t">Loading payload...</div>
+                      ) : payloadCache[entry.id] ? (
+                        <pre className="bg-muted/30 p-3 text-xs overflow-x-auto border-t">
+                          {(() => {
+                            try {
+                              const parsed = JSON.parse(payloadCache[entry.id]!);
+                              if (parsed._webhook_payload) {
+                                const { _webhook_payload, ...context } = parsed;
+                                const leadEmail = _webhook_payload?.data?.lead?.email
+                                  || _webhook_payload?.data?.reply?.from_email_address
+                                  || "stored";
+                                return JSON.stringify(
+                                  { ...context, _webhook_payload: `[payload for ${leadEmail} — click Retry to reprocess]` },
+                                  null, 2
+                                );
+                              }
+                              return JSON.stringify(parsed, null, 2);
+                            } catch {
+                              return payloadCache[entry.id];
                             }
-                            return JSON.stringify(parsed, null, 2);
-                          } catch {
-                            return entry.payload;
-                          }
-                        })()}
-                      </pre>
+                          })()}
+                        </pre>
+                      ) : null
                     )}
                   </div>
                 );

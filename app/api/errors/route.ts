@@ -7,7 +7,15 @@ export async function GET(req: NextRequest) {
     const limit = req.nextUrl.searchParams.get("limit") || "5000";
     const workflow = req.nextUrl.searchParams.get("workflow");
 
-    let sql = "SELECT * FROM error_log";
+    // Exclude payload from list queries to avoid Turso response size limits.
+    // Payload is fetched on demand via ?id= param.
+    const id = req.nextUrl.searchParams.get("id");
+    if (id) {
+      const result = await db.execute({ sql: "SELECT * FROM error_log WHERE id = ?", args: [Number(id)] });
+      return NextResponse.json(result.rows[0] || null);
+    }
+
+    let sql = "SELECT id, timestamp, workflow, stage, message, (payload IS NOT NULL) as has_payload FROM error_log";
     const args: (string | number)[] = [];
     const conditions: string[] = [];
 
