@@ -40,9 +40,17 @@ export default function SectionsPage() {
     clay_webhook_url_tracked: "",
   });
 
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
   const loadSections = useCallback(async () => {
-    const res = await fetch("/api/config/sections");
-    if (res.ok) setSections(await res.json());
+    try {
+      const res = await fetch("/api/config/sections");
+      if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+      if (res.ok) { setSections(await res.json()); setFetchError(null); }
+      else setFetchError(`Failed to load sections (${res.status})`);
+    } catch (err) {
+      setFetchError(`Network error: ${(err as Error).message}`);
+    }
   }, []);
 
   useEffect(() => {
@@ -181,6 +189,12 @@ export default function SectionsPage() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {fetchError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {fetchError}
+        </div>
+      )}
 
       <div className="space-y-4">
         {sections.map((section) => (

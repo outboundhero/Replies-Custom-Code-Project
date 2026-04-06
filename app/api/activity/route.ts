@@ -2,20 +2,25 @@ import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 
 export async function GET(req: NextRequest) {
-  const since = req.nextUrl.searchParams.get("since");
-  const limit = req.nextUrl.searchParams.get("limit") || "50";
+  try {
+    const since = req.nextUrl.searchParams.get("since");
+    const limit = req.nextUrl.searchParams.get("limit") || "50";
 
-  let sql = "SELECT * FROM activity_log";
-  const args: (string | number)[] = [];
+    let sql = "SELECT * FROM activity_log";
+    const args: (string | number)[] = [];
 
-  if (since) {
-    sql += " WHERE id > ?";
-    args.push(Number(since));
+    if (since) {
+      sql += " WHERE id > ?";
+      args.push(Number(since));
+    }
+
+    sql += " ORDER BY id DESC LIMIT ?";
+    args.push(Number(limit));
+
+    const result = await db.execute({ sql, args });
+    return NextResponse.json(result.rows);
+  } catch (error) {
+    console.error("[api/activity] GET failed:", error);
+    return NextResponse.json({ error: "Failed to fetch activity" }, { status: 500 });
   }
-
-  sql += " ORDER BY id DESC LIMIT ?";
-  args.push(Number(limit));
-
-  const result = await db.execute({ sql, args });
-  return NextResponse.json(result.rows);
 }

@@ -26,6 +26,7 @@ interface ErrorEntry {
 export default function DashboardPage() {
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const lastActivityIdRef = useRef(0);
   const lastErrorIdRef = useRef(0);
 
@@ -39,6 +40,17 @@ export default function DashboardPage() {
           fetch(`/api/activity?limit=50${sinceActivity ? `&since=${sinceActivity}` : ""}`),
           fetch(`/api/errors?limit=20${sinceError ? `&since=${sinceError}` : ""}`),
         ]);
+
+        if (actRes.redirected || actRes.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!actRes.ok || !errRes.ok) {
+          setFetchError(`API error: activity=${actRes.status}, errors=${errRes.status}`);
+        } else {
+          setFetchError(null);
+        }
 
         if (actRes.ok) {
           const newActivity: ActivityEntry[] = await actRes.json();
@@ -63,8 +75,8 @@ export default function DashboardPage() {
             });
           }
         }
-      } catch {
-        // Silently retry on next poll
+      } catch (err) {
+        setFetchError(`Network error: ${(err as Error).message}`);
       }
     }
 
@@ -89,6 +101,12 @@ export default function DashboardPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
         <p className="text-sm text-muted-foreground">Live webhook activity and errors</p>
       </div>
+
+      {fetchError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {fetchError}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Activity Feed */}

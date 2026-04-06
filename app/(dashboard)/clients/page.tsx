@@ -74,15 +74,24 @@ export default function ClientsPage() {
   const [newTag, setNewTag] = useState("");
   const [newSectionId, setNewSectionId] = useState("");
   const [onboarding, setOnboarding] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const loadClients = useCallback(async () => {
-    const res = await fetch("/api/config/clients");
-    if (res.ok) setClients(await res.json());
+    try {
+      const res = await fetch("/api/config/clients");
+      if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+      if (res.ok) { setClients(await res.json()); setFetchError(null); }
+      else setFetchError(`Failed to load clients (${res.status})`);
+    } catch (err) {
+      setFetchError(`Network error: ${(err as Error).message}`);
+    }
   }, []);
 
   const loadSections = useCallback(async () => {
-    const res = await fetch("/api/config/sections");
-    if (res.ok) setSections(await res.json());
+    try {
+      const res = await fetch("/api/config/sections");
+      if (res.ok) setSections(await res.json());
+    } catch { /* sections load is secondary */ }
   }, []);
 
   useEffect(() => {
@@ -174,6 +183,12 @@ export default function ClientsPage() {
         </div>
         <Button onClick={() => setOnboardOpen(true)}>Onboard New Client</Button>
       </div>
+
+      {fetchError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {fetchError}
+        </div>
+      )}
 
       <Input
         placeholder="Search by tag or section..."

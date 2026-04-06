@@ -73,18 +73,30 @@ export default function UntrackedPage() {
   // New bounce filter form
   const [newFilter, setNewFilter] = useState({ field: "text_body", value: "", match_type: "notContains" });
 
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
   const loadData = useCallback(async () => {
-    const [cfgRes, codesRes, filtersRes] = await Promise.all([
-      fetch("/api/config/untracked"),
-      fetch("/api/config/company-codes"),
-      fetch("/api/config/bounce-filters"),
-    ]);
-    if (cfgRes.ok) {
-      const cfg = await cfgRes.json();
-      if (cfg) setConfigForm({ airtable_base_id: cfg.airtable_base_id, clay_webhook_url: cfg.clay_webhook_url || "" });
+    try {
+      const [cfgRes, codesRes, filtersRes] = await Promise.all([
+        fetch("/api/config/untracked"),
+        fetch("/api/config/company-codes"),
+        fetch("/api/config/bounce-filters"),
+      ]);
+      if (cfgRes.redirected || cfgRes.status === 401) { window.location.href = "/login"; return; }
+      if (!cfgRes.ok || !codesRes.ok || !filtersRes.ok) {
+        setFetchError(`Failed to load config (${cfgRes.status}/${codesRes.status}/${filtersRes.status})`);
+      } else {
+        setFetchError(null);
+      }
+      if (cfgRes.ok) {
+        const cfg = await cfgRes.json();
+        if (cfg) setConfigForm({ airtable_base_id: cfg.airtable_base_id, clay_webhook_url: cfg.clay_webhook_url || "" });
+      }
+      if (codesRes.ok) setCodes(await codesRes.json());
+      if (filtersRes.ok) setFilters(await filtersRes.json());
+    } catch (err) {
+      setFetchError(`Network error: ${(err as Error).message}`);
     }
-    if (codesRes.ok) setCodes(await codesRes.json());
-    if (filtersRes.ok) setFilters(await filtersRes.json());
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
@@ -181,6 +193,12 @@ export default function UntrackedPage() {
           All untracked replies route to a single Airtable base
         </p>
       </div>
+
+      {fetchError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {fetchError}
+        </div>
+      )}
 
       {/* Airtable + Clay Config */}
       <Card>

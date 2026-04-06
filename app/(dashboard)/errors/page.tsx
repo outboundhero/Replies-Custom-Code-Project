@@ -23,11 +23,19 @@ export default function ErrorsPage() {
   const [retryAllProgress, setRetryAllProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [retryResult, setRetryResult] = useState<{ id: number; success: boolean; message: string } | null>(null);
 
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
   const loadErrors = useCallback(async () => {
-    let url = "/api/errors?limit=5000";
-    if (filter) url += `&workflow=${filter}`;
-    const res = await fetch(url);
-    if (res.ok) setErrors(await res.json());
+    try {
+      let url = "/api/errors?limit=5000";
+      if (filter) url += `&workflow=${filter}`;
+      const res = await fetch(url);
+      if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+      if (res.ok) { setErrors(await res.json()); setFetchError(null); }
+      else setFetchError(`Failed to load errors (${res.status})`);
+    } catch (err) {
+      setFetchError(`Network error: ${(err as Error).message}`);
+    }
   }, [filter]);
 
   useEffect(() => {
@@ -175,6 +183,12 @@ export default function ErrorsPage() {
         <div className={`text-sm px-3 py-2 rounded-md border ${retryAllProgress.failed === 0 ? "bg-green-50 text-green-700 border-green-200" : "bg-yellow-50 text-yellow-800 border-yellow-200"}`}>
           Retry All complete: {retryAllProgress.done - retryAllProgress.failed} succeeded
           {retryAllProgress.failed > 0 && `, ${retryAllProgress.failed} failed`}
+        </div>
+      )}
+
+      {fetchError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {fetchError}
         </div>
       )}
 

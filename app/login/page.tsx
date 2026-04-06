@@ -17,20 +17,31 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
     try {
       const res = await fetch("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
 
       if (res.ok) {
         router.push("/");
       } else {
-        setError("Invalid password");
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Invalid password");
       }
-    } catch {
-      setError("Connection error");
+    } catch (err) {
+      clearTimeout(timeout);
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setError("Request timed out — server may be starting up. Try again.");
+      } else {
+        setError("Connection error — server may be down.");
+      }
     } finally {
       setLoading(false);
     }
