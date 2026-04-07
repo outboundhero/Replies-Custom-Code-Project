@@ -17,7 +17,11 @@ export function Nav() {
   const router = useRouter();
 
   async function handleLogout() {
-    await fetch("/api/auth", { method: "DELETE" });
+    await fetch("/api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "logout" }),
+    });
     router.push("/login");
   }
 

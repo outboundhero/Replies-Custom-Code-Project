@@ -1,20 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
+  const denied = await requireAuth();
+  if (denied) return denied;
   try {
     const since = req.nextUrl.searchParams.get("since");
     const limit = req.nextUrl.searchParams.get("limit") || "5000";
     const workflow = req.nextUrl.searchParams.get("workflow");
 
-    // Exclude payload from list queries to avoid Turso response size limits.
-    // Payload is fetched on demand via ?id= param.
+    // Fetch single error with payload via ?id= param
     const id = req.nextUrl.searchParams.get("id");
     if (id) {
       const result = await db.execute({ sql: "SELECT * FROM error_log WHERE id = ?", args: [Number(id)] });
       return NextResponse.json(result.rows[0] || null);
     }
 
+    // List query excludes payload to avoid Turso response size limits
     let sql = "SELECT id, timestamp, workflow, stage, message, (payload IS NOT NULL) as has_payload FROM error_log";
     const args: (string | number)[] = [];
     const conditions: string[] = [];
@@ -41,22 +44,5 @@ export async function GET(req: NextRequest) {
   } catch (error) {
     console.error("[api/errors] GET failed:", error);
     return NextResponse.json({ error: "Failed to fetch errors" }, { status: 500 });
-  }
-}
-
-export async function DELETE(req: NextRequest) {
-  try {
-    const { id } = await req.json();
-
-    if (id) {
-      await db.execute({ sql: "DELETE FROM error_log WHERE id = ?", args: [id] });
-    } else {
-      await db.execute("DELETE FROM error_log");
-    }
-
-    return NextResponse.json({ ok: true });
-  } catch (error) {
-    console.error("[api/errors] DELETE failed:", error);
-    return NextResponse.json({ error: "Failed to delete errors" }, { status: 500 });
   }
 }

@@ -6,10 +6,10 @@ const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "default-secre
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Public routes — no auth required
+  // Only protect page navigations — API routes handle their own auth
+  // to avoid Next.js 16 proxy dropping request bodies on POST/PUT/DELETE
   if (
-    pathname.startsWith("/api/webhook") ||
-    pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api") ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon")
@@ -17,7 +17,6 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // Check session cookie
   const token = req.cookies.get("oh-session")?.value;
   if (!token) {
     return NextResponse.redirect(new URL("/login", req.url));
@@ -32,5 +31,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
 };

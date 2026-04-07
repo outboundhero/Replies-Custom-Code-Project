@@ -33,3 +33,12 @@ export async function verifySession(): Promise<boolean> {
 export async function clearSession() {
   (await cookies()).delete(COOKIE_NAME);
 }
+
+/** Check auth from an API route. Returns a 401 Response if not authenticated, or null if OK. */
+export async function requireAuth(): Promise<Response | null> {
+  const valid = await verifySession();
+  if (!valid) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  return null;
+}

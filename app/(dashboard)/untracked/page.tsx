@@ -102,10 +102,10 @@ export default function UntrackedPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   async function saveConfig() {
-    const res = await fetch("/api/config/untracked", {
-      method: "PUT",
+    const res = await fetch("/api/config/untracked/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(configForm),
+      body: JSON.stringify({ action: "update", ...configForm }),
     });
     if (res.ok) toast.success("Config saved");
     else toast.error("Failed to save config");
@@ -118,10 +118,10 @@ export default function UntrackedPage() {
     }
     const pattern = humanToPattern(newCode.humanPattern);
     // New codes get priority 0 (lowest) — user can reorder if needed
-    const res = await fetch("/api/config/company-codes", {
+    const res = await fetch("/api/config/company-codes/mutate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: newCode.code.trim().toUpperCase(), pattern, priority: 0 }),
+      body: JSON.stringify({ action: "create", code: newCode.code.trim().toUpperCase(), pattern, priority: 0 }),
     });
     if (res.ok) {
       toast.success("Company code added");
@@ -143,10 +143,10 @@ export default function UntrackedPage() {
       return;
     }
     const pattern = humanToPattern(editCodeForm.humanPattern);
-    const res = await fetch("/api/config/company-codes", {
-      method: "PUT",
+    const res = await fetch("/api/config/company-codes/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, code: editCodeForm.code.trim().toUpperCase(), pattern }),
+      body: JSON.stringify({ action: "update", id, code: editCodeForm.code.trim().toUpperCase(), pattern }),
     });
     if (res.ok) {
       toast.success("Updated");
@@ -158,29 +158,29 @@ export default function UntrackedPage() {
   }
 
   async function deleteCompanyCode(id: number) {
-    const res = await fetch("/api/config/company-codes", {
-      method: "DELETE",
+    const res = await fetch("/api/config/company-codes/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ action: "delete", id }),
     });
     if (res.ok) { toast.success("Deleted"); loadData(); }
   }
 
   async function addBounceFilter() {
     if (!newFilter.value) { toast.error("Value required"); return; }
-    const res = await fetch("/api/config/bounce-filters", {
+    const res = await fetch("/api/config/bounce-filters/mutate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newFilter),
+      body: JSON.stringify({ action: "create", ...newFilter }),
     });
     if (res.ok) { toast.success("Filter added"); setNewFilter({ field: "text_body", value: "", match_type: "notContains" }); loadData(); }
   }
 
   async function deleteBounceFilter(id: number) {
-    const res = await fetch("/api/config/bounce-filters", {
-      method: "DELETE",
+    const res = await fetch("/api/config/bounce-filters/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ action: "delete", id }),
     });
     if (res.ok) { toast.success("Deleted"); loadData(); }
   }

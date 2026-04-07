@@ -124,10 +124,10 @@ export default function ClientsPage() {
 
   async function saveConfig(tag: string) {
     setSaving(true);
-    await fetch("/api/config/clients", {
-      method: "PUT",
+    await fetch("/api/config/clients/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag, ...editForm }),
+      body: JSON.stringify({ action: "update", tag, ...editForm }),
     });
     setSaving(false);
     setEditing(null);
@@ -137,10 +137,10 @@ export default function ClientsPage() {
   async function onboardClient() {
     if (!newTag.trim() || !newSectionId) return;
     setOnboarding(true);
-    await fetch("/api/config/clients", {
+    await fetch("/api/config/clients/mutate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag: newTag.trim(), section_id: Number(newSectionId) }),
+      body: JSON.stringify({ action: "create", tag: newTag.trim(), section_id: Number(newSectionId) }),
     });
     setOnboarding(false);
     setOnboardOpen(false);
@@ -151,10 +151,10 @@ export default function ClientsPage() {
 
   async function removeClient(tag: string) {
     if (!confirm(`Remove client "${tag}"? This will delete the tag and its config.`)) return;
-    await fetch("/api/config/clients", {
-      method: "DELETE",
+    await fetch("/api/config/clients/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag }),
+      body: JSON.stringify({ action: "delete", tag }),
     });
     loadClients();
   }

@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
+  const denied = await requireAuth();
+  if (denied) return denied;
   try {
     const since = req.nextUrl.searchParams.get("since");
     const limit = req.nextUrl.searchParams.get("limit") || "50";

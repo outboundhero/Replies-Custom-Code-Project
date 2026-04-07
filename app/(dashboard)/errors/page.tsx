@@ -47,20 +47,20 @@ export default function ErrorsPage() {
   }, [loadErrors]);
 
   async function deleteError(id: number) {
-    await fetch("/api/errors", {
-      method: "DELETE",
+    await fetch("/api/errors/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ action: "delete", id }),
     });
     loadErrors();
   }
 
   async function clearAll() {
     if (!confirm("Clear all errors?")) return;
-    await fetch("/api/errors", {
-      method: "DELETE",
+    await fetch("/api/errors/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ action: "delete" }),
     });
     loadErrors();
   }

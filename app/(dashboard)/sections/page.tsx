@@ -62,10 +62,10 @@ export default function SectionsPage() {
       toast.error("Name and Airtable Base ID are required");
       return;
     }
-    const res = await fetch("/api/config/sections", {
+    const res = await fetch("/api/config/sections/mutate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newSection),
+      body: JSON.stringify({ action: "create", ...newSection }),
     });
     if (res.ok) {
       toast.success("Section created");
@@ -79,10 +79,10 @@ export default function SectionsPage() {
 
   async function deleteSection(id: number) {
     if (!confirm("Delete this section? All its tags will become unroutable.")) return;
-    const res = await fetch("/api/config/sections", {
-      method: "DELETE",
+    const res = await fetch("/api/config/sections/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ action: "delete", id }),
     });
     if (res.ok) {
       toast.success("Section deleted");
@@ -91,10 +91,10 @@ export default function SectionsPage() {
   }
 
   async function updateSection(id: number) {
-    const res = await fetch("/api/config/sections", {
-      method: "PUT",
+    const res = await fetch("/api/config/sections/mutate", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, ...editForm }),
+      body: JSON.stringify({ action: "update", id, ...editForm }),
     });
     if (res.ok) {
       toast.success("Section updated");
@@ -108,7 +108,7 @@ export default function SectionsPage() {
     const res = await fetch("/api/config/tags", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tags: [newTag.trim().toUpperCase()], section_id: sectionId }),
+      body: JSON.stringify({ action: "create", tags: [newTag.trim().toUpperCase()], section_id: sectionId }),
     });
     if (res.ok) {
       const data = await res.json();
@@ -124,9 +124,9 @@ export default function SectionsPage() {
 
   async function removeTag(tag: string) {
     const res = await fetch("/api/config/tags", {
-      method: "DELETE",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag }),
+      body: JSON.stringify({ action: "delete", tag }),
     });
     if (res.ok) {
       toast.success(`Tag "${tag}" removed`);
