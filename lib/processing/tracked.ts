@@ -8,6 +8,7 @@ import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain } from "./domain-blacklist";
+import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
@@ -157,6 +158,38 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
       lead_email: lead.email,
     });
     throw error;
+  }
+
+  // 5b. Lead qualification (non-blocking, fire-and-forget)
+  const QUALIFYING_CATEGORIES = ["Interested", "Meeting Request"];
+  const QUALIFYING_CONTAINS = ["Follow Up", "Unrecognizable"];
+
+  const shouldQualify = aiCategory && (
+    QUALIFYING_CATEGORIES.includes(aiCategory) ||
+    QUALIFYING_CONTAINS.some((p) => aiCategory.includes(p))
+  );
+
+  if (shouldQualify && recordId) {
+    qualifyLead({
+      campaignTag,
+      companyName: lead.company,
+      city: customVars.city,
+      state: customVars.state,
+      address: customVars.address,
+      googleMapsUrl: customVars.google_maps_url,
+      phone: customVars.phone,
+      linkedin: customVars.linkedin,
+      leadEmail: reply.from_email_address,
+      recordId,
+      airtableBaseId: section.airtable_base_id,
+      airtableTableId: section.airtable_table_id,
+    }).catch(async (error) => {
+      await logError("tracked", "qualification", (error as Error).message, {
+        tag: campaignTag,
+        record_id: recordId,
+        lead_email: reply.from_email_address,
+      });
+    });
   }
 
   // 6. Send to master Clay table (all sections) — only for qualified replies

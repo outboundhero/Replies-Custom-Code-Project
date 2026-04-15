@@ -9,6 +9,7 @@ const links = [
   { href: "/clients", label: "Clients" },
   { href: "/sections", label: "Sections & Tags" },
   { href: "/untracked", label: "Untracked Config" },
+  { href: "/qualification", label: "Qualification" },
   { href: "/errors", label: "Error Log" },
 ];
 
