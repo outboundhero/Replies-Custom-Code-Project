@@ -39,7 +39,7 @@ export default function DashboardPage() {
         const sinceError = lastErrorIdRef.current;
 
         const [actRes, errRes] = await Promise.all([
-          fetch(`/api/activity?limit=50${sinceActivity ? `&since=${sinceActivity}` : ""}`),
+          fetch(`/api/activity?limit=500${sinceActivity ? `&since=${sinceActivity}` : ""}`),
           fetch(`/api/errors?limit=20${sinceError ? `&since=${sinceError}` : ""}`),
         ]);
 
@@ -61,7 +61,7 @@ export default function DashboardPage() {
             setActivity((prev) => {
               const existingIds = new Set(prev.map((a) => a.id));
               const unique = newActivity.filter((a) => !existingIds.has(a.id));
-              return [...unique, ...prev].slice(0, 100);
+              return [...unique, ...prev].slice(0, 500);
             });
           }
         }
