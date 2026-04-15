@@ -1,6 +1,9 @@
 /**
  * Sync Google Sheets data to Supabase.
  * Fetches Client Tracker + Onboarding Form and upserts into Supabase tables.
+ *
+ * Handles combined abbreviations in sheets (e.g. "JPDFW & JPK", "JPAR / JPSWM")
+ * by splitting them into individual rows so each tag can be looked up directly.
  */
 
 import supabase from "@/lib/supabase";
@@ -11,16 +14,25 @@ interface SyncResult {
   qualificationCount: number;
 }
 
+/** Split combined abbreviations like "JPDFW & JPK" or "JPAR / JPSWM" into individual tags */
+function splitAbbreviations(raw: string): string[] {
+  return raw
+    .split(/[&\/,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export async function syncAll(): Promise<SyncResult> {
-  // 1. Sync client status (deduplicate — last row wins for each abbreviation)
+  const now = new Date().toISOString();
+
+  // 1. Sync client status — split combined abbreviations, last row wins per tag
   const trackerRows = await fetchClientTracker();
   const statusMap = new Map<string, { client_abbreviation: string; status: string; synced_at: string }>();
   for (const r of trackerRows) {
-    statusMap.set(r.clientAbbreviation, {
-      client_abbreviation: r.clientAbbreviation,
-      status: r.status,
-      synced_at: new Date().toISOString(),
-    });
+    const tags = splitAbbreviations(r.clientAbbreviation);
+    for (const tag of tags) {
+      statusMap.set(tag, { client_abbreviation: tag, status: r.status, synced_at: now });
+    }
   }
   const statusRecords = [...statusMap.values()];
 
@@ -32,16 +44,19 @@ export async function syncAll(): Promise<SyncResult> {
     if (statusError) throw new Error(`Failed to sync client_status: ${statusError.message}`);
   }
 
-  // 2. Sync qualification rules (deduplicate — last row wins)
+  // 2. Sync qualification rules — split combined abbreviations, last row wins per tag
   const formRows = await fetchOnboardingForm();
   const qualMap = new Map<string, { client_abbreviation: string; exclusion_industries: string; inclusion_locations: string; synced_at: string }>();
   for (const r of formRows) {
-    qualMap.set(r.clientAbbreviation, {
-      client_abbreviation: r.clientAbbreviation,
-      exclusion_industries: r.exclusionIndustries,
-      inclusion_locations: r.inclusionLocations,
-      synced_at: new Date().toISOString(),
-    });
+    const tags = splitAbbreviations(r.clientAbbreviation);
+    for (const tag of tags) {
+      qualMap.set(tag, {
+        client_abbreviation: tag,
+        exclusion_industries: r.exclusionIndustries,
+        inclusion_locations: r.inclusionLocations,
+        synced_at: now,
+      });
+    }
   }
   const qualRecords = [...qualMap.values()];
 
