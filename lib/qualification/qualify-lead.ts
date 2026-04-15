@@ -97,11 +97,11 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     locationResult = { result: "Failed", reason: "Location audit error" };
   }
 
-  // 5. Build qualification reason
+  // 5. Build qualification reason (always include reasons from both audits)
   const reasons: string[] = [];
-  if (industryResult.result !== "Passed") reasons.push(`Industry: ${industryResult.reason}`);
-  if (locationResult.result !== "Passed") reasons.push(`Location: ${locationResult.reason}`);
-  const qualificationReason = reasons.length > 0 ? reasons.join(" | ") : "";
+  reasons.push(`Industry: ${industryResult.reason}`);
+  reasons.push(`Location: ${locationResult.reason}`);
+  const qualificationReason = reasons.join(" | ");
 
   // 6. Cross-client matching (if not a fit)
   let suggestedClients = "";
@@ -120,8 +120,8 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     const updateFields: Record<string, string> = {
       "Industry Audit": industryResult.result,
       "Location Audit": locationResult.result,
+      "Qualification Reason": qualificationReason,
     };
-    if (qualificationReason) updateFields["Qualification Reason"] = qualificationReason;
     if (suggestedClients) updateFields["Suggested Client"] = suggestedClients;
 
     await updateRecord(airtableBaseId, airtableTableId, recordId, updateFields);

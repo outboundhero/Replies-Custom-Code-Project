@@ -173,6 +173,26 @@ export default function DashboardPage() {
                             {aiCategory}
                           </span>
                         )}
+                        {details?.industry && (
+                          <span className={`text-xs font-medium px-1.5 py-0.5 rounded whitespace-nowrap ${details.industry === "Passed" ? "text-green-700 bg-green-50" : details.industry === "Residential" ? "text-yellow-700 bg-yellow-50" : "text-red-700 bg-red-50"}`}>
+                            Ind: {details.industry}
+                          </span>
+                        )}
+                        {details?.location && (
+                          <span className={`text-xs font-medium px-1.5 py-0.5 rounded whitespace-nowrap ${details.location === "Passed" ? "text-green-700 bg-green-50" : "text-red-700 bg-red-50"}`}>
+                            Loc: {details.location}
+                          </span>
+                        )}
+                        {details?.reason && entry.action === "qualified" && (
+                          <span className="text-xs text-muted-foreground truncate max-w-[250px]" title={details.reason}>
+                            {details.reason}
+                          </span>
+                        )}
+                        {details?.suggested && (
+                          <span className="text-xs font-medium px-1.5 py-0.5 rounded whitespace-nowrap text-blue-700 bg-blue-50">
+                            Suggested: {details.suggested}
+                          </span>
+                        )}
                         {(entry.section_name || baseId) && (
                           <span className="font-mono text-xs text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
                             {entry.section_name ? `${entry.section_name} (${baseId || "—"})` : baseId}
