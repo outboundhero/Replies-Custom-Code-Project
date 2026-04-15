@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 interface ActivityEntry {
   id: number;
@@ -27,6 +28,7 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [activityFilter, setActivityFilter] = useState<string | null>(null);
   const lastActivityIdRef = useRef(0);
   const lastErrorIdRef = useRef(0);
 
@@ -113,7 +115,30 @@ export default function DashboardPage() {
         <div className="lg:col-span-2">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Recent Activity</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base">Recent Activity</CardTitle>
+                <div className="flex gap-1.5 flex-wrap">
+                  {[
+                    { value: null, label: "All" },
+                    { value: "created,updated", label: "Created/Updated" },
+                    { value: "qualified", label: "Qualified" },
+                    { value: "qualification-skipped", label: "Skipped" },
+                    { value: "filtered", label: "Filtered" },
+                    { value: "domain-blacklisted,domain-already-blacklisted", label: "Blacklisted" },
+                    { value: "unroutable", label: "Unroutable" },
+                  ].map((f) => (
+                    <Button
+                      key={f.label}
+                      variant={activityFilter === f.value ? "default" : "outline"}
+                      size="sm"
+                      className="h-6 text-xs px-2"
+                      onClick={() => setActivityFilter(f.value)}
+                    >
+                      {f.label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
             </CardHeader>
             <CardContent>
               {activity.length === 0 ? (
@@ -122,7 +147,11 @@ export default function DashboardPage() {
                 </p>
               ) : (
                 <div className="space-y-2 max-h-[600px] overflow-y-auto">
-                  {activity.map((entry) => {
+                  {activity.filter((entry) => {
+                    if (!activityFilter) return true;
+                    const actions = activityFilter.split(",");
+                    return actions.includes(entry.action);
+                  }).map((entry) => {
                     const details = entry.details ? (() => { try { return JSON.parse(entry.details); } catch { return null; } })() : null;
                     const baseId = details?.airtable_base_id;
                     const blacklistedDomain = details?.domain as string | null | undefined;
