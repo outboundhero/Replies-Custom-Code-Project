@@ -1,7 +1,7 @@
 import { logActivity, logError } from "@/lib/errors";
 
 const BLACKLIST_API_URL = "https://app.outboundhero.co/api/blacklisted-domains";
-const BLACKLIST_API_KEY = "26|4rxC2w1VbzXnmQmyvIazjAQcXOnsqE3s2lgTqUWrd661aabf";
+const BLACKLIST_API_KEY = "60|QACwd4xuHycuYxLh8knGlKvKEuRkVSUw2obSpCNSd2ba2ebd";
 
 const BLACKLIST_TRIGGERS = [
   "don't have a physical office",
