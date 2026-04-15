@@ -48,23 +48,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     leadEmail, recordId, airtableBaseId, airtableTableId,
   } = params;
 
-  // 1. Check if client is active
-  const { data: statusRow } = await supabase
-    .from("client_status")
-    .select("status")
-    .eq("client_abbreviation", campaignTag)
-    .single();
-
-  if (!statusRow || statusRow.status !== "Active") {
-    await logActivity("tracked", "qualification-skipped", {
-      client_tag: campaignTag,
-      lead_email: leadEmail,
-      details: { reason: statusRow ? `Client status: ${statusRow.status}` : "Client not found in status table" },
-    });
-    return;
-  }
-
-  // 2. Get exclusion/inclusion rules
+  // 1. Get exclusion/inclusion rules
   const { data: rules } = await supabase
     .from("client_qualifications")
     .select("exclusion_industries, inclusion_locations")
