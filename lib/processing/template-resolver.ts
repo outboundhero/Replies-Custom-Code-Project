@@ -61,20 +61,20 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
   // Only replace variables that exist in the template
   let resolved = template;
 
-  if (resolved.includes("{FIRST_NAME}")) {
-    resolved = resolved.replaceAll("{FIRST_NAME}", vars.firstName || "");
+  if (resolved.includes("{FIRST_NAME}") && vars.firstName) {
+    resolved = resolved.replaceAll("{FIRST_NAME}", vars.firstName);
   }
 
-  if (resolved.includes("{PHONE}")) {
-    resolved = resolved.replaceAll("{PHONE}", vars.phoneNumber || "");
+  if (resolved.includes("{PHONE}") && vars.phoneNumber) {
+    resolved = resolved.replaceAll("{PHONE}", vars.phoneNumber);
   }
 
-  if (resolved.includes("{COMPANY}")) {
-    resolved = resolved.replaceAll("{COMPANY}", vars.companyName || "");
+  if (resolved.includes("{COMPANY}") && vars.companyName) {
+    resolved = resolved.replaceAll("{COMPANY}", vars.companyName);
   }
 
-  if (resolved.includes("{SENDER_NAME}")) {
-    resolved = resolved.replaceAll("{SENDER_NAME}", vars.senderFirstName || "");
+  if (resolved.includes("{SENDER_NAME}") && vars.senderFirstName) {
+    resolved = resolved.replaceAll("{SENDER_NAME}", vars.senderFirstName);
   }
 
   if (resolved.includes("{CONTEXT}")) {
