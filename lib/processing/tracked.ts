@@ -9,6 +9,7 @@ import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
+import { resolveTemplate } from "./template-resolver";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
@@ -121,8 +122,22 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     ...(includeClientConfig && clientConfig?.bcc_email_1 && { "BCC email 1": clientConfig.bcc_email_1 }),
     ...(includeClientConfig && clientConfig?.bcc_name_2 && { "BCC name 2": clientConfig.bcc_name_2 }),
     ...(includeClientConfig && clientConfig?.bcc_email_2 && { "BCC email 2": clientConfig.bcc_email_2 }),
-    ...(includeClientConfig && clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
+    // "Our reply" is resolved below after template variable replacement
   };
+
+  // 4b. Resolve reply template variables
+  if (includeClientConfig && clientConfig?.reply_template) {
+    const senderNameParts = (sender_email.name || "").split(" ");
+    const resolvedReply = await resolveTemplate(clientConfig.reply_template, {
+      firstName: lead.first_name || "",
+      phoneNumber: String(customVars.phone || ""),
+      companyName: lead.company || "",
+      senderFirstName: senderNameParts[0] || "",
+      replyBody: cleanedReply,
+      replySubject: reply.email_subject,
+    });
+    baseFields["Our reply"] = resolvedReply;
+  }
 
   // 5. Search for existing record
   let recordId: string | undefined;
