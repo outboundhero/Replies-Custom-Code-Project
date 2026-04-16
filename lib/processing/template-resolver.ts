@@ -3,8 +3,8 @@
  *
  * Supported variables (only replaced when manually mapped in the template):
  *   {FIRST_NAME}    — Lead's first name
- *   {PHONE_NUMBER}  — Extracted phone number from lead data
- *   {COMPANY_NAME}  — Lead's company name
+ *   {PHONE}         — Extracted phone number from lead data
+ *   {COMPANY}       — Lead's company name
  *   {CONTEXT}       — GPT-extracted context from lead's reply
  *   {SENDER_NAME}   — Our rep's first name
  */
@@ -65,12 +65,12 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
     resolved = resolved.replaceAll("{FIRST_NAME}", vars.firstName || "");
   }
 
-  if (resolved.includes("{PHONE_NUMBER}")) {
-    resolved = resolved.replaceAll("{PHONE_NUMBER}", vars.phoneNumber || "");
+  if (resolved.includes("{PHONE}")) {
+    resolved = resolved.replaceAll("{PHONE}", vars.phoneNumber || "");
   }
 
-  if (resolved.includes("{COMPANY_NAME}")) {
-    resolved = resolved.replaceAll("{COMPANY_NAME}", vars.companyName || "");
+  if (resolved.includes("{COMPANY}")) {
+    resolved = resolved.replaceAll("{COMPANY}", vars.companyName || "");
   }
 
   if (resolved.includes("{SENDER_NAME}")) {

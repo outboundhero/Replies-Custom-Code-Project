@@ -302,13 +302,47 @@ export default function ClientsPage() {
                           {/* Reply Template */}
                           <div>
                             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Reply Template → "Our Reply" in Airtable</p>
+                            <div className="flex flex-wrap gap-1.5 mb-2">
+                              <span className="text-xs text-muted-foreground py-0.5">Insert variable:</span>
+                              {[
+                                { label: "First Name", value: "{FIRST_NAME}" },
+                                { label: "Phone", value: "{PHONE}" },
+                                { label: "Company", value: "{COMPANY}" },
+                                { label: "Context", value: "{CONTEXT}" },
+                                { label: "Sender Name", value: "{SENDER_NAME}" },
+                              ].map((v) => (
+                                <button
+                                  key={v.value}
+                                  type="button"
+                                  className={`text-xs px-2 py-0.5 rounded border transition-colors ${editForm.reply_template.includes(v.value) ? "bg-primary text-primary-foreground border-primary" : "bg-muted hover:bg-muted/80 border-border text-foreground"}`}
+                                  onClick={() => {
+                                    const textarea = document.getElementById(`template-${client.tag}`) as HTMLTextAreaElement | null;
+                                    if (textarea) {
+                                      const start = textarea.selectionStart;
+                                      const end = textarea.selectionEnd;
+                                      const before = editForm.reply_template.slice(0, start);
+                                      const after = editForm.reply_template.slice(end);
+                                      setEditForm({ ...editForm, reply_template: before + v.value + after });
+                                    } else {
+                                      setEditForm({ ...editForm, reply_template: editForm.reply_template + v.value });
+                                    }
+                                  }}
+                                >
+                                  {v.label}
+                                </button>
+                              ))}
+                            </div>
                             <Textarea
+                              id={`template-${client.tag}`}
                               placeholder="Enter the reply template that will be stored under 'Our Reply' in Airtable..."
                               value={editForm.reply_template}
                               onChange={(e) => setEditForm({ ...editForm, reply_template: e.target.value })}
                               rows={4}
                               className="text-xs"
                             />
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Variables are replaced with real lead data when sent to Airtable. Only mapped variables get replaced.
+                            </p>
                           </div>
 
                           <div className="flex gap-2">
