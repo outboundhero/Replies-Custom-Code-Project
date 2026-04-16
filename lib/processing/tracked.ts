@@ -128,7 +128,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   // 4b. Resolve reply template variables
   if (includeClientConfig && clientConfig?.reply_template) {
     const senderNameParts = (sender_email.name || "").split(" ");
-    const resolvedReply = await resolveTemplate(clientConfig.reply_template, {
+    const resolvedReply = await resolveTemplate(String(clientConfig.reply_template), {
       firstName: lead.first_name || "",
       phoneNumber: String(customVars.phone || ""),
       companyName: lead.company || "",
