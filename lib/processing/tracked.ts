@@ -195,6 +195,8 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
       phone: customVars.phone,
       linkedin: customVars.linkedin,
       leadEmail: reply.from_email_address,
+      replyText: cleanedReply,
+      replySubject: reply.email_subject,
       recordId,
       airtableBaseId: section.airtable_base_id,
       airtableTableId: section.airtable_table_id,

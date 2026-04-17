@@ -2,30 +2,21 @@
  * Lead qualification orchestrator.
  * Runs after Airtable record creation for qualifying AI categories.
  * Non-blocking — errors are logged but never prevent the main webhook flow.
+ *
+ * Flow:
+ * 1. Enrich lead data (GPT + web search for verified industry/location)
+ * 2. Industry audit using enriched data
+ * 3. Location audit using enriched data
+ * 4. Cross-client matching if either audit fails
+ * 5. Update Airtable + log activity
  */
 
 import supabase from "@/lib/supabase";
 import { updateRecord } from "@/lib/airtable";
 import { logActivity, logError } from "@/lib/errors";
+import { enrichLead, type EnrichedLeadData } from "./enrich-lead";
 import { auditIndustry } from "./industry-audit";
 import { auditLocation } from "./location-audit";
-
-/** Personal/free email domains — don't extract website from these */
-const PERSONAL_DOMAINS = new Set([
-  "gmail.com", "googlemail.com", "yahoo.com", "yahoo.ca", "ymail.com", "rocketmail.com",
-  "aol.com", "aim.com", "outlook.com", "hotmail.com", "hotmail.ca", "live.com", "msn.com",
-  "icloud.com", "me.com", "mac.com", "att.net", "comcast.net", "xfinity.com",
-  "verizon.net", "sbcglobal.net", "bellsouth.net", "cox.net", "charter.net", "spectrum.net",
-  "protonmail.com", "proton.me", "fastmail.com", "zoho.com", "gmx.com", "mail.com",
-]);
-
-function extractWebsite(email: string): string | null {
-  const parts = email.split("@");
-  if (parts.length !== 2) return null;
-  const domain = parts[1].toLowerCase();
-  if (PERSONAL_DOMAINS.has(domain)) return null;
-  return domain;
-}
 
 interface QualifyLeadParams {
   campaignTag: string;
@@ -37,6 +28,8 @@ interface QualifyLeadParams {
   phone: string;
   linkedin: string;
   leadEmail: string;
+  replyText: string;
+  replySubject: string;
   recordId: string;
   airtableBaseId: string;
   airtableTableId: string;
@@ -44,11 +37,11 @@ interface QualifyLeadParams {
 
 export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   const {
-    campaignTag, companyName, city, state, address,
-    leadEmail, recordId, airtableBaseId, airtableTableId,
+    campaignTag, companyName, city, state, address, googleMapsUrl, phone,
+    leadEmail, replyText, replySubject, recordId, airtableBaseId, airtableTableId,
   } = params;
 
-  // 1. Get exclusion/inclusion rules
+  // 1. Get exclusion/inclusion rules from Supabase
   const { data: rules } = await supabase
     .from("client_qualifications")
     .select("exclusion_industries, inclusion_locations")
@@ -58,11 +51,37 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   const exclusionIndustries = rules?.exclusion_industries || "";
   const inclusionLocations = rules?.inclusion_locations || "";
 
-  // 3. Industry audit
+  // 2. Enrich lead data (GPT + web search)
+  let enriched: EnrichedLeadData;
+  try {
+    enriched = await enrichLead({
+      companyName,
+      leadEmail,
+      city,
+      state,
+      address,
+      googleMapsUrl,
+      phone: String(phone || ""),
+      replyText,
+    });
+  } catch (error) {
+    await logError("tracked", "qualification-enrich", (error as Error).message, {
+      tag: campaignTag, record_id: recordId,
+    });
+    // Fall back to raw data
+    enriched = {
+      companyName, website: null, industry: "", city, state, address,
+      zip: "", dataSources: "CRM only (enrichment failed)", confidence: "low",
+    };
+  }
+
+  // 3. Industry audit with enriched data
   let industryResult: { result: "Passed" | "Failed" | "Residential"; reason: string };
   try {
-    const website = extractWebsite(leadEmail);
-    industryResult = await auditIndustry(companyName, website, exclusionIndustries);
+    industryResult = await auditIndustry(
+      enriched.companyName, enriched.website, enriched.industry,
+      exclusionIndustries, enriched.confidence, enriched.dataSources,
+    );
   } catch (error) {
     await logError("tracked", "qualification-industry", (error as Error).message, {
       tag: campaignTag, record_id: recordId,
@@ -70,10 +89,13 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     industryResult = { result: "Passed", reason: "Industry audit error — defaulting to Passed" };
   }
 
-  // 4. Location audit
+  // 4. Location audit with enriched data
   let locationResult: { result: "Passed" | "Failed"; reason: string };
   try {
-    locationResult = await auditLocation(city, state, address, inclusionLocations);
+    locationResult = await auditLocation(
+      enriched.city, enriched.state, enriched.address, enriched.zip,
+      inclusionLocations, enriched.confidence,
+    );
   } catch (error) {
     await logError("tracked", "qualification-location", (error as Error).message, {
       tag: campaignTag, record_id: recordId,
@@ -81,17 +103,20 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     locationResult = { result: "Failed", reason: "Location audit error" };
   }
 
-  // 5. Build qualification reason (always include reasons from both audits)
+  // 5. Build qualification reason
   const reasons: string[] = [];
   reasons.push(`Industry: ${industryResult.reason}`);
   reasons.push(`Location: ${locationResult.reason}`);
+  if (enriched.confidence !== "low") {
+    reasons.push(`Sources: ${enriched.dataSources}`);
+  }
   const qualificationReason = reasons.join(" | ");
 
   // 6. Cross-client matching (if not a fit)
   let suggestedClients = "";
   if (industryResult.result !== "Passed" || locationResult.result !== "Passed") {
     try {
-      suggestedClients = await findFittingClients(campaignTag, companyName, extractWebsite(leadEmail), city, state, address);
+      suggestedClients = await findFittingClients(campaignTag, enriched);
     } catch (error) {
       await logError("tracked", "qualification-cross-client", (error as Error).message, {
         tag: campaignTag, record_id: recordId,
@@ -124,48 +149,39 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
       location: locationResult.result,
       reason: qualificationReason || "Fit",
       suggested: suggestedClients || undefined,
+      enriched_confidence: enriched.confidence,
+      enriched_industry: enriched.industry || undefined,
     },
   });
 }
 
 /**
  * Find other active clients where this lead would be a fit.
- * Uses a single GPT call for industry check, then location check for matches.
+ * Uses enriched data (verified industry + location) for a single comprehensive GPT call.
  */
 async function findFittingClients(
   excludeTag: string,
-  companyName: string,
-  website: string | null,
-  city: string | null,
-  state: string | null,
-  address: string | null,
+  enriched: EnrichedLeadData,
 ): Promise<string> {
   // Get all active clients with their rules
-  const { data: activeClients } = await supabase
-    .from("client_status")
-    .select("client_abbreviation")
-    .eq("status", "Active")
-    .neq("client_abbreviation", excludeTag);
-
-  if (!activeClients?.length) return "";
-
-  const tags = activeClients.map((c) => c.client_abbreviation);
   const { data: allRules } = await supabase
     .from("client_qualifications")
-    .select("client_abbreviation, exclusion_industries, inclusion_locations")
-    .in("client_abbreviation", tags);
+    .select("client_abbreviation, exclusion_industries, inclusion_locations");
 
   if (!allRules?.length) return "";
 
-  // Single GPT call: check company against all clients' exclusions
-  const clientsList = allRules
-    .filter((r) => r.exclusion_industries?.trim())
-    .map((r) => `- ${r.client_abbreviation}: excludes "${r.exclusion_industries}"`)
+  const otherRules = allRules.filter((r) => r.client_abbreviation !== excludeTag);
+  if (!otherRules.length) return "";
+
+  // Build a comprehensive prompt with enriched data + all clients
+  const clientsList = otherRules
+    .map((r) => {
+      const parts = [`- ${r.client_abbreviation}`];
+      if (r.exclusion_industries?.trim()) parts.push(`excludes: "${r.exclusion_industries}"`);
+      if (r.inclusion_locations?.trim()) parts.push(`serves: "${r.inclusion_locations.slice(0, 150)}"`);
+      return parts.join(" | ");
+    })
     .join("\n");
-
-  if (!clientsList) return "";
-
-  const fittingTags: string[] = [];
 
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -177,44 +193,42 @@ async function findFittingClients(
       body: JSON.stringify({
         model: "gpt-4o-mini",
         temperature: 0,
-        max_tokens: 200,
+        max_tokens: 300,
         response_format: { type: "json_object" },
         messages: [
           {
             role: "system",
-            content: `You are a business classification assistant. Given a company and multiple clients with their excluded industries, determine which clients this company could work with (i.e., the company does NOT fall under that client's excluded industries and is NOT residential).
+            content: `You are a lead-to-client matching assistant. Given a company's verified industry and location, determine which clients this company is a fit for.
+
+A fit means BOTH:
+1. Company is NOT in that client's excluded industries and is NOT residential
+2. Company IS within approximately 5 miles of that client's service area
+
 Respond with JSON only: {"fits": ["TAG1", "TAG2"]}
-If no clients fit, return {"fits": []}`,
+If no clients fit, return {"fits": []}
+Only include clients where BOTH industry and location match.`,
           },
           {
             role: "user",
-            content: `Company: "${companyName}"${website ? ` (website: ${website})` : ""}\n\nClients:\n${clientsList}`,
+            content: `Company: "${enriched.companyName}"
+Industry: "${enriched.industry}"
+Website: "${enriched.website || "unknown"}"
+Location: "${enriched.city}, ${enriched.state}" (${enriched.address || "no address"}, ZIP: ${enriched.zip || "unknown"})
+
+Clients:
+${clientsList}`,
           },
         ],
       }),
     });
 
-    if (response.ok) {
-      const data = await response.json();
-      const parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{"fits":[]}');
-      const industryFits: string[] = parsed.fits || [];
+    if (!response.ok) return "";
 
-      // For industry-fitting clients, check location
-      for (const tag of industryFits) {
-        const rule = allRules.find((r) => r.client_abbreviation === tag);
-        if (!rule?.inclusion_locations?.trim()) {
-          fittingTags.push(tag); // No location restriction
-          continue;
-        }
-        const locResult = await auditLocation(city, state, address, rule.inclusion_locations);
-        if (locResult.result === "Passed") {
-          fittingTags.push(tag);
-        }
-      }
-    }
+    const data = await response.json();
+    const parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{"fits":[]}');
+    const fits: string[] = parsed.fits || [];
+    return fits.join(", ");
   } catch {
-    // Cross-client matching is best-effort
+    return "";
   }
-
-  return fittingTags.join(", ");
 }

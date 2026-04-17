@@ -1,5 +1,6 @@
 /**
  * GPT-based industry audit: checks if a company falls under excluded industries.
+ * Uses enriched data (verified industry from web research) for higher accuracy.
  * Returns "Passed" (not excluded), "Failed" (excluded), or "Residential".
  */
 
@@ -8,42 +9,44 @@ interface IndustryAuditResult {
   reason: string;
 }
 
-const SYSTEM_PROMPT = `You are a business classification assistant. Given a company name, website, and any available details, determine if the company operates in any of the listed excluded industries or keywords.
+const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and a list of excluded industries/keywords, determine if the company operates in any excluded industry.
 
 Also check if the company appears to be RESIDENTIAL — meaning they primarily serve residential customers (e.g., Airbnb cleaning, apartment cleaning, house cleaning, maid service, short-term rental cleaning, residential cleaning, home cleaning).
 
-Use your knowledge about the company. If the company name or website suggests a specific industry, use that knowledge.
+You are given enriched data that may include a verified industry from web research. Trust this data — it has already been researched.
 
 Respond with JSON only, no other text:
 {"result": "Passed" | "Failed" | "Residential", "reason": "one sentence explanation"}
 
 - "Passed" = company does NOT operate in any excluded industry and is NOT residential
-- "Failed" = company appears to operate in one of the excluded industries
-- "Residential" = company appears to primarily serve residential customers
+- "Failed" = company operates in one of the excluded industries
+- "Residential" = company primarily serves residential customers
 
-If there are no excluded industries listed or the exclusion list is empty, return "Passed" unless the company is residential.
-If you cannot determine the company's industry from the name/website alone, lean toward "Passed" (benefit of the doubt).`;
+If there are no excluded industries listed, return "Passed" unless the company is residential.`;
 
 export async function auditIndustry(
   companyName: string,
   website: string | null,
-  exclusionIndustries: string
+  industry: string,
+  exclusionIndustries: string,
+  confidence: string,
+  dataSources: string,
 ): Promise<IndustryAuditResult> {
   if (!exclusionIndustries?.trim()) {
     return { result: "Passed", reason: "No exclusion industries defined for this client" };
   }
 
-  if (!companyName?.trim()) {
-    return { result: "Passed", reason: "No company name available to check" };
+  if (!companyName?.trim() && !industry?.trim()) {
+    return { result: "Passed", reason: "No company or industry data available" };
   }
 
-  const userMessage = [
+  const userParts = [
     `Company: "${companyName}"`,
     website ? `Website: "${website}"` : null,
-    `Excluded industries/keywords: "${exclusionIndustries}"`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+    industry ? `Verified industry: "${industry}"` : null,
+    `Data confidence: ${confidence} | Sources: ${dataSources}`,
+    `\nExcluded industries/keywords: "${exclusionIndustries}"`,
+  ].filter(Boolean).join("\n");
 
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -59,7 +62,7 @@ export async function auditIndustry(
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage },
+          { role: "user", content: userParts },
         ],
       }),
     });
