@@ -1,6 +1,7 @@
 import { logActivity, logError } from "@/lib/errors";
 
-const BLACKLIST_API_URL = "https://app.outboundhero.co/api/blacklisted-domains";
+const BLACKLIST_DOMAIN_API_URL = "https://app.outboundhero.co/api/blacklisted-domains";
+const BLACKLIST_EMAIL_API_URL = "https://app.outboundhero.co/api/blacklisted-emails";
 const BLACKLIST_API_KEY = "60|QACwd4xuHycuYxLh8knGlKvKEuRkVSUw2obSpCNSd2ba2ebd";
 
 const BLACKLIST_TRIGGERS = [
@@ -178,7 +179,7 @@ export async function blacklistDomain(
   if (PROTECTED_DOMAINS.has(domain)) return;
 
   try {
-    const res = await fetch(BLACKLIST_API_URL, {
+    const res = await fetch(BLACKLIST_DOMAIN_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -214,6 +215,55 @@ export async function blacklistDomain(
       domain,
       from_email: fromEmail,
       matched_phrase: matchedPhrase,
+    });
+  }
+}
+
+/**
+ * Blacklist an email address via the OutboundHero API.
+ * Called when AI categorizes a reply as "Do Not Contact".
+ * Non-blocking — errors are logged but don't throw.
+ */
+export async function blacklistEmail(
+  email: string,
+  workflow: string,
+  opts?: { client_tag?: string; section_name?: string }
+): Promise<void> {
+  if (!email) return;
+
+  try {
+    const res = await fetch(BLACKLIST_EMAIL_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${BLACKLIST_API_KEY}`,
+      },
+      body: JSON.stringify({ email }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      if (res.status === 422 && body.includes("already been taken")) {
+        await logActivity(workflow, "email-already-blacklisted", {
+          client_tag: opts?.client_tag,
+          section_name: opts?.section_name,
+          lead_email: email,
+          details: { email },
+        });
+        return;
+      }
+      throw new Error(`Email blacklist API failed (${res.status}): ${body}`);
+    }
+
+    await logActivity(workflow, "email-blacklisted", {
+      client_tag: opts?.client_tag,
+      section_name: opts?.section_name,
+      lead_email: email,
+      details: { email },
+    });
+  } catch (error) {
+    await logError(workflow, "email-blacklist", (error as Error).message, {
+      email,
     });
   }
 }

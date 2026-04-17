@@ -7,7 +7,7 @@ import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-cate
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
-import { shouldBlacklistDomain, blacklistDomain } from "./domain-blacklist";
+import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { resolveTemplate } from "./template-resolver";
 import { logError, logActivity } from "@/lib/errors";
@@ -312,10 +312,18 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     }
   }
 
-  // 6c. Domain blacklisting
+  // 6c. Domain blacklisting (trigger phrases in reply)
   const blacklistMatch = shouldBlacklistDomain(reply.email_subject, reply.text_body);
   if (blacklistMatch) {
     await blacklistDomain(reply.from_email_address, blacklistMatch, "tracked", {
+      client_tag: campaignTag,
+      section_name: section.name,
+    });
+  }
+
+  // 6d. Email blacklisting (Do Not Contact category)
+  if (aiCategory === "Do Not Contact") {
+    await blacklistEmail(reply.from_email_address, "tracked", {
       client_tag: campaignTag,
       section_name: section.name,
     });

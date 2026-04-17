@@ -95,6 +95,8 @@ export default function DashboardPage() {
     error: "bg-red-100 text-red-800",
     "domain-blacklisted": "bg-red-200 text-red-900",
     "domain-already-blacklisted": "bg-orange-100 text-orange-800",
+    "email-blacklisted": "bg-red-200 text-red-900",
+    "email-already-blacklisted": "bg-orange-100 text-orange-800",
   };
 
   return (
@@ -124,7 +126,7 @@ export default function DashboardPage() {
                     { value: "qualified", label: "Qualified" },
                     { value: "qualification-skipped", label: "Skipped" },
                     { value: "filtered", label: "Filtered" },
-                    { value: "domain-blacklisted,domain-already-blacklisted", label: "Blacklisted" },
+                    { value: "domain-blacklisted,domain-already-blacklisted,email-blacklisted,email-already-blacklisted", label: "Blacklisted" },
                     { value: "unroutable", label: "Unroutable" },
                   ].map((f) => (
                     <Button
