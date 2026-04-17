@@ -103,13 +103,14 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     locationResult = { result: "Failed", reason: "Location audit error" };
   }
 
-  // 5. Build qualification reason
+  // 5. Build qualification reason with enrichment context
   const reasons: string[] = [];
-  reasons.push(`Industry: ${industryResult.reason}`);
-  reasons.push(`Location: ${locationResult.reason}`);
-  if (enriched.confidence !== "low") {
-    reasons.push(`Sources: ${enriched.dataSources}`);
-  }
+  if (enriched.website) reasons.push(`Website: ${enriched.website}`);
+  if (enriched.industry) reasons.push(`Verified industry: ${enriched.industry}`);
+  if (enriched.zip) reasons.push(`Verified location: ${enriched.city}, ${enriched.state} ${enriched.zip}`);
+  reasons.push(`Industry audit: ${industryResult.reason}`);
+  reasons.push(`Location audit: ${locationResult.reason}`);
+  reasons.push(`Data: ${enriched.dataSources} (${enriched.confidence} confidence)`);
   const qualificationReason = reasons.join(" | ");
 
   // 6. Cross-client matching (if not a fit)
@@ -204,7 +205,9 @@ A fit means BOTH:
 1. Company is NOT in that client's excluded industries and is NOT residential
 2. Company IS within approximately 5 miles of that client's service area
 
-Respond with JSON only: {"fits": ["TAG1", "TAG2"]}
+For each fitting client, provide a one-sentence reason explaining why this lead is a good fit for that specific client.
+
+Respond with JSON only: {"fits": [{"tag": "TAG1", "reason": "one sentence why this lead fits this client"}, ...]}
 If no clients fit, return {"fits": []}
 Only include clients where BOTH industry and location match.`,
           },
@@ -226,8 +229,9 @@ ${clientsList}`,
 
     const data = await response.json();
     const parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{"fits":[]}');
-    const fits: string[] = parsed.fits || [];
-    return fits.join(", ");
+    const fits: Array<{ tag: string; reason: string }> = parsed.fits || [];
+    if (fits.length === 0) return "";
+    return fits.map((f) => `${f.tag} (${f.reason})`).join(", ");
   } catch {
     return "";
   }
