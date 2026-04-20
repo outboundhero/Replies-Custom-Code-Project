@@ -4,7 +4,6 @@ import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -89,22 +88,24 @@ const LEAD_CATEGORIES = [
   "Internally Forwarded",
 ];
 
-const categoryColor: Record<string, string> = {
-  "Interested": "bg-green-100 text-green-800",
-  "Meeting Set": "bg-green-200 text-green-900",
-  "Meeting-Ready Lead": "bg-green-200 text-green-900",
-  "Follow Up": "bg-blue-100 text-blue-800",
-  "Not Interested": "bg-gray-100 text-gray-600",
-  "Do Not Contact": "bg-red-100 text-red-800",
-  "Out Of Office": "bg-yellow-100 text-yellow-800",
-  "Wrong Person": "bg-orange-100 text-orange-800",
-  "Change Of Target": "bg-orange-100 text-orange-800",
-  "Automated Reply": "bg-gray-100 text-gray-600",
-  "Mailbox No Longer Active": "bg-gray-100 text-gray-600",
-  "Open Response": "bg-purple-100 text-purple-800",
-  "Needs Review": "bg-purple-100 text-purple-800",
-  "Referral Given": "bg-blue-200 text-blue-900",
-  "Internally Forwarded": "bg-blue-200 text-blue-900",
+const catDot: Record<string, string> = {
+  "Interested": "bg-green-500",
+  "Meeting Set": "bg-green-600",
+  "Meeting-Ready Lead": "bg-green-600",
+  "Follow Up": "bg-blue-500",
+  "Not Interested": "bg-gray-400",
+  "Do Not Contact": "bg-red-500",
+  "Out Of Office": "bg-yellow-500",
+  "Wrong Person": "bg-orange-500",
+  "Change Of Target": "bg-orange-400",
+  "Automated Reply": "bg-gray-400",
+  "Mailbox No Longer Active": "bg-gray-400",
+  "Open Response": "bg-purple-500",
+  "Needs Review": "bg-purple-400",
+  "Referral Given": "bg-blue-600",
+  "Internally Forwarded": "bg-blue-600",
+  "Closed Won": "bg-emerald-600",
+  "Lost": "bg-gray-500",
 };
 
 export default function InboxPage() {
@@ -114,12 +115,13 @@ export default function InboxPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
   const [search, setSearch] = useState("");
-  const [filterCategory, setFilterCategory] = useState<string>("");
-  const [filterWorkflow, setFilterWorkflow] = useState<string>("");
+  const [filterCategory, setFilterCategory] = useState("");
+  const [filterWorkflow, setFilterWorkflow] = useState("");
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
 
-  // Dialog states
+  // Dialogs
   const [replyDialogOpen, setReplyDialogOpen] = useState(false);
   const [forwardDialogOpen, setForwardDialogOpen] = useState(false);
   const [oneOffDialogOpen, setOneOffDialogOpen] = useState(false);
@@ -131,7 +133,7 @@ export default function InboxPage() {
 
   const loadReplies = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ page: String(page), limit: "50" });
+      const params = new URLSearchParams({ page: String(page), limit: "100" });
       if (search) params.set("search", search);
       if (filterCategory) params.set("category", filterCategory);
       if (filterWorkflow) params.set("workflow", filterWorkflow);
@@ -158,11 +160,17 @@ export default function InboxPage() {
     setLoading(true);
     try {
       const res = await fetch(`/api/inbox/${id}`);
-      if (res.ok) {
-        setDetail(await res.json());
-      }
+      if (res.ok) setDetail(await res.json());
     } catch { /* ignore */ }
     setLoading(false);
+  }
+
+  function toggleCategory(cat: string) {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat); else next.add(cat);
+      return next;
+    });
   }
 
   async function updateCategory(id: number, category: string) {
@@ -173,13 +181,13 @@ export default function InboxPage() {
     });
     const data = await res.json();
     if (res.ok) {
-      toast.success(`Category updated to ${category}`);
+      toast.success(`Category: ${category}`);
       if (data.pushed_to_sheet) toast.success("Pushed to Google Sheet");
-      if (data.sheet_error) toast.error(`Sheet push failed: ${data.sheet_error}`);
+      if (data.sheet_error) toast.error(`Sheet: ${data.sheet_error}`);
       loadReplies();
       if (detail?.id === id) loadDetail(id);
     } else {
-      toast.error(data.error || "Failed to update");
+      toast.error(data.error || "Failed");
     }
   }
 
@@ -198,25 +206,15 @@ export default function InboxPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        action: "send-reply",
-        id: detail.id,
-        replyId: detail.reply_id,
-        senderEmailId: detail.sender_id,
-        message: replyMessage,
-        toEmail: detail.lead_email,
-        toName: detail.lead_name,
+        action: "send-reply", id: detail.id, replyId: detail.reply_id,
+        senderEmailId: detail.sender_id, message: replyMessage,
+        toEmail: detail.lead_email, toName: detail.lead_name,
       }),
     });
     const data = await res.json();
     setSending(false);
-    if (data.ok) {
-      toast.success("Reply sent");
-      setReplyDialogOpen(false);
-      setReplyMessage("");
-      loadDetail(detail.id);
-    } else {
-      toast.error(data.error || "Failed to send");
-    }
+    if (data.ok) { toast.success("Reply sent"); setReplyDialogOpen(false); setReplyMessage(""); loadDetail(detail.id); }
+    else toast.error(data.error || "Failed");
   }
 
   async function handleForward() {
@@ -226,25 +224,15 @@ export default function InboxPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        action: "forward",
-        id: detail.id,
-        replyId: detail.reply_id,
-        senderEmailId: detail.sender_id,
-        message: detail.reply_we_got,
-        forwardTo,
-        leadName: detail.lead_name,
+        action: "forward", id: detail.id, replyId: detail.reply_id,
+        senderEmailId: detail.sender_id, message: detail.reply_we_got,
+        forwardTo, leadName: detail.lead_name,
       }),
     });
     const data = await res.json();
     setSending(false);
-    if (data.ok) {
-      toast.success("Forwarded");
-      setForwardDialogOpen(false);
-      setForwardTo("");
-      loadDetail(detail.id);
-    } else {
-      toast.error(data.error || "Forward failed");
-    }
+    if (data.ok) { toast.success("Forwarded"); setForwardDialogOpen(false); setForwardTo(""); loadDetail(detail.id); }
+    else toast.error(data.error || "Failed");
   }
 
   async function handleOneOff() {
@@ -254,30 +242,19 @@ export default function InboxPage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        action: "send-one-off",
-        id: detail.id,
-        senderEmailId: detail.sender_id,
-        subject: oneOffSubject,
-        message: oneOffMessage,
-        toEmail: detail.lead_email,
-        toName: detail.lead_name,
+        action: "send-one-off", id: detail.id, senderEmailId: detail.sender_id,
+        subject: oneOffSubject, message: oneOffMessage,
+        toEmail: detail.lead_email, toName: detail.lead_name,
       }),
     });
     const data = await res.json();
     setSending(false);
-    if (data.ok) {
-      toast.success("One-off reply sent");
-      setOneOffDialogOpen(false);
-      setOneOffSubject("");
-      setOneOffMessage("");
-    } else {
-      toast.error(data.error || "Failed to send");
-    }
+    if (data.ok) { toast.success("Sent"); setOneOffDialogOpen(false); setOneOffSubject(""); setOneOffMessage(""); }
+    else toast.error(data.error || "Failed");
   }
 
   async function handleBlacklist() {
-    if (!detail) return;
-    if (!confirm(`Blacklist domain for ${detail.lead_email}?`)) return;
+    if (!detail || !confirm(`Blacklist domain for ${detail.lead_email}?`)) return;
     await fetch("/api/inbox/mutate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -294,12 +271,8 @@ export default function InboxPage() {
       body: JSON.stringify({ action: "push-to-sheet", id: detail.id }),
     });
     const data = await res.json();
-    if (data.ok) {
-      toast.success("Pushed to Google Sheet");
-      loadDetail(detail.id);
-    } else {
-      toast.error(data.error || "Push failed");
-    }
+    if (data.ok) { toast.success("Pushed to Google Sheet"); loadDetail(detail.id); }
+    else toast.error(data.error || "Push failed");
   }
 
   async function handleReallocate(clientTag: string) {
@@ -309,14 +282,10 @@ export default function InboxPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "reallocate", id: detail.id, client_tag: clientTag }),
     });
-    if (res.ok) {
-      toast.success(`Reallocated to ${clientTag}`);
-      loadReplies();
-      loadDetail(detail.id);
-    }
+    if (res.ok) { toast.success(`Reallocated to ${clientTag}`); loadReplies(); loadDetail(detail.id); }
   }
 
-  // Group replies by category for left panel
+  // Group by category
   const grouped = replies.reduce<Record<string, ReplyListItem[]>>((acc, r) => {
     const cat = r.lead_category || "Open Response";
     if (!acc[cat]) acc[cat] = [];
@@ -324,241 +293,256 @@ export default function InboxPage() {
     return acc;
   }, {});
 
+  // Sort categories: put ones with items first
+  const sortedCategories = Object.entries(grouped).sort(([, a], [, b]) => b.length - a.length);
+
   return (
-    <div className="flex h-[calc(100vh-4rem)] gap-0">
-      {/* Left Panel - Lead List */}
-      <div className="w-72 border-r overflow-y-auto shrink-0 bg-muted/20">
-        <div className="p-3 border-b space-y-2">
+    <div className="flex h-[calc(100vh-3rem)]">
+      {/* Left Panel */}
+      <div className="w-80 border-r flex flex-col bg-white shrink-0">
+        {/* Search & Filters */}
+        <div className="p-3 space-y-2 border-b">
           <Input
-            placeholder="Search email, name, company..."
+            placeholder="Search..."
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            className="text-xs h-8"
+            className="h-8 text-sm"
           />
-          <div className="flex gap-1">
-            <Select value={filterWorkflow} onValueChange={(v) => { setFilterWorkflow(v === "all" ? "" : v); setPage(1); }}>
-              <SelectTrigger className="text-xs h-7 flex-1"><SelectValue placeholder="All" /></SelectTrigger>
+          <div className="flex gap-1.5">
+            <Select value={filterWorkflow || "all"} onValueChange={(v) => { setFilterWorkflow(v === "all" ? "" : v); setPage(1); }}>
+              <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
                 <SelectItem value="tracked">Tracked</SelectItem>
                 <SelectItem value="untracked">Untracked</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={filterCategory} onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); setPage(1); }}>
-              <SelectTrigger className="text-xs h-7 flex-1"><SelectValue placeholder="Category" /></SelectTrigger>
+            <Select value={filterCategory || "all"} onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); setPage(1); }}>
+              <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Categories</SelectItem>
                 {LEAD_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
+          <div className="text-[11px] text-muted-foreground">{total} leads</div>
         </div>
 
-        <div className="divide-y">
-          {Object.entries(grouped).map(([category, items]) => (
-            <div key={category}>
-              <div className="px-3 py-1.5 bg-muted/50 flex items-center justify-between">
-                <Badge variant="secondary" className={`text-xs ${categoryColor[category] || ""}`}>
-                  {category}
-                </Badge>
-                <span className="text-xs text-muted-foreground">{items.length}</span>
-              </div>
-              {items.map((r) => (
-                <div
-                  key={r.id}
-                  className={`px-3 py-2 cursor-pointer hover:bg-muted/40 border-l-2 ${selectedId === r.id ? "bg-muted border-l-primary" : "border-l-transparent"}`}
-                  onClick={() => loadDetail(r.id)}
+        {/* Lead List */}
+        <div className="flex-1 overflow-y-auto">
+          {sortedCategories.map(([category, items]) => {
+            const isCollapsed = collapsedCategories.has(category);
+            return (
+              <div key={category}>
+                {/* Category Header */}
+                <button
+                  onClick={() => toggleCategory(category)}
+                  className="w-full flex items-center justify-between px-3 py-2 bg-muted/40 hover:bg-muted/60 border-b text-left transition-colors"
                 >
-                  <p className="text-xs font-medium truncate">{r.lead_email}</p>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <Badge variant="secondary" className={`text-[10px] px-1 py-0 ${categoryColor[r.ai_categorized_lead_category || ""] || ""}`}>
-                      {r.ai_categorized_lead_category || "—"}
-                    </Badge>
-                    <Badge variant="outline" className="text-[10px] px-1 py-0 font-mono">
-                      {r.client_tag || "N/A"}
-                    </Badge>
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${catDot[category] || "bg-gray-400"}`} />
+                    <span className="text-xs font-medium text-foreground">{category}</span>
                   </div>
-                </div>
-              ))}
-            </div>
-          ))}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-muted-foreground tabular-nums">{items.length}</span>
+                    <svg className={`w-3 h-3 text-muted-foreground transition-transform ${isCollapsed ? "" : "rotate-180"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </button>
+
+                {/* Leads */}
+                {!isCollapsed && items.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => loadDetail(r.id)}
+                    className={`w-full text-left px-3 py-2.5 border-b border-muted/50 transition-colors ${
+                      selectedId === r.id
+                        ? "bg-primary/5 border-l-2 border-l-primary"
+                        : "hover:bg-muted/20 border-l-2 border-l-transparent"
+                    }`}
+                  >
+                    <p className="text-[13px] font-medium truncate text-foreground leading-tight">{r.lead_email}</p>
+                    <div className="flex items-center gap-1.5 mt-1">
+                      {r.ai_categorized_lead_category && (
+                        <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category}</span>
+                      )}
+                      <span className="text-[10px] font-mono font-semibold text-primary/70">{r.client_tag || "N/A"}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+
+          {replies.length === 0 && !fetchError && (
+            <p className="text-xs text-muted-foreground text-center py-10">No replies yet</p>
+          )}
         </div>
 
         {/* Pagination */}
-        {total > 50 && (
-          <div className="p-2 border-t flex items-center justify-between">
-            <Button size="sm" variant="outline" disabled={page === 1} onClick={() => setPage(page - 1)} className="text-xs h-7">Prev</Button>
-            <span className="text-xs text-muted-foreground">{page} / {Math.ceil(total / 50)}</span>
-            <Button size="sm" variant="outline" disabled={page * 50 >= total} onClick={() => setPage(page + 1)} className="text-xs h-7">Next</Button>
+        {total > 100 && (
+          <div className="p-2 border-t flex items-center justify-between bg-white">
+            <Button size="sm" variant="ghost" disabled={page === 1} onClick={() => setPage(page - 1)} className="h-6 text-xs">Prev</Button>
+            <span className="text-[11px] text-muted-foreground tabular-nums">{page}/{Math.ceil(total / 100)}</span>
+            <Button size="sm" variant="ghost" disabled={page * 100 >= total} onClick={() => setPage(page + 1)} className="h-6 text-xs">Next</Button>
           </div>
         )}
       </div>
 
-      {/* Right Panel - Detail */}
-      <div className="flex-1 overflow-y-auto p-4">
+      {/* Right Panel */}
+      <div className="flex-1 overflow-y-auto bg-muted/10">
         {fetchError && (
-          <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive mb-4">
+          <div className="m-4 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
             {fetchError}
           </div>
         )}
 
         {!detail && !loading && (
-          <p className="text-sm text-muted-foreground text-center py-20">Select a lead from the left panel</p>
+          <div className="flex items-center justify-center h-full">
+            <p className="text-sm text-muted-foreground">Select a lead to view details</p>
+          </div>
         )}
 
-        {loading && <p className="text-sm text-muted-foreground text-center py-20">Loading...</p>}
+        {loading && (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-sm text-muted-foreground">Loading...</p>
+          </div>
+        )}
 
         {detail && !loading && (
-          <div className="space-y-4 max-w-4xl">
+          <div className="p-6 max-w-3xl mx-auto space-y-5">
             {/* Header */}
-            <div className="flex items-center justify-between">
+            <div className="flex items-start justify-between">
               <div>
-                <h2 className="text-xl font-semibold">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
+                <h2 className="text-lg font-semibold tracking-tight">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
                 <p className="text-sm text-muted-foreground">{detail.lead_email}</p>
               </div>
               <div className="flex gap-2">
-                <Badge variant="outline" className="font-mono">{detail.client_tag || "N/A"}</Badge>
-                <Badge variant={detail.workflow === "tracked" ? "default" : "secondary"}>{detail.workflow}</Badge>
+                <span className="text-xs font-mono font-semibold bg-primary/10 text-primary px-2 py-1 rounded">{detail.client_tag || "N/A"}</span>
+                <span className="text-xs bg-muted px-2 py-1 rounded">{detail.workflow}</span>
               </div>
             </div>
 
-            {/* Lead Info */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Lead Info</CardTitle></CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
-                  {detail.company_name && <div><span className="text-muted-foreground">Company:</span> {detail.company_name}</div>}
-                  {detail.phone && <div><span className="text-muted-foreground">Phone:</span> {detail.phone}</div>}
-                  {detail.city && <div><span className="text-muted-foreground">City:</span> {detail.city}</div>}
-                  {detail.state && <div><span className="text-muted-foreground">State:</span> {detail.state}</div>}
-                  {detail.address && <div className="col-span-2"><span className="text-muted-foreground">Address:</span> {detail.address}</div>}
-                  {detail.sender_email && <div><span className="text-muted-foreground">Sender:</span> {detail.sender_email}</div>}
-                  {detail.campaign_name && <div><span className="text-muted-foreground">Campaign:</span> {detail.campaign_name}</div>}
+            {/* Info Grid */}
+            <div className="grid grid-cols-2 gap-x-8 gap-y-2 rounded-lg border bg-white p-4">
+              {[
+                { label: "Company", value: detail.company_name },
+                { label: "Phone", value: detail.phone },
+                { label: "Location", value: [detail.city, detail.state].filter(Boolean).join(", ") },
+                { label: "Sender", value: detail.sender_email },
+                { label: "Campaign", value: detail.campaign_name },
+                { label: "Address", value: detail.address },
+              ].filter((f) => f.value).map((f) => (
+                <div key={f.label} className="flex gap-2 text-sm">
+                  <span className="text-muted-foreground shrink-0 w-20">{f.label}</span>
+                  <span className="truncate">{f.value}</span>
                 </div>
-              </CardContent>
-            </Card>
+              ))}
+            </div>
 
-            {/* Reply Content */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Reply</CardTitle></CardHeader>
-              <CardContent>
-                <p className="text-xs text-muted-foreground mb-1">Subject: {detail.email_subject}</p>
-                <div className="bg-muted/30 rounded p-3 text-sm whitespace-pre-wrap max-h-60 overflow-y-auto">
-                  {detail.reply_we_got || "No reply content"}
-                </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  {detail.reply_time && new Date(detail.reply_time).toLocaleString()}
-                </p>
-              </CardContent>
-            </Card>
+            {/* Reply */}
+            <div className="rounded-lg border bg-white">
+              <div className="px-4 py-2.5 border-b bg-muted/30">
+                <p className="text-xs font-medium">Reply</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{detail.email_subject}</p>
+              </div>
+              <div className="p-4 text-sm whitespace-pre-wrap leading-relaxed max-h-72 overflow-y-auto">
+                {detail.reply_we_got || "No content"}
+              </div>
+              <div className="px-4 py-2 border-t bg-muted/20">
+                <p className="text-[11px] text-muted-foreground">{detail.reply_time && new Date(detail.reply_time).toLocaleString()}</p>
+              </div>
+            </div>
 
             {/* Audit */}
             {(detail.industry_audit || detail.location_audit) && (
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-sm">Audit</CardTitle></CardHeader>
-                <CardContent className="space-y-2">
-                  <div className="flex gap-4">
-                    <div>
-                      <span className="text-xs text-muted-foreground">Industry: </span>
-                      <Badge className={detail.industry_audit === "Passed" ? "bg-green-600" : detail.industry_audit === "Residential" ? "bg-yellow-600" : "bg-red-600"}>
-                        {detail.industry_audit}
-                      </Badge>
-                    </div>
-                    <div>
-                      <span className="text-xs text-muted-foreground">Location: </span>
-                      <Badge className={detail.location_audit === "Passed" ? "bg-green-600" : "bg-red-600"}>
-                        {detail.location_audit}
-                      </Badge>
-                    </div>
+              <div className="rounded-lg border bg-white p-4 space-y-3">
+                <p className="text-xs font-medium">Qualification Audit</p>
+                <div className="flex gap-6">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Industry</span>
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                      detail.industry_audit === "Passed" ? "bg-green-100 text-green-700" :
+                      detail.industry_audit === "Residential" ? "bg-yellow-100 text-yellow-700" :
+                      "bg-red-100 text-red-700"
+                    }`}>{detail.industry_audit}</span>
                   </div>
-                  {detail.qualification_reason && (
-                    <p className="text-xs text-muted-foreground">{detail.qualification_reason}</p>
-                  )}
-                  {detail.suggested_client && (
-                    <p className="text-xs"><span className="text-muted-foreground">Suggested:</span> {detail.suggested_client}</p>
-                  )}
-                </CardContent>
-              </Card>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Location</span>
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                      detail.location_audit === "Passed" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+                    }`}>{detail.location_audit}</span>
+                  </div>
+                </div>
+                {detail.qualification_reason && (
+                  <p className="text-xs text-muted-foreground leading-relaxed">{detail.qualification_reason}</p>
+                )}
+                {detail.suggested_client && (
+                  <p className="text-xs"><span className="text-muted-foreground">Suggested: </span><span className="font-medium">{detail.suggested_client}</span></p>
+                )}
+              </div>
             )}
 
-            {/* Lead Category */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Lead Category</CardTitle></CardHeader>
-              <CardContent>
+            {/* Category + Reallocate */}
+            <div className="flex gap-4 items-start">
+              <div className="rounded-lg border bg-white p-4 flex-1">
+                <p className="text-xs font-medium mb-2">Lead Category</p>
                 <Select value={detail.lead_category || "Open Response"} onValueChange={(v) => updateCategory(detail.id, v)}>
-                  <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="w-56 h-9"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {LEAD_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
                   </SelectContent>
                 </Select>
                 {detail.pushed_to_sheet && (
-                  <p className="text-xs text-green-600 mt-1">Pushed to sheet {detail.pushed_to_sheet_at && `at ${new Date(detail.pushed_to_sheet_at).toLocaleString()}`}</p>
+                  <p className="text-[11px] text-green-600 mt-2">Pushed to sheet {detail.pushed_to_sheet_at && new Date(detail.pushed_to_sheet_at).toLocaleString()}</p>
                 )}
-              </CardContent>
-            </Card>
+              </div>
 
-            {/* Reallocate (for N/A untracked) */}
-            {(detail.client_tag === "N/A" || !detail.client_tag) && (
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-sm">Reallocate Client</CardTitle></CardHeader>
-                <CardContent>
+              {(!detail.client_tag || detail.client_tag === "N/A") && (
+                <div className="rounded-lg border bg-white p-4">
+                  <p className="text-xs font-medium mb-2">Reallocate</p>
                   <div className="flex gap-2">
-                    <Input
-                      placeholder="Enter client tag (e.g., ABM)"
-                      id="reallocate-tag"
-                      className="w-48 text-xs"
-                    />
-                    <Button size="sm" onClick={() => {
-                      const input = document.getElementById("reallocate-tag") as HTMLInputElement;
-                      if (input?.value) handleReallocate(input.value.toUpperCase());
-                    }}>Reallocate</Button>
+                    <Input id="reallocate-input" placeholder="Client tag" className="w-28 h-9 text-sm" />
+                    <Button size="sm" className="h-9" onClick={() => {
+                      const v = (document.getElementById("reallocate-input") as HTMLInputElement)?.value;
+                      if (v) handleReallocate(v.toUpperCase());
+                    }}>Assign</Button>
                   </div>
-                </CardContent>
-              </Card>
-            )}
+                </div>
+              )}
+            </div>
 
-            {/* Our Reply / Template */}
+            {/* Our Reply Template */}
             {detail.our_reply && (
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-sm">Our Reply (Template)</CardTitle></CardHeader>
-                <CardContent>
-                  <div className="bg-muted/30 rounded p-3 text-sm whitespace-pre-wrap">{detail.our_reply}</div>
-                </CardContent>
-              </Card>
+              <div className="rounded-lg border bg-white p-4">
+                <p className="text-xs font-medium mb-2">Our Reply (Template)</p>
+                <div className="bg-muted/20 rounded p-3 text-sm whitespace-pre-wrap">{detail.our_reply}</div>
+              </div>
             )}
 
             {/* Notes */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Notes</CardTitle></CardHeader>
-              <CardContent>
-                <Textarea
-                  value={detail.notes || ""}
-                  onChange={(e) => setDetail({ ...detail, notes: e.target.value })}
-                  onBlur={() => updateNotes(detail.id, detail.notes || "")}
-                  placeholder="Add notes..."
-                  rows={3}
-                  className="text-xs"
-                />
-              </CardContent>
-            </Card>
+            <div className="rounded-lg border bg-white p-4">
+              <p className="text-xs font-medium mb-2">Notes</p>
+              <Textarea
+                value={detail.notes || ""}
+                onChange={(e) => setDetail({ ...detail, notes: e.target.value })}
+                onBlur={() => updateNotes(detail.id, detail.notes || "")}
+                placeholder="Add notes..."
+                rows={2}
+                className="text-sm resize-none"
+              />
+            </div>
 
-            {/* Action Buttons */}
-            <div className="flex gap-2 flex-wrap">
+            {/* Actions */}
+            <div className="flex gap-2 flex-wrap pb-6">
               <Button size="sm" onClick={() => { setReplyMessage(detail.our_reply || ""); setReplyDialogOpen(true); }}>
                 Send Reply
               </Button>
-              <Button size="sm" variant="outline" onClick={() => setForwardDialogOpen(true)}>
-                Forward
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => setOneOffDialogOpen(true)}>
-                One-Off Reply
-              </Button>
-              <Button size="sm" variant="outline" onClick={handlePushToSheet}>
-                Push to Sheet
-              </Button>
-              <Button size="sm" variant="destructive" onClick={handleBlacklist}>
-                Blacklist Domain
-              </Button>
+              <Button size="sm" variant="outline" onClick={() => setForwardDialogOpen(true)}>Forward</Button>
+              <Button size="sm" variant="outline" onClick={() => setOneOffDialogOpen(true)}>One-Off</Button>
+              <Button size="sm" variant="outline" onClick={handlePushToSheet}>Push to Sheet</Button>
+              <Button size="sm" variant="destructive" onClick={handleBlacklist}>Blacklist</Button>
             </div>
           </div>
         )}
@@ -569,19 +553,9 @@ export default function InboxPage() {
         <DialogContent className="max-w-lg">
           <DialogHeader><DialogTitle>Send Reply</DialogTitle></DialogHeader>
           <div className="space-y-3">
-            <div>
-              <Label className="text-xs">To: {detail?.lead_email}</Label>
-            </div>
-            <Textarea
-              value={replyMessage}
-              onChange={(e) => setReplyMessage(e.target.value)}
-              rows={8}
-              placeholder="Type your reply..."
-              className="text-sm"
-            />
-            <Button onClick={handleSendReply} disabled={sending} className="w-full">
-              {sending ? "Sending..." : "Send"}
-            </Button>
+            <p className="text-sm text-muted-foreground">To: {detail?.lead_email}</p>
+            <Textarea value={replyMessage} onChange={(e) => setReplyMessage(e.target.value)} rows={8} className="text-sm" />
+            <Button onClick={handleSendReply} disabled={sending} className="w-full">{sending ? "Sending..." : "Send"}</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -591,36 +565,21 @@ export default function InboxPage() {
         <DialogContent>
           <DialogHeader><DialogTitle>Forward Reply</DialogTitle></DialogHeader>
           <div className="space-y-3">
-            <div>
-              <Label className="text-xs">Forward to</Label>
-              <Input value={forwardTo} onChange={(e) => setForwardTo(e.target.value)} placeholder="email@example.com" className="text-sm" />
-            </div>
-            <Button onClick={handleForward} disabled={sending} className="w-full">
-              {sending ? "Forwarding..." : "Forward"}
-            </Button>
+            <div><Label className="text-xs">Forward to</Label><Input value={forwardTo} onChange={(e) => setForwardTo(e.target.value)} placeholder="email@example.com" /></div>
+            <Button onClick={handleForward} disabled={sending} className="w-full">{sending ? "Forwarding..." : "Forward"}</Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* One-Off Reply Dialog */}
+      {/* One-Off Dialog */}
       <Dialog open={oneOffDialogOpen} onOpenChange={setOneOffDialogOpen}>
         <DialogContent className="max-w-lg">
-          <DialogHeader><DialogTitle>Send One-Off Reply</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>One-Off Reply</DialogTitle></DialogHeader>
           <div className="space-y-3">
-            <div>
-              <Label className="text-xs">To: {detail?.lead_email}</Label>
-            </div>
-            <div>
-              <Label className="text-xs">Subject</Label>
-              <Input value={oneOffSubject} onChange={(e) => setOneOffSubject(e.target.value)} className="text-sm" />
-            </div>
-            <div>
-              <Label className="text-xs">Message</Label>
-              <Textarea value={oneOffMessage} onChange={(e) => setOneOffMessage(e.target.value)} rows={6} className="text-sm" />
-            </div>
-            <Button onClick={handleOneOff} disabled={sending} className="w-full">
-              {sending ? "Sending..." : "Send"}
-            </Button>
+            <p className="text-sm text-muted-foreground">To: {detail?.lead_email}</p>
+            <div><Label className="text-xs">Subject</Label><Input value={oneOffSubject} onChange={(e) => setOneOffSubject(e.target.value)} /></div>
+            <div><Label className="text-xs">Message</Label><Textarea value={oneOffMessage} onChange={(e) => setOneOffMessage(e.target.value)} rows={6} /></div>
+            <Button onClick={handleOneOff} disabled={sending} className="w-full">{sending ? "Sending..." : "Send"}</Button>
           </div>
         </DialogContent>
       </Dialog>
