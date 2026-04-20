@@ -176,9 +176,9 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     throw error;
   }
 
-  // 5a. Store in Supabase (non-blocking)
+  // 5a. Store in Supabase (non-blocking, skip bounces)
   const replyStatus = action === "created" ? "Pending" : "Pending again";
-  supabase.from("replies").upsert({
+  if (!isBounce) supabase.from("replies").upsert({
     workflow: "tracked",
     lead_id: lead.id,
     lead_email: reply.from_email_address,
