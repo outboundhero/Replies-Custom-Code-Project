@@ -148,6 +148,17 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     });
   }
 
+  // 7b. Also update Supabase replies table with audit results
+  supabase.from("replies").update({
+    industry_audit: industryResult.result,
+    location_audit: locationResult.result,
+    qualification_reason: qualificationReason,
+    suggested_client: suggestedClients || null,
+    updated_at: new Date().toISOString(),
+  }).eq("airtable_record_id", recordId).then(({ error }) => {
+    if (error) console.error("[qualification] Supabase update failed:", error.message);
+  });
+
   // 8. Log activity
   await logActivity("tracked", "qualified", {
     client_tag: campaignTag,

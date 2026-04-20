@@ -10,6 +10,7 @@ import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
+import supabase from "@/lib/supabase";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
 
 async function getUntrackedConfig(): Promise<UntrackedConfig> {
@@ -195,6 +196,57 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     });
     throw error;
   }
+
+  // 7b. Store in Supabase (non-blocking)
+  const untrackedReplyStatus = action === "created" ? "Pending" : "Pending again";
+  supabase.from("replies").upsert({
+    workflow: "untracked",
+    lead_email: reply.from_email_address,
+    lead_name: reply.from_name,
+    from_name: reply.from_name,
+    from_email: reply.from_email_address,
+    client_tag: companyCode,
+    sender_id: sender_email.id,
+    sender_email: sender_email.email,
+    sender_name: sender_email.name,
+    reply_id: reply.id,
+    email_subject: reply.email_subject,
+    reply_we_got: cleanedReply,
+    reply_time: recipients.replyTime,
+    to_email: recipients.toEmails,
+    to_name: recipients.toNames,
+    prospect_cc_email: recipients.ccEmails,
+    prospect_cc_name: recipients.ccNames,
+    lead_category: getLeadCategory(aiCategory),
+    ai_categorized_lead_category: aiCategory,
+    reply_status: untrackedReplyStatus,
+    airtable_record_id: recordId,
+    airtable_base_id: airtableBaseId,
+    section_name: sectionName,
+    ...(includeClientConfig && clientConfig ? {
+      cc_name_1: clientConfig.cc_name_1 ? String(clientConfig.cc_name_1) : null,
+      cc_email_1: clientConfig.cc_email_1 ? String(clientConfig.cc_email_1) : null,
+      cc_name_2: clientConfig.cc_name_2 ? String(clientConfig.cc_name_2) : null,
+      cc_email_2: clientConfig.cc_email_2 ? String(clientConfig.cc_email_2) : null,
+      cc_name_3: clientConfig.cc_name_3 ? String(clientConfig.cc_name_3) : null,
+      cc_email_3: clientConfig.cc_email_3 ? String(clientConfig.cc_email_3) : null,
+      cc_name_4: clientConfig.cc_name_4 ? String(clientConfig.cc_name_4) : null,
+      cc_email_4: clientConfig.cc_email_4 ? String(clientConfig.cc_email_4) : null,
+      cc_name_5: clientConfig.cc_name_5 ? String(clientConfig.cc_name_5) : null,
+      cc_email_5: clientConfig.cc_email_5 ? String(clientConfig.cc_email_5) : null,
+      cc_name_6: clientConfig.cc_name_6 ? String(clientConfig.cc_name_6) : null,
+      cc_email_6: clientConfig.cc_email_6 ? String(clientConfig.cc_email_6) : null,
+      bcc_name_1: clientConfig.bcc_name_1 ? String(clientConfig.bcc_name_1) : null,
+      bcc_email_1: clientConfig.bcc_email_1 ? String(clientConfig.bcc_email_1) : null,
+      bcc_name_2: clientConfig.bcc_name_2 ? String(clientConfig.bcc_name_2) : null,
+      bcc_email_2: clientConfig.bcc_email_2 ? String(clientConfig.bcc_email_2) : null,
+    } : {}),
+    our_reply: baseFields["Our reply"] ? String(baseFields["Our reply"]) : null,
+    campaign_id: 0, // untracked has no campaign — use 0 for unique constraint
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "reply_id,campaign_id" }).then(({ error }) => {
+    if (error) console.error("[untracked] Supabase upsert failed:", error.message);
+  });
 
   // 8. Send to master Clay table (all sections) — only for qualified replies
   const replyBodyLower = (reply.text_body || "").toLowerCase();

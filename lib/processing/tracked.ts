@@ -10,6 +10,7 @@ import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { resolveTemplate } from "./template-resolver";
+import supabase from "@/lib/supabase";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
@@ -174,6 +175,68 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     });
     throw error;
   }
+
+  // 5a. Store in Supabase (non-blocking)
+  const replyStatus = action === "created" ? "Pending" : "Pending again";
+  supabase.from("replies").upsert({
+    workflow: "tracked",
+    lead_id: lead.id,
+    lead_email: reply.from_email_address,
+    lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
+    first_name: lead.first_name,
+    last_name: lead.last_name,
+    company_name: lead.company,
+    campaign_id: campaign.id,
+    campaign_name: campaign.name,
+    client_tag: campaignTag,
+    sender_id: sender_email.id,
+    sender_email: sender_email.email,
+    sender_name: sender_email.name,
+    reply_id: reply.id,
+    email_subject: reply.email_subject,
+    reply_we_got: cleanedReply,
+    reply_time: recipients.replyTime,
+    from_name: reply.from_name,
+    from_email: reply.from_email_address,
+    to_email: recipients.toEmails,
+    to_name: recipients.toNames,
+    prospect_cc_email: recipients.ccEmails,
+    prospect_cc_name: recipients.ccNames,
+    phone: String(customVars.phone || ""),
+    linkedin_url: String(customVars.linkedin || ""),
+    address: String(customVars.address || ""),
+    city: String(customVars.city || ""),
+    state: String(customVars.state || ""),
+    google_maps_url: String(customVars.google_maps_url || ""),
+    lead_category: getLeadCategory(aiCategory),
+    ai_categorized_lead_category: aiCategory,
+    reply_status: replyStatus,
+    airtable_record_id: recordId,
+    airtable_base_id: section.airtable_base_id,
+    section_name: section.name,
+    ...(includeClientConfig && clientConfig ? {
+      cc_name_1: clientConfig.cc_name_1 ? String(clientConfig.cc_name_1) : null,
+      cc_email_1: clientConfig.cc_email_1 ? String(clientConfig.cc_email_1) : null,
+      cc_name_2: clientConfig.cc_name_2 ? String(clientConfig.cc_name_2) : null,
+      cc_email_2: clientConfig.cc_email_2 ? String(clientConfig.cc_email_2) : null,
+      cc_name_3: clientConfig.cc_name_3 ? String(clientConfig.cc_name_3) : null,
+      cc_email_3: clientConfig.cc_email_3 ? String(clientConfig.cc_email_3) : null,
+      cc_name_4: clientConfig.cc_name_4 ? String(clientConfig.cc_name_4) : null,
+      cc_email_4: clientConfig.cc_email_4 ? String(clientConfig.cc_email_4) : null,
+      cc_name_5: clientConfig.cc_name_5 ? String(clientConfig.cc_name_5) : null,
+      cc_email_5: clientConfig.cc_email_5 ? String(clientConfig.cc_email_5) : null,
+      cc_name_6: clientConfig.cc_name_6 ? String(clientConfig.cc_name_6) : null,
+      cc_email_6: clientConfig.cc_email_6 ? String(clientConfig.cc_email_6) : null,
+      bcc_name_1: clientConfig.bcc_name_1 ? String(clientConfig.bcc_name_1) : null,
+      bcc_email_1: clientConfig.bcc_email_1 ? String(clientConfig.bcc_email_1) : null,
+      bcc_name_2: clientConfig.bcc_name_2 ? String(clientConfig.bcc_name_2) : null,
+      bcc_email_2: clientConfig.bcc_email_2 ? String(clientConfig.bcc_email_2) : null,
+    } : {}),
+    our_reply: baseFields["Our reply"] ? String(baseFields["Our reply"]) : null,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "reply_id,campaign_id" }).then(({ error }) => {
+    if (error) console.error("[tracked] Supabase upsert failed:", error.message);
+  });
 
   // 5b. Lead qualification (non-blocking, fire-and-forget)
   const QUALIFYING_CATEGORIES = ["Interested", "Meeting Request"];
