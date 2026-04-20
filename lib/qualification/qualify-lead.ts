@@ -106,11 +106,17 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
 
   // 5. Build qualification reason with enrichment context
   const reasons: string[] = [];
+  if (industryResult.result === "Residential") {
+    reasons.push(`RESIDENTIAL FLAG: ${industryResult.reason}`);
+  } else if (industryResult.result === "Failed" && industryResult.reason.includes("reply asks about")) {
+    reasons.push(`NON-COMMERCIAL FLAG: ${industryResult.reason}`);
+  } else {
+    reasons.push(`Industry audit: ${industryResult.reason}`);
+  }
+  reasons.push(`Location audit: ${locationResult.reason}`);
   if (enriched.website) reasons.push(`Website: ${enriched.website}`);
   if (enriched.industry) reasons.push(`Verified industry: ${enriched.industry}`);
   if (enriched.zip) reasons.push(`Verified location: ${enriched.city}, ${enriched.state} ${enriched.zip}`);
-  reasons.push(`Industry audit: ${industryResult.reason}`);
-  reasons.push(`Location audit: ${locationResult.reason}`);
   reasons.push(`Data: ${enriched.dataSources} (${enriched.confidence} confidence)`);
   const qualificationReason = reasons.join(" | ");
 
