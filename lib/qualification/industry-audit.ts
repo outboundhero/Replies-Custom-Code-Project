@@ -13,31 +13,42 @@ interface IndustryAuditResult {
   reason: string;
 }
 
-/** Keywords in the lead's reply that indicate a residential inquiry */
-const RESIDENTIAL_KEYWORDS = [
-  "residential",
+/** Lead's reply asks about residential cleaning → Residential */
+const RESIDENTIAL_KEYWORDS = ["residential"];
+
+/** Lead's reply asks about these → Failed (not a fit) */
+const FAILED_KEYWORDS = [
   "house cleaning",
   "home cleaning",
   "home office",
   "food truck",
+  "farm cleaning",
+  "farm",
   "airbnb",
   "apartment unit",
   "apartment cleaning",
   "my house",
   "my home",
   "my apartment",
-  "farm cleaning",
-  "farm building",
 ];
 
 /**
- * Check if the lead's reply is asking about residential/home cleaning.
+ * Check the lead's reply for residential/non-commercial inquiries.
  * Only the reply text matters — not company data or website.
  */
-function isResidentialInquiry(replyText: string): string | null {
+function checkReplyForResidential(replyText: string): { result: "Residential" | "Failed"; keyword: string } | null {
   if (!replyText) return null;
   const lower = replyText.toLowerCase();
-  return RESIDENTIAL_KEYWORDS.find((kw) => lower.includes(kw)) || null;
+
+  // Check "residential" first → Residential
+  const resMatch = RESIDENTIAL_KEYWORDS.find((kw) => lower.includes(kw));
+  if (resMatch) return { result: "Residential", keyword: resMatch };
+
+  // Check house/home/farm/airbnb/etc → Failed
+  const failMatch = FAILED_KEYWORDS.find((kw) => lower.includes(kw));
+  if (failMatch) return { result: "Failed", keyword: failMatch };
+
+  return null;
 }
 
 const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and a list of excluded industries/keywords, determine if the company operates in any excluded industry.
@@ -63,12 +74,12 @@ export async function auditIndustry(
   dataSources: string,
   replyText: string,
 ): Promise<IndustryAuditResult> {
-  // Check reply text for residential inquiry FIRST (only source for residential)
-  const residentialMatch = isResidentialInquiry(replyText);
-  if (residentialMatch) {
+  // Check reply text for residential/non-commercial inquiry FIRST
+  const replyCheck = checkReplyForResidential(replyText);
+  if (replyCheck) {
     return {
-      result: "Residential",
-      reason: `Lead's reply asks about "${residentialMatch}" cleaning`,
+      result: replyCheck.result,
+      reason: `Lead's reply asks about "${replyCheck.keyword}" cleaning`,
     };
   }
 
