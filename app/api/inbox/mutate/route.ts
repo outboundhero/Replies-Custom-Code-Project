@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import db from "@/lib/db";
 import { sendReply, forwardReply, sendOneOffReply } from "@/lib/outboundhero-api";
 import { blacklistDomain } from "@/lib/processing/domain-blacklist";
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
@@ -89,10 +90,36 @@ export async function POST(req: NextRequest) {
 
       case "reallocate": {
         const { client_tag } = body;
-        const { error } = await supabase
-          .from("replies")
-          .update({ client_tag, updated_at: new Date().toISOString() })
-          .eq("id", id);
+        // Fetch new client's config (CC/BCC/template)
+        const configResult = await db.execute({
+          sql: "SELECT * FROM client_config WHERE client_tag = ?",
+          args: [client_tag],
+        });
+        const cfg = configResult.rows[0];
+        const updateData: Record<string, unknown> = {
+          client_tag,
+          updated_at: new Date().toISOString(),
+        };
+        if (cfg) {
+          updateData.cc_name_1 = cfg.cc_name_1 ? String(cfg.cc_name_1) : null;
+          updateData.cc_email_1 = cfg.cc_email_1 ? String(cfg.cc_email_1) : null;
+          updateData.cc_name_2 = cfg.cc_name_2 ? String(cfg.cc_name_2) : null;
+          updateData.cc_email_2 = cfg.cc_email_2 ? String(cfg.cc_email_2) : null;
+          updateData.cc_name_3 = cfg.cc_name_3 ? String(cfg.cc_name_3) : null;
+          updateData.cc_email_3 = cfg.cc_email_3 ? String(cfg.cc_email_3) : null;
+          updateData.cc_name_4 = cfg.cc_name_4 ? String(cfg.cc_name_4) : null;
+          updateData.cc_email_4 = cfg.cc_email_4 ? String(cfg.cc_email_4) : null;
+          updateData.cc_name_5 = cfg.cc_name_5 ? String(cfg.cc_name_5) : null;
+          updateData.cc_email_5 = cfg.cc_email_5 ? String(cfg.cc_email_5) : null;
+          updateData.cc_name_6 = cfg.cc_name_6 ? String(cfg.cc_name_6) : null;
+          updateData.cc_email_6 = cfg.cc_email_6 ? String(cfg.cc_email_6) : null;
+          updateData.bcc_name_1 = cfg.bcc_name_1 ? String(cfg.bcc_name_1) : null;
+          updateData.bcc_email_1 = cfg.bcc_email_1 ? String(cfg.bcc_email_1) : null;
+          updateData.bcc_name_2 = cfg.bcc_name_2 ? String(cfg.bcc_name_2) : null;
+          updateData.bcc_email_2 = cfg.bcc_email_2 ? String(cfg.bcc_email_2) : null;
+          updateData.our_reply = cfg.reply_template ? String(cfg.reply_template) : null;
+        }
+        const { error } = await supabase.from("replies").update(updateData).eq("id", id);
         if (error) throw new Error(error.message);
         return NextResponse.json({ ok: true });
       }
