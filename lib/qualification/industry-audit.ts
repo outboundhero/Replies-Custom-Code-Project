@@ -2,6 +2,10 @@
  * GPT-based industry audit: checks if a company falls under excluded industries.
  * Uses enriched data (verified industry from web research) for higher accuracy.
  * Returns "Passed" (not excluded), "Failed" (excluded), or "Residential".
+ *
+ * IMPORTANT: "Residential" is ONLY returned when the lead's REPLY asks about
+ * residential/house/home/apartment/Airbnb/food truck/farm cleaning.
+ * Company data and website are NOT used for the residential check.
  */
 
 interface IndustryAuditResult {
@@ -9,20 +13,46 @@ interface IndustryAuditResult {
   reason: string;
 }
 
+/** Keywords in the lead's reply that indicate a residential inquiry */
+const RESIDENTIAL_KEYWORDS = [
+  "residential",
+  "house cleaning",
+  "home cleaning",
+  "home office",
+  "food truck",
+  "airbnb",
+  "apartment unit",
+  "apartment cleaning",
+  "my house",
+  "my home",
+  "my apartment",
+  "farm cleaning",
+  "farm building",
+];
+
+/**
+ * Check if the lead's reply is asking about residential/home cleaning.
+ * Only the reply text matters — not company data or website.
+ */
+function isResidentialInquiry(replyText: string): string | null {
+  if (!replyText) return null;
+  const lower = replyText.toLowerCase();
+  return RESIDENTIAL_KEYWORDS.find((kw) => lower.includes(kw)) || null;
+}
+
 const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and a list of excluded industries/keywords, determine if the company operates in any excluded industry.
 
-Also check if the company appears to be RESIDENTIAL — meaning they primarily serve residential customers (e.g., Airbnb cleaning, apartment cleaning, house cleaning, maid service, short-term rental cleaning, residential cleaning, home cleaning).
+IMPORTANT: Do NOT check for residential/house/home cleaning — that is handled separately. Only check against the excluded industries list provided.
 
 You are given enriched data that may include a verified industry from web research. Trust this data — it has already been researched.
 
 Respond with JSON only, no other text:
-{"result": "Passed" | "Failed" | "Residential", "reason": "one sentence explanation"}
+{"result": "Passed" | "Failed", "reason": "one sentence explanation"}
 
-- "Passed" = company does NOT operate in any excluded industry and is NOT residential
+- "Passed" = company does NOT operate in any excluded industry
 - "Failed" = company operates in one of the excluded industries
-- "Residential" = company primarily serves residential customers
 
-If there are no excluded industries listed, return "Passed" unless the company is residential.`;
+If there are no excluded industries listed, return "Passed".`;
 
 export async function auditIndustry(
   companyName: string,
@@ -31,7 +61,17 @@ export async function auditIndustry(
   exclusionIndustries: string,
   confidence: string,
   dataSources: string,
+  replyText: string,
 ): Promise<IndustryAuditResult> {
+  // Check reply text for residential inquiry FIRST (only source for residential)
+  const residentialMatch = isResidentialInquiry(replyText);
+  if (residentialMatch) {
+    return {
+      result: "Residential",
+      reason: `Lead's reply asks about "${residentialMatch}" cleaning`,
+    };
+  }
+
   if (!exclusionIndustries?.trim()) {
     return { result: "Passed", reason: "No exclusion industries defined for this client" };
   }
@@ -75,11 +115,10 @@ export async function auditIndustry(
     const raw = data?.choices?.[0]?.message?.content || "";
     const parsed = JSON.parse(raw) as { result: string; reason: string };
 
-    const validResults = ["Passed", "Failed", "Residential"];
-    const result = validResults.find((v) => v.toLowerCase() === parsed.result?.toLowerCase());
+    const result = parsed.result?.toLowerCase() === "failed" ? "Failed" : "Passed";
 
     return {
-      result: (result as IndustryAuditResult["result"]) || "Passed",
+      result,
       reason: parsed.reason || "No reason provided",
     };
   } catch {
