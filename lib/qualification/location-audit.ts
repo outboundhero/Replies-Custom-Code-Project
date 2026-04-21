@@ -11,19 +11,20 @@ interface LocationAuditResult {
 const SYSTEM_PROMPT = `You are a geographic proximity assistant. Given a lead's location and a client's service area, determine if the lead is within approximately 20 miles or 20 minutes driving distance of the client's service area.
 
 CRITICAL RULES:
-- If a city and state are provided, that is ALWAYS enough information to determine proximity. NEVER say "too vague" or "cannot determine" when city + state are available. Use your geographic knowledge to estimate the distance.
+- READ THE ENTIRE SERVICE AREA LIST CAREFULLY. The list may span MULTIPLE states/regions. Check ALL of them, not just the first section.
+- If a city and state are provided, that is ALWAYS enough information to determine proximity. NEVER say "too vague" or "cannot determine" when city + state are available.
 - If the service area lists zip codes, check if the lead's city/zip is within ~20 miles of those zip codes.
 - If the service area lists cities or counties, check if the lead's city is within ~20 miles of those areas.
-- If the service area lists entire states, any location within that state counts as within the service area.
+- If the service area lists entire states (e.g. just "Kentucky" or "Texas" as a header), any location within that state counts as within the service area.
 - Use your knowledge of US geography, zip codes, city locations, and driving distances.
 - Be GENEROUS — if there's any reasonable chance the lead is within range, pass them. Err on the side of passing rather than failing.
-- Only fail if the lead is clearly and obviously outside the 20-mile / 20-minute radius (e.g., different state with no nearby service area cities).
+- Only fail if the lead is clearly and obviously outside the 20-mile / 20-minute radius of ALL listed service areas.
 
 Respond with JSON only, no other text:
 {"result": "Passed" | "Failed", "reason": "one sentence explanation with approximate distance"}
 
-- "Passed" = lead is within approximately 20 miles / 20 minutes of the service area
-- "Failed" = lead is clearly outside the service area (more than 20 miles away)`;
+- "Passed" = lead is within approximately 20 miles / 20 minutes of ANY part of the service area
+- "Failed" = lead is clearly outside ALL parts of the service area (more than 20 miles away from every listed location)`;
 
 export async function auditLocation(
   city: string | null,
@@ -54,7 +55,7 @@ export async function auditLocation(
       body: JSON.stringify({
         model: "gpt-4o-mini",
         temperature: 0,
-        max_tokens: 100,
+        max_tokens: 200,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
