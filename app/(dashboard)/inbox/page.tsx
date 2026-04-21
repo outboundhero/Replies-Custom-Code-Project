@@ -46,17 +46,23 @@ const catDot: Record<string, string> = {
 };
 
 export default function InboxPage() {
-  const [replies, setReplies] = useState<ReplyListItem[]>([]);
+  // Category counts (loaded once, lightweight)
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
+
+  // Leads loaded per-category on expand
+  const [categoryLeads, setCategoryLeads] = useState<Record<string, ReplyListItem[]>>({});
+  const [loadingCat, setLoadingCat] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
   const [search, setSearch] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
-  const [filterWorkflow, setFilterWorkflow] = useState("");
+  const [filterClient, setFilterClient] = useState("");
+  const [clientTags, setClientTags] = useState<string[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   // Reply form
   const [replyMsg, setReplyMsg] = useState("");
@@ -69,23 +75,73 @@ export default function InboxPage() {
   const [reallocTag, setReallocTag] = useState("");
   const [sending, setSending] = useState<string | null>(null);
 
-  const repliesRef = useRef(replies);
-  repliesRef.current = replies;
+  // Load client tags for filter dropdown
+  useEffect(() => {
+    fetch("/api/inbox?mode=client_tags")
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d?.tags) setClientTags(d.tags); })
+      .catch(() => {});
+  }, []);
 
-  const loadReplies = useCallback(async () => {
+  // Load category counts
+  const loadCounts = useCallback(async () => {
     try {
-      const p = new URLSearchParams({ page: String(page), limit: "100" });
+      const p = new URLSearchParams({ mode: "counts" });
       if (search) p.set("search", search);
-      if (filterCategory) p.set("category", filterCategory);
-      if (filterWorkflow) p.set("workflow", filterWorkflow);
+      if (filterClient) p.set("client_tag", filterClient);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
-      if (res.ok) { const d = await res.json(); setReplies(d.replies); setTotal(d.total); setFetchError(null); }
-      else setFetchError(`Failed (${res.status})`);
+      if (res.ok) {
+        const d = await res.json();
+        setCounts(d.counts);
+        setTotal(d.total);
+        setFetchError(null);
+      } else {
+        setFetchError(`Failed (${res.status})`);
+      }
     } catch (e) { setFetchError((e as Error).message); }
-  }, [page, search, filterCategory, filterWorkflow]);
+  }, [search, filterClient]);
 
-  useEffect(() => { loadReplies(); }, [loadReplies]);
+  useEffect(() => { loadCounts(); }, [loadCounts]);
+
+  // Load leads for a specific category
+  async function loadCategoryLeads(cat: string) {
+    setLoadingCat(cat);
+    try {
+      const p = new URLSearchParams({ category: cat });
+      if (search) p.set("search", search);
+      if (filterClient) p.set("client_tag", filterClient);
+      const res = await fetch(`/api/inbox?${p}`);
+      if (res.ok) {
+        const d = await res.json();
+        setCategoryLeads((prev) => ({ ...prev, [cat]: d.replies }));
+      }
+    } catch { /* */ }
+    setLoadingCat(null);
+  }
+
+  // Toggle category expand/collapse
+  function toggleCategory(cat: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) {
+        next.delete(cat);
+      } else {
+        next.add(cat);
+        // Load leads for this category if not already loaded
+        if (!categoryLeads[cat]) {
+          loadCategoryLeads(cat);
+        }
+      }
+      return next;
+    });
+  }
+
+  // When filters change, clear loaded leads and re-collapse
+  useEffect(() => {
+    setCategoryLeads({});
+    setExpanded(new Set());
+  }, [search, filterClient]);
 
   // Realtime: listen for new inserts
   useEffect(() => {
@@ -93,12 +149,16 @@ export default function InboxPage() {
       .channel("inbox-realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "replies" }, (payload) => {
         const newRow = payload.new as ReplyListItem;
-        // Prepend to list if not already present
-        setReplies((prev) => {
-          if (prev.some((r) => r.id === newRow.id)) return prev;
-          return [newRow, ...prev];
-        });
+        const cat = newRow.lead_category || "Open Response";
+        // Update counts
+        setCounts((prev) => ({ ...prev, [cat]: (prev[cat] || 0) + 1 }));
         setTotal((t) => t + 1);
+        // If category is expanded, prepend the lead
+        setCategoryLeads((prev) => {
+          if (!prev[cat]) return prev;
+          if (prev[cat].some((r) => r.id === newRow.id)) return prev;
+          return { ...prev, [cat]: [newRow, ...prev[cat]] };
+        });
       })
       .subscribe();
 
@@ -113,7 +173,6 @@ export default function InboxPage() {
       if (res.ok) {
         const d = await res.json();
         setDetail(d);
-        // Populate reply form with template + CC/BCC
         setReplyMsg(d.our_reply || "");
         const ccList = [d.cc_email_1, d.cc_email_2, d.cc_email_3, d.cc_email_4, d.cc_email_5, d.cc_email_6].filter(Boolean).join(", ");
         const bccList = [d.bcc_email_1, d.bcc_email_2].filter(Boolean).join(", ");
@@ -142,7 +201,12 @@ export default function InboxPage() {
       toast.success(`Category: ${cat}`);
       if (d.pushed_to_sheet) toast.success("Auto-pushed to Google Sheet");
       if (d.sheet_error) toast.error(`Sheet: ${d.sheet_error}`);
-      loadReplies(); loadDetail(detail.id);
+      // Refresh counts and reload leads for affected categories
+      loadCounts();
+      const oldCat = detail.lead_category || "Open Response";
+      if (categoryLeads[oldCat]) loadCategoryLeads(oldCat);
+      if (categoryLeads[cat]) loadCategoryLeads(cat);
+      loadDetail(detail.id);
     } else toast.error(d.error);
   }
 
@@ -187,7 +251,7 @@ export default function InboxPage() {
     if (!detail || !reallocTag) return;
     const tag = reallocTag.toUpperCase();
     const d = await mutate({ action: "reallocate", id: detail.id, client_tag: tag });
-    if (d.ok) { toast.success(`Reallocated to ${tag}`); setReallocTag(""); loadReplies(); loadDetail(detail.id); }
+    if (d.ok) { toast.success(`Reallocated to ${tag}`); setReallocTag(""); loadCounts(); loadDetail(detail.id); }
     else toast.error(d.error);
   }
 
@@ -203,64 +267,82 @@ export default function InboxPage() {
     detail.industry_audit === "Failed" || detail.industry_audit === "Residential" || detail.location_audit === "Failed"
   );
 
-  const grouped = replies.reduce<Record<string, ReplyListItem[]>>((acc, r) => {
-    const c = r.lead_category || "Open Response"; if (!acc[c]) acc[c] = []; acc[c].push(r); return acc;
-  }, {});
+  // Sort categories: by count descending
+  const sortedCategories = Object.entries(counts).sort(([, a], [, b]) => b - a);
+
+  // If filter by category is set, only show that category
+  const displayCategories = filterCategory
+    ? sortedCategories.filter(([cat]) => cat === filterCategory)
+    : sortedCategories;
 
   return (
     <div className="flex h-[calc(100vh-3rem)]">
       {/* ── LEFT PANEL ── */}
       <div className="w-72 border-r flex flex-col bg-white shrink-0">
         <div className="p-2.5 space-y-1.5 border-b">
-          <Input placeholder="Search..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="h-7 text-xs" />
+          <Input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} className="h-7 text-xs" />
           <div className="flex gap-1">
-            <Select value={filterWorkflow || "all"} onValueChange={(v) => { setFilterWorkflow(v === "all" ? "" : v); setPage(1); }}>
-              <SelectTrigger className="h-6 text-[11px]"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectItem value="all">All</SelectItem><SelectItem value="tracked">Tracked</SelectItem><SelectItem value="untracked">Untracked</SelectItem></SelectContent>
+            <Select value={filterClient || "all"} onValueChange={(v) => { setFilterClient(v === "all" ? "" : v); }}>
+              <SelectTrigger className="h-6 text-[11px]"><SelectValue placeholder="All Clients" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Clients</SelectItem>
+                {clientTags.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              </SelectContent>
             </Select>
-            <Select value={filterCategory || "all"} onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); setPage(1); }}>
-              <SelectTrigger className="h-6 text-[11px]"><SelectValue /></SelectTrigger>
-              <SelectContent>{[{ v: "all", l: "All" }, ...LEAD_CATEGORIES.map((c) => ({ v: c, l: c }))].map((o) => <SelectItem key={o.v} value={o.v}>{o.l}</SelectItem>)}</SelectContent>
+            <Select value={filterCategory || "all"} onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); }}>
+              <SelectTrigger className="h-6 text-[11px]"><SelectValue placeholder="All Categories" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Categories</SelectItem>
+                {LEAD_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+              </SelectContent>
             </Select>
           </div>
           <p className="text-[10px] text-muted-foreground">{total} leads</p>
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {Object.entries(grouped).sort(([, a], [, b]) => b.length - a.length).map(([cat, items]) => (
+          {displayCategories.map(([cat, count]) => (
             <div key={cat}>
-              <button onClick={() => setCollapsed((p) => { const n = new Set(p); n.has(cat) ? n.delete(cat) : n.add(cat); return n; })}
-                className="w-full flex items-center justify-between px-3 py-1.5 bg-muted/30 hover:bg-muted/50 border-b text-left">
+              {/* Category header — always visible */}
+              <button
+                onClick={() => toggleCategory(cat)}
+                className="w-full flex items-center justify-between px-3 py-1.5 bg-muted/30 hover:bg-muted/50 border-b text-left"
+              >
                 <div className="flex items-center gap-1.5">
                   <span className={`w-1.5 h-1.5 rounded-full ${catDot[cat] || "bg-gray-400"}`} />
                   <span className="text-[11px] font-medium">{cat}</span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-[10px] text-muted-foreground tabular-nums">{items.length}</span>
-                  <svg className={`w-2.5 h-2.5 text-muted-foreground transition-transform ${collapsed.has(cat) ? "-rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                  <span className="text-[10px] text-muted-foreground tabular-nums">{count}</span>
+                  <svg className={`w-2.5 h-2.5 text-muted-foreground transition-transform ${expanded.has(cat) ? "" : "-rotate-90"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                 </div>
               </button>
-              {!collapsed.has(cat) && items.map((r) => (
-                <button key={r.id} onClick={() => loadDetail(r.id)}
-                  className={`w-full text-left px-3 py-2 border-b border-muted/30 transition-colors ${selectedId === r.id ? "bg-primary/5 border-l-2 border-l-primary" : "hover:bg-muted/10 border-l-2 border-l-transparent"}`}>
-                  <p className="text-xs font-medium truncate">{r.lead_email}</p>
-                  <div className="flex items-center gap-1 mt-0.5">
-                    <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category || "—"}</span>
-                    <span className="text-[10px] font-mono font-bold text-primary/60">{r.client_tag || "N/A"}</span>
-                  </div>
-                </button>
-              ))}
+
+              {/* Leads list — only when expanded */}
+              {expanded.has(cat) && (
+                <>
+                  {loadingCat === cat && !categoryLeads[cat] && (
+                    <div className="px-3 py-2 text-[10px] text-muted-foreground">Loading...</div>
+                  )}
+                  {categoryLeads[cat]?.map((r) => (
+                    <button key={r.id} onClick={() => loadDetail(r.id)}
+                      className={`w-full text-left px-3 py-2 border-b border-muted/30 transition-colors ${selectedId === r.id ? "bg-primary/5 border-l-2 border-l-primary" : "hover:bg-muted/10 border-l-2 border-l-transparent"}`}>
+                      <p className="text-xs font-medium truncate">{r.lead_email}</p>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category || "—"}</span>
+                        <span className="text-[10px] font-mono font-bold text-primary/60">{r.client_tag || "N/A"}</span>
+                      </div>
+                    </button>
+                  ))}
+                </>
+              )}
             </div>
           ))}
-        </div>
 
-        {total > 100 && (
-          <div className="p-1.5 border-t flex items-center justify-between">
-            <Button size="sm" variant="ghost" disabled={page === 1} onClick={() => setPage(page - 1)} className="h-5 text-[10px]">Prev</Button>
-            <span className="text-[10px] text-muted-foreground">{page}/{Math.ceil(total / 100)}</span>
-            <Button size="sm" variant="ghost" disabled={page * 100 >= total} onClick={() => setPage(page + 1)} className="h-5 text-[10px]">Next</Button>
-          </div>
-        )}
+          {displayCategories.length === 0 && (
+            <div className="px-3 py-4 text-xs text-muted-foreground text-center">No leads found</div>
+          )}
+        </div>
       </div>
 
       {/* ── RIGHT PANEL ── */}
