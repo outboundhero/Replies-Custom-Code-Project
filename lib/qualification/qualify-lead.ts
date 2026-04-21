@@ -175,27 +175,48 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
 }
 
 /**
- * Find other active clients where this lead would be a fit.
+ * Find other ACTIVE clients where this lead would be a fit.
  * Uses enriched data (verified industry + location) for a single comprehensive GPT call.
+ * Only suggests clients with "Active" status — never churned/paused clients.
  */
 async function findFittingClients(
   excludeTag: string,
   enriched: EnrichedLeadData,
 ): Promise<string> {
-  // Get all active clients with their rules
+  // Get all active client statuses
+  const { data: activeStatuses } = await supabase
+    .from("client_status")
+    .select("client_abbreviation")
+    .eq("status", "Active");
+
+  // Build a set of active tags (handle combined abbreviations like "JPDFW & JPK")
+  const activeTags = new Set<string>();
+  if (activeStatuses) {
+    for (const row of activeStatuses) {
+      const parts = row.client_abbreviation.split(/\s*[&\/,]+\s*/);
+      for (const part of parts) {
+        if (part.trim()) activeTags.add(part.trim());
+      }
+    }
+  }
+
+  // Get all client qualification rules
   const { data: allRules } = await supabase
     .from("client_qualifications")
     .select("client_abbreviation, exclusion_industries, inclusion_locations");
 
   if (!allRules?.length) return "";
 
-  const otherRules = allRules.filter((r) => r.client_abbreviation !== excludeTag);
+  // Filter: exclude current client + only keep active clients
+  const otherRules = allRules.filter(
+    (r) => r.client_abbreviation !== excludeTag && activeTags.has(r.client_abbreviation),
+  );
   if (!otherRules.length) return "";
 
-  // Build a comprehensive prompt with enriched data + all clients
+  // Build a comprehensive prompt with enriched data + active clients only
   const clientsList = otherRules
     .map((r) => {
-      const parts = [`- ${r.client_abbreviation}`];
+      const parts = [`- ${r.client_abbreviation} (Active)`];
       if (r.exclusion_industries?.trim()) parts.push(`excludes: "${r.exclusion_industries}"`);
       if (r.inclusion_locations?.trim()) parts.push(`serves: "${r.inclusion_locations.slice(0, 150)}"`);
       return parts.join(" | ");
@@ -217,15 +238,17 @@ async function findFittingClients(
         messages: [
           {
             role: "system",
-            content: `You are a lead-to-client matching assistant. Given a company's verified industry and location, determine which clients this company is a fit for.
+            content: `You are a lead-to-client matching assistant. Given a company's verified industry and location, determine which ACTIVE clients this company is a fit for.
 
-A fit means BOTH:
+All clients in the list below are currently active. A fit means BOTH:
 1. Company is NOT in that client's excluded industries and is NOT residential
-2. Company IS within approximately 5 miles of that client's service area
+2. Company IS within approximately 20 miles or 20 minutes driving distance of that client's service area
 
-For each fitting client, provide a one-sentence reason explaining why this lead is a good fit for that specific client.
+For each fitting client, include in your reason:
+- That this client is currently active
+- Why this lead is a good fit (industry + location match)
 
-Respond with JSON only: {"fits": [{"tag": "TAG1", "reason": "one sentence why this lead fits this client"}, ...]}
+Respond with JSON only: {"fits": [{"tag": "TAG1", "reason": "This client is currently active. [reason why lead fits]"}, ...]}
 If no clients fit, return {"fits": []}
 Only include clients where BOTH industry and location match.`,
           },
@@ -236,7 +259,7 @@ Industry: "${enriched.industry}"
 Website: "${enriched.website || "unknown"}"
 Location: "${enriched.city}, ${enriched.state}" (${enriched.address || "no address"}, ZIP: ${enriched.zip || "unknown"})
 
-Clients:
+Active clients:
 ${clientsList}`,
           },
         ],
