@@ -268,7 +268,12 @@ export default function InboxPage() {
   );
 
   // Sort categories: by count descending
-  const sortedCategories = Object.entries(counts).sort(([, a], [, b]) => b - a);
+  // Sort: Open Response always first, then by count descending
+  const sortedCategories = Object.entries(counts).sort(([catA, a], [catB, b]) => {
+    if (catA === "Open Response") return -1;
+    if (catB === "Open Response") return 1;
+    return b - a;
+  });
 
   // If filter by category is set, only show that category
   const displayCategories = filterCategory
