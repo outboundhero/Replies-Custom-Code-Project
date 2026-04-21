@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { toast } from "sonner";
 
 interface Client {
   id: number;
@@ -124,39 +125,73 @@ export default function ClientsPage() {
 
   async function saveConfig(tag: string) {
     setSaving(true);
-    await fetch("/api/config/clients/mutate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "update", tag, ...editForm }),
-    });
-    setSaving(false);
-    setEditing(null);
-    loadClients();
+    try {
+      const res = await fetch("/api/config/clients/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "update", tag, ...editForm }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Failed to save config for ${tag}: ${data.error || res.statusText}`);
+        setSaving(false);
+        return;
+      }
+      toast.success(`Config saved for ${tag}`);
+      setEditing(null);
+      loadClients();
+    } catch (err) {
+      toast.error(`Network error saving ${tag}: ${(err as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function onboardClient() {
     if (!newTag.trim() || !newSectionId) return;
     setOnboarding(true);
-    await fetch("/api/config/clients/mutate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "create", tag: newTag.trim(), section_id: Number(newSectionId) }),
-    });
-    setOnboarding(false);
-    setOnboardOpen(false);
-    setNewTag("");
-    setNewSectionId("");
-    loadClients();
+    try {
+      const res = await fetch("/api/config/clients/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create", tag: newTag.trim(), section_id: Number(newSectionId) }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Failed to onboard ${newTag}: ${data.error || res.statusText}`);
+        setOnboarding(false);
+        return;
+      }
+      toast.success(`Client ${newTag} onboarded`);
+      setOnboardOpen(false);
+      setNewTag("");
+      setNewSectionId("");
+      loadClients();
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+    } finally {
+      setOnboarding(false);
+    }
   }
 
   async function removeClient(tag: string) {
     if (!confirm(`Remove client "${tag}"? This will delete the tag and its config.`)) return;
-    await fetch("/api/config/clients/mutate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "delete", tag }),
-    });
-    loadClients();
+    try {
+      const res = await fetch("/api/config/clients/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", tag }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Failed to remove ${tag}: ${data.error || res.statusText}`);
+        return;
+      }
+      toast.success(`Client ${tag} removed`);
+      loadClients();
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+    }
   }
 
   const filtered = clients.filter((c) =>
