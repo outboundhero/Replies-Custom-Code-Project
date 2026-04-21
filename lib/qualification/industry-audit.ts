@@ -51,19 +51,25 @@ function checkReplyForResidential(replyText: string): { result: "Residential" | 
   return null;
 }
 
-const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and a list of excluded industries/keywords, determine if the company operates in any excluded industry.
+const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and industry rules, determine if the company passes or fails the industry check.
 
-IMPORTANT: Do NOT check for residential/house/home cleaning — that is handled separately. Only check against the excluded industries list provided.
+The rules text can be one of two patterns:
+1. EXCLUSION LIST (most common): Lists specific industries to exclude, e.g. "restaurants, retail, healthcare". → FAIL if the company IS in any excluded industry, PASS otherwise.
+2. INCLUSION-ONLY (rare): Says something like "we only want to work with X" or "only accept X". → FAIL if the company is NOT in the specified industry, PASS only if it IS in that industry.
+
+Read the rules text carefully to determine which pattern it follows, then evaluate accordingly.
+
+IMPORTANT: Do NOT check for residential/house/home cleaning — that is handled separately. Only check against the industry rules provided.
 
 You are given enriched data that may include a verified industry from web research. Trust this data — it has already been researched.
 
 Respond with JSON only, no other text:
 {"result": "Passed" | "Failed", "reason": "one sentence explanation"}
 
-- "Passed" = company does NOT operate in any excluded industry
-- "Failed" = company operates in one of the excluded industries
+- "Passed" = company meets the industry criteria
+- "Failed" = company does not meet the industry criteria
 
-If there are no excluded industries listed, return "Passed".`;
+If there are no industry rules listed, return "Passed".`;
 
 export async function auditIndustry(
   companyName: string,
@@ -96,7 +102,7 @@ export async function auditIndustry(
     website ? `Website: "${website}"` : null,
     industry ? `Verified industry: "${industry}"` : null,
     `Data confidence: ${confidence} | Sources: ${dataSources}`,
-    `\nExcluded industries/keywords: "${exclusionIndustries}"`,
+    `\nIndustry rules: "${exclusionIndustries}"`,
   ].filter(Boolean).join("\n");
 
   try {
