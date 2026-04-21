@@ -1,5 +1,5 @@
 /**
- * GPT-based location audit: checks if a lead is within ~5 miles of a client's service area.
+ * GPT-based location audit: checks if a lead is within ~20 miles / ~20 minutes of a client's service area.
  * Uses enriched data (verified address/zip from web research) for higher accuracy.
  */
 
@@ -8,21 +8,22 @@ interface LocationAuditResult {
   reason: string;
 }
 
-const SYSTEM_PROMPT = `You are a geographic proximity assistant. Given a lead's verified location and a client's service area (which may include zip codes, city names, county names, or state names), determine if the lead is located within approximately 5 miles of the client's service area.
+const SYSTEM_PROMPT = `You are a geographic proximity assistant. Given a lead's location and a client's service area, determine if the lead is within approximately 20 miles or 20 minutes driving distance of the client's service area.
 
-Important rules:
-- If the service area lists zip codes, check if the lead's zip code or city is within ~5 miles of those zip codes.
-- If the service area lists cities or counties, check if the lead's city is within ~5 miles of those areas.
+CRITICAL RULES:
+- If a city and state are provided, that is ALWAYS enough information to determine proximity. NEVER say "too vague" or "cannot determine" when city + state are available. Use your geographic knowledge to estimate the distance.
+- If the service area lists zip codes, check if the lead's city/zip is within ~20 miles of those zip codes.
+- If the service area lists cities or counties, check if the lead's city is within ~20 miles of those areas.
 - If the service area lists entire states, any location within that state counts as within the service area.
-- Use your knowledge of US geography, zip codes, and city locations.
-- You are given enriched data that may include a verified zip code and address from web research. Trust this data over raw CRM data.
-- If the lead's location information is missing or too vague to determine proximity, return "Failed" with an appropriate reason.
+- Use your knowledge of US geography, zip codes, city locations, and driving distances.
+- Be GENEROUS — if there's any reasonable chance the lead is within range, pass them. Err on the side of passing rather than failing.
+- Only fail if the lead is clearly and obviously outside the 20-mile / 20-minute radius (e.g., different state with no nearby service area cities).
 
 Respond with JSON only, no other text:
-{"result": "Passed" | "Failed", "reason": "one sentence explanation"}
+{"result": "Passed" | "Failed", "reason": "one sentence explanation with approximate distance"}
 
-- "Passed" = lead is within approximately 5 miles of the client's service area
-- "Failed" = lead is outside the service area or location cannot be determined`;
+- "Passed" = lead is within approximately 20 miles / 20 minutes of the service area
+- "Failed" = lead is clearly outside the service area (more than 20 miles away)`;
 
 export async function auditLocation(
   city: string | null,
