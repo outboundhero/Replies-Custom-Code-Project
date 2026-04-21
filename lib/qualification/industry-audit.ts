@@ -3,9 +3,10 @@
  * Uses enriched data (verified industry from web research) for higher accuracy.
  * Returns "Passed" (not excluded), "Failed" (excluded), or "Residential".
  *
- * IMPORTANT: "Residential" is ONLY returned when the lead's REPLY asks about
- * residential/house/home/apartment/Airbnb/food truck/farm cleaning.
- * Company data and website are NOT used for the residential check.
+ * Three layers of checks (in order):
+ * 1. GLOBAL: Cleaning/washing companies excluded for ALL clients (based on company name/website/industry)
+ * 2. REPLY TEXT: Residential/house/home/farm/airbnb inquiries (based on lead's reply)
+ * 3. PER-CLIENT: Client-specific exclusion/inclusion rules (GPT-based)
  */
 
 interface IndustryAuditResult {
@@ -13,11 +14,37 @@ interface IndustryAuditResult {
   reason: string;
 }
 
+/**
+ * GLOBAL EXCLUSION: Cleaning/washing companies are competitors, not prospects.
+ * Checked against company name, website, AND verified industry.
+ * These are always excluded for ALL clients.
+ */
+const COMPETITOR_KEYWORDS = [
+  "cleaning", "window cleaning", "carpet cleaning",
+  "pressure washing", "power washing", "exterior cleaning",
+  "parking lot cleaning", "janitorial", "maid service",
+  "house cleaning", "home cleaning",
+];
+
+/**
+ * Check company data (name + website + industry) for competitor companies.
+ * This runs for ALL clients — no exceptions.
+ */
+function checkCompanyForCompetitor(
+  companyName: string,
+  website: string | null,
+  industry: string,
+): { keyword: string } | null {
+  const combined = [companyName, website, industry].filter(Boolean).join(" ").toLowerCase();
+  const match = COMPETITOR_KEYWORDS.find((kw) => combined.includes(kw));
+  return match ? { keyword: match } : null;
+}
+
 /** Lead's reply asks about residential cleaning → Residential */
 const RESIDENTIAL_KEYWORDS = ["residential"];
 
 /** Lead's reply asks about these → Failed (not a fit) */
-const FAILED_KEYWORDS = [
+const REPLY_FAILED_KEYWORDS = [
   "house cleaning",
   "home cleaning",
   "home office",
@@ -45,7 +72,7 @@ function checkReplyForResidential(replyText: string): { result: "Residential" | 
   if (resMatch) return { result: "Residential", keyword: resMatch };
 
   // Check house/home/farm/airbnb/etc → Failed
-  const failMatch = FAILED_KEYWORDS.find((kw) => lower.includes(kw));
+  const failMatch = REPLY_FAILED_KEYWORDS.find((kw) => lower.includes(kw));
   if (failMatch) return { result: "Failed", keyword: failMatch };
 
   return null;
@@ -80,7 +107,16 @@ export async function auditIndustry(
   dataSources: string,
   replyText: string,
 ): Promise<IndustryAuditResult> {
-  // Check reply text for residential/non-commercial inquiry FIRST
+  // 1. GLOBAL: Check if company itself is a cleaning/washing competitor
+  const competitorCheck = checkCompanyForCompetitor(companyName, website, industry);
+  if (competitorCheck) {
+    return {
+      result: "Failed",
+      reason: `COMPETITOR: Company is a "${competitorCheck.keyword}" business (detected from company name/website/industry)`,
+    };
+  }
+
+  // 2. REPLY TEXT: Check reply for residential/non-commercial inquiry
   const replyCheck = checkReplyForResidential(replyText);
   if (replyCheck) {
     return {
