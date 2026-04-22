@@ -288,21 +288,21 @@ export default function InboxPage() {
     <div className="flex h-[calc(100vh-3rem)]">
       {/* ── LEFT PANEL ── */}
       <div className="w-72 border-r flex flex-col bg-white shrink-0">
-        {/* View selector — at the very top */}
-        <div className="px-2.5 py-2 border-b bg-gradient-to-b from-primary/5 to-transparent">
+        {/* View selector — clean header style */}
+        <div className="px-3 py-2.5 border-b bg-muted/20">
           <Select value={view} onValueChange={setView}>
-            <SelectTrigger className="h-8 text-xs font-medium bg-white shadow-sm border-primary/20">
-              <div className="flex items-center gap-1.5">
-                <svg className="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
-                <SelectValue />
+            <SelectTrigger className="h-9 text-sm font-semibold bg-white border-border hover:bg-muted/30 transition-colors">
+              <div className="flex items-center gap-2 min-w-0">
+                <svg className="w-3.5 h-3.5 text-muted-foreground shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h18M3 12h18M3 17h18" /></svg>
+                <span className="truncate">{INBOX_VIEWS.find((v) => v.id === view)?.label || "All Leads"}</span>
               </div>
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="w-[280px]">
               {INBOX_VIEWS.map((v) => (
-                <SelectItem key={v.id} value={v.id} className="text-xs">
-                  <div>
-                    <p className="font-medium">{v.label}</p>
-                    {v.description && <p className="text-[10px] text-muted-foreground">{v.description}</p>}
+                <SelectItem key={v.id} value={v.id} className="py-2">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium leading-tight">{v.label}</p>
+                    {v.description && <p className="text-xs text-muted-foreground leading-tight">{v.description}</p>}
                   </div>
                 </SelectItem>
               ))}
