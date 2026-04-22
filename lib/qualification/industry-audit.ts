@@ -3,7 +3,7 @@
  * Uses enriched data (verified industry from web research) for higher accuracy.
  * Returns "Passed" (not excluded), "Failed" (excluded), or "Residential".
  *
- * Three layers of checks (in order):
+ * Three layers of checks (in order, v2):
  * 1. GLOBAL: Cleaning/washing companies excluded for ALL clients (based on company name/website/industry)
  * 2. REPLY TEXT: Residential/house/home/farm/airbnb inquiries (based on lead's reply)
  * 3. PER-CLIENT: Client-specific exclusion/inclusion rules (GPT-based)
