@@ -26,7 +26,7 @@ export interface InboxView {
 export const INBOX_VIEWS: InboxView[] = [
   {
     id: "all",
-    label: "All Leads",
+    label: "Master Inbox",
     description: "All leads in the inbox",
   },
   {

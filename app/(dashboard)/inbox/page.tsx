@@ -291,19 +291,13 @@ export default function InboxPage() {
         {/* View selector — clean header style */}
         <div className="px-3 py-2.5 border-b bg-muted/20">
           <Select value={view} onValueChange={setView}>
-            <SelectTrigger className="h-9 text-sm font-semibold bg-white border-border hover:bg-muted/30 transition-colors">
-              <div className="flex items-center gap-2 min-w-0">
-                <svg className="w-3.5 h-3.5 text-muted-foreground shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h18M3 12h18M3 17h18" /></svg>
-                <span className="truncate">{INBOX_VIEWS.find((v) => v.id === view)?.label || "All Leads"}</span>
-              </div>
+            <SelectTrigger className="h-9 w-full text-sm font-semibold bg-white border-border hover:bg-muted/30 transition-colors">
+              <SelectValue placeholder="Master Inbox" />
             </SelectTrigger>
-            <SelectContent className="w-[280px]">
+            <SelectContent>
               {INBOX_VIEWS.map((v) => (
-                <SelectItem key={v.id} value={v.id} className="py-2">
-                  <div className="space-y-0.5">
-                    <p className="text-sm font-medium leading-tight">{v.label}</p>
-                    {v.description && <p className="text-xs text-muted-foreground leading-tight">{v.description}</p>}
-                  </div>
+                <SelectItem key={v.id} value={v.id} className="text-sm font-medium py-2">
+                  {v.label}
                 </SelectItem>
               ))}
             </SelectContent>
