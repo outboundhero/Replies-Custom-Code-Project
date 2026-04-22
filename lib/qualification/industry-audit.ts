@@ -80,21 +80,25 @@ function checkReplyForResidential(replyText: string): { result: "Residential" | 
 
 const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and industry rules, determine if the company passes or fails the industry check.
 
-The rules text can be one of two patterns:
-1. EXCLUSION LIST (most common): Lists specific industries to exclude, e.g. "restaurants, retail, healthcare". → FAIL if the company IS in any excluded industry, PASS otherwise.
-2. INCLUSION-ONLY (rare): Says something like "we only want to work with X" or "only accept X". → FAIL if the company is NOT in the specified industry, PASS only if it IS in that industry.
+CRITICAL: These rules are ALWAYS an EXCLUSION LIST unless the text EXPLICITLY contains phrases like "we only want to work with", "only accept", or "we only want". A simple list of industries (e.g. "back of house kitchen cleaning") is ALWAYS an exclusion — it means EXCLUDE those industries, not "only accept" them.
 
-Read the rules text carefully to determine which pattern it follows, then evaluate accordingly.
+How to evaluate:
+- DEFAULT (exclusion): The rules list industries/keywords to EXCLUDE. → FAIL only if the company clearly operates in one of those specific excluded industries. PASS otherwise.
+- ONLY if the text explicitly says "we only want" or "only accept": Treat as inclusion-only. → FAIL if the company is NOT in the specified industry.
 
-IMPORTANT: Do NOT check for residential/house/home cleaning — that is handled separately. Only check against the industry rules provided.
+IMPORTANT RULES:
+- IGNORE any mention of "residential" in the rules — residential checks are handled separately. Do NOT fail a company for being residential.
+- IGNORE any mention of "house cleaning" or "home cleaning" in the rules — these are handled separately.
+- Only fail if the company's ACTUAL industry matches the excluded industries. A restaurant is NOT "residential" just because the exclusion list mentions residential.
+- When in doubt, return "Passed".
 
-You are given enriched data that may include a verified industry from web research. Trust this data — it has already been researched.
+You are given enriched data that may include a verified industry from web research. Trust this data.
 
 Respond with JSON only, no other text:
 {"result": "Passed" | "Failed", "reason": "one sentence explanation"}
 
-- "Passed" = company meets the industry criteria
-- "Failed" = company does not meet the industry criteria
+- "Passed" = company does NOT operate in any excluded industry
+- "Failed" = company clearly operates in an excluded industry
 
 If there are no industry rules listed, return "Passed".`;
 
@@ -133,12 +137,29 @@ export async function auditIndustry(
     return { result: "Passed", reason: "No company or industry data available" };
   }
 
+  // Strip residential-related lines from exclusion text — handled separately by reply check
+  const cleanedExclusions = exclusionIndustries
+    .split("\n")
+    .filter((line) => {
+      const lower = line.toLowerCase().trim();
+      // Remove lines that are only about residential
+      if (lower.startsWith("residential")) return false;
+      if (lower === "house cleaning" || lower === "home cleaning") return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+
+  if (!cleanedExclusions) {
+    return { result: "Passed", reason: "No non-residential exclusion industries defined" };
+  }
+
   const userParts = [
     `Company: "${companyName}"`,
     website ? `Website: "${website}"` : null,
     industry ? `Verified industry: "${industry}"` : null,
     `Data confidence: ${confidence} | Sources: ${dataSources}`,
-    `\nIndustry rules: "${exclusionIndustries}"`,
+    `\nIndustry rules: "${cleanedExclusions}"`,
   ].filter(Boolean).join("\n");
 
   try {
@@ -151,7 +172,7 @@ export async function auditIndustry(
       body: JSON.stringify({
         model: "gpt-4o-mini",
         temperature: 0,
-        max_tokens: 100,
+        max_tokens: 200,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
