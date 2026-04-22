@@ -364,7 +364,19 @@ export default function InboxPage() {
                 <h2 className="text-base font-semibold">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
                 <p className="text-xs text-muted-foreground">{detail.lead_email}</p>
               </div>
-              <div className="flex gap-1.5">
+              <div className="flex gap-1.5 items-center">
+                {detail.sheet_url && (
+                  <a
+                    href={detail.sheet_url as string}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] font-medium bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 px-2 py-0.5 rounded inline-flex items-center gap-1 transition-colors"
+                    title="Open client's Google Sheet"
+                  >
+                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M19.5 3h-15A1.5 1.5 0 003 4.5v15A1.5 1.5 0 004.5 21h15a1.5 1.5 0 001.5-1.5v-15A1.5 1.5 0 0019.5 3zM8 17H6v-2h2v2zm0-4H6v-2h2v2zm0-4H6V7h2v2zm10 8h-8v-2h8v2zm0-4h-8v-2h8v2zm0-4h-8V7h8v2z"/></svg>
+                    Sheet
+                  </a>
+                )}
                 <span className="text-[11px] font-mono font-bold bg-primary/10 text-primary px-2 py-0.5 rounded">{detail.client_tag || "N/A"}</span>
                 <span className="text-[11px] bg-muted px-2 py-0.5 rounded">{detail.workflow}</span>
               </div>

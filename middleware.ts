@@ -4,7 +4,7 @@ import { jwtVerify } from "jose";
 const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "default-secret-change-me");
 
 /** Routes accessible by inbox_manager role */
-const INBOX_MANAGER_ROUTES = ["/inbox", "/clients"];
+const INBOX_MANAGER_ROUTES = ["/inbox", "/clients", "/qualification"];
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
