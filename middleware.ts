@@ -3,11 +3,13 @@ import { jwtVerify } from "jose";
 
 const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "default-secret-change-me");
 
+/** Routes accessible by inbox_manager role */
+const INBOX_MANAGER_ROUTES = ["/inbox", "/clients"];
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Only protect page navigations — API routes handle their own auth
-  // to avoid Next.js 16 proxy dropping request bodies on POST/PUT/DELETE
+  // Skip auth for API routes, login, static assets
   if (
     pathname.startsWith("/api") ||
     pathname.startsWith("/login") ||
@@ -23,8 +25,32 @@ export async function middleware(req: NextRequest) {
   }
 
   try {
-    await jwtVerify(token, SECRET);
-    return NextResponse.next();
+    const { payload } = await jwtVerify(token, SECRET);
+    const role = payload.role as string;
+
+    // Admin can access everything
+    if (role === "admin") {
+      return NextResponse.next();
+    }
+
+    // Inbox manager: restrict to allowed routes
+    if (role === "inbox_manager") {
+      const allowed = INBOX_MANAGER_ROUTES.some((r) => pathname === r || pathname.startsWith(r + "/"));
+
+      // Root "/" redirects to /inbox for inbox managers
+      if (pathname === "/") {
+        return NextResponse.redirect(new URL("/inbox", req.url));
+      }
+
+      if (!allowed) {
+        return NextResponse.redirect(new URL("/inbox", req.url));
+      }
+
+      return NextResponse.next();
+    }
+
+    // Unknown role — redirect to login
+    return NextResponse.redirect(new URL("/login", req.url));
   } catch {
     return NextResponse.redirect(new URL("/login", req.url));
   }

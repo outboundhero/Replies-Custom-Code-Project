@@ -4,8 +4,15 @@ import { cookies } from "next/headers";
 const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "default-secret-change-me");
 const COOKIE_NAME = "oh-session";
 
-export async function createSession() {
-  const token = await new SignJWT({ authenticated: true })
+export type UserRole = "admin" | "inbox_manager";
+
+interface SessionPayload {
+  email: string;
+  role: UserRole;
+}
+
+export async function createSession(email: string, role: UserRole) {
+  const token = await new SignJWT({ email, role })
     .setProtectedHeader({ alg: "HS256" })
     .setExpirationTime("7d")
     .sign(SECRET);
@@ -14,7 +21,7 @@ export async function createSession() {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
-    maxAge: 60 * 60 * 24 * 7, // 7 days
+    maxAge: 60 * 60 * 24 * 7,
     path: "/",
   });
 }
@@ -30,6 +37,18 @@ export async function verifySession(): Promise<boolean> {
   }
 }
 
+/** Get the current user's session data (email + role) */
+export async function getSession(): Promise<SessionPayload | null> {
+  try {
+    const token = (await cookies()).get(COOKIE_NAME)?.value;
+    if (!token) return null;
+    const { payload } = await jwtVerify(token, SECRET);
+    return { email: payload.email as string, role: payload.role as UserRole };
+  } catch {
+    return null;
+  }
+}
+
 export async function clearSession() {
   (await cookies()).delete(COOKIE_NAME);
 }
@@ -39,6 +58,18 @@ export async function requireAuth(): Promise<Response | null> {
   const valid = await verifySession();
   if (!valid) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  return null;
+}
+
+/** Check auth + require admin role. Returns a 403 Response if not admin. */
+export async function requireAdmin(): Promise<Response | null> {
+  const session = await getSession();
+  if (!session) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (session.role !== "admin") {
+    return Response.json({ error: "Forbidden — admin only" }, { status: 403 });
   }
   return null;
 }
