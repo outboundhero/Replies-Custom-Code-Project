@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import { getView, type InboxView } from "@/lib/inbox-views";
 
 const BATCH_SIZE = 1000;
 
@@ -15,10 +16,41 @@ async function fetchAllRows<T>(
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
     allRows.push(...data);
-    if (data.length < BATCH_SIZE) break; // Last batch
+    if (data.length < BATCH_SIZE) break;
     offset += BATCH_SIZE;
   }
   return allRows;
+}
+
+/** Apply a view's filter rules to a Supabase query builder */
+function applyView(q: any, view: InboxView | null): any {
+  if (!view) return q;
+
+  // "Does not contain" filters — use NOT ILIKE
+  for (const term of view.replyExcludes || []) {
+    q = q.not("reply_we_got", "ilike", `%${term}%`);
+  }
+  for (const term of view.leadEmailExcludes || []) {
+    q = q.not("lead_email", "ilike", `%${term}%`);
+  }
+  for (const term of view.toEmailExcludes || []) {
+    q = q.not("to_email", "ilike", `%${term}%`);
+  }
+  for (const term of view.emailSubjectExcludes || []) {
+    q = q.not("email_subject", "ilike", `%${term}%`);
+  }
+
+  // AI category OR group — must match at least one
+  if (view.aiCategoryAny && view.aiCategoryAny.length > 0) {
+    const orParts = view.aiCategoryAny.map((rule) => {
+      if (rule.equals !== undefined) return `ai_categorized_lead_category.eq.${rule.equals}`;
+      if (rule.contains !== undefined) return `ai_categorized_lead_category.ilike.%${rule.contains}%`;
+      return null;
+    }).filter(Boolean).join(",");
+    if (orParts) q = q.or(orParts);
+  }
+
+  return q;
 }
 
 export async function GET(req: NextRequest) {
@@ -31,6 +63,7 @@ export async function GET(req: NextRequest) {
     const category = req.nextUrl.searchParams.get("category");
     const workflow = req.nextUrl.searchParams.get("workflow");
     const search = req.nextUrl.searchParams.get("search");
+    const view = getView(req.nextUrl.searchParams.get("view"));
 
     // Mode: client_tags — return distinct client tags
     if (mode === "client_tags") {
@@ -49,6 +82,7 @@ export async function GET(req: NextRequest) {
         if (clientTag) q = q.eq("client_tag", clientTag);
         if (workflow) q = q.eq("workflow", workflow);
         if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
+        q = applyView(q, view);
         return q as any;
       });
 
@@ -73,6 +107,7 @@ export async function GET(req: NextRequest) {
       if (category) q = q.eq("lead_category", category);
       if (workflow) q = q.eq("workflow", workflow);
       if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
+      q = applyView(q, view);
       return q as any;
     });
 

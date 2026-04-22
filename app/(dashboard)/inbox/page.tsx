@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
+import { INBOX_VIEWS } from "@/lib/inbox-views";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -60,6 +61,7 @@ export default function InboxPage() {
   const [search, setSearch] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
   const [filterClient, setFilterClient] = useState("");
+  const [view, setView] = useState<string>("all");
   const [clientTags, setClientTags] = useState<string[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -89,6 +91,7 @@ export default function InboxPage() {
       const p = new URLSearchParams({ mode: "counts" });
       if (search) p.set("search", search);
       if (filterClient) p.set("client_tag", filterClient);
+      if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
       if (res.ok) {
@@ -100,7 +103,7 @@ export default function InboxPage() {
         setFetchError(`Failed (${res.status})`);
       }
     } catch (e) { setFetchError((e as Error).message); }
-  }, [search, filterClient]);
+  }, [search, filterClient, view]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
@@ -111,6 +114,7 @@ export default function InboxPage() {
       const p = new URLSearchParams({ category: cat });
       if (search) p.set("search", search);
       if (filterClient) p.set("client_tag", filterClient);
+      if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.ok) {
         const d = await res.json();
@@ -137,11 +141,11 @@ export default function InboxPage() {
     });
   }
 
-  // When filters change, clear loaded leads and re-collapse
+  // When filters or view change, clear loaded leads and re-collapse
   useEffect(() => {
     setCategoryLeads({});
     setExpanded(new Set());
-  }, [search, filterClient]);
+  }, [search, filterClient, view]);
 
   // Realtime: listen for new inserts
   useEffect(() => {
@@ -284,6 +288,28 @@ export default function InboxPage() {
     <div className="flex h-[calc(100vh-3rem)]">
       {/* ── LEFT PANEL ── */}
       <div className="w-72 border-r flex flex-col bg-white shrink-0">
+        {/* View selector — at the very top */}
+        <div className="px-2.5 py-2 border-b bg-gradient-to-b from-primary/5 to-transparent">
+          <Select value={view} onValueChange={setView}>
+            <SelectTrigger className="h-8 text-xs font-medium bg-white shadow-sm border-primary/20">
+              <div className="flex items-center gap-1.5">
+                <svg className="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+                <SelectValue />
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              {INBOX_VIEWS.map((v) => (
+                <SelectItem key={v.id} value={v.id} className="text-xs">
+                  <div>
+                    <p className="font-medium">{v.label}</p>
+                    {v.description && <p className="text-[10px] text-muted-foreground">{v.description}</p>}
+                  </div>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="p-2.5 space-y-1.5 border-b">
           <Input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} className="h-7 text-xs" />
           <div className="flex gap-1">
