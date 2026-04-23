@@ -67,13 +67,14 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(false);
 
   // Reply form
+  type Recipient = { name: string; email: string };
   const [replyMsg, setReplyMsg] = useState("");
-  const [replyCc, setReplyCc] = useState("");
-  const [replyBcc, setReplyBcc] = useState("");
+  const [replyCc, setReplyCc] = useState<Recipient[]>([]);
+  const [replyBcc, setReplyBcc] = useState<Recipient[]>([]);
   const [fwdTo, setFwdTo] = useState("");
   const [ooSubject, setOoSubject] = useState("");
   const [ooMsg, setOoMsg] = useState("");
-  const [ooCc, setOoCc] = useState("");
+  const [ooCc, setOoCc] = useState<Recipient[]>([]);
   const [reallocTag, setReallocTag] = useState("");
   const [sending, setSending] = useState<string | null>(null);
 
@@ -178,10 +179,15 @@ export default function InboxPage() {
         const d = await res.json();
         setDetail(d);
         setReplyMsg(d.our_reply || "");
-        const ccList = [d.cc_email_1, d.cc_email_2, d.cc_email_3, d.cc_email_4, d.cc_email_5, d.cc_email_6].filter(Boolean).join(", ");
-        const bccList = [d.bcc_email_1, d.bcc_email_2].filter(Boolean).join(", ");
-        setReplyCc(ccList);
-        setReplyBcc(bccList);
+        const ccs: Recipient[] = ([1, 2, 3, 4, 5, 6] as const)
+          .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
+          .filter((r) => r.name || r.email);
+        const bccs: Recipient[] = ([1, 2] as const)
+          .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
+          .filter((r) => r.name || r.email);
+        setReplyCc(ccs);
+        setReplyBcc(bccs);
+        setOoCc([]);
       }
     } catch { /* */ }
     setLoading(false);
@@ -194,8 +200,64 @@ export default function InboxPage() {
     return res.json();
   }
 
-  function parseCcList(raw: string) {
-    return raw.split(",").map((s) => s.trim()).filter(Boolean).map((e) => ({ name: "", email_address: e }));
+  function recipientsToApi(recipients: Recipient[]) {
+    return recipients
+      .filter((r) => r.email.trim())
+      .map((r) => ({ name: r.name.trim(), email_address: r.email.trim() }));
+  }
+
+  function RecipientList({
+    label, value, onChange, max, addLabel,
+  }: {
+    label: string; value: Recipient[]; onChange: (next: Recipient[]) => void;
+    max: number; addLabel: string;
+  }) {
+    function update(idx: number, field: "name" | "email", v: string) {
+      const next = value.slice();
+      next[idx] = { ...next[idx], [field]: v };
+      onChange(next);
+    }
+    function remove(idx: number) {
+      onChange(value.filter((_, i) => i !== idx));
+    }
+    function add() {
+      if (value.length >= max) return;
+      onChange([...value, { name: "", email: "" }]);
+    }
+    return (
+      <div className="space-y-1">
+        <Label className="text-[10px] text-muted-foreground">{label}</Label>
+        {value.map((r, idx) => (
+          <div key={idx} className="flex gap-1.5">
+            <Input
+              value={r.name}
+              onChange={(e) => update(idx, "name", e.target.value)}
+              placeholder="Name"
+              className="text-[11px] h-7 flex-1"
+            />
+            <Input
+              value={r.email}
+              onChange={(e) => update(idx, "email", e.target.value)}
+              placeholder="email@example.com"
+              className="text-[11px] h-7 flex-[1.5]"
+            />
+            <button
+              type="button"
+              onClick={() => remove(idx)}
+              className="h-7 w-7 shrink-0 rounded border border-border text-xs text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
+              title="Remove"
+            >×</button>
+          </div>
+        ))}
+        {value.length < max && (
+          <button
+            type="button"
+            onClick={add}
+            className="text-[11px] text-primary hover:underline"
+          >+ {addLabel}</button>
+        )}
+      </div>
+    );
   }
 
   async function updateCategory(cat: string) {
@@ -221,8 +283,8 @@ export default function InboxPage() {
       action: "send-reply", id: detail.id, replyId: detail.reply_id,
       senderEmailId: detail.sender_id, message: replyMsg,
       toEmail: detail.lead_email, toName: detail.lead_name,
-      ccEmails: replyCc ? parseCcList(replyCc) : undefined,
-      bccEmails: replyBcc ? parseCcList(replyBcc) : undefined,
+      ccEmails: replyCc.length ? recipientsToApi(replyCc) : undefined,
+      bccEmails: replyBcc.length ? recipientsToApi(replyBcc) : undefined,
     });
     setSending(null);
     if (d.ok) { toast.success("Reply sent"); loadDetail(detail.id); } else toast.error(d.error || "Failed");
@@ -245,10 +307,10 @@ export default function InboxPage() {
     const d = await mutate({
       action: "send-one-off", id: detail.id, senderEmailId: detail.sender_id,
       subject: ooSubject, message: ooMsg, toEmail: detail.lead_email, toName: detail.lead_name,
-      ccEmails: ooCc ? parseCcList(ooCc) : undefined,
+      ccEmails: ooCc.length ? recipientsToApi(ooCc) : undefined,
     });
     setSending(null);
-    if (d.ok) { toast.success("Sent"); setOoSubject(""); setOoMsg(""); setOoCc(""); } else toast.error(d.error || "Failed");
+    if (d.ok) { toast.success("Sent"); setOoSubject(""); setOoMsg(""); setOoCc([]); } else toast.error(d.error || "Failed");
   }
 
   async function handleRealloc() {
@@ -482,9 +544,9 @@ export default function InboxPage() {
                 <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
               </div>
               <Textarea value={replyMsg} onChange={(e) => setReplyMsg(e.target.value)} rows={4} placeholder="Type reply..." className="text-sm" />
-              <div className="grid grid-cols-2 gap-2">
-                <div><Label className="text-[10px] text-muted-foreground">CC</Label><Input value={replyCc} onChange={(e) => setReplyCc(e.target.value)} placeholder="cc1@email.com, cc2@email.com" className="text-[11px] h-7" /></div>
-                <div><Label className="text-[10px] text-muted-foreground">BCC</Label><Input value={replyBcc} onChange={(e) => setReplyBcc(e.target.value)} placeholder="bcc@email.com" className="text-[11px] h-7" /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <RecipientList label="CC Recipients" value={replyCc} onChange={setReplyCc} max={6} addLabel="Add CC" />
+                <RecipientList label="BCC Recipients" value={replyBcc} onChange={setReplyBcc} max={2} addLabel="Add BCC" />
               </div>
               <Button size="sm" className="h-8 text-xs" onClick={handleSend} disabled={sending === "reply" || !replyMsg}>{sending === "reply" ? "Sending..." : "Send Reply"}</Button>
             </div>
@@ -500,7 +562,7 @@ export default function InboxPage() {
               <p className="text-xs font-medium">One-Off Reply <span className="text-muted-foreground font-normal">to {detail.lead_email}</span></p>
               <Input value={ooSubject} onChange={(e) => setOoSubject(e.target.value)} placeholder="Subject" className="text-xs h-8" />
               <Textarea value={ooMsg} onChange={(e) => setOoMsg(e.target.value)} rows={3} placeholder="Message" className="text-sm" />
-              <div><Label className="text-[10px] text-muted-foreground">CC</Label><Input value={ooCc} onChange={(e) => setOoCc(e.target.value)} placeholder="cc@email.com" className="text-[11px] h-7" /></div>
+              <RecipientList label="CC Recipients" value={ooCc} onChange={setOoCc} max={6} addLabel="Add CC" />
               <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleOneOff} disabled={sending === "oo" || !ooMsg || !ooSubject}>{sending === "oo" ? "..." : "Send"}</Button>
             </div>
 

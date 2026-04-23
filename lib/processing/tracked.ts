@@ -10,18 +10,32 @@ import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { resolveTemplate } from "./template-resolver";
+import { BBS_TAGS, BBS_TRIGGER_CATEGORIES, routeLeadBbs } from "./bbs-router";
 import supabase from "@/lib/supabase";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
 
-async function getClientConfig(tag: string) {
+interface ClientConfig {
+  cc_name_1?: string | null; cc_email_1?: string | null;
+  cc_name_2?: string | null; cc_email_2?: string | null;
+  cc_name_3?: string | null; cc_email_3?: string | null;
+  cc_name_4?: string | null; cc_email_4?: string | null;
+  cc_name_5?: string | null; cc_email_5?: string | null;
+  cc_name_6?: string | null; cc_email_6?: string | null;
+  bcc_name_1?: string | null; bcc_email_1?: string | null;
+  bcc_name_2?: string | null; bcc_email_2?: string | null;
+  reply_template?: string | null;
+  [key: string]: unknown;
+}
+
+async function getClientConfig(tag: string): Promise<ClientConfig | null> {
   try {
     const result = await db.execute({
       sql: "SELECT * FROM client_config WHERE client_tag = ?",
       args: [tag],
     });
-    return result.rows[0] || null;
+    return (result.rows[0] as ClientConfig | undefined) || null;
   } catch {
     // Table may not exist yet on a fresh deployment — skip client config gracefully
     return null;
@@ -56,7 +70,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   const customVars = extractCustomVars(lead.custom_variables);
   const recipients = extractRecipients(reply.to, reply.cc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
-  const clientConfig = await getClientConfig(campaignTag);
+  let clientConfig: ClientConfig | null = await getClientConfig(campaignTag);
 
   // 3b. Bounce check + AI categorization
   const isBounce = await shouldFilter({
@@ -73,6 +87,50 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     cleanedReply,
   );
   const includeClientConfig = aiCategory !== null && CC_BCC_CATEGORIES.includes(aiCategory as typeof CC_BCC_CATEGORIES[number]);
+
+  // 3c. BBS-only AI routing — pick Nefi (Northern Utah) or Junior (NV/Southern UT)
+  // and override the CC fields + reply template before they get written downstream.
+  if (
+    aiCategory &&
+    BBS_TAGS.includes(campaignTag) &&
+    BBS_TRIGGER_CATEGORIES.includes(aiCategory.toLowerCase())
+  ) {
+    try {
+      const route = await routeLeadBbs({
+        companyName: lead.company || "",
+        address: customVars.address ? String(customVars.address) : null,
+        city: customVars.city ? String(customVars.city) : null,
+        state: customVars.state ? String(customVars.state) : null,
+        googleMapsUrl: customVars.google_maps_url ? String(customVars.google_maps_url) : null,
+        phone: customVars.phone ? String(customVars.phone) : null,
+        replyText: cleanedReply,
+      });
+      clientConfig = {
+        ...(clientConfig || {}),
+        cc_name_1: route.cc_name_1,
+        cc_email_1: route.cc_email_1,
+        cc_name_2: route.cc_name_2,
+        cc_email_2: route.cc_email_2,
+        // BBS template uses only Jake + (Nefi|Junior) — clear CC 3-6
+        cc_name_3: null, cc_email_3: null,
+        cc_name_4: null, cc_email_4: null,
+        cc_name_5: null, cc_email_5: null,
+        cc_name_6: null, cc_email_6: null,
+        reply_template: route.reply_template,
+      };
+      await logActivity("tracked", "bbs-routed", {
+        client_tag: campaignTag,
+        lead_email: reply.from_email_address,
+        details: { assignment: route.assignment, reason: route.reason },
+      });
+    } catch (error) {
+      await logError("tracked", "bbs-routing", (error as Error).message, {
+        tag: campaignTag,
+        lead_email: reply.from_email_address,
+      });
+      // Fall through with the default client_config
+    }
+  }
 
   // 4. Build Airtable field values
   const baseFields: Record<string, unknown> = {
