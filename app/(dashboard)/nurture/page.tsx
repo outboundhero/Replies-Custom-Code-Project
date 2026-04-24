@@ -2,14 +2,13 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 
-type Source = "soft_negative" | "out_of_office" | "sequence_finished";
+type Source = "soft_negative" | "out_of_office" | "sequence_finished" | "other";
 type Status = "waiting" | "eligible" | "added" | "skipped" | "all";
 type Safety = "safe" | "unsafe" | "unknown" | "unclassified" | "all";
 
@@ -50,12 +49,14 @@ const SOURCE_LABEL: Record<Source, string> = {
   soft_negative: "Soft Negative",
   out_of_office: "Out of Office",
   sequence_finished: "Sequence Finished",
+  other: "Other",
 };
 
 const SOURCE_COLOR: Record<Source, string> = {
   soft_negative: "bg-blue-100 text-blue-700 border-blue-200",
   out_of_office: "bg-yellow-100 text-yellow-700 border-yellow-200",
   sequence_finished: "bg-purple-100 text-purple-700 border-purple-200",
+  other: "bg-gray-100 text-gray-700 border-gray-200",
 };
 
 export default function NurturePage() {
@@ -278,6 +279,7 @@ export default function NurturePage() {
                 <SelectItem value="soft_negative">Soft Negative</SelectItem>
                 <SelectItem value="out_of_office">Out of Office</SelectItem>
                 <SelectItem value="sequence_finished">Sequence Finished</SelectItem>
+                <SelectItem value="other">Other / Unsafe</SelectItem>
               </SelectContent>
             </Select>
           </div>

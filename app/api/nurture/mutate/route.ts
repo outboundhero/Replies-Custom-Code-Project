@@ -44,55 +44,54 @@ export async function POST(req: NextRequest) {
 
       const { data: rows, error } = await supabase
         .from("replies")
-        .select("id, ai_categorized_lead_category, reply_we_got")
+        .select("id, reply_we_got")
         .in("id", ids);
       if (error) throw new Error(error.message);
 
-      const results: Array<{ id: number; safety: string; reason: string }> = [];
+      const results: Array<{ id: number; safety: string; bucket: string | null; reason: string }> = [];
       for (const r of rows || []) {
-        const result = await classifyNurtureSafety({
-          aiCategory: r.ai_categorized_lead_category,
-          replyText: r.reply_we_got || "",
-        });
+        const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
         await supabase.from("replies").update({
           nurture_safety: result.safety,
+          nurture_bucket: result.bucket,
           nurture_safety_reason: result.reason,
           nurture_classified_at: new Date().toISOString(),
         }).eq("id", r.id);
-        results.push({ id: r.id, safety: result.safety, reason: result.reason });
+        results.push({ id: r.id, safety: result.safety, bucket: result.bucket, reason: result.reason });
       }
 
       return NextResponse.json({ ok: true, classified: results.length, results });
     }
 
-    // ── classify EVERY unclassified candidate ──
+    // ── classify EVERY unclassified reply (regardless of AI category) ──
+    // Pulls in batches of 200 per request. Re-run to continue if more remain.
     if (action === "classify-all-unclassified") {
-      const CANDIDATE_CATS = [
-        "Not Interested", "Follow Up", "Open Response", "Out Of Office",
-      ];
       const { data: rows, error } = await supabase
         .from("replies")
-        .select("id, ai_categorized_lead_category, reply_we_got")
-        .in("ai_categorized_lead_category", CANDIDATE_CATS)
+        .select("id, reply_we_got")
+        .not("reply_we_got", "is", null)
+        .neq("reply_we_got", "")
         .is("nurture_safety", null)
-        .limit(200); // safety cap per request
+        .limit(200);
       if (error) throw new Error(error.message);
 
       let classified = 0;
       for (const r of rows || []) {
-        const result = await classifyNurtureSafety({
-          aiCategory: r.ai_categorized_lead_category,
-          replyText: r.reply_we_got || "",
-        });
+        const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
         await supabase.from("replies").update({
           nurture_safety: result.safety,
+          nurture_bucket: result.bucket,
           nurture_safety_reason: result.reason,
           nurture_classified_at: new Date().toISOString(),
         }).eq("id", r.id);
         classified++;
       }
 
-      return NextResponse.json({ ok: true, classified, remaining: (rows?.length || 0) === 200 ? "200+ — re-run to continue" : 0 });
+      return NextResponse.json({
+        ok: true,
+        classified,
+        remaining: (rows?.length || 0) === 200 ? "200+ — re-run to continue" : 0,
+      });
     }
 
     // ── skip / unskip ──

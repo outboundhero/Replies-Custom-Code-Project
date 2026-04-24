@@ -1,16 +1,20 @@
 /**
  * GET /api/nurture
  *
- * Returns nurture-eligible leads grouped by source. The 45-day waiting period
- * is computed at query time:
- *   - replies-based candidates: trigger = reply_time
- *   - sequence-finished:        trigger = sequence_finished_at
+ * Returns nurture-eligible candidates from two data sources:
+ *   1. Replies (Scenarios 1 + 2) — bucket is determined by the safety
+ *      classifier from the reply text itself, NOT by the original AI category.
+ *   2. nurture_sequence_finished (Scenario 3) — synced from EmailBison.
+ *
+ * 45-day eligibility is computed at query time:
+ *   trigger = reply_time (replies) or sequence_finished_at (sequence)
+ *   eligible_at = trigger + 45 days
  *
  * Query params:
- *   - source: "soft_negative" | "out_of_office" | "sequence_finished" | "all" (default: all)
- *   - client_tag: filter by client
- *   - status: "waiting" | "eligible" | "added" | "skipped" | "all" (default: all)
- *   - safety: "safe" | "unsafe" | "unknown" | "unclassified" | "all" (default: all)  — only applies to reply-based
+ *   source       "soft_negative" | "out_of_office" | "sequence_finished" | "all"  (default all)
+ *   client_tag   filter by client
+ *   status       "waiting" | "eligible" | "added" | "skipped" | "all"            (default all)
+ *   safety       "safe" | "unsafe" | "unknown" | "unclassified" | "all"          (default all; n/a for sequence_finished)
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -34,35 +38,31 @@ async function fetchAllRows<T>(buildQuery: (from: number, to: number) => any): P
   return all;
 }
 
-const REPLY_SOFT_NEGATIVE_CATEGORIES = ["Not Interested", "Follow Up", "Open Response"];
-const REPLY_OUT_OF_OFFICE_CATEGORIES = ["Out Of Office"];
-
 function daysBetween(later: Date, earlier: Date): number {
   return Math.floor((later.getTime() - earlier.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 interface NurtureItem {
-  id: string;                // unique key like "reply:123" or "seq:456"
-  source: "soft_negative" | "out_of_office" | "sequence_finished";
+  id: string;
+  source: "soft_negative" | "out_of_office" | "sequence_finished" | "other";
   client_tag: string | null;
   email: string;
   first_name: string | null;
   last_name: string | null;
   company: string | null;
-  trigger_at: string;        // ISO timestamp of the event
-  eligible_at: string;       // trigger + 45 days
-  days_until_eligible: number;  // negative or 0 = eligible now
+  trigger_at: string;
+  eligible_at: string;
+  days_until_eligible: number;
   is_eligible: boolean;
   added_at: string | null;
   skipped: boolean;
-  // For replies:
   reply_id?: number;
   ai_category?: string | null;
   reply_text?: string | null;
   nurture_safety?: string | null;
+  nurture_bucket?: string | null;
   nurture_safety_reason?: string | null;
   nurture_classified_at?: string | null;
-  // For sequence-finished:
   ob_lead_id?: number;
   ob_campaign_id?: number;
   campaign_name?: string;
@@ -81,13 +81,11 @@ export async function GET(req: NextRequest) {
     const items: NurtureItem[] = [];
     const now = new Date();
 
-    // ── Replies-based candidates (Scenarios 1 & 2) ──
+    // ── Replies-based candidates (Scenarios 1 + 2) ──
+    // Pull every reply with non-empty text and reply_time.
+    // Bucket / safety is decided by the classifier (stored in nurture_bucket /
+    // nurture_safety). Unclassified rows show up with bucket = null.
     if (sourceParam === "all" || sourceParam === "soft_negative" || sourceParam === "out_of_office") {
-      const allReplyCategories = [
-        ...REPLY_SOFT_NEGATIVE_CATEGORIES,
-        ...REPLY_OUT_OF_OFFICE_CATEGORIES,
-      ];
-
       const replies = await fetchAllRows<{
         id: number;
         reply_id: number;
@@ -100,6 +98,7 @@ export async function GET(req: NextRequest) {
         reply_we_got: string | null;
         reply_time: string | null;
         nurture_safety: string | null;
+        nurture_bucket: string | null;
         nurture_safety_reason: string | null;
         nurture_classified_at: string | null;
         nurture_added_at: string | null;
@@ -107,8 +106,10 @@ export async function GET(req: NextRequest) {
       }>((from, to) => {
         let q = supabase
           .from("replies")
-          .select("id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped")
-          .in("ai_categorized_lead_category", allReplyCategories)
+          .select("id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped")
+          .not("reply_we_got", "is", null)
+          .neq("reply_we_got", "")
+          .not("reply_time", "is", null)
           .order("reply_time", { ascending: false })
           .range(from, to);
         if (clientTag) q = q.eq("client_tag", clientTag);
@@ -117,11 +118,17 @@ export async function GET(req: NextRequest) {
 
       for (const r of replies) {
         if (!r.reply_time) continue;
-        const isOoo = REPLY_OUT_OF_OFFICE_CATEGORIES.includes(r.ai_categorized_lead_category || "");
-        const source: NurtureItem["source"] = isOoo ? "out_of_office" : "soft_negative";
 
-        // Filter by source param
-        if (sourceParam !== "all" && sourceParam !== source) continue;
+        // Determine display source from classifier output (bucket).
+        // Unclassified rows or "other" rows fall into "other" group.
+        let source: NurtureItem["source"];
+        if (r.nurture_bucket === "out_of_office") source = "out_of_office";
+        else if (r.nurture_bucket === "soft_negative") source = "soft_negative";
+        else source = "other";
+
+        // Source param filter — "soft_negative" or "out_of_office" only matches that bucket
+        if (sourceParam === "soft_negative" && source !== "soft_negative") continue;
+        if (sourceParam === "out_of_office" && source !== "out_of_office") continue;
 
         const triggerAt = new Date(r.reply_time);
         const eligibleAt = new Date(triggerAt.getTime() + NURTURE_DAYS * 24 * 60 * 60 * 1000);
@@ -146,6 +153,7 @@ export async function GET(req: NextRequest) {
           ai_category: r.ai_categorized_lead_category,
           reply_text: r.reply_we_got,
           nurture_safety: r.nurture_safety,
+          nurture_bucket: r.nurture_bucket,
           nurture_safety_reason: r.nurture_safety_reason,
           nurture_classified_at: r.nurture_classified_at,
         });
@@ -206,14 +214,12 @@ export async function GET(req: NextRequest) {
 
     // ── Apply post-filters: status + safety ──
     const filtered = items.filter((it) => {
-      // Status
       if (statusFilter !== "all") {
         if (statusFilter === "added" && !it.added_at) return false;
         if (statusFilter === "skipped" && !it.skipped) return false;
         if (statusFilter === "waiting" && (it.is_eligible || it.added_at || it.skipped)) return false;
         if (statusFilter === "eligible" && (!it.is_eligible || it.added_at || it.skipped)) return false;
       }
-      // Safety (only for reply-based; sequence_finished items have no safety field)
       if (safetyFilter !== "all" && it.source !== "sequence_finished") {
         if (safetyFilter === "unclassified" && it.nurture_safety) return false;
         if (safetyFilter !== "unclassified" && it.nurture_safety !== safetyFilter) return false;
@@ -221,13 +227,14 @@ export async function GET(req: NextRequest) {
       return true;
     });
 
-    // ── Aggregate counts for the UI sidebar ──
+    // ── Aggregate counts for the UI ──
     const counts = {
       total: filtered.length,
       bySource: {
         soft_negative: 0,
         out_of_office: 0,
         sequence_finished: 0,
+        other: 0,
       } as Record<string, number>,
       byStatus: {
         waiting: 0,
