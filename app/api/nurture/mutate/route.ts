@@ -4,6 +4,7 @@
  * Actions:
  *  - "classify-batch": Run safety classifier on a list of unclassified reply IDs
  *  - "classify-all-unclassified": Classify ALL replies that are nurture candidates and don't yet have a safety
+ *  - "classify-reset-safe": Re-classify replies currently marked "safe" (apply new classifier rules retroactively)
  *  - "push-to-nurture": Push items (replies + sequence-finished leads) to a nurture campaign
  *  - "skip": Mark an item as skipped (do not nurture)
  *  - "unskip": Reverse a skip
@@ -14,6 +15,40 @@ import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
+
+const CLASSIFY_CONCURRENCY = 8;
+
+async function runWithConcurrency<T>(
+  items: T[],
+  worker: (item: T) => Promise<void>,
+  concurrency: number
+): Promise<void> {
+  let i = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      try {
+        await worker(items[idx]);
+      } catch (e) {
+        console.error("[nurture/mutate] worker error", e);
+      }
+    }
+  });
+  await Promise.all(runners);
+}
+
+async function classifyAndStore(r: { id: number; reply_we_got: string | null }) {
+  const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
+  await supabase
+    .from("replies")
+    .update({
+      nurture_safety: result.safety,
+      nurture_bucket: result.bucket,
+      nurture_safety_reason: result.reason,
+      nurture_classified_at: new Date().toISOString(),
+    })
+    .eq("id", r.id);
+}
 
 interface ItemRef {
   id: string;          // "reply:123" or "seq:456"
@@ -49,16 +84,23 @@ export async function POST(req: NextRequest) {
       if (error) throw new Error(error.message);
 
       const results: Array<{ id: number; safety: string; bucket: string | null; reason: string }> = [];
-      for (const r of rows || []) {
-        const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
-        await supabase.from("replies").update({
-          nurture_safety: result.safety,
-          nurture_bucket: result.bucket,
-          nurture_safety_reason: result.reason,
-          nurture_classified_at: new Date().toISOString(),
-        }).eq("id", r.id);
-        results.push({ id: r.id, safety: result.safety, bucket: result.bucket, reason: result.reason });
-      }
+      await runWithConcurrency(
+        rows || [],
+        async (r) => {
+          const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
+          await supabase
+            .from("replies")
+            .update({
+              nurture_safety: result.safety,
+              nurture_bucket: result.bucket,
+              nurture_safety_reason: result.reason,
+              nurture_classified_at: new Date().toISOString(),
+            })
+            .eq("id", r.id);
+          results.push({ id: r.id, safety: result.safety, bucket: result.bucket, reason: result.reason });
+        },
+        CLASSIFY_CONCURRENCY
+      );
 
       return NextResponse.json({ ok: true, classified: results.length, results });
     }
@@ -76,20 +118,58 @@ export async function POST(req: NextRequest) {
       if (error) throw new Error(error.message);
 
       let classified = 0;
-      for (const r of rows || []) {
-        const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
-        await supabase.from("replies").update({
-          nurture_safety: result.safety,
-          nurture_bucket: result.bucket,
-          nurture_safety_reason: result.reason,
-          nurture_classified_at: new Date().toISOString(),
-        }).eq("id", r.id);
-        classified++;
-      }
+      await runWithConcurrency(
+        rows || [],
+        async (r) => {
+          await classifyAndStore(r);
+          classified++;
+        },
+        CLASSIFY_CONCURRENCY
+      );
 
       return NextResponse.json({
         ok: true,
         classified,
+        remaining: (rows?.length || 0) === 200 ? "200+ — re-run to continue" : 0,
+      });
+    }
+
+    // ── re-classify everything currently marked safe (apply new classifier rules) ──
+    if (action === "classify-reset-safe") {
+      const { data: rows, error } = await supabase
+        .from("replies")
+        .select("id, reply_we_got")
+        .not("reply_we_got", "is", null)
+        .neq("reply_we_got", "")
+        .eq("nurture_safety", "safe")
+        .limit(200);
+      if (error) throw new Error(error.message);
+
+      let reclassified = 0;
+      let flippedToUnsafe = 0;
+      await runWithConcurrency(
+        rows || [],
+        async (r) => {
+          const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
+          await supabase
+            .from("replies")
+            .update({
+              nurture_safety: result.safety,
+              nurture_bucket: result.bucket,
+              nurture_safety_reason: result.reason,
+              nurture_classified_at: new Date().toISOString(),
+            })
+            .eq("id", r.id);
+          reclassified++;
+          if (result.safety !== "safe") flippedToUnsafe++;
+        },
+        CLASSIFY_CONCURRENCY
+      );
+
+      return NextResponse.json({
+        ok: true,
+        reclassified,
+        flippedToUnsafe,
         remaining: (rows?.length || 0) === 200 ? "200+ — re-run to continue" : 0,
       });
     }

@@ -6,15 +6,16 @@
  *      classifier from the reply text itself, NOT by the original AI category.
  *   2. nurture_sequence_finished (Scenario 3) — synced from EmailBison.
  *
- * 45-day eligibility is computed at query time:
- *   trigger = reply_time (replies) or sequence_finished_at (sequence)
- *   eligible_at = trigger + 45 days
+ * 45-day eligibility is computed in SQL via reply_time / sequence_finished_at
+ * comparisons against (now - 45d).
  *
  * Query params:
  *   source       "soft_negative" | "out_of_office" | "sequence_finished" | "all"  (default all)
  *   client_tag   filter by client
  *   status       "waiting" | "eligible" | "added" | "skipped" | "all"            (default all)
  *   safety       "safe" | "unsafe" | "unknown" | "unclassified" | "all"          (default all; n/a for sequence_finished)
+ *   limit        page size (default 50, max 200)
+ *   offset       pagination offset (default 0)
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -22,21 +23,8 @@ import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 
 const NURTURE_DAYS = 45;
-const BATCH_SIZE = 1000;
-
-async function fetchAllRows<T>(buildQuery: (from: number, to: number) => any): Promise<T[]> {
-  const all: T[] = [];
-  let offset = 0;
-  while (true) {
-    const { data, error } = await buildQuery(offset, offset + BATCH_SIZE - 1);
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-    all.push(...data);
-    if (data.length < BATCH_SIZE) break;
-    offset += BATCH_SIZE;
-  }
-  return all;
-}
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
 
 function daysBetween(later: Date, earlier: Date): number {
   return Math.floor((later.getTime() - earlier.getTime()) / (1000 * 60 * 60 * 24));
@@ -77,58 +65,77 @@ export async function GET(req: NextRequest) {
     const clientTag = req.nextUrl.searchParams.get("client_tag");
     const statusFilter = req.nextUrl.searchParams.get("status") || "all";
     const safetyFilter = req.nextUrl.searchParams.get("safety") || "all";
+    const limit = Math.min(
+      MAX_LIMIT,
+      Math.max(1, Number(req.nextUrl.searchParams.get("limit") || DEFAULT_LIMIT))
+    );
+    const offset = Math.max(0, Number(req.nextUrl.searchParams.get("offset") || 0));
 
     const items: NurtureItem[] = [];
     const now = new Date();
+    const cutoffIso = new Date(now.getTime() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-    // ── Replies-based candidates (Scenarios 1 + 2) ──
-    // Pull every reply with non-empty text and reply_time.
-    // Bucket / safety is decided by the classifier (stored in nurture_bucket /
-    // nurture_safety). Unclassified rows show up with bucket = null.
-    if (sourceParam === "all" || sourceParam === "soft_negative" || sourceParam === "out_of_office") {
-      const replies = await fetchAllRows<{
-        id: number;
-        reply_id: number;
-        client_tag: string | null;
-        lead_email: string;
-        first_name: string | null;
-        last_name: string | null;
-        company_name: string | null;
-        ai_categorized_lead_category: string | null;
-        reply_we_got: string | null;
-        reply_time: string | null;
-        nurture_safety: string | null;
-        nurture_bucket: string | null;
-        nurture_safety_reason: string | null;
-        nurture_classified_at: string | null;
-        nurture_added_at: string | null;
-        nurture_skipped: boolean | null;
-      }>((from, to) => {
-        let q = supabase
-          .from("replies")
-          .select("id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped")
-          .not("reply_we_got", "is", null)
-          .neq("reply_we_got", "")
-          .not("reply_time", "is", null)
-          .order("reply_time", { ascending: false })
-          .range(from, to);
-        if (clientTag) q = q.eq("client_tag", clientTag);
-        return q;
-      });
+    // Decide which sources to query.
+    // sequence_finished only includes the seq table; soft_negative / out_of_office
+    // restrict the replies-bucket filter; "all" hits both tables.
+    const wantReplies =
+      sourceParam === "all" ||
+      sourceParam === "soft_negative" ||
+      sourceParam === "out_of_office";
+    const wantSeq = sourceParam === "all" || sourceParam === "sequence_finished";
 
-      for (const r of replies) {
+    // ── Replies-based candidates ──
+    if (wantReplies) {
+      let q = supabase
+        .from("replies")
+        .select(
+          "id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped"
+        )
+        .not("reply_we_got", "is", null)
+        .neq("reply_we_got", "")
+        .not("reply_time", "is", null)
+        .order("reply_time", { ascending: false });
+
+      if (clientTag) q = q.eq("client_tag", clientTag);
+
+      // bucket source filter
+      if (sourceParam === "soft_negative") q = q.eq("nurture_bucket", "soft_negative");
+      else if (sourceParam === "out_of_office") q = q.eq("nurture_bucket", "out_of_office");
+
+      // status filter
+      if (statusFilter === "added") {
+        q = q.not("nurture_added_at", "is", null);
+      } else if (statusFilter === "skipped") {
+        q = q.eq("nurture_skipped", true);
+      } else if (statusFilter === "eligible") {
+        q = q
+          .lte("reply_time", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+      } else if (statusFilter === "waiting") {
+        q = q
+          .gt("reply_time", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+      }
+
+      // safety filter
+      if (safetyFilter === "unclassified") {
+        q = q.is("nurture_safety", null);
+      } else if (safetyFilter === "safe" || safetyFilter === "unsafe" || safetyFilter === "unknown") {
+        q = q.eq("nurture_safety", safetyFilter);
+      }
+
+      q = q.range(offset, offset + limit - 1);
+      const { data: rows, error } = await q;
+      if (error) throw new Error(error.message);
+
+      for (const r of rows || []) {
         if (!r.reply_time) continue;
-
-        // Determine display source from classifier output (bucket).
-        // Unclassified rows or "other" rows fall into "other" group.
         let source: NurtureItem["source"];
         if (r.nurture_bucket === "out_of_office") source = "out_of_office";
         else if (r.nurture_bucket === "soft_negative") source = "soft_negative";
         else source = "other";
-
-        // Source param filter — "soft_negative" or "out_of_office" only matches that bucket
-        if (sourceParam === "soft_negative" && source !== "soft_negative") continue;
-        if (sourceParam === "out_of_office" && source !== "out_of_office") continue;
 
         const triggerAt = new Date(r.reply_time);
         const eligibleAt = new Date(triggerAt.getTime() + NURTURE_DAYS * 24 * 60 * 60 * 1000);
@@ -160,32 +167,38 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ── Sequence-finished candidates (Scenario 3) ──
-    if (sourceParam === "all" || sourceParam === "sequence_finished") {
-      const seqRows = await fetchAllRows<{
-        id: number;
-        ob_lead_id: number;
-        ob_campaign_id: number;
-        campaign_name: string | null;
-        client_tag: string | null;
-        email: string;
-        first_name: string | null;
-        last_name: string | null;
-        company: string | null;
-        sequence_finished_at: string;
-        added_at: string | null;
-        skipped: boolean | null;
-      }>((from, to) => {
-        let q = supabase
-          .from("nurture_sequence_finished")
-          .select("id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, email, first_name, last_name, company, sequence_finished_at, added_at, skipped")
-          .order("sequence_finished_at", { ascending: false })
-          .range(from, to);
-        if (clientTag) q = q.eq("client_tag", clientTag);
-        return q;
-      });
+    // ── Sequence-finished candidates ──
+    if (wantSeq) {
+      let q = supabase
+        .from("nurture_sequence_finished")
+        .select(
+          "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, email, first_name, last_name, company, sequence_finished_at, added_at, skipped"
+        )
+        .order("sequence_finished_at", { ascending: false });
 
-      for (const r of seqRows) {
+      if (clientTag) q = q.eq("client_tag", clientTag);
+
+      if (statusFilter === "added") {
+        q = q.not("added_at", "is", null);
+      } else if (statusFilter === "skipped") {
+        q = q.eq("skipped", true);
+      } else if (statusFilter === "eligible") {
+        q = q
+          .lte("sequence_finished_at", cutoffIso)
+          .is("added_at", null)
+          .or("skipped.is.null,skipped.eq.false");
+      } else if (statusFilter === "waiting") {
+        q = q
+          .gt("sequence_finished_at", cutoffIso)
+          .is("added_at", null)
+          .or("skipped.is.null,skipped.eq.false");
+      }
+
+      q = q.range(offset, offset + limit - 1);
+      const { data: seqRows, error } = await q;
+      if (error) throw new Error(error.message);
+
+      for (const r of seqRows || []) {
         const triggerAt = new Date(r.sequence_finished_at);
         const eligibleAt = new Date(triggerAt.getTime() + NURTURE_DAYS * 24 * 60 * 60 * 1000);
         const daysLeft = daysBetween(eligibleAt, now);
@@ -212,58 +225,16 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ── Apply post-filters: status + safety ──
-    const filtered = items.filter((it) => {
-      if (statusFilter !== "all") {
-        if (statusFilter === "added" && !it.added_at) return false;
-        if (statusFilter === "skipped" && !it.skipped) return false;
-        if (statusFilter === "waiting" && (it.is_eligible || it.added_at || it.skipped)) return false;
-        if (statusFilter === "eligible" && (!it.is_eligible || it.added_at || it.skipped)) return false;
-      }
-      if (safetyFilter !== "all" && it.source !== "sequence_finished") {
-        if (safetyFilter === "unclassified" && it.nurture_safety) return false;
-        if (safetyFilter !== "unclassified" && it.nurture_safety !== safetyFilter) return false;
-      }
-      return true;
+    // Sort the merged page by trigger_at desc so the two sources interleave correctly.
+    items.sort((a, b) => (a.trigger_at < b.trigger_at ? 1 : -1));
+
+    // Trim to page size in case both sources contributed.
+    const paged = items.slice(0, limit);
+
+    return NextResponse.json({
+      items: paged,
+      page: { limit, offset, returned: paged.length, hasMore: items.length === limit },
     });
-
-    // ── Aggregate counts for the UI ──
-    const counts = {
-      total: filtered.length,
-      bySource: {
-        soft_negative: 0,
-        out_of_office: 0,
-        sequence_finished: 0,
-        other: 0,
-      } as Record<string, number>,
-      byStatus: {
-        waiting: 0,
-        eligible: 0,
-        added: 0,
-        skipped: 0,
-      } as Record<string, number>,
-      bySafety: {
-        safe: 0,
-        unsafe: 0,
-        unknown: 0,
-        unclassified: 0,
-      } as Record<string, number>,
-    };
-    for (const it of filtered) {
-      counts.bySource[it.source]++;
-      if (it.added_at) counts.byStatus.added++;
-      else if (it.skipped) counts.byStatus.skipped++;
-      else if (it.is_eligible) counts.byStatus.eligible++;
-      else counts.byStatus.waiting++;
-      if (it.source !== "sequence_finished") {
-        if (!it.nurture_safety) counts.bySafety.unclassified++;
-        else if (it.nurture_safety === "safe") counts.bySafety.safe++;
-        else if (it.nurture_safety === "unsafe") counts.bySafety.unsafe++;
-        else counts.bySafety.unknown++;
-      }
-    }
-
-    return NextResponse.json({ items: filtered, counts });
   } catch (error) {
     console.error("[api/nurture] GET failed:", error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
