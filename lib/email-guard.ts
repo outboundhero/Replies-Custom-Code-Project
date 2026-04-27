@@ -45,20 +45,28 @@ export async function lookupEmailHost(email: string): Promise<string | null> {
       body: JSON.stringify({ email }),
     });
     if (!res.ok) {
-      // 429 (rate limit) and 5xx warrant a quick retry; everything else is fatal-soft.
+      // 429 (rate limit) and 5xx warrant exponential retries up to 5 times.
+      // Everything else is fatal-soft.
       if (res.status === 429 || res.status >= 500) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const retry = await fetch(EMAIL_GUARD_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({ email }),
-        });
-        if (!retry.ok) {
-          console.warn(`[email-guard] ${email} → ${retry.status} after retry`);
-          return null;
+        const delays = [1500, 3000, 6000, 12000, 24000];
+        for (const delay of delays) {
+          await new Promise((r) => setTimeout(r, delay));
+          const retry = await fetch(EMAIL_GUARD_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({ email }),
+          });
+          if (retry.ok) {
+            const d = await retry.json();
+            return (d?.data?.email_host as string | null) ?? null;
+          }
+          if (retry.status !== 429 && retry.status < 500) {
+            console.warn(`[email-guard] ${email} → ${retry.status} after ${delay}ms backoff`);
+            return null;
+          }
         }
-        const data = await retry.json();
-        return (data?.data?.email_host as string | null) ?? null;
+        console.warn(`[email-guard] ${email} → exhausted ${delays.length} retries (rate-limit)`);
+        return null;
       }
       console.warn(`[email-guard] ${email} → ${res.status}`);
       return null;

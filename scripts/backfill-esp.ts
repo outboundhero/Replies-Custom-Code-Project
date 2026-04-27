@@ -26,6 +26,7 @@ import { lookupEmailHost } from "../lib/email-guard";
 config({ path: ".env.local" });
 
 const PAGE_SIZE = 500;
+const DEFAULT_CONCURRENCY = 5;
 
 interface TableSpec {
   name: string;
@@ -95,8 +96,9 @@ async function runWithConcurrency<T>(
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry");
+  const resetUnknowns = args.includes("--reset-unknowns");
   const concIdx = args.indexOf("--concurrency");
-  const concurrency = concIdx >= 0 ? Math.max(1, Math.min(50, Number(args[concIdx + 1]))) : 10;
+  const concurrency = concIdx >= 0 ? Math.max(1, Math.min(50, Number(args[concIdx + 1]))) : DEFAULT_CONCURRENCY;
   const tableArg = args.find((a) => !a.startsWith("--") && isNaN(Number(a)));
   const tables = tableArg ? TABLES.filter((t) => t.name === tableArg) : TABLES;
 
@@ -111,6 +113,25 @@ async function main() {
 
   console.log(`\nBackfilling esp for ${tables.length} table${tables.length === 1 ? "" : "s"}${dryRun ? " (DRY RUN)" : ""}`);
   console.log(`Concurrency: ${concurrency}\n`);
+
+  // Pre-step: reset rows previously marked "Unknown" by a botched / rate-
+  // limited run so they get re-attempted. Uses cursor pagination just
+  // like the main scan to avoid the 8s statement timeout.
+  if (resetUnknowns) {
+    for (const t of tables) {
+      console.log(`Resetting Unknown rows in ${t.name}…`);
+      const { error, count } = await supabase
+        .from(t.name)
+        .update({ esp: null }, { count: "exact" })
+        .eq("esp", "Unknown");
+      if (error) {
+        console.error(`  reset failed: ${error.message}`);
+      } else {
+        console.log(`  cleared ${(count || 0).toLocaleString()} rows`);
+      }
+    }
+    console.log("");
+  }
 
   // 1. Build the union of unique emails across all selected tables.
   const emailsByTable = new Map<string, Set<string>>();
@@ -175,16 +196,22 @@ async function main() {
       Array.from(emails),
       async (email) => {
         const host = cache.get(email);
-        // Mark unknown/failed lookups as "Unknown" so the next run skips
-        // them (esp is no longer NULL). Avoids burning credits on dead
-        // domains every time the script runs.
-        const value = host || "Unknown";
+        processed++;
+        // Lookup failed (rate-limit, network, EmailGuard outage) → leave
+        // esp as NULL so a future run re-attempts. Trying to mark a
+        // failed lookup as "Unknown" loses real data permanently the
+        // first time EmailGuard rate-limits us.
+        if (!host) {
+          if (processed % 500 === 0) {
+            console.log(`  Updated ${updated.toLocaleString()} / processed ${processed.toLocaleString()} unique emails`);
+          }
+          return;
+        }
         const { error, count } = await supabase
           .from(t.name)
-          .update({ esp: value }, { count: "exact" })
+          .update({ esp: host }, { count: "exact" })
           .ilike(t.emailColumn, email)
           .is("esp", null);
-        processed++;
         if (error) {
           updateErrors++;
           if (updateErrors <= 5) console.error(`  ${email} → update error: ${error.message}`);
