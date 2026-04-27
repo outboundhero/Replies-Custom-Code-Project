@@ -382,58 +382,107 @@ export default function NurturePage() {
   }
 
   /**
-   * Drain the entire unclassified backlog by re-firing the classify batch
-   * endpoint until it returns done=true. Each batch processes up to 200
-   * reply rows + 200 legacy rows server-side. The button updates after
-   * every batch so the user can see progress.
+   * Drain the entire unclassified backlog by re-firing the classify-batch
+   * endpoint until it returns done=true. Each batch is 200 reply + 200
+   * legacy rows server-side, ~30–60s per batch.
    *
-   * Stops on:
-   *   - done = true (no more unclassified rows)
-   *   - first failure (toast + halt)
-   *   - manual cancel via classifyCancelRef
+   * Stop is implemented via AbortController so clicking Stop interrupts
+   * the in-flight fetch immediately — not after the current batch
+   * finishes. Progress is tracked in classifyProgress state and rendered
+   * as a live banner while running.
    */
-  const classifyCancelRef = useRef(false);
+  const classifyAbortRef = useRef<AbortController | null>(null);
+  const [classifyProgress, setClassifyProgress] = useState<{
+    status: "idle" | "running" | "stopping" | "done" | "error";
+    batches: number;
+    classifiedThisRun: number;
+    lastBatchClassified: number;
+    startedAt: number | null;
+    error?: string;
+  }>({ status: "idle", batches: 0, classifiedThisRun: 0, lastBatchClassified: 0, startedAt: null });
 
   async function classifyAllUnclassified() {
     setClassifying(true);
-    classifyCancelRef.current = false;
+    const ac = new AbortController();
+    classifyAbortRef.current = ac;
+    setClassifyProgress({
+      status: "running",
+      batches: 0,
+      classifiedThisRun: 0,
+      lastBatchClassified: 0,
+      startedAt: Date.now(),
+    });
+
     let totalClassified = 0;
     let batches = 0;
+    let stopped = false;
 
     try {
-      while (!classifyCancelRef.current) {
-        const res = await fetch("/api/nurture/mutate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "classify-all-unclassified" }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          toast.error(data.error || "Classify failed");
-          break;
+      while (true) {
+        if (ac.signal.aborted) { stopped = true; break; }
+
+        let data: { classified?: number; remaining?: number | string; error?: string } | null = null;
+        try {
+          const res = await fetch("/api/nurture/mutate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "classify-all-unclassified" }),
+            signal: ac.signal,
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            setClassifyProgress((p) => ({ ...p, status: "error", error: err.error || `HTTP ${res.status}` }));
+            toast.error(err.error || "Classify failed");
+            break;
+          }
+          data = await res.json();
+        } catch (e) {
+          if ((e as Error).name === "AbortError") { stopped = true; break; }
+          throw e;
         }
+
         batches++;
-        totalClassified += data.classified || 0;
-        // Refresh tile counts every 5 batches so the user sees the dial moving
-        if (batches % 5 === 0) loadCounts();
-        if (data.remaining === 0 || data.classified === 0) {
+        const lastBatch = data?.classified || 0;
+        totalClassified += lastBatch;
+        setClassifyProgress((p) => ({
+          ...p,
+          batches,
+          classifiedThisRun: totalClassified,
+          lastBatchClassified: lastBatch,
+        }));
+
+        // Refresh tile counts every 3 batches so the dial moves visibly.
+        if (batches % 3 === 0) loadCounts();
+
+        // done = server returned 0 unclassified, or this batch classified 0 rows
+        if (data?.remaining === 0 || lastBatch === 0) {
+          setClassifyProgress((p) => ({ ...p, status: "done" }));
           toast.success(`Done — classified ${totalClassified.toLocaleString()} rows in ${batches} batch${batches === 1 ? "" : "es"}`);
           break;
         }
       }
-      if (classifyCancelRef.current) {
-        toast.info(`Stopped — classified ${totalClassified.toLocaleString()} rows so far`);
+      if (stopped) {
+        setClassifyProgress((p) => ({ ...p, status: "done" }));
+        toast.info(`Stopped — classified ${totalClassified.toLocaleString()} rows in ${batches} batch${batches === 1 ? "" : "es"}`);
       }
       await Promise.all([loadPage(true, false), loadCounts()]);
     } catch (e) {
+      setClassifyProgress((p) => ({ ...p, status: "error", error: (e as Error).message }));
       toast.error((e as Error).message);
     }
+
     setClassifying(false);
-    classifyCancelRef.current = false;
+    classifyAbortRef.current = null;
   }
 
   function cancelClassify() {
-    classifyCancelRef.current = true;
+    if (!classifyAbortRef.current) return;
+    setClassifyProgress((p) => ({ ...p, status: "stopping" }));
+    classifyAbortRef.current.abort();
+  }
+
+  function dismissClassifyProgress() {
+    setClassifyProgress({ status: "idle", batches: 0, classifiedThisRun: 0, lastBatchClassified: 0, startedAt: null });
   }
 
   async function reclassifySafe() {
@@ -609,6 +658,16 @@ export default function NurturePage() {
           onClick={() => setView("added")}
         />
       </div>
+
+      {/* ── Classify progress banner (visible while classify-loop is active) ── */}
+      {classifyProgress.status !== "idle" && (
+        <ClassifyProgressBanner
+          progress={classifyProgress}
+          counts={counts}
+          onStop={cancelClassify}
+          onDismiss={dismissClassifyProgress}
+        />
+      )}
 
       {/* ── Filter bar ── */}
       <div className="flex items-center gap-2 flex-wrap">
@@ -955,6 +1014,124 @@ export default function NurturePage() {
           )}
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function ClassifyProgressBanner({
+  progress, counts, onStop, onDismiss,
+}: {
+  progress: {
+    status: "idle" | "running" | "stopping" | "done" | "error";
+    batches: number;
+    classifiedThisRun: number;
+    lastBatchClassified: number;
+    startedAt: number | null;
+    error?: string;
+  };
+  counts: Counts | null;
+  onStop: () => void;
+  onDismiss: () => void;
+}) {
+  // Live elapsed-time tick
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (progress.status !== "running" && progress.status !== "stopping") return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [progress.status]);
+  void tick; // keep eslint happy — we use it implicitly via re-render
+
+  const elapsedMs = progress.startedAt ? Date.now() - progress.startedAt : 0;
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  const mm = Math.floor(elapsedSec / 60).toString().padStart(2, "0");
+  const ss = (elapsedSec % 60).toString().padStart(2, "0");
+
+  const rowsPerMin = elapsedSec > 0 ? Math.round((progress.classifiedThisRun / elapsedSec) * 60) : 0;
+
+  // Estimate remaining: counts.eligible is "all eligible" — eligibleSafe is
+  // the subset already classified safe. Unscored ≈ eligible − eligibleSafe.
+  // Add waiting too since the cron classifies everything regardless of
+  // eligibility status.
+  const remainingEstimate = counts
+    ? Math.max(0, counts.eligible + counts.waiting - counts.eligibleSafe)
+    : null;
+  const pctDone = remainingEstimate !== null && remainingEstimate > 0
+    ? Math.min(99, Math.round((progress.classifiedThisRun / (progress.classifiedThisRun + remainingEstimate)) * 100))
+    : null;
+  const etaSec = remainingEstimate !== null && rowsPerMin > 0
+    ? Math.round((remainingEstimate / rowsPerMin) * 60)
+    : null;
+  const etaText = etaSec === null ? "—"
+    : etaSec < 90 ? `${etaSec}s`
+    : etaSec < 3600 ? `${Math.round(etaSec / 60)}m`
+    : `${(etaSec / 3600).toFixed(1)}h`;
+
+  const isActive = progress.status === "running" || progress.status === "stopping";
+  const isDone = progress.status === "done";
+  const isError = progress.status === "error";
+
+  const accent = isError ? "border-red-300 bg-red-50/40"
+    : isDone ? "border-emerald-300 bg-emerald-50/40"
+    : "border-sky-300 bg-sky-50/40";
+
+  const headline = isError ? `Classify failed: ${progress.error || "unknown"}`
+    : progress.status === "stopping" ? "Stopping after current batch…"
+    : isDone ? "Classify finished"
+    : progress.batches === 0 ? "Starting classifier — first batch is processing (up to 60s)…"
+    : `Classifying batch ${progress.batches + 1}…`;
+
+  return (
+    <div className={`rounded-lg border ${accent} px-4 py-3`}>
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          {isActive && (
+            <span className="relative flex size-2.5 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75" />
+              <span className="relative inline-flex rounded-full size-2.5 bg-sky-500" />
+            </span>
+          )}
+          <p className="text-sm font-medium truncate">{headline}</p>
+        </div>
+        {isActive ? (
+          <Button size="sm" variant="outline" onClick={onStop} disabled={progress.status === "stopping"}>
+            {progress.status === "stopping" ? "Stopping…" : "Stop"}
+          </Button>
+        ) : (
+          <Button size="sm" variant="ghost" onClick={onDismiss}>Dismiss</Button>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      {pctDone !== null && (
+        <div className="mt-3 h-1.5 w-full rounded-full bg-muted overflow-hidden">
+          <div
+            className={`h-full transition-all duration-500 ${isDone ? "bg-emerald-500" : "bg-sky-500"}`}
+            style={{ width: `${isDone ? 100 : pctDone}%` }}
+          />
+        </div>
+      )}
+
+      {/* Stats row */}
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-2 text-xs">
+        <Stat label="Classified" value={progress.classifiedThisRun.toLocaleString()} />
+        <Stat label="Batches" value={progress.batches.toString()} />
+        <Stat label="Last batch" value={progress.lastBatchClassified.toLocaleString()} />
+        <Stat label="Elapsed" value={`${mm}:${ss}`} />
+        <Stat
+          label={remainingEstimate !== null ? `~Remaining (ETA ${etaText})` : "Throughput"}
+          value={remainingEstimate !== null ? `~${remainingEstimate.toLocaleString()}` : `${rowsPerMin}/min`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="font-medium tabular-nums">{value}</p>
     </div>
   );
 }
