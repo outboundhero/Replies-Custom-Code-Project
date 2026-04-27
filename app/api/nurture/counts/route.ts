@@ -27,40 +27,9 @@ const EXCLUDED_AI_CATEGORIES = [
   "Automated Error Message",
 ];
 
-// Mirror of NOISE_SENDER_PATTERNS in /api/nurture/route.ts — keep in sync.
-const NOISE_SENDER_PATTERNS = [
-  "%@public.govdelivery.com",
-  "%@govdelivery.com",
-  "%@mailchimpapp.com",
-  "%@em.%",
-  "%@bounce.%",
-  "%@bounces.%",
-  "noreply@%",
-  "no-reply@%",
-  "no_reply@%",
-  "donotreply@%",
-  "do-not-reply@%",
-  "do_not_reply@%",
-  "notifications@%",
-  "notification@%",
-  "newsletter@%",
-  "mailer-daemon@%",
-  "mailer@%",
-  "postmaster@%",
-  "jira@%",
-  "help@%",
-  "helpdesk@%",
-  "tickets@%",
-  "ticket@%",
-  "support-noreply@%",
-  "%@spiceworks.com",
-  "%.spiceworks.com",
-  "%@zendesk.com",
-  "%@freshdesk.com",
-  "survey@%",
-  "surveys@%",
-  "feedback@%",
-];
+// Noise-sender patterns are intentionally NOT filtered in this counts
+// endpoint — see comment in baseReplies() / baseLegacy(). They live in
+// /api/nurture for the list query.
 
 export async function GET(req: NextRequest) {
   const denied = await requireAdmin();
@@ -70,6 +39,13 @@ export async function GET(req: NextRequest) {
     const clientTag = req.nextUrl.searchParams.get("client_tag");
     const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
+    // NOTE: counts intentionally omit the noise-sender ILIKE patterns. With
+    // 30+ patterns × 394K legacy rows, those scans hit Supabase's statement
+    // timeout (~8s) and the count returns an empty error. The list query
+    // (/api/nurture) keeps the full filter — only 50 rows go through it per
+    // request, so it's fine. Result: tile counts may overcount by a few
+    // percent (a handful of newsletter senders), which is fine for a header
+    // tile. The list itself is always accurate.
     const baseReplies = () => {
       let q = supabase
         .from("replies")
@@ -81,9 +57,6 @@ export async function GET(req: NextRequest) {
         .or(
           `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );
-      for (const p of NOISE_SENDER_PATTERNS) {
-        q = q.not("lead_email", "ilike", p);
-      }
       if (clientTag) q = q.eq("client_tag", clientTag);
       return q;
     };
@@ -102,9 +75,6 @@ export async function GET(req: NextRequest) {
         .or(
           `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );
-      for (const p of NOISE_SENDER_PATTERNS) {
-        q = q.not("lead_email", "ilike", p);
-      }
       if (clientTag) q = q.eq("client_tag", clientTag);
       return q;
     };
