@@ -102,7 +102,14 @@ export default function NurturePage() {
   const [groupByClient, setGroupByClient] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
+  // selected = the IDs the user has chosen for bulk actions.
+  // selectedMeta = parallel map carrying client_tag + ob_lead_id for every
+  // selected ID, including bulk-selected rows that are NOT on the visible
+  // page. Needed so the campaign dropdown can filter by the selected
+  // leads' client_tag and so push/skip work without refetching.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedMeta, setSelectedMeta] = useState<Map<string, { client_tag: string | null; ob_lead_id?: number }>>(new Map());
+  const [bulkSelecting, setBulkSelecting] = useState(false);
   const [pushTargetCampaignId, setPushTargetCampaignId] = useState<string>("");
   const [pushing, setPushing] = useState(false);
   const [classifying, setClassifying] = useState(false);
@@ -138,7 +145,7 @@ export default function NurturePage() {
         const data = await res.json();
         const newItems: NurtureItem[] = data.items || [];
         if (append) setItems((prev) => [...prev, ...newItems]);
-        else { setItems(newItems); setSelected(new Set()); }
+        else { setItems(newItems); setSelected(new Set()); setSelectedMeta(new Map()); }
         setHasMore(!!data.page?.hasMore);
         setOffset(nextOffset + newItems.length);
         setFetchError(null);
@@ -202,10 +209,36 @@ export default function NurturePage() {
     [items]
   );
 
-  const campaignsForClient = useMemo(
-    () => (clientFilter ? campaigns.filter((c) => c.client_tag === clientFilter) : campaigns),
-    [campaigns, clientFilter]
-  );
+  // Distinct client_tags currently in the selection — used to filter the
+  // campaign dropdown so the user only sees that client's nurture campaigns.
+  const selectedClientTags = useMemo(() => {
+    const tags = new Set<string>();
+    for (const meta of selectedMeta.values()) {
+      if (meta.client_tag) tags.add(meta.client_tag);
+    }
+    return Array.from(tags);
+  }, [selectedMeta]);
+
+  // Campaign dropdown filter:
+  //   - If something is selected, show only campaigns matching the selected
+  //     leads' client_tag(s).
+  //   - Otherwise honour the page's client filter as a fallback.
+  //   - When campaigns lack a client_tag, fall back to matching by name
+  //     prefix (campaigns are named "TAG - …").
+  const filteredCampaigns = useMemo(() => {
+    const tagsToMatch =
+      selectedClientTags.length > 0 ? selectedClientTags
+      : clientFilter ? [clientFilter]
+      : null;
+    if (!tagsToMatch) return campaigns;
+    return campaigns.filter((c) => {
+      if (c.client_tag && tagsToMatch.includes(c.client_tag)) return true;
+      // Fallback: match by name prefix "TAG - …" or "TAG -…"
+      const m = c.name.match(/^([A-Z0-9&]+)\s*[-–:]/);
+      if (m && tagsToMatch.includes(m[1])) return true;
+      return false;
+    });
+  }, [campaigns, selectedClientTags, clientFilter]);
 
   // Search filter only — server already returns rows in the chosen sort
   // order across the FULL dataset (not just this 50-row page).
@@ -251,10 +284,16 @@ export default function NurturePage() {
     }
   }
 
-  function toggleSelect(id: string) {
+  function toggleSelect(it: NurtureItem) {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(it.id)) next.delete(it.id); else next.add(it.id);
+      return next;
+    });
+    setSelectedMeta((prev) => {
+      const next = new Map(prev);
+      if (next.has(it.id)) next.delete(it.id);
+      else next.set(it.id, { client_tag: it.client_tag, ob_lead_id: it.ob_lead_id });
       return next;
     });
   }
@@ -269,10 +308,55 @@ export default function NurturePage() {
       else pushables.forEach((i) => next.add(i.id));
       return next;
     });
+    setSelectedMeta((prev) => {
+      const next = new Map(prev);
+      if (allSelected) {
+        pushables.forEach((i) => next.delete(i.id));
+      } else {
+        pushables.forEach((i) =>
+          next.set(i.id, { client_tag: i.client_tag, ob_lead_id: i.ob_lead_id })
+        );
+      }
+      return next;
+    });
   }
 
   function toggleSelectAllVisible() {
     toggleSelectAllInGroup(visibleItems);
+  }
+
+  /**
+   * Bulk-select EVERY pushable lead matching the given filters across the
+   * full dataset (not just the visible page). Returns IDs from
+   * /api/nurture/ids — capped at 1000 per call. Replaces the current
+   * selection so the user can grab "everything for this client" in one
+   * click.
+   */
+  async function bulkSelectMatching(filters: { client_tag?: string; source?: string }) {
+    setBulkSelecting(true);
+    try {
+      const p = new URLSearchParams();
+      if (filters.client_tag) p.set("client_tag", filters.client_tag);
+      if (filters.source && filters.source !== "all") p.set("source", filters.source);
+      const res = await fetch(`/api/nurture/ids?${p}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        toast.error(body.error || `Bulk select failed (${res.status})`);
+        return;
+      }
+      const data = await res.json() as { items: Array<{ id: string; client_tag: string | null; ob_lead_id?: number }>; truncated: boolean };
+      setSelected(new Set(data.items.map((i) => i.id)));
+      setSelectedMeta(new Map(data.items.map((i) => [i.id, { client_tag: i.client_tag, ob_lead_id: i.ob_lead_id }])));
+      const noun = filters.client_tag ? `for ${filters.client_tag}` : "matching filters";
+      if (data.truncated) {
+        toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun} (capped at 1000 — push these first, then re-run)`);
+      } else {
+        toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun}`);
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+    setBulkSelecting(false);
   }
 
   function toggleGroupCollapse(key: string) {
@@ -341,9 +425,15 @@ export default function NurturePage() {
     if (!pushTargetCampaignId || selected.size === 0) return;
     setPushing(true);
     try {
-      const itemRefs = items
-        .filter((i) => selected.has(i.id))
-        .map((i) => ({ id: i.id, ob_lead_id: i.ob_lead_id }));
+      // Pull from selectedMeta — covers bulk-selected items that aren't on
+      // the current visible page. Falls back to items[] for ob_lead_id when
+      // the selection came from a row click.
+      const itemMap = new Map(items.map((i) => [i.id, i]));
+      const itemRefs = Array.from(selected).map((id) => {
+        const meta = selectedMeta.get(id);
+        const it = itemMap.get(id);
+        return { id, ob_lead_id: meta?.ob_lead_id ?? it?.ob_lead_id };
+      });
       const res = await fetch("/api/nurture/mutate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -540,17 +630,33 @@ export default function NurturePage() {
               )}
             </span>
           </div>
+          <button
+            onClick={() => bulkSelectMatching({ client_tag: clientFilter || undefined, source: sourceFilter })}
+            disabled={bulkSelecting}
+            className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+            title={
+              clientFilter
+                ? `Select every pushable lead for ${clientFilter} across the whole dataset (capped at 1000)`
+                : "Select every pushable lead matching the current filters across the whole dataset (capped at 1000). Tip: pick a Client first to limit the scope."
+            }
+          >
+            {bulkSelecting ? "Selecting…" : clientFilter ? `Select all for ${clientFilter}` : "Select all matching"}
+          </button>
           <Select value={pushTargetCampaignId} onValueChange={setPushTargetCampaignId}>
             <SelectTrigger className="h-9 w-72 text-sm" disabled={selected.size === 0}>
               <SelectValue placeholder="Choose a nurture campaign…" />
             </SelectTrigger>
             <SelectContent>
-              {campaignsForClient.length === 0 && (
+              {filteredCampaigns.length === 0 && (
                 <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                  {clientFilter ? `No nurture campaigns for ${clientFilter}` : "No nurture campaigns found"}
+                  {selectedClientTags.length > 0
+                    ? `No nurture campaigns for ${selectedClientTags.join(", ")}`
+                    : clientFilter
+                      ? `No nurture campaigns for ${clientFilter}`
+                      : "No nurture campaigns found"}
                 </div>
               )}
-              {campaignsForClient.map((c) => (
+              {filteredCampaigns.map((c) => (
                 <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
               ))}
             </SelectContent>
@@ -573,7 +679,12 @@ export default function NurturePage() {
             Skip
           </Button>
           {selected.size > 0 && (
-            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} className="h-9 ml-auto">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => { setSelected(new Set()); setSelectedMeta(new Map()); }}
+              className="h-9 ml-auto"
+            >
               Clear selection
             </Button>
           )}
@@ -631,14 +742,29 @@ export default function NurturePage() {
                             />
                           </TableCell>
                           <TableCell colSpan={7} className="font-medium">
-                            <span className="inline-flex items-center gap-2">
-                              {collapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
-                              <span>{group}</span>
-                              <span className="text-xs text-muted-foreground">
-                                · {gItems.length} lead{gItems.length === 1 ? "" : "s"}
-                                {groupPushable.length > 0 && <> · <span className="text-emerald-700">{groupPushable.length} ready</span></>}
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="inline-flex items-center gap-2">
+                                {collapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
+                                <span>{group}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  · {gItems.length} on this page
+                                  {groupPushable.length > 0 && <> · <span className="text-emerald-700">{groupPushable.length} ready</span></>}
+                                </span>
                               </span>
-                            </span>
+                              {group !== "(no client)" && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    bulkSelectMatching({ client_tag: group, source: sourceFilter });
+                                  }}
+                                  disabled={bulkSelecting}
+                                  className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline shrink-0"
+                                  title={`Select EVERY pushable ${group} lead across all pages (capped at 1000)`}
+                                >
+                                  Select all {group}
+                                </button>
+                              )}
+                            </div>
                           </TableCell>
                         </TableRow>
                         {!collapsed && gItems.map((it) => (
@@ -647,7 +773,7 @@ export default function NurturePage() {
                             it={it}
                             selected={selected.has(it.id)}
                             pushable={isPushable(it)}
-                            onToggle={() => toggleSelect(it.id)}
+                            onToggle={() => toggleSelect(it)}
                             onClick={() => setDetailItem(it)}
                           />
                         ))}
@@ -660,7 +786,7 @@ export default function NurturePage() {
                       it={it}
                       selected={selected.has(it.id)}
                       pushable={isPushable(it)}
-                      onToggle={() => toggleSelect(it.id)}
+                      onToggle={() => toggleSelect(it)}
                       onClick={() => setDetailItem(it)}
                     />
                   ))}
@@ -728,6 +854,7 @@ export default function NurturePage() {
                     size="sm"
                     onClick={() => {
                       setSelected(new Set([detailItem.id]));
+                      setSelectedMeta(new Map([[detailItem.id, { client_tag: detailItem.client_tag, ob_lead_id: detailItem.ob_lead_id }]]));
                       setDetailItem(null);
                       toast.info("Selected — pick a campaign in the action bar above to push.");
                     }}
