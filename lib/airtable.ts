@@ -91,3 +91,94 @@ export async function updateRecord(
     }
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Schema + bulk read helpers (used by the Airtable → Supabase backfill)
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface AirtableField {
+  id: string;
+  name: string;
+  type: string;
+  description?: string;
+  options?: unknown;
+}
+
+export interface AirtableTableSchema {
+  id: string;
+  name: string;
+  primaryFieldId: string;
+  description?: string;
+  fields: AirtableField[];
+}
+
+export interface AirtableRecord {
+  id: string;
+  createdTime: string;
+  fields: Record<string, unknown>;
+}
+
+/**
+ * List every table in a base and the schema of each one.
+ * Calls Airtable's Meta API: GET /v0/meta/bases/{baseId}/tables
+ *
+ * Requires the PAT to have the `schema.bases:read` scope.
+ */
+export async function listBaseSchema(baseId: string): Promise<AirtableTableSchema[]> {
+  return withRetry(async () => {
+    const res = await fetch(`${AIRTABLE_API}/meta/bases/${baseId}/tables`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Airtable schema fetch failed (${res.status}): ${body}`);
+    }
+    const data = await res.json();
+    return data.tables || [];
+  });
+}
+
+/**
+ * Stream every record from a table, paging through Airtable's `offset`
+ * cursor (page size 100). The optional onPage callback fires once per
+ * Airtable page so callers can flush each batch straight to a destination
+ * without holding the whole table in memory.
+ *
+ * Returns the full record list as well — callers that don't care about
+ * memory pressure can ignore onPage.
+ */
+export async function listAllRecords(
+  baseId: string,
+  tableId: string,
+  opts?: {
+    pageSize?: number;
+    onPage?: (records: AirtableRecord[], pageNumber: number) => Promise<void> | void;
+  }
+): Promise<AirtableRecord[]> {
+  const all: AirtableRecord[] = [];
+  let offset: string | undefined;
+  let pageNumber = 0;
+  const pageSize = Math.min(100, Math.max(1, opts?.pageSize ?? 100));
+
+  do {
+    const url = new URL(`${AIRTABLE_API}/${baseId}/${tableId}`);
+    url.searchParams.set("pageSize", String(pageSize));
+    if (offset) url.searchParams.set("offset", offset);
+
+    const page = await withRetry(async () => {
+      const res = await fetch(url.toString(), { headers: getHeaders() });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Airtable list failed (${res.status}): ${body}`);
+      }
+      return (await res.json()) as { records: AirtableRecord[]; offset?: string };
+    });
+
+    pageNumber++;
+    if (opts?.onPage) await opts.onPage(page.records || [], pageNumber);
+    all.push(...(page.records || []));
+    offset = page.offset;
+  } while (offset);
+
+  return all;
+}

@@ -9,7 +9,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
-type Source = "soft_negative" | "out_of_office" | "sequence_finished" | "other";
+type Source = "soft_negative" | "out_of_office" | "sequence_finished" | "legacy_airtable" | "other";
 type View = "actionable" | "eligible" | "waiting" | "added";
 type SortKey = "email" | "company" | "client" | "source" | "safety" | "eligibility";
 type SortDir = "asc" | "desc";
@@ -61,6 +61,7 @@ const SOURCE_LABEL: Record<Source, string> = {
   soft_negative: "Soft Negative",
   out_of_office: "Out of Office",
   sequence_finished: "Sequence Finished",
+  legacy_airtable: "Legacy (Airtable)",
   other: "Other",
 };
 
@@ -68,6 +69,7 @@ const SOURCE_DOT: Record<Source, string> = {
   soft_negative: "bg-blue-400",
   out_of_office: "bg-amber-400",
   sequence_finished: "bg-violet-400",
+  legacy_airtable: "bg-rose-400",
   other: "bg-zinc-300",
 };
 
@@ -485,6 +487,7 @@ export default function NurturePage() {
             <SelectItem value="soft_negative">Soft negative</SelectItem>
             <SelectItem value="out_of_office">Out of office</SelectItem>
             <SelectItem value="sequence_finished">Sequence finished</SelectItem>
+            <SelectItem value="legacy_airtable">Legacy (Airtable)</SelectItem>
           </SelectContent>
         </Select>
         <button

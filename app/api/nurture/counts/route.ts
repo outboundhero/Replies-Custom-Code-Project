@@ -90,7 +90,21 @@ export async function GET(req: NextRequest) {
       return q;
     };
 
-    const runCount = async (q: ReturnType<typeof baseReplies> | ReturnType<typeof baseSeq>) => {
+    const baseLegacy = () => {
+      let q = supabase
+        .from("nurture_legacy_leads")
+        .select("id", { count: "exact", head: true })
+        .or(
+          `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+        );
+      for (const p of NOISE_SENDER_PATTERNS) {
+        q = q.not("lead_email", "ilike", p);
+      }
+      if (clientTag) q = q.eq("client_tag", clientTag);
+      return q;
+    };
+
+    const runCount = async (q: ReturnType<typeof baseReplies> | ReturnType<typeof baseSeq> | ReturnType<typeof baseLegacy>) => {
       const { count, error } = await q;
       if (error) throw new Error(error.message);
       return count ?? 0;
@@ -106,6 +120,11 @@ export async function GET(req: NextRequest) {
       seqEligible,
       seqWaiting,
       seqAdded,
+      legacyTotal,
+      legacyEligible,
+      legacyEligibleSafe,
+      legacyWaiting,
+      legacyAdded,
     ] = await Promise.all([
       runCount(baseReplies()),
       runCount(
@@ -142,16 +161,42 @@ export async function GET(req: NextRequest) {
           .or("skipped.is.null,skipped.eq.false")
       ),
       runCount(baseSeq().not("added_at", "is", null)),
+      runCount(baseLegacy()),
+      runCount(
+        baseLegacy()
+          .lte("reply_at", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+      ),
+      runCount(
+        baseLegacy()
+          .lte("reply_at", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .eq("nurture_safety", "safe")
+      ),
+      runCount(
+        baseLegacy()
+          .gt("reply_at", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+      ),
+      runCount(baseLegacy().not("nurture_added_at", "is", null)),
     ]);
 
+    // NOTE: counts are per-source raw totals. The actual list dedupes by
+    // (lead_email, client_tag) across replies + legacy, so the visible row
+    // count may be lower than (replyX + seqX + legacyX) when leads exist
+    // in both `replies` and `nurture_legacy_leads`. Computing a perfect
+    // deduped count would require a full anti-join — out of scope for now.
     return NextResponse.json(
       {
-        total: replyTotal + seqTotal,
-        eligible: replyEligible + seqEligible,
+        total: replyTotal + seqTotal + legacyTotal,
+        eligible: replyEligible + seqEligible + legacyEligible,
         // Sequence-finished rows have no safety classifier — treat them as safe.
-        eligibleSafe: replyEligibleSafe + seqEligible,
-        waiting: replyWaiting + seqWaiting,
-        added: replyAdded + seqAdded,
+        eligibleSafe: replyEligibleSafe + seqEligible + legacyEligibleSafe,
+        waiting: replyWaiting + seqWaiting + legacyWaiting,
+        added: replyAdded + seqAdded + legacyAdded,
       },
       { headers: { "Cache-Control": "private, max-age=30" } }
     );

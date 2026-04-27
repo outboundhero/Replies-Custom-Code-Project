@@ -57,16 +57,36 @@ async function classifyAndStore(r: {
     .eq("id", r.id);
 }
 
-interface ItemRef {
-  id: string;          // "reply:123" or "seq:456"
-  ob_lead_id?: number; // optional override (for sequence_finished items it's known)
-  email?: string;      // optional, used to find OB lead ID for reply-based items
+async function classifyAndStoreLegacy(r: {
+  id: number;
+  reply_text: string | null;
+  original_ai_category?: string | null;
+}) {
+  const result = await classifyNurtureSafety({
+    replyText: r.reply_text || "",
+    aiCategory: r.original_ai_category ?? null,
+  });
+  await supabase
+    .from("nurture_legacy_leads")
+    .update({
+      nurture_safety: result.safety,
+      nurture_bucket: result.bucket,
+      nurture_safety_reason: result.reason,
+      nurture_classified_at: new Date().toISOString(),
+    })
+    .eq("id", r.id);
 }
 
-function parseItemId(id: string): { source: "reply" | "seq"; rowId: number } | null {
-  const m = id.match(/^(reply|seq):(\d+)$/);
+interface ItemRef {
+  id: string;          // "reply:123", "seq:456", or "legacy:789"
+  ob_lead_id?: number; // optional override (for sequence_finished items it's known)
+  email?: string;      // optional, used to find OB lead ID for reply-based / legacy items
+}
+
+function parseItemId(id: string): { source: "reply" | "seq" | "legacy"; rowId: number } | null {
+  const m = id.match(/^(reply|seq|legacy):(\d+)$/);
   if (!m) return null;
-  return { source: m[1] as "reply" | "seq", rowId: Number(m[2]) };
+  return { source: m[1] as "reply" | "seq" | "legacy", rowId: Number(m[2]) };
 }
 
 export async function POST(req: NextRequest) {
@@ -116,49 +136,79 @@ export async function POST(req: NextRequest) {
     }
 
     // ── classify EVERY unclassified reply (regardless of AI category) ──
-    // Pulls in batches of 200 per request. Re-run to continue if more remain.
+    // Pulls in batches of 200 per request from BOTH replies and legacy.
+    // Re-run to continue if more remain.
     if (action === "classify-all-unclassified") {
-      const { data: rows, error } = await supabase
-        .from("replies")
-        .select("id, reply_we_got, ai_categorized_lead_category")
-        .not("reply_we_got", "is", null)
-        .neq("reply_we_got", "")
-        .is("nurture_safety", null)
-        .limit(200);
-      if (error) throw new Error(error.message);
+      const [{ data: replyRows, error: replyErr }, { data: legacyRows, error: legacyErr }] =
+        await Promise.all([
+          supabase
+            .from("replies")
+            .select("id, reply_we_got, ai_categorized_lead_category")
+            .not("reply_we_got", "is", null)
+            .neq("reply_we_got", "")
+            .is("nurture_safety", null)
+            .limit(200),
+          supabase
+            .from("nurture_legacy_leads")
+            .select("id, reply_text, original_ai_category")
+            .not("reply_text", "is", null)
+            .neq("reply_text", "")
+            .is("nurture_safety", null)
+            .limit(200),
+        ]);
+      if (replyErr) throw new Error(replyErr.message);
+      if (legacyErr) throw new Error(legacyErr.message);
 
       let classified = 0;
       await runWithConcurrency(
-        rows || [],
-        async (r) => {
-          await classifyAndStore(r);
-          classified++;
-        },
+        replyRows || [],
+        async (r) => { await classifyAndStore(r); classified++; },
+        CLASSIFY_CONCURRENCY
+      );
+      await runWithConcurrency(
+        legacyRows || [],
+        async (r) => { await classifyAndStoreLegacy(r); classified++; },
         CLASSIFY_CONCURRENCY
       );
 
+      const replyDone = (replyRows?.length || 0) < 200;
+      const legacyDone = (legacyRows?.length || 0) < 200;
       return NextResponse.json({
         ok: true,
         classified,
-        remaining: (rows?.length || 0) === 200 ? "200+ — re-run to continue" : 0,
+        replyClassified: replyRows?.length || 0,
+        legacyClassified: legacyRows?.length || 0,
+        remaining: replyDone && legacyDone ? 0 : "more remaining — re-run to continue",
       });
     }
 
     // ── re-classify everything currently marked safe (apply new classifier rules) ──
+    // Pulls 200 from each of replies + legacy.
     if (action === "classify-reset-safe") {
-      const { data: rows, error } = await supabase
-        .from("replies")
-        .select("id, reply_we_got, ai_categorized_lead_category")
-        .not("reply_we_got", "is", null)
-        .neq("reply_we_got", "")
-        .eq("nurture_safety", "safe")
-        .limit(200);
-      if (error) throw new Error(error.message);
+      const [{ data: replyRows, error: replyErr }, { data: legacyRows, error: legacyErr }] =
+        await Promise.all([
+          supabase
+            .from("replies")
+            .select("id, reply_we_got, ai_categorized_lead_category, nurture_safety")
+            .not("reply_we_got", "is", null)
+            .neq("reply_we_got", "")
+            .eq("nurture_safety", "safe")
+            .limit(200),
+          supabase
+            .from("nurture_legacy_leads")
+            .select("id, reply_text, original_ai_category, nurture_safety")
+            .not("reply_text", "is", null)
+            .neq("reply_text", "")
+            .eq("nurture_safety", "safe")
+            .limit(200),
+        ]);
+      if (replyErr) throw new Error(replyErr.message);
+      if (legacyErr) throw new Error(legacyErr.message);
 
       let reclassified = 0;
       let flippedToUnsafe = 0;
       await runWithConcurrency(
-        rows || [],
+        replyRows || [],
         async (r) => {
           const result = await classifyNurtureSafety({
             replyText: r.reply_we_got || "",
@@ -178,12 +228,37 @@ export async function POST(req: NextRequest) {
         },
         CLASSIFY_CONCURRENCY
       );
+      await runWithConcurrency(
+        legacyRows || [],
+        async (r) => {
+          const result = await classifyNurtureSafety({
+            replyText: r.reply_text || "",
+            aiCategory: r.original_ai_category ?? null,
+          });
+          await supabase
+            .from("nurture_legacy_leads")
+            .update({
+              nurture_safety: result.safety,
+              nurture_bucket: result.bucket,
+              nurture_safety_reason: result.reason,
+              nurture_classified_at: new Date().toISOString(),
+            })
+            .eq("id", r.id);
+          reclassified++;
+          if (result.safety !== "safe") flippedToUnsafe++;
+        },
+        CLASSIFY_CONCURRENCY
+      );
 
+      const replyDone = (replyRows?.length || 0) < 200;
+      const legacyDone = (legacyRows?.length || 0) < 200;
       return NextResponse.json({
         ok: true,
         reclassified,
         flippedToUnsafe,
-        remaining: (rows?.length || 0) === 200 ? "200+ — re-run to continue" : 0,
+        replyReclassified: replyRows?.length || 0,
+        legacyReclassified: legacyRows?.length || 0,
+        remaining: replyDone && legacyDone ? 0 : "more remaining — re-run to continue",
       });
     }
 
@@ -196,17 +271,22 @@ export async function POST(req: NextRequest) {
       const skipValue = action === "skip";
       const replyIds: number[] = [];
       const seqIds: number[] = [];
+      const legacyIds: number[] = [];
       for (const id of items) {
         const parsed = parseItemId(id);
         if (!parsed) continue;
         if (parsed.source === "reply") replyIds.push(parsed.rowId);
-        else seqIds.push(parsed.rowId);
+        else if (parsed.source === "seq") seqIds.push(parsed.rowId);
+        else legacyIds.push(parsed.rowId);
       }
       if (replyIds.length) {
         await supabase.from("replies").update({ nurture_skipped: skipValue }).in("id", replyIds);
       }
       if (seqIds.length) {
         await supabase.from("nurture_sequence_finished").update({ skipped: skipValue }).in("id", seqIds);
+      }
+      if (legacyIds.length) {
+        await supabase.from("nurture_legacy_leads").update({ nurture_skipped: skipValue }).in("id", legacyIds);
       }
       return NextResponse.json({ ok: true, updated: items.length });
     }
@@ -223,6 +303,7 @@ export async function POST(req: NextRequest) {
       const leadIds: number[] = [];
       const replyIdsBeingAdded: number[] = [];
       const seqIdsBeingAdded: number[] = [];
+      const legacyIdsBeingAdded: number[] = [];
       const failures: Array<{ id: string; reason: string }> = [];
 
       for (const it of items) {
@@ -241,6 +322,26 @@ export async function POST(req: NextRequest) {
           if (row.skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
           leadIds.push(row.ob_lead_id);
           seqIdsBeingAdded.push(parsed.rowId);
+        } else if (parsed.source === "legacy") {
+          // Legacy Airtable rows: look up OutboundHero lead by email
+          const { data: row } = await supabase
+            .from("nurture_legacy_leads")
+            .select("lead_email, nurture_added_at, nurture_skipped, nurture_safety")
+            .eq("id", parsed.rowId)
+            .single();
+          if (!row) { failures.push({ id: it.id, reason: "Legacy lead not found" }); continue; }
+          if (row.nurture_added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
+          if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
+          if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); continue; }
+
+          let obLeadId = it.ob_lead_id;
+          if (!obLeadId && row.lead_email) {
+            const lead = await findLeadByEmail(row.lead_email);
+            if (lead) obLeadId = lead.id;
+          }
+          if (!obLeadId) { failures.push({ id: it.id, reason: "Could not find lead in OutboundHero" }); continue; }
+          leadIds.push(obLeadId);
+          legacyIdsBeingAdded.push(parsed.rowId);
         } else {
           // Reply-based: look up the lead in OutboundHero by email
           const { data: row } = await supabase
@@ -287,6 +388,12 @@ export async function POST(req: NextRequest) {
           added_at: nowIso,
           nurture_campaign_id: nurtureCampaignId,
         }).in("id", seqIdsBeingAdded);
+      }
+      if (legacyIdsBeingAdded.length) {
+        await supabase.from("nurture_legacy_leads").update({
+          nurture_added_at: nowIso,
+          nurture_campaign_id: nurtureCampaignId,
+        }).in("id", legacyIdsBeingAdded);
       }
 
       return NextResponse.json({

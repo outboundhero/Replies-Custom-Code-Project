@@ -120,7 +120,7 @@ function daysBetween(later: Date, earlier: Date): number {
 
 interface NurtureItem {
   id: string;
-  source: "soft_negative" | "out_of_office" | "sequence_finished" | "other";
+  source: "soft_negative" | "out_of_office" | "sequence_finished" | "legacy_airtable" | "other";
   client_tag: string | null;
   email: string;
   first_name: string | null;
@@ -142,6 +142,10 @@ interface NurtureItem {
   ob_lead_id?: number;
   ob_campaign_id?: number;
   campaign_name?: string;
+}
+
+function dedupeKey(email: string | null | undefined, clientTag: string | null | undefined): string {
+  return `${(email || "").toLowerCase().trim()}|${(clientTag || "").trim()}`;
 }
 
 export async function GET(req: NextRequest) {
@@ -171,6 +175,7 @@ export async function GET(req: NextRequest) {
       sourceParam === "soft_negative" ||
       sourceParam === "out_of_office";
     const wantSeq = sourceParam === "all" || sourceParam === "sequence_finished";
+    const wantLegacy = sourceParam === "all" || sourceParam === "legacy_airtable";
 
     // ── Replies-based candidates ──
     if (wantReplies) {
@@ -239,18 +244,19 @@ export async function GET(req: NextRequest) {
       const { data: rows, error } = await q;
       if (error) throw new Error(error.message);
 
-      // Dedupe by lead_email — multiple replies from the same address
-      // (e.g. a newsletter that survived noise filtering) collapse to one
-      // entry per email. The query is already ordered by reply_time, so the
-      // first occurrence is the most relevant one for the active view.
-      const seenEmails = new Set<string>();
+      // Dedupe by (lead_email, client_tag) — same person under the same
+      // client tag collapses to one entry. The query is ordered by reply_time
+      // so the first occurrence is the most relevant for the active view.
+      const seenKeys = new Set<string>();
       for (const r of rows || []) {
         if (!r.reply_time) continue;
         const email = (r.lead_email || "").toLowerCase();
-        if (!email || seenEmails.has(email)) continue;
+        if (!email) continue;
+        const key = dedupeKey(email, r.client_tag);
+        if (seenKeys.has(key)) continue;
         // Skip ticket / notification / survey auto-replies based on body markers.
         if (isNoiseBody(r.reply_we_got)) continue;
-        seenEmails.add(email);
+        seenKeys.add(key);
 
         let source: NurtureItem["source"];
         if (r.nurture_bucket === "out_of_office") source = "out_of_office";
@@ -350,10 +356,113 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Sort the merged page by trigger_at desc so the two sources interleave correctly.
+    // ── Legacy Airtable candidates (historical replies imported from Airtable) ──
+    if (wantLegacy) {
+      const legacyOrderByAddedDesc = statusFilter === "added";
+      let q = supabase
+        .from("nurture_legacy_leads")
+        .select(
+          "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped"
+        );
+
+      q = legacyOrderByAddedDesc
+        ? q.order("nurture_added_at", { ascending: false })
+        : q.order("reply_at", { ascending: true });
+
+      // Same hard-block AI-category filter as the replies query
+      q = q.or(
+        `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+      );
+
+      // Same noise-sender filter as the replies query
+      for (const p of NOISE_SENDER_PATTERNS) {
+        q = q.not("lead_email", "ilike", p);
+      }
+
+      if (clientTag) q = q.eq("client_tag", clientTag);
+
+      if (statusFilter === "added") {
+        q = q.not("nurture_added_at", "is", null);
+      } else if (statusFilter === "skipped") {
+        q = q.eq("nurture_skipped", true);
+      } else if (statusFilter === "eligible") {
+        q = q
+          .lte("reply_at", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+      } else if (statusFilter === "waiting") {
+        q = q
+          .gt("reply_at", cutoffIso)
+          .is("nurture_added_at", null)
+          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+      }
+
+      // Safety filter — same semantics as replies
+      if (safetyFilter === "unclassified") {
+        q = q.is("nurture_safety", null);
+      } else if (safetyFilter === "safe" || safetyFilter === "unsafe" || safetyFilter === "unknown") {
+        q = q.eq("nurture_safety", safetyFilter);
+      }
+
+      // Fetch 2x for dedupe headroom (same pattern as replies)
+      q = q.range(offset, offset + limit * 2 - 1);
+      const { data: legacyRows, error } = await q;
+      if (error) throw new Error(error.message);
+
+      // Cross-source dedupe: skip any (email, client_tag) already seen in
+      // `replies` above. Recent replies always win — they're more authoritative.
+      const seenFromReplies = new Set<string>();
+      for (const it of items) seenFromReplies.add(dedupeKey(it.email, it.client_tag));
+
+      const seenLegacy = new Set<string>();
+      for (const r of legacyRows || []) {
+        if (!r.reply_at) continue;
+        const email = (r.lead_email || "").toLowerCase();
+        if (!email) continue;
+        const key = dedupeKey(email, r.client_tag);
+        if (seenFromReplies.has(key) || seenLegacy.has(key)) continue;
+        if (isNoiseBody(r.reply_text)) continue;
+        seenLegacy.add(key);
+
+        let source: NurtureItem["source"];
+        if (r.nurture_bucket === "out_of_office") source = "out_of_office";
+        else if (r.nurture_bucket === "soft_negative") source = "soft_negative";
+        else source = "legacy_airtable";
+
+        const triggerAt = new Date(r.reply_at);
+        const eligibleAt = new Date(triggerAt.getTime() + NURTURE_DAYS * 24 * 60 * 60 * 1000);
+        const daysLeft = daysBetween(eligibleAt, now);
+        const isEligible = daysLeft <= 0;
+
+        items.push({
+          id: `legacy:${r.id}`,
+          source,
+          client_tag: r.client_tag,
+          email: r.lead_email,
+          first_name: r.first_name,
+          last_name: r.last_name,
+          company: r.company,
+          trigger_at: r.reply_at,
+          eligible_at: eligibleAt.toISOString(),
+          days_until_eligible: daysLeft,
+          is_eligible: isEligible,
+          added_at: r.nurture_added_at,
+          skipped: !!r.nurture_skipped,
+          ai_category: r.original_ai_category,
+          reply_text: r.reply_text,
+          nurture_safety: r.nurture_safety,
+          nurture_bucket: r.nurture_bucket,
+          nurture_safety_reason: r.nurture_safety_reason,
+          nurture_classified_at: r.nurture_classified_at,
+        });
+        if (items.length >= limit * 3) break;
+      }
+    }
+
+    // Sort the merged page by trigger_at desc so the sources interleave correctly.
     items.sort((a, b) => (a.trigger_at < b.trigger_at ? 1 : -1));
 
-    // Trim to page size in case both sources contributed.
+    // Trim to page size in case multiple sources contributed.
     const paged = items.slice(0, limit);
 
     return NextResponse.json({
