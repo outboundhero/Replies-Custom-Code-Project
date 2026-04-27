@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
     const baseReplies = () => {
       let q = supabase
         .from("replies")
-        .select("id", { count: "exact", head: true })
+        .select("id", { count: "estimated", head: true })
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .not("reply_time", "is", null)
@@ -62,7 +62,7 @@ export async function GET(req: NextRequest) {
     };
 
     const baseSeq = () => {
-      let q = supabase.from("nurture_sequence_finished").select("id", { count: "exact", head: true });
+      let q = supabase.from("nurture_sequence_finished").select("id", { count: "estimated", head: true });
       if (clientTag) q = q.eq("client_tag", clientTag);
       return q;
     };
@@ -70,7 +70,7 @@ export async function GET(req: NextRequest) {
     const baseLegacy = () => {
       let q = supabase
         .from("nurture_legacy_leads")
-        .select("id", { count: "exact", head: true })
+        .select("id", { count: "estimated", head: true })
         .neq("client_tag", "N/A")
         .or(
           `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
@@ -125,14 +125,14 @@ export async function GET(req: NextRequest) {
         baseReplies()
           .lte("reply_time", cutoffIso)
           .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .not("nurture_skipped", "is", true)
       ),
       runCount(
         "replies.eligibleSafe",
         baseReplies()
           .lte("reply_time", cutoffIso)
           .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .not("nurture_skipped", "is", true)
           .eq("nurture_safety", "safe")
       ),
       runCount(
@@ -140,7 +140,7 @@ export async function GET(req: NextRequest) {
         baseReplies()
           .gt("reply_time", cutoffIso)
           .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .not("nurture_skipped", "is", true)
       ),
       runCount("replies.added", baseReplies().not("nurture_added_at", "is", null)),
       runCount("seq.total", baseSeq()),
@@ -149,14 +149,14 @@ export async function GET(req: NextRequest) {
         baseSeq()
           .lte("sequence_finished_at", cutoffIso)
           .is("added_at", null)
-          .or("skipped.is.null,skipped.eq.false")
+          .not("skipped", "is", true)
       ),
       runCount(
         "seq.waiting",
         baseSeq()
           .gt("sequence_finished_at", cutoffIso)
           .is("added_at", null)
-          .or("skipped.is.null,skipped.eq.false")
+          .not("skipped", "is", true)
       ),
       runCount("seq.added", baseSeq().not("added_at", "is", null)),
       runCount("legacy.total", baseLegacy()),
@@ -165,14 +165,14 @@ export async function GET(req: NextRequest) {
         baseLegacy()
           .lte("reply_at", cutoffIso)
           .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .not("nurture_skipped", "is", true)
       ),
       runCount(
         "legacy.eligibleSafe",
         baseLegacy()
           .lte("reply_at", cutoffIso)
           .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .not("nurture_skipped", "is", true)
           .eq("nurture_safety", "safe")
       ),
       runCount(
@@ -180,7 +180,7 @@ export async function GET(req: NextRequest) {
         baseLegacy()
           .gt("reply_at", cutoffIso)
           .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false")
+          .not("nurture_skipped", "is", true)
       ),
       runCount("legacy.added", baseLegacy().not("nurture_added_at", "is", null)),
     ]);
