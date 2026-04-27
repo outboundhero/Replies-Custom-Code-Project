@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, Fragment } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 type Source = "soft_negative" | "out_of_office" | "sequence_finished" | "other";
 type View = "actionable" | "eligible" | "waiting" | "added";
+type SortKey = "email" | "company" | "client" | "source" | "safety" | "eligibility";
+type SortDir = "asc" | "desc";
 
 interface NurtureItem {
   id: string;
@@ -60,13 +64,14 @@ const SOURCE_LABEL: Record<Source, string> = {
   other: "Other",
 };
 
-// Subtle accent stripe per source — replaces the noisy badge
-const SOURCE_ACCENT: Record<Source, string> = {
-  soft_negative: "border-l-blue-400",
-  out_of_office: "border-l-amber-400",
-  sequence_finished: "border-l-purple-400",
-  other: "border-l-zinc-300",
+const SOURCE_DOT: Record<Source, string> = {
+  soft_negative: "bg-blue-400",
+  out_of_office: "bg-amber-400",
+  sequence_finished: "bg-violet-400",
+  other: "bg-zinc-300",
 };
+
+const SAFETY_RANK: Record<string, number> = { safe: 0, unknown: 1, unsafe: 2 };
 
 function viewToFilters(view: View): { status: string; safety: string } {
   switch (view) {
@@ -74,6 +79,17 @@ function viewToFilters(view: View): { status: string; safety: string } {
     case "eligible":   return { status: "eligible", safety: "all" };
     case "waiting":    return { status: "waiting", safety: "all" };
     case "added":      return { status: "added", safety: "all" };
+  }
+}
+
+function getSortValue(it: NurtureItem, key: SortKey): string | number {
+  switch (key) {
+    case "email":       return it.email?.toLowerCase() || "";
+    case "company":     return it.company?.toLowerCase() || "~"; // empty sorts last
+    case "client":      return it.client_tag?.toLowerCase() || "~";
+    case "source":      return it.source;
+    case "safety":      return it.source === "sequence_finished" ? 0 : SAFETY_RANK[it.nurture_safety || ""] ?? 3;
+    case "eligibility": return it.days_until_eligible;
   }
 }
 
@@ -91,6 +107,11 @@ export default function NurturePage() {
   const [search, setSearch] = useState("");
   const [clientFilter, setClientFilter] = useState<string>("");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+
+  const [sortKey, setSortKey] = useState<SortKey>("eligibility");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [groupByClient, setGroupByClient] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pushTargetCampaignId, setPushTargetCampaignId] = useState<string>("");
@@ -150,22 +171,33 @@ export default function NurturePage() {
     } catch {}
   }, [clientFilter]);
 
-  // Reload page when view or filters change
   useEffect(() => {
     loadPage(true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, clientFilter, sourceFilter]);
 
-  // Load counts on mount + on client filter change
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
-  // Load nurture campaigns once
   useEffect(() => {
     fetch("/api/nurture/campaigns")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d?.campaigns) setCampaigns(d.campaigns); })
       .catch(() => {});
   }, []);
+
+  // Tick every 60s so days-left labels stay accurate without a refetch.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Recompute days_until_eligible / is_eligible from eligible_at + current time
+  function withFreshDays(it: NurtureItem): NurtureItem {
+    const eligibleMs = new Date(it.eligible_at).getTime();
+    const daysLeft = Math.floor((eligibleMs - now) / (1000 * 60 * 60 * 24));
+    return { ...it, days_until_eligible: daysLeft, is_eligible: daysLeft <= 0 };
+  }
 
   // Distinct client tags from current page items (for the filter dropdown)
   const clientTags = useMemo(
@@ -178,22 +210,7 @@ export default function NurturePage() {
     [campaigns, clientFilter]
   );
 
-  // Tick every 60s so days-left labels stay accurate without a refetch.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(id);
-  }, []);
-
-  // Recompute days_until_eligible / is_eligible from eligible_at + current time
-  // so the list stays accurate even hours after the initial fetch.
-  function withFreshDays(it: NurtureItem): NurtureItem {
-    const eligibleMs = new Date(it.eligible_at).getTime();
-    const daysLeft = Math.floor((eligibleMs - now) / (1000 * 60 * 60 * 24));
-    return { ...it, days_until_eligible: daysLeft, is_eligible: daysLeft <= 0 };
-  }
-
-  // Search-filter + sort the visible items client-side (only paginated 50 at a time)
+  // Search + sort visible items
   const visibleItems = useMemo(() => {
     let list = items.map(withFreshDays);
     if (search.trim()) {
@@ -205,11 +222,29 @@ export default function NurturePage() {
           `${i.first_name || ""} ${i.last_name || ""}`.toLowerCase().includes(q)
       );
     }
-    // Sort by time-until-eligible ascending so the most-due items surface first.
-    // Eligible items (negative days) end up at the top, oldest-eligible first.
-    return list.sort((a, b) => a.days_until_eligible - b.days_until_eligible);
+    const dir = sortDir === "asc" ? 1 : -1;
+    return list.sort((a, b) => {
+      const av = getSortValue(a, sortKey);
+      const bv = getSortValue(b, sortKey);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      // Tiebreak by eligibility ascending so most-due always wins.
+      return a.days_until_eligible - b.days_until_eligible;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, search, now]);
+  }, [items, search, sortKey, sortDir, now]);
+
+  // Group items by client when groupByClient is enabled
+  const groupedItems = useMemo(() => {
+    if (!groupByClient) return null;
+    const groups = new Map<string, NurtureItem[]>();
+    for (const it of visibleItems) {
+      const key = it.client_tag || "(no client)";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(it);
+    }
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [visibleItems, groupByClient]);
 
   function isPushable(it: NurtureItem): boolean {
     if (!it.is_eligible) return false;
@@ -217,6 +252,15 @@ export default function NurturePage() {
     if (it.skipped) return false;
     if (it.source !== "sequence_finished" && it.nurture_safety !== "safe") return false;
     return true;
+  }
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "eligibility" ? "asc" : "asc");
+    }
   }
 
   function toggleSelect(id: string) {
@@ -227,17 +271,28 @@ export default function NurturePage() {
     });
   }
 
-  function toggleSelectAll() {
-    const selectable = visibleItems.filter(isPushable);
-    if (selectable.every((i) => selected.has(i.id))) {
-      const next = new Set(selected);
-      selectable.forEach((i) => next.delete(i.id));
-      setSelected(next);
-    } else {
-      const next = new Set(selected);
-      selectable.forEach((i) => next.add(i.id));
-      setSelected(next);
-    }
+  function toggleSelectAllInGroup(groupItems: NurtureItem[]) {
+    const pushables = groupItems.filter(isPushable);
+    if (pushables.length === 0) return;
+    const allSelected = pushables.every((i) => selected.has(i.id));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allSelected) pushables.forEach((i) => next.delete(i.id));
+      else pushables.forEach((i) => next.add(i.id));
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    toggleSelectAllInGroup(visibleItems);
+  }
+
+  function toggleGroupCollapse(key: string) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
   }
 
   async function classifyAllUnclassified() {
@@ -339,17 +394,17 @@ export default function NurturePage() {
     } else toast.error(data.error);
   }
 
-  const selectableInView = visibleItems.filter(isPushable);
-  const allInViewSelected = selectableInView.length > 0 && selectableInView.every((i) => selected.has(i.id));
+  const pushableInView = visibleItems.filter(isPushable);
+  const allInViewSelected = pushableInView.length > 0 && pushableInView.every((i) => selected.has(i.id));
 
   return (
-    <div className="space-y-6 max-w-[1400px]">
+    <div className="space-y-6 max-w-[1500px]">
       {/* ── Header ── */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Nurture</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Re-engage leads after a 45-day cooldown. The classifier hard-blocks any reply with "no", "remove me", "unsubscribe", or wrong-person signals.
+          <h1 className="text-[26px] font-semibold tracking-tight">Nurture</h1>
+          <p className="text-sm text-muted-foreground mt-1.5 max-w-2xl">
+            Re-engage soft-negative and out-of-office leads after a 45-day cooldown. The classifier hard-blocks any reply with "no", "remove me", "unsubscribe", "wrong person", or remote-only signals — and any lead the AI categorizer flagged as Do Not Contact / Wrong Person / Not Interested.
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
@@ -360,7 +415,7 @@ export default function NurturePage() {
             {classifying ? "Classifying…" : "Classify Unclassified"}
           </Button>
           <Button size="sm" variant="outline" onClick={reclassifySafe} disabled={reclassifying}>
-            {reclassifying ? "Re-classifying…" : "Re-classify Safe (apply new rules)"}
+            {reclassifying ? "Re-classifying…" : "Re-classify Safe"}
           </Button>
         </div>
       </div>
@@ -369,7 +424,7 @@ export default function NurturePage() {
       <div className="grid grid-cols-4 gap-3">
         <StatTile
           label="Ready to nurture"
-          sublabel="eligible & safe"
+          sublabel="Eligible & safe — push these"
           value={counts?.eligibleSafe}
           accent="text-emerald-700"
           active={view === "actionable"}
@@ -378,7 +433,7 @@ export default function NurturePage() {
         />
         <StatTile
           label="All eligible"
-          sublabel="incl. unclassified"
+          sublabel="Past 45-day cooldown"
           value={counts?.eligible}
           accent="text-sky-700"
           active={view === "eligible"}
@@ -387,7 +442,7 @@ export default function NurturePage() {
         />
         <StatTile
           label="Waiting"
-          sublabel="< 45 days old"
+          sublabel="Cooldown still ticking"
           value={counts?.waiting}
           accent="text-amber-700"
           active={view === "waiting"}
@@ -396,7 +451,7 @@ export default function NurturePage() {
         />
         <StatTile
           label="Added"
-          sublabel="pushed to a campaign"
+          sublabel="Already pushed to a campaign"
           value={counts?.added}
           accent="text-violet-700"
           active={view === "added"}
@@ -406,13 +461,16 @@ export default function NurturePage() {
       </div>
 
       {/* ── Filter bar ── */}
-      <div className="flex items-center gap-2">
-        <Input
-          placeholder="Search email, name, or company"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="h-9 max-w-sm"
-        />
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+          <Input
+            placeholder="Search email, name, or company"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-9 w-72 pl-8"
+          />
+        </div>
         <Select value={clientFilter || "all"} onValueChange={(v) => setClientFilter(v === "all" ? "" : v)}>
           <SelectTrigger className="h-9 w-44 text-sm"><SelectValue placeholder="All clients" /></SelectTrigger>
           <SelectContent>
@@ -429,31 +487,52 @@ export default function NurturePage() {
             <SelectItem value="sequence_finished">Sequence finished</SelectItem>
           </SelectContent>
         </Select>
-        <Button size="sm" variant="ghost" onClick={() => loadPage(true, false)} disabled={loading} className="h-9 ml-auto">
-          {loading ? "Loading…" : "Refresh"}
+        <button
+          onClick={() => setGroupByClient((g) => !g)}
+          className={`h-9 px-3 rounded-md border text-sm transition-colors ${
+            groupByClient
+              ? "bg-primary text-primary-foreground border-primary"
+              : "bg-background hover:bg-muted/50 text-foreground"
+          }`}
+        >
+          Group by client
+        </button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => loadPage(true, false)}
+          disabled={loading}
+          className="h-9 ml-auto"
+          title="Refresh"
+        >
+          <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
         </Button>
       </div>
 
       {/* ── Sticky bulk action bar ── */}
-      <div className="sticky top-0 z-10 -mx-1 px-1 py-2 bg-background/90 backdrop-blur border-b">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleSelectAll}
-            disabled={selectableInView.length === 0}
-            className="text-sm text-muted-foreground hover:text-foreground disabled:opacity-40"
-          >
-            <span className="inline-flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={allInViewSelected}
-                onChange={toggleSelectAll}
-                disabled={selectableInView.length === 0}
-              />
-              <span>
-                {selected.size > 0 ? `${selected.size} selected` : `${selectableInView.length} selectable on this page`}
-              </span>
+      <div className="sticky top-0 z-20 -mx-1 px-1 py-2 bg-background/95 backdrop-blur border-b">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={allInViewSelected}
+              onChange={toggleSelectAllVisible}
+              disabled={pushableInView.length === 0}
+              className="size-4"
+            />
+            <span className="text-sm text-muted-foreground">
+              {selected.size > 0 ? (
+                <span className="text-foreground font-medium">{selected.size} selected</span>
+              ) : (
+                <>
+                  <span className="text-foreground font-medium">{visibleItems.length}</span> shown
+                  {pushableInView.length > 0 && (
+                    <span> · <span className="text-emerald-700">{pushableInView.length} ready to push</span></span>
+                  )}
+                </>
+              )}
             </span>
-          </button>
+          </div>
           <Select value={pushTargetCampaignId} onValueChange={setPushTargetCampaignId}>
             <SelectTrigger className="h-9 w-72 text-sm" disabled={selected.size === 0}>
               <SelectValue placeholder="Choose a nurture campaign…" />
@@ -488,14 +567,14 @@ export default function NurturePage() {
           </Button>
           {selected.size > 0 && (
             <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} className="h-9 ml-auto">
-              Clear
+              Clear selection
             </Button>
           )}
         </div>
       </div>
 
-      {/* ── Lead list ── */}
-      <div className="rounded-lg border bg-card">
+      {/* ── Lead table ── */}
+      <div className="rounded-lg border bg-card overflow-hidden">
         {fetchError && (
           <div className="m-3 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
             {fetchError}
@@ -507,71 +586,90 @@ export default function NurturePage() {
         ) : visibleItems.length === 0 ? (
           <EmptyState view={view} />
         ) : (
-          <div className="divide-y">
-            {visibleItems.map((it) => {
-              const pushable = isPushable(it);
-              const isSelected = selected.has(it.id);
-              return (
-                <div
-                  key={it.id}
-                  className={`group flex items-center gap-3 px-4 py-3.5 border-l-4 ${SOURCE_ACCENT[it.source]} ${isSelected ? "bg-emerald-50/40" : "hover:bg-muted/40"} transition-colors`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => toggleSelect(it.id)}
-                    disabled={!pushable}
-                    className="shrink-0"
-                    title={pushable ? "" : "Not selectable (not eligible/safe or already added)"}
-                  />
-                  <button
-                    onClick={() => setDetailItem(it)}
-                    className="flex-1 min-w-0 text-left"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-sm font-medium truncate">{it.email}</span>
-                      {(it.first_name || it.last_name) && (
-                        <span className="text-sm text-muted-foreground truncate">
-                          {it.first_name} {it.last_name}
-                        </span>
-                      )}
-                      {it.company && (
-                        <span className="text-sm text-muted-foreground truncate">· {it.company}</span>
-                      )}
-                      {it.client_tag && (
-                        <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0">
-                          {it.client_tag}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1 line-clamp-1 italic">
-                      {it.reply_text?.trim() || (it.source === "sequence_finished" ? "Sequence finished — no reply, no bounce" : "—")}
-                    </p>
-                  </button>
-                  <div className="shrink-0 flex items-center gap-2">
-                    <SafetyPill safety={it.nurture_safety} source={it.source} />
-                    <EligibilityPill it={it} />
-                  </div>
-                </div>
-              );
-            })}
-            {hasMore && (
-              <div className="p-3 text-center">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => loadPage(false, true)}
-                  disabled={loadingMore}
-                >
-                  {loadingMore ? "Loading…" : "Load more"}
-                </Button>
-              </div>
-            )}
+          <Table>
+            <TableHeader className="bg-muted/40">
+              <TableRow>
+                <TableHead className="w-10 px-3"></TableHead>
+                <SortableHead label="Lead" k="email" current={sortKey} dir={sortDir} onClick={toggleSort} />
+                <SortableHead label="Company" k="company" current={sortKey} dir={sortDir} onClick={toggleSort} />
+                <SortableHead label="Client" k="client" current={sortKey} dir={sortDir} onClick={toggleSort} />
+                <SortableHead label="Source" k="source" current={sortKey} dir={sortDir} onClick={toggleSort} />
+                <TableHead className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
+                  Reply
+                </TableHead>
+                <SortableHead label="Safety" k="safety" current={sortKey} dir={sortDir} onClick={toggleSort} />
+                <SortableHead label="Eligibility" k="eligibility" current={sortKey} dir={sortDir} onClick={toggleSort} />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {groupedItems
+                ? groupedItems.map(([group, gItems]) => {
+                    const collapsed = collapsedGroups.has(group);
+                    const groupPushable = gItems.filter(isPushable);
+                    const groupAllSelected = groupPushable.length > 0 && groupPushable.every((i) => selected.has(i.id));
+                    return (
+                      <Fragment key={`group-${group}`}>
+                        <TableRow
+                          className="bg-muted/30 hover:bg-muted/50 cursor-pointer"
+                          onClick={() => toggleGroupCollapse(group)}
+                        >
+                          <TableCell className="px-3">
+                            <input
+                              type="checkbox"
+                              checked={groupAllSelected}
+                              onChange={(e) => { e.stopPropagation(); toggleSelectAllInGroup(gItems); }}
+                              onClick={(e) => e.stopPropagation()}
+                              disabled={groupPushable.length === 0}
+                              className="size-4"
+                            />
+                          </TableCell>
+                          <TableCell colSpan={7} className="font-medium">
+                            <span className="inline-flex items-center gap-2">
+                              {collapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
+                              <span>{group}</span>
+                              <span className="text-xs text-muted-foreground">
+                                · {gItems.length} lead{gItems.length === 1 ? "" : "s"}
+                                {groupPushable.length > 0 && <> · <span className="text-emerald-700">{groupPushable.length} ready</span></>}
+                              </span>
+                            </span>
+                          </TableCell>
+                        </TableRow>
+                        {!collapsed && gItems.map((it) => (
+                          <LeadRow
+                            key={it.id}
+                            it={it}
+                            selected={selected.has(it.id)}
+                            pushable={isPushable(it)}
+                            onToggle={() => toggleSelect(it.id)}
+                            onClick={() => setDetailItem(it)}
+                          />
+                        ))}
+                      </Fragment>
+                    );
+                  })
+                : visibleItems.map((it) => (
+                    <LeadRow
+                      key={it.id}
+                      it={it}
+                      selected={selected.has(it.id)}
+                      pushable={isPushable(it)}
+                      onToggle={() => toggleSelect(it.id)}
+                      onClick={() => setDetailItem(it)}
+                    />
+                  ))}
+            </TableBody>
+          </Table>
+        )}
+        {hasMore && (
+          <div className="p-3 text-center border-t bg-muted/20">
+            <Button size="sm" variant="outline" onClick={() => loadPage(false, true)} disabled={loadingMore}>
+              {loadingMore ? "Loading…" : "Load more"}
+            </Button>
           </div>
         )}
       </div>
 
-      {/* ── Detail side panel (centered modal — Sheet not installed) ── */}
+      {/* ── Detail dialog ── */}
       <Dialog open={!!detailItem} onOpenChange={(open) => !open && setDetailItem(null)}>
         <DialogContent className="sm:max-w-2xl">
           {detailItem && (
@@ -601,9 +699,7 @@ export default function NurturePage() {
                   <DetailField label="From campaign">{detailItem.campaign_name}</DetailField>
                 )}
                 <DetailField label="Triggered">
-                  {new Date(detailItem.trigger_at).toLocaleString()} ·
-                  {" "}
-                  Eligible {new Date(detailItem.eligible_at).toLocaleDateString()}
+                  {new Date(detailItem.trigger_at).toLocaleString()} · Eligible {new Date(detailItem.eligible_at).toLocaleDateString()}
                 </DetailField>
                 {detailItem.nurture_safety_reason && (
                   <DetailField label="Safety reason">
@@ -678,44 +774,137 @@ function StatTile({
   return (
     <button
       onClick={onClick}
-      className={`text-left rounded-lg border bg-card px-4 py-3 transition-colors hover:bg-muted/30 ${active ? `border-b-2 ${activeBorder}` : ""}`}
+      className={`text-left rounded-lg border bg-card px-5 py-4 transition-all hover:shadow-sm hover:bg-muted/20 ${active ? `border-b-2 ${activeBorder} shadow-sm` : ""}`}
     >
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`text-2xl font-semibold tabular-nums mt-0.5 ${accent}`}>
+      <p className="text-xs uppercase tracking-wide text-muted-foreground font-medium">{label}</p>
+      <p className={`text-3xl font-semibold tabular-nums mt-1 ${accent}`}>
         {value === undefined ? "—" : value.toLocaleString()}
       </p>
-      <p className="text-[11px] text-muted-foreground mt-0.5">{sublabel}</p>
+      <p className="text-xs text-muted-foreground mt-1">{sublabel}</p>
     </button>
   );
 }
 
+function SortableHead({
+  label, k, current, dir, onClick,
+}: {
+  label: string;
+  k: SortKey;
+  current: SortKey;
+  dir: SortDir;
+  onClick: (k: SortKey) => void;
+}) {
+  const active = current === k;
+  return (
+    <TableHead
+      className="text-xs uppercase tracking-wide text-muted-foreground font-medium cursor-pointer select-none hover:text-foreground"
+      onClick={() => onClick(k)}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active ? (
+          dir === "asc" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />
+        ) : (
+          <ArrowUpDown className="size-3 opacity-40" />
+        )}
+      </span>
+    </TableHead>
+  );
+}
+
+function LeadRow({
+  it, selected, pushable, onToggle, onClick,
+}: {
+  it: NurtureItem;
+  selected: boolean;
+  pushable: boolean;
+  onToggle: () => void;
+  onClick: () => void;
+}) {
+  return (
+    <TableRow className={selected ? "bg-emerald-50/50 hover:bg-emerald-50/60" : ""}>
+      <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          disabled={!pushable}
+          className="size-4"
+          title={pushable ? "" : "Not selectable (not eligible/safe or already added)"}
+        />
+      </TableCell>
+      <TableCell className="cursor-pointer max-w-[220px]" onClick={onClick}>
+        <div className="font-medium text-sm truncate">{it.email}</div>
+        {(it.first_name || it.last_name) && (
+          <div className="text-xs text-muted-foreground truncate">
+            {it.first_name} {it.last_name}
+          </div>
+        )}
+      </TableCell>
+      <TableCell className="cursor-pointer max-w-[180px]" onClick={onClick}>
+        <span className="text-sm truncate block">{it.company || "—"}</span>
+      </TableCell>
+      <TableCell className="cursor-pointer" onClick={onClick}>
+        {it.client_tag ? (
+          <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+            {it.client_tag}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        )}
+      </TableCell>
+      <TableCell className="cursor-pointer" onClick={onClick}>
+        <span className="inline-flex items-center gap-1.5 text-xs">
+          <span className={`size-2 rounded-full ${SOURCE_DOT[it.source]}`} />
+          <span className="text-muted-foreground">{SOURCE_LABEL[it.source]}</span>
+        </span>
+      </TableCell>
+      <TableCell className="cursor-pointer max-w-[280px] whitespace-normal" onClick={onClick}>
+        <span className="text-xs text-muted-foreground italic line-clamp-1">
+          {it.reply_text?.trim() || (it.source === "sequence_finished" ? "Sequence finished — no reply, no bounce" : "—")}
+        </span>
+      </TableCell>
+      <TableCell className="cursor-pointer" onClick={onClick}>
+        <SafetyPill safety={it.nurture_safety} source={it.source} />
+      </TableCell>
+      <TableCell className="cursor-pointer" onClick={onClick}>
+        <EligibilityPill it={it} />
+      </TableCell>
+    </TableRow>
+  );
+}
+
 function SafetyPill({ safety, source }: { safety: string | null | undefined; source: Source }) {
+  const cls = "text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap";
   if (source === "sequence_finished") {
-    return <span className="text-[11px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200 whitespace-nowrap">No reply</span>;
+    return <span className={`${cls} bg-violet-50 text-violet-700 border-violet-200`}>No reply</span>;
   }
-  if (!safety) return <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-50 text-zinc-600 border border-zinc-200 whitespace-nowrap">Unclassified</span>;
-  if (safety === "safe") return <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap">Safe</span>;
-  if (safety === "unsafe") return <span className="text-[11px] px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 whitespace-nowrap">Unsafe</span>;
-  return <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 whitespace-nowrap">Unknown</span>;
+  if (!safety) return <span className={`${cls} bg-zinc-50 text-zinc-600 border-zinc-200`}>Unclassified</span>;
+  if (safety === "safe") return <span className={`${cls} bg-emerald-50 text-emerald-700 border-emerald-200`}>Safe</span>;
+  if (safety === "unsafe") return <span className={`${cls} bg-red-50 text-red-700 border-red-200`}>Unsafe</span>;
+  return <span className={`${cls} bg-amber-50 text-amber-700 border-amber-200`}>Unknown</span>;
 }
 
 function EligibilityPill({ it }: { it: NurtureItem }) {
-  if (it.added_at) {
-    return <span className="text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap">Added</span>;
-  }
-  if (it.skipped) {
-    return <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600 border border-zinc-200 whitespace-nowrap">Skipped</span>;
-  }
+  const cls = "text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap";
+  if (it.added_at) return <span className={`${cls} bg-blue-50 text-blue-700 border-blue-200`}>Added</span>;
+  if (it.skipped) return <span className={`${cls} bg-zinc-100 text-zinc-600 border-zinc-200`}>Skipped</span>;
   if (it.is_eligible) {
     const ago = Math.abs(it.days_until_eligible);
     return (
-      <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap" title={`Eligible since ${new Date(it.eligible_at).toLocaleDateString()}`}>
+      <span
+        className={`${cls} bg-emerald-50 text-emerald-700 border-emerald-200`}
+        title={`Eligible since ${new Date(it.eligible_at).toLocaleDateString()}`}
+      >
         {ago === 0 ? "Eligible today" : `Eligible ${ago}d ago`}
       </span>
     );
   }
   return (
-    <span className="text-[11px] text-muted-foreground whitespace-nowrap" title={`Eligible on ${new Date(it.eligible_at).toLocaleDateString()}`}>
+    <span
+      className="text-[11px] text-muted-foreground whitespace-nowrap"
+      title={`Eligible on ${new Date(it.eligible_at).toLocaleDateString()}`}
+    >
       In {it.days_until_eligible}d
     </span>
   );
