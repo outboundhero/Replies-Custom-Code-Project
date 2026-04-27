@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, Fragment } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef, Fragment } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -367,22 +367,59 @@ export default function NurturePage() {
     });
   }
 
+  /**
+   * Drain the entire unclassified backlog by re-firing the classify batch
+   * endpoint until it returns done=true. Each batch processes up to 200
+   * reply rows + 200 legacy rows server-side. The button updates after
+   * every batch so the user can see progress.
+   *
+   * Stops on:
+   *   - done = true (no more unclassified rows)
+   *   - first failure (toast + halt)
+   *   - manual cancel via classifyCancelRef
+   */
+  const classifyCancelRef = useRef(false);
+
   async function classifyAllUnclassified() {
     setClassifying(true);
+    classifyCancelRef.current = false;
+    let totalClassified = 0;
+    let batches = 0;
+
     try {
-      const res = await fetch("/api/nurture/mutate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "classify-all-unclassified" }),
-      });
-      const data = await res.json();
-      if (res.ok) toast.success(`Classified ${data.classified} replies`);
-      else toast.error(data.error || "Classify failed");
+      while (!classifyCancelRef.current) {
+        const res = await fetch("/api/nurture/mutate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "classify-all-unclassified" }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          toast.error(data.error || "Classify failed");
+          break;
+        }
+        batches++;
+        totalClassified += data.classified || 0;
+        // Refresh tile counts every 5 batches so the user sees the dial moving
+        if (batches % 5 === 0) loadCounts();
+        if (data.remaining === 0 || data.classified === 0) {
+          toast.success(`Done — classified ${totalClassified.toLocaleString()} rows in ${batches} batch${batches === 1 ? "" : "es"}`);
+          break;
+        }
+      }
+      if (classifyCancelRef.current) {
+        toast.info(`Stopped — classified ${totalClassified.toLocaleString()} rows so far`);
+      }
       await Promise.all([loadPage(true, false), loadCounts()]);
     } catch (e) {
       toast.error((e as Error).message);
     }
     setClassifying(false);
+    classifyCancelRef.current = false;
+  }
+
+  function cancelClassify() {
+    classifyCancelRef.current = true;
   }
 
   async function reclassifySafe() {
@@ -498,11 +535,14 @@ export default function NurturePage() {
           <Button
             size="sm"
             variant="outline"
-            onClick={classifyAllUnclassified}
-            disabled={classifying}
-            title="Runs the safety classifier on rows that don't have a Safety value yet — 200 from replies + 200 from legacy per click. Re-run until the toast shows '0 remaining'. Required before rows can show up in 'Ready to nurture'."
+            onClick={classifying ? cancelClassify : classifyAllUnclassified}
+            title={
+              classifying
+                ? "Click to stop. The current batch will finish first."
+                : "Drains the entire unclassified backlog — keeps firing 200-reply + 200-legacy batches in a loop until done. Tile counts refresh every 5 batches. Click again while running to stop."
+            }
           >
-            {classifying ? "Classifying…" : "Classify Unclassified"}
+            {classifying ? "Classifying — click to stop" : "Classify Unclassified"}
           </Button>
           <Button
             size="sm"

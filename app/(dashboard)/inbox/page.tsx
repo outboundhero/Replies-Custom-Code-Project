@@ -262,18 +262,59 @@ export default function InboxPage() {
 
   async function updateCategory(cat: string) {
     if (!detail) return;
+    const oldCat = detail.lead_category || "Open Response";
+    if (oldCat === cat) return;
+
+    // ── Optimistic local-state patch — NO refetches, NO page flash ──
+    // The detail panel updates instantly, the sidebar tile counts shift, and
+    // the lead row moves between category buckets in place. The reply
+    // composer and CC/BCC inputs are NOT touched.
+    setDetail((prev) => (prev ? { ...prev, lead_category: cat } : prev));
+    setCounts((prev) => {
+      const next = { ...prev };
+      if (oldCat) next[oldCat] = Math.max(0, (next[oldCat] || 0) - 1);
+      next[cat] = (next[cat] || 0) + 1;
+      return next;
+    });
+    setCategoryLeads((prev) => {
+      const next = { ...prev };
+      // Remove from old bucket if present
+      if (next[oldCat]) {
+        next[oldCat] = next[oldCat].filter((r) => r.id !== detail.id);
+      }
+      // Add to new bucket if loaded — keep top of list so user sees the move
+      if (next[cat]) {
+        const existing = next[cat].find((r) => r.id === detail.id);
+        const moved = { ...(existing || (categoryLeads[oldCat] || []).find((r) => r.id === detail.id)), lead_category: cat } as ReplyListItem;
+        if (moved && moved.id) {
+          next[cat] = [moved, ...next[cat].filter((r) => r.id !== detail.id)];
+        }
+      }
+      return next;
+    });
+
     const d = await mutate({ action: "update-category", id: detail.id, category: cat });
     if (d.ok) {
       toast.success(`Category: ${cat}`);
       if (d.pushed_to_sheet) toast.success("Auto-pushed to Google Sheet");
       if (d.sheet_error) toast.error(`Sheet: ${d.sheet_error}`);
-      // Refresh counts and reload leads for affected categories
-      loadCounts();
-      const oldCat = detail.lead_category || "Open Response";
-      if (categoryLeads[oldCat]) loadCategoryLeads(oldCat);
-      if (categoryLeads[cat]) loadCategoryLeads(cat);
-      loadDetail(detail.id);
-    } else toast.error(d.error);
+    } else {
+      // Rollback on failure
+      toast.error(d.error || "Category update failed — reverting");
+      setDetail((prev) => (prev ? { ...prev, lead_category: oldCat } : prev));
+      setCounts((prev) => {
+        const next = { ...prev };
+        next[cat] = Math.max(0, (next[cat] || 0) - 1);
+        next[oldCat] = (next[oldCat] || 0) + 1;
+        return next;
+      });
+      setCategoryLeads((prev) => {
+        const next = { ...prev };
+        if (next[cat]) next[cat] = next[cat].filter((r) => r.id !== detail.id);
+        if (next[oldCat]) next[oldCat] = [{ ...detail, lead_category: oldCat } as unknown as ReplyListItem, ...next[oldCat]];
+        return next;
+      });
+    }
   }
 
   async function handleSend() {
