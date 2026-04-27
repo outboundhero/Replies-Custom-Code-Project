@@ -22,6 +22,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 
+// Allow longer timeout — large legacy table can make page queries slow.
+export const maxDuration = 60;
+
 const NURTURE_DAYS = 45;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;

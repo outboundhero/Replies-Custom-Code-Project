@@ -12,6 +12,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 
+// Counts can be expensive after large imports; default 10s is not enough.
+export const maxDuration = 60;
+
 const NURTURE_DAYS = 45;
 
 // Mirror of EXCLUDED_AI_CATEGORIES in /api/nurture/route.ts — keep in sync.

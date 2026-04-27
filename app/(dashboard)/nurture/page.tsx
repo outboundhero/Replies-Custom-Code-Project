@@ -167,10 +167,16 @@ export default function NurturePage() {
       const p = new URLSearchParams();
       if (clientFilter) p.set("client_tag", clientFilter);
       const res = await fetch(`/api/nurture/counts?${p}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.error(`[nurture] /api/nurture/counts ${res.status}: ${body.slice(0, 200)}`);
+        return;
+      }
       const data = await res.json();
       setCounts(data);
-    } catch {}
+    } catch (e) {
+      console.error("[nurture] counts fetch failed:", e);
+    }
   }, [clientFilter]);
 
   useEffect(() => {
