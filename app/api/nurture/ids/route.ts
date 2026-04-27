@@ -26,6 +26,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
 
 export const maxDuration = 60;
 
@@ -83,6 +84,8 @@ interface IdItem {
   id: string;
   client_tag: string | null;
   ob_lead_id?: number;
+  email: string;
+  esp: Esp;
 }
 
 export async function GET(req: NextRequest) {
@@ -92,6 +95,7 @@ export async function GET(req: NextRequest) {
   try {
     const clientTag = req.nextUrl.searchParams.get("client_tag");
     const sourceParam = req.nextUrl.searchParams.get("source") || "all";
+    const espFilter = (req.nextUrl.searchParams.get("esp") || "").toLowerCase(); // "outlook" | "other" | ""
     const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
     const wantReplies = sourceParam === "all" || sourceParam === "soft_negative" || sourceParam === "out_of_office";
@@ -100,11 +104,24 @@ export async function GET(req: NextRequest) {
 
     const items: IdItem[] = [];
 
+    // Helper: only push when ESP filter matches (or no ESP filter is set).
+    const pushIfEspMatches = (item: IdItem) => {
+      if (espFilter && item.esp !== espFilter) return;
+      items.push(item);
+    };
+
+    // We over-fetch when an ESP filter is active because most rows will be
+    // dropped — typical B2B data is ~95% "other" (custom domains), only a
+    // few percent "outlook". For "other" the over-fetch is mild; for
+    // "outlook" we may still hit the cap but at least we surface as many
+    // matching IDs as possible. Cap at MAX_IDS * 4 in that case.
+    const fetchLimit = espFilter ? MAX_IDS * 4 : MAX_IDS;
+
     // ── Replies ──
     if (wantReplies) {
       let q = supabase
         .from("replies")
-        .select("id, client_tag")
+        .select("id, client_tag, lead_email, esp")
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .not("reply_time", "is", null)
@@ -116,7 +133,7 @@ export async function GET(req: NextRequest) {
         .is("nurture_added_at", null)
         .not("nurture_skipped", "is", true)
         .eq("nurture_safety", "safe")
-        .limit(MAX_IDS);
+        .limit(fetchLimit);
       for (const p of NOISE_SENDER_PATTERNS) q = q.not("lead_email", "ilike", p);
       if (clientTag) q = q.eq("client_tag", clientTag);
       if (sourceParam === "soft_negative") q = q.eq("nurture_bucket", "soft_negative");
@@ -125,8 +142,13 @@ export async function GET(req: NextRequest) {
       const { data, error } = await q;
       if (error) throw new Error(`replies: ${error.message}`);
       for (const r of data || []) {
-        items.push({ id: `reply:${r.id}`, client_tag: r.client_tag });
         if (items.length >= MAX_IDS) break;
+        pushIfEspMatches({
+          id: `reply:${r.id}`,
+          client_tag: r.client_tag,
+          email: r.lead_email,
+          esp: effectiveEsp(r.esp, r.lead_email),
+        });
       }
     }
 
@@ -134,18 +156,24 @@ export async function GET(req: NextRequest) {
     if (wantSeq && items.length < MAX_IDS) {
       let q = supabase
         .from("nurture_sequence_finished")
-        .select("id, client_tag, ob_lead_id")
+        .select("id, client_tag, ob_lead_id, email, esp")
         .lte("sequence_finished_at", cutoffIso)
         .is("added_at", null)
         .not("skipped", "is", true)
-        .limit(MAX_IDS - items.length);
+        .limit(fetchLimit);
       if (clientTag) q = q.eq("client_tag", clientTag);
 
       const { data, error } = await q;
       if (error) throw new Error(`seq: ${error.message}`);
       for (const r of data || []) {
-        items.push({ id: `seq:${r.id}`, client_tag: r.client_tag, ob_lead_id: r.ob_lead_id });
         if (items.length >= MAX_IDS) break;
+        pushIfEspMatches({
+          id: `seq:${r.id}`,
+          client_tag: r.client_tag,
+          ob_lead_id: r.ob_lead_id,
+          email: r.email,
+          esp: effectiveEsp(r.esp, r.email),
+        });
       }
     }
 
@@ -153,7 +181,7 @@ export async function GET(req: NextRequest) {
     if (wantLegacy && items.length < MAX_IDS) {
       let q = supabase
         .from("nurture_legacy_leads")
-        .select("id, client_tag")
+        .select("id, client_tag, lead_email, esp")
         .neq("client_tag", "N/A")
         .or(
           `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
@@ -162,15 +190,20 @@ export async function GET(req: NextRequest) {
         .is("nurture_added_at", null)
         .not("nurture_skipped", "is", true)
         .eq("nurture_safety", "safe")
-        .limit(MAX_IDS - items.length);
+        .limit(fetchLimit);
       for (const p of NOISE_SENDER_PATTERNS) q = q.not("lead_email", "ilike", p);
       if (clientTag) q = q.eq("client_tag", clientTag);
 
       const { data, error } = await q;
       if (error) throw new Error(`legacy: ${error.message}`);
       for (const r of data || []) {
-        items.push({ id: `legacy:${r.id}`, client_tag: r.client_tag });
         if (items.length >= MAX_IDS) break;
+        pushIfEspMatches({
+          id: `legacy:${r.id}`,
+          client_tag: r.client_tag,
+          email: r.lead_email,
+          esp: effectiveEsp(r.esp, r.lead_email),
+        });
       }
     }
 

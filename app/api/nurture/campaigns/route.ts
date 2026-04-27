@@ -33,7 +33,13 @@ export async function GET() {
       return NextResponse.json({ campaigns: cache.data, cached: true });
     }
 
-    const all = await listCampaigns({ nameContains: "[Nurture]" });
+    // Match any campaign whose name has the word "nurture" anywhere — case
+    // insensitive, whole word so "Nurturing" doesn't accidentally match.
+    // Covers all wrapper styles seen in the wild: [Nurture], (Nurture), and
+    // bare Nurture. We over-fetch then filter client-side because the
+    // upstream API doesn't support regex matching.
+    const allCampaigns = await listCampaigns();
+    const all = allCampaigns.filter((c) => /\bnurture\b/i.test(c.name || ""));
     const data = all.map((c) => ({
       id: c.id,
       name: c.name,

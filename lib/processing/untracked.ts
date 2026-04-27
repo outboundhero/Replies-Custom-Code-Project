@@ -245,7 +245,25 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     campaign_id: 0, // untracked has no campaign — use 0 for unique constraint
     updated_at: new Date().toISOString(),
   }, { onConflict: "reply_id,campaign_id" }).then(({ error }) => {
-    if (error) console.error("[untracked] Supabase upsert failed:", error.message);
+    if (error) {
+      console.error("[untracked] Supabase upsert failed:", error.message);
+      return;
+    }
+    // Fire-and-forget ESP detection — same pattern as tracked.ts.
+    if (reply.from_email_address) {
+      import("@/lib/email-guard").then(({ lookupEmailHost }) =>
+        lookupEmailHost(reply.from_email_address).then((host) => {
+          if (!host) return;
+          supabase.from("replies")
+            .update({ esp: host })
+            .eq("reply_id", reply.id)
+            .eq("campaign_id", 0)
+            .then(({ error: espErr }) => {
+              if (espErr) console.error("[untracked] esp update failed:", espErr.message);
+            });
+        })
+      ).catch((e) => console.error("[untracked] esp detect failed:", e));
+    }
   });
 
   // 8. Send to master Clay table (all sections) — only for qualified replies

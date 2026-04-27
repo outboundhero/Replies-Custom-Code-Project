@@ -293,7 +293,28 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     our_reply: baseFields["Our reply"] ? String(baseFields["Our reply"]) : null,
     updated_at: new Date().toISOString(),
   }, { onConflict: "reply_id,campaign_id" }).then(({ error }) => {
-    if (error) console.error("[tracked] Supabase upsert failed:", error.message);
+    if (error) {
+      console.error("[tracked] Supabase upsert failed:", error.message);
+      return;
+    }
+    // Fire-and-forget ESP detection. Looks up the recipient's mailbox
+    // provider via EmailGuard and writes it back. Non-blocking so the
+    // webhook keeps responding fast; the cron / backfill catches any
+    // lookup failure on the next pass.
+    if (!isBounce && reply.from_email_address) {
+      import("@/lib/email-guard").then(({ lookupEmailHost }) =>
+        lookupEmailHost(reply.from_email_address).then((host) => {
+          if (!host) return;
+          supabase.from("replies")
+            .update({ esp: host })
+            .eq("reply_id", reply.id)
+            .eq("campaign_id", campaign.id)
+            .then(({ error: espErr }) => {
+              if (espErr) console.error("[tracked] esp update failed:", espErr.message);
+            });
+        })
+      ).catch((e) => console.error("[tracked] esp detect failed:", e));
+    }
   });
 
   // 5b. Lead qualification (non-blocking, fire-and-forget)

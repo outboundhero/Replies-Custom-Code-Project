@@ -84,6 +84,24 @@ export async function syncSequenceFinished(): Promise<SyncResult> {
         errors.push(`Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
       } else {
         upserted += rows.length;
+        // Fire-and-forget ESP detection on the freshly-inserted rows.
+        // Doesn't block the sync; backfill-esp.ts script picks up any
+        // misses on the next pass.
+        import("@/lib/email-guard").then(({ lookupEmailHost }) => {
+          for (const r of rows) {
+            if (!r.email) continue;
+            lookupEmailHost(r.email).then((host) => {
+              if (!host) return;
+              supabase.from("nurture_sequence_finished")
+                .update({ esp: host })
+                .eq("ob_lead_id", r.ob_lead_id)
+                .eq("ob_campaign_id", r.ob_campaign_id)
+                .then(({ error: espErr }) => {
+                  if (espErr) console.error("[sync-sequence-finished] esp update failed:", espErr.message);
+                });
+            }).catch((e) => console.error("[sync-sequence-finished] esp lookup failed:", e));
+          }
+        });
       }
     } catch (e) {
       errors.push(`Campaign ${campaign.id} (${campaign.name}): ${(e as Error).message}`);
