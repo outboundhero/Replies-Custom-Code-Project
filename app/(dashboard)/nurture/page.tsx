@@ -331,12 +331,20 @@ export default function NurturePage() {
    * /api/nurture/ids — capped at 1000 per call. Replaces the current
    * selection so the user can grab "everything for this client" in one
    * click.
+   *
+   * REQUIRES a client_tag — pushing leads from many clients to one
+   * nurture campaign doesn't make sense (campaigns are per-client). If
+   * called without one, refuse and prompt the user to filter first.
    */
   async function bulkSelectMatching(filters: { client_tag?: string; source?: string }) {
+    if (!filters.client_tag) {
+      toast.error("Pick a Client filter first — nurture campaigns are per-client, so the bulk select needs to be scoped to one client at a time.");
+      return;
+    }
     setBulkSelecting(true);
     try {
       const p = new URLSearchParams();
-      if (filters.client_tag) p.set("client_tag", filters.client_tag);
+      p.set("client_tag", filters.client_tag);
       if (filters.source && filters.source !== "all") p.set("source", filters.source);
       const res = await fetch(`/api/nurture/ids?${p}`);
       if (!res.ok) {
@@ -672,15 +680,15 @@ export default function NurturePage() {
           </div>
           <button
             onClick={() => bulkSelectMatching({ client_tag: clientFilter || undefined, source: sourceFilter })}
-            disabled={bulkSelecting}
-            className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline"
+            disabled={bulkSelecting || !clientFilter}
+            className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline disabled:cursor-not-allowed"
             title={
               clientFilter
-                ? `Select every pushable lead for ${clientFilter} across the whole dataset (capped at 1000)`
-                : "Select every pushable lead matching the current filters across the whole dataset (capped at 1000). Tip: pick a Client first to limit the scope."
+                ? `Select every pushable ${clientFilter} lead across the whole dataset (capped at 1000)`
+                : "Pick a Client filter (or use Group by Client and click 'Select all <tag>' on a group header) — nurture campaigns are per-client, so bulk select must be scoped to one client at a time."
             }
           >
-            {bulkSelecting ? "Selecting…" : clientFilter ? `Select all for ${clientFilter}` : "Select all matching"}
+            {bulkSelecting ? "Selecting…" : clientFilter ? `Select all for ${clientFilter}` : "Select all (pick a client first)"}
           </button>
           <Select value={pushTargetCampaignId} onValueChange={setPushTargetCampaignId}>
             <SelectTrigger className="h-9 w-72 text-sm" disabled={selected.size === 0}>

@@ -3,7 +3,25 @@ import { requireAuth } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { getView, type InboxView } from "@/lib/inbox-views";
 
+// Counts + leads can be slow on the big replies table.
+export const maxDuration = 60;
+
 const BATCH_SIZE = 1000;
+const DEFAULT_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 500;
+
+/**
+ * Mirror of LEAD_CATEGORIES in app/(dashboard)/inbox/page.tsx — keep in sync.
+ * Used for parallel COUNT queries instead of fetching every row to count
+ * categories in JS (which got progressively slower as the table grew).
+ */
+const LEAD_CATEGORIES = [
+  "Open Response", "Interested", "Meeting Set", "Not Interested", "Do Not Contact",
+  "Out Of Office", "Wrong Person", "Lost", "Meeting-Ready Lead", "Follow Up",
+  "Automated Reply", "Needs Review", "Change Of Target", "Not Interested (Send Reply)",
+  "Unqualified (Cleaning)", "Closed Won", "Mailbox No Longer Active", "Referral Given",
+  "Internally Forwarded",
+];
 
 /** Fetch ALL rows for a lightweight column query by paginating through batches */
 async function fetchAllRows<T>(
@@ -75,43 +93,74 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ tags });
     }
 
-    // Mode: counts — return category counts (paginate to get ALL rows)
+    // Mode: counts — one HEAD count per known category, run in parallel.
+    // Old approach paginated every reply row into memory and tallied in JS;
+    // that scaled linearly with the table and was the source of the
+    // "category opening is slow" complaint. Now: ~20 head queries,
+    // estimated counts (planner-based, O(1)).
     if (mode === "counts") {
-      const data = await fetchAllRows<{ lead_category: string }>((from, to) => {
-        let q = supabase.from("replies").select("lead_category").range(from, to);
+      const baseQuery = () => {
+        let q = supabase.from("replies").select("id", { count: "estimated", head: true });
         if (clientTag) q = q.eq("client_tag", clientTag);
         if (workflow) q = q.eq("workflow", workflow);
         if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
         q = applyView(q, view);
-        return q as any;
-      });
+        return q;
+      };
+
+      const runCount = async (label: string, q: ReturnType<typeof baseQuery>): Promise<number> => {
+        try {
+          const { count, error } = await q;
+          if (error) {
+            console.error(`[inbox/counts:${label}]`, JSON.stringify(error));
+            return 0;
+          }
+          return count ?? 0;
+        } catch (e) {
+          console.error(`[inbox/counts:${label}] threw:`, e);
+          return 0;
+        }
+      };
+
+      const [totalCount, ...categoryCounts] = await Promise.all([
+        runCount("total", baseQuery()),
+        ...LEAD_CATEGORIES.map((cat) =>
+          runCount(`cat:${cat}`, baseQuery().eq("lead_category", cat))
+        ),
+      ]);
 
       const counts: Record<string, number> = {};
-      let total = 0;
-      for (const row of data) {
-        const cat = row.lead_category || "Open Response";
-        counts[cat] = (counts[cat] || 0) + 1;
-        total++;
-      }
-      return NextResponse.json({ counts, total });
+      LEAD_CATEGORIES.forEach((cat, i) => {
+        counts[cat] = categoryCounts[i];
+      });
+
+      return NextResponse.json({ counts, total: totalCount });
     }
 
-    // Default mode: fetch leads for a specific category
-    const data = await fetchAllRows<Record<string, unknown>>((from, to) => {
-      let q = supabase
-        .from("replies")
-        .select("id, workflow, lead_email, lead_name, company_name, client_tag, ai_categorized_lead_category, lead_category, reply_status, industry_audit, location_audit, created_at, reply_id")
-        .order("created_at", { ascending: false })
-        .range(from, to);
-      if (clientTag) q = q.eq("client_tag", clientTag);
-      if (category) q = q.eq("lead_category", category);
-      if (workflow) q = q.eq("workflow", workflow);
-      if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
-      q = applyView(q, view);
-      return q as any;
-    });
+    // Default mode: fetch leads for a specific category, paginated.
+    // Old code fetched ALL rows for the category — fine when there were
+    // a few hundred, painful at 50k+. Now: 100 rows per request, with
+    // offset for "load more".
+    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(req.nextUrl.searchParams.get("limit") || DEFAULT_PAGE_SIZE)));
+    const offset = Math.max(0, Number(req.nextUrl.searchParams.get("offset") || 0));
 
-    return NextResponse.json({ replies: data });
+    let q = supabase
+      .from("replies")
+      .select("id, workflow, lead_email, lead_name, company_name, client_tag, ai_categorized_lead_category, lead_category, reply_status, industry_audit, location_audit, created_at, reply_id")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (clientTag) q = q.eq("client_tag", clientTag);
+    if (category) q = q.eq("lead_category", category);
+    if (workflow) q = q.eq("workflow", workflow);
+    if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
+    q = applyView(q, view) as typeof q;
+    const { data: rows, error } = await q;
+    if (error) throw new Error(error.message);
+
+    return NextResponse.json({
+      replies: rows || [],
+      page: { limit, offset, returned: rows?.length || 0, hasMore: (rows?.length || 0) === limit },
+    });
   } catch (error) {
     console.error("[api/inbox] GET failed:", error);
     return NextResponse.json({ error: "Failed to fetch inbox" }, { status: 500 });
