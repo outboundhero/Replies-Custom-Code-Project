@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/nurture-classify-unclassified",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/nurture-sync-sequence",
+      "schedule": "0 */6 * * *"
+    }
+  ]
+}

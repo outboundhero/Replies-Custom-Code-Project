@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
+import { classifyOneBatch } from "@/lib/nurture/auto-classify";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
 
 const CLASSIFY_CONCURRENCY = 8;
@@ -35,46 +36,6 @@ async function runWithConcurrency<T>(
     }
   });
   await Promise.all(runners);
-}
-
-async function classifyAndStore(r: {
-  id: number;
-  reply_we_got: string | null;
-  ai_categorized_lead_category?: string | null;
-}) {
-  const result = await classifyNurtureSafety({
-    replyText: r.reply_we_got || "",
-    aiCategory: r.ai_categorized_lead_category ?? null,
-  });
-  await supabase
-    .from("replies")
-    .update({
-      nurture_safety: result.safety,
-      nurture_bucket: result.bucket,
-      nurture_safety_reason: result.reason,
-      nurture_classified_at: new Date().toISOString(),
-    })
-    .eq("id", r.id);
-}
-
-async function classifyAndStoreLegacy(r: {
-  id: number;
-  reply_text: string | null;
-  original_ai_category?: string | null;
-}) {
-  const result = await classifyNurtureSafety({
-    replyText: r.reply_text || "",
-    aiCategory: r.original_ai_category ?? null,
-  });
-  await supabase
-    .from("nurture_legacy_leads")
-    .update({
-      nurture_safety: result.safety,
-      nurture_bucket: result.bucket,
-      nurture_safety_reason: result.reason,
-      nurture_classified_at: new Date().toISOString(),
-    })
-    .eq("id", r.id);
 }
 
 interface ItemRef {
@@ -137,48 +98,16 @@ export async function POST(req: NextRequest) {
 
     // ── classify EVERY unclassified reply (regardless of AI category) ──
     // Pulls in batches of 200 per request from BOTH replies and legacy.
-    // Re-run to continue if more remain.
+    // Re-run to continue if more remain. Shares the same code path as the
+    // /api/cron/nurture-classify-unclassified job.
     if (action === "classify-all-unclassified") {
-      const [{ data: replyRows, error: replyErr }, { data: legacyRows, error: legacyErr }] =
-        await Promise.all([
-          supabase
-            .from("replies")
-            .select("id, reply_we_got, ai_categorized_lead_category")
-            .not("reply_we_got", "is", null)
-            .neq("reply_we_got", "")
-            .is("nurture_safety", null)
-            .limit(200),
-          supabase
-            .from("nurture_legacy_leads")
-            .select("id, reply_text, original_ai_category")
-            .not("reply_text", "is", null)
-            .neq("reply_text", "")
-            .is("nurture_safety", null)
-            .limit(200),
-        ]);
-      if (replyErr) throw new Error(replyErr.message);
-      if (legacyErr) throw new Error(legacyErr.message);
-
-      let classified = 0;
-      await runWithConcurrency(
-        replyRows || [],
-        async (r) => { await classifyAndStore(r); classified++; },
-        CLASSIFY_CONCURRENCY
-      );
-      await runWithConcurrency(
-        legacyRows || [],
-        async (r) => { await classifyAndStoreLegacy(r); classified++; },
-        CLASSIFY_CONCURRENCY
-      );
-
-      const replyDone = (replyRows?.length || 0) < 200;
-      const legacyDone = (legacyRows?.length || 0) < 200;
+      const result = await classifyOneBatch();
       return NextResponse.json({
         ok: true,
-        classified,
-        replyClassified: replyRows?.length || 0,
-        legacyClassified: legacyRows?.length || 0,
-        remaining: replyDone && legacyDone ? 0 : "more remaining — re-run to continue",
+        classified: result.classified,
+        replyClassified: result.replyClassified,
+        legacyClassified: result.legacyClassified,
+        remaining: result.done ? 0 : "more remaining — re-run to continue",
       });
     }
 
