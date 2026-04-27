@@ -73,25 +73,12 @@ const SOURCE_DOT: Record<Source, string> = {
   other: "bg-zinc-300",
 };
 
-const SAFETY_RANK: Record<string, number> = { safe: 0, unknown: 1, unsafe: 2 };
-
 function viewToFilters(view: View): { status: string; safety: string } {
   switch (view) {
     case "actionable": return { status: "eligible", safety: "safe" };
     case "eligible":   return { status: "eligible", safety: "all" };
     case "waiting":    return { status: "waiting", safety: "all" };
     case "added":      return { status: "added", safety: "all" };
-  }
-}
-
-function getSortValue(it: NurtureItem, key: SortKey): string | number {
-  switch (key) {
-    case "email":       return it.email?.toLowerCase() || "";
-    case "company":     return it.company?.toLowerCase() || "~"; // empty sorts last
-    case "client":      return it.client_tag?.toLowerCase() || "~";
-    case "source":      return it.source;
-    case "safety":      return it.source === "sequence_finished" ? 0 : SAFETY_RANK[it.nurture_safety || ""] ?? 3;
-    case "eligibility": return it.days_until_eligible;
   }
 }
 
@@ -136,6 +123,8 @@ export default function NurturePage() {
         p.set("safety", safety);
         p.set("limit", String(PAGE_SIZE));
         p.set("offset", String(nextOffset));
+        p.set("sort", sortKey);
+        p.set("dir", sortDir);
         if (clientFilter) p.set("client_tag", clientFilter);
         if (sourceFilter !== "all") p.set("source", sourceFilter);
 
@@ -159,7 +148,7 @@ export default function NurturePage() {
       setLoading(false);
       setLoadingMore(false);
     },
-    [view, clientFilter, sourceFilter, offset]
+    [view, clientFilter, sourceFilter, offset, sortKey, sortDir]
   );
 
   const loadCounts = useCallback(async () => {
@@ -182,7 +171,7 @@ export default function NurturePage() {
   useEffect(() => {
     loadPage(true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, clientFilter, sourceFilter]);
+  }, [view, clientFilter, sourceFilter, sortKey, sortDir]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
@@ -218,29 +207,20 @@ export default function NurturePage() {
     [campaigns, clientFilter]
   );
 
-  // Search + sort visible items
+  // Search filter only — server already returns rows in the chosen sort
+  // order across the FULL dataset (not just this 50-row page).
   const visibleItems = useMemo(() => {
-    let list = items.map(withFreshDays);
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(
-        (i) =>
-          i.email?.toLowerCase().includes(q) ||
-          i.company?.toLowerCase().includes(q) ||
-          `${i.first_name || ""} ${i.last_name || ""}`.toLowerCase().includes(q)
-      );
-    }
-    const dir = sortDir === "asc" ? 1 : -1;
-    return list.sort((a, b) => {
-      const av = getSortValue(a, sortKey);
-      const bv = getSortValue(b, sortKey);
-      if (av < bv) return -1 * dir;
-      if (av > bv) return 1 * dir;
-      // Tiebreak by eligibility ascending so most-due always wins.
-      return a.days_until_eligible - b.days_until_eligible;
-    });
+    const list = items.map(withFreshDays);
+    if (!search.trim()) return list;
+    const q = search.toLowerCase();
+    return list.filter(
+      (i) =>
+        i.email?.toLowerCase().includes(q) ||
+        i.company?.toLowerCase().includes(q) ||
+        `${i.first_name || ""} ${i.last_name || ""}`.toLowerCase().includes(q)
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, search, sortKey, sortDir, now]);
+  }, [items, search, now]);
 
   // Group items by client when groupByClient is enabled
   const groupedItems = useMemo(() => {
@@ -416,13 +396,31 @@ export default function NurturePage() {
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
-          <Button size="sm" variant="outline" onClick={syncSequenceFinished} disabled={syncing}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={syncSequenceFinished}
+            disabled={syncing}
+            title="Pulls leads from EmailBison whose outbound sequence finished with no reply and no bounce — they're added to the queue as a third source ('Sequence Finished'). Run after a sequence wraps."
+          >
             {syncing ? "Syncing…" : "Sync Sequence-Finished"}
           </Button>
-          <Button size="sm" variant="outline" onClick={classifyAllUnclassified} disabled={classifying}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={classifyAllUnclassified}
+            disabled={classifying}
+            title="Runs the safety classifier on rows that don't have a Safety value yet — 200 from replies + 200 from legacy per click. Re-run until the toast shows '0 remaining'. Required before rows can show up in 'Ready to nurture'."
+          >
             {classifying ? "Classifying…" : "Classify Unclassified"}
           </Button>
-          <Button size="sm" variant="outline" onClick={reclassifySafe} disabled={reclassifying}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={reclassifySafe}
+            disabled={reclassifying}
+            title="Re-runs the classifier on rows currently marked Safe. Useful after the classifier rules tighten — flips false positives to Unsafe so they stop showing in 'Ready to nurture'."
+          >
             {reclassifying ? "Re-classifying…" : "Re-classify Safe"}
           </Button>
         </div>
@@ -593,7 +591,7 @@ export default function NurturePage() {
         {loading && items.length === 0 ? (
           <SkeletonRows count={6} />
         ) : visibleItems.length === 0 ? (
-          <EmptyState view={view} />
+          <EmptyState view={view} counts={counts} onClassify={classifyAllUnclassified} classifying={classifying} />
         ) : (
           <Table>
             <TableHeader className="bg-muted/40">
@@ -945,7 +943,32 @@ function SkeletonRows({ count }: { count: number }) {
   );
 }
 
-function EmptyState({ view }: { view: View }) {
+function EmptyState({
+  view, counts, onClassify, classifying,
+}: {
+  view: View;
+  counts: Counts | null;
+  onClassify: () => void;
+  classifying: boolean;
+}) {
+  // For "Ready to nurture" specifically, the most common reason for an empty
+  // state is "we have eligible rows but none classified Safe yet" — point the
+  // user at Classify Unclassified instead of saying "all caught up".
+  if (view === "actionable" && counts && counts.eligible > counts.eligibleSafe) {
+    const unscored = counts.eligible - counts.eligibleSafe;
+    return (
+      <div className="px-6 py-16 text-center">
+        <p className="text-base font-medium">{unscored.toLocaleString()} eligible leads not scored yet</p>
+        <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">
+          The classifier hasn't run on these rows yet. Click below — it processes 200 replies + 200 legacy rows per click. Re-run a few times until everything is classified.
+        </p>
+        <Button size="sm" onClick={onClassify} disabled={classifying} className="mt-4">
+          {classifying ? "Classifying…" : "Classify Unclassified"}
+        </Button>
+      </div>
+    );
+  }
+
   const messages: Record<View, { title: string; sub: string }> = {
     actionable: {
       title: "All caught up",

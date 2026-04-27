@@ -167,6 +167,26 @@ function dedupeKey(email: string | null | undefined, clientTag: string | null | 
   return `${(email || "").toLowerCase().trim()}|${(clientTag || "").trim()}`;
 }
 
+/**
+ * Sort key → SQL column for each source. eligibility maps to the source's
+ * trigger-time column; for legacy/replies, larger reply_time = larger
+ * days_until_eligible, so the direction can be passed through directly.
+ */
+type SortKey = "email" | "company" | "client" | "source" | "safety" | "eligibility";
+
+const SORT_COLUMN: Record<SortKey, { replies: string; seq: string; legacy: string }> = {
+  email:       { replies: "lead_email",     seq: "email",                  legacy: "lead_email" },
+  company:     { replies: "company_name",   seq: "company",                legacy: "company" },
+  client:      { replies: "client_tag",     seq: "client_tag",             legacy: "client_tag" },
+  source:      { replies: "nurture_bucket", seq: "client_tag",             legacy: "nurture_bucket" },
+  safety:      { replies: "nurture_safety", seq: "client_tag",             legacy: "nurture_safety" },
+  eligibility: { replies: "reply_time",     seq: "sequence_finished_at",   legacy: "reply_at" },
+};
+
+function isSortKey(s: string | null): s is SortKey {
+  return !!s && ["email", "company", "client", "source", "safety", "eligibility"].includes(s);
+}
+
 export async function GET(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
@@ -176,6 +196,10 @@ export async function GET(req: NextRequest) {
     const clientTag = req.nextUrl.searchParams.get("client_tag");
     const statusFilter = req.nextUrl.searchParams.get("status") || "all";
     const safetyFilter = req.nextUrl.searchParams.get("safety") || "all";
+    const sortParam = req.nextUrl.searchParams.get("sort");
+    const sortKey: SortKey = isSortKey(sortParam) ? sortParam : "eligibility";
+    const sortDir = req.nextUrl.searchParams.get("dir") === "desc" ? "desc" : "asc";
+    const sortAsc = sortDir === "asc";
     const limit = Math.min(
       MAX_LIMIT,
       Math.max(1, Number(req.nextUrl.searchParams.get("limit") || DEFAULT_LIMIT))
@@ -198,12 +222,9 @@ export async function GET(req: NextRequest) {
 
     // ── Replies-based candidates ──
     if (wantReplies) {
-      // For "added" view, sort by when they were added (newest first).
-      // For everything else, sort by reply_time ASC so the longest-waiting /
-      // most-due lead surfaces at the top of the page — the user wants to
-      // see what's overdue or about to be ready, not the most recently
-      // received noise.
-      const orderByAddedDesc = statusFilter === "added";
+      // For "added" view, sort by when they were added (newest first by default).
+      // Otherwise honour the user-requested sort column + direction.
+      const orderByAddedDesc = statusFilter === "added" && sortKey === "eligibility";
 
       let q = supabase
         .from("replies")
@@ -227,7 +248,7 @@ export async function GET(req: NextRequest) {
 
       q = orderByAddedDesc
         ? q.order("nurture_added_at", { ascending: false })
-        : q.order("reply_time", { ascending: true });
+        : q.order(SORT_COLUMN[sortKey].replies, { ascending: sortAsc, nullsFirst: false });
 
       if (clientTag) q = q.eq("client_tag", clientTag);
 
@@ -317,7 +338,7 @@ export async function GET(req: NextRequest) {
 
     // ── Sequence-finished candidates ──
     if (wantSeq) {
-      const seqOrderByAddedDesc = statusFilter === "added";
+      const seqOrderByAddedDesc = statusFilter === "added" && sortKey === "eligibility";
       let q = supabase
         .from("nurture_sequence_finished")
         .select(
@@ -326,7 +347,7 @@ export async function GET(req: NextRequest) {
 
       q = seqOrderByAddedDesc
         ? q.order("added_at", { ascending: false })
-        : q.order("sequence_finished_at", { ascending: true });
+        : q.order(SORT_COLUMN[sortKey].seq, { ascending: sortAsc, nullsFirst: false });
 
       if (clientTag) q = q.eq("client_tag", clientTag);
 
@@ -379,7 +400,7 @@ export async function GET(req: NextRequest) {
 
     // ── Legacy Airtable candidates (historical replies imported from Airtable) ──
     if (wantLegacy) {
-      const legacyOrderByAddedDesc = statusFilter === "added";
+      const legacyOrderByAddedDesc = statusFilter === "added" && sortKey === "eligibility";
       let q = supabase
         .from("nurture_legacy_leads")
         .select(
@@ -388,7 +409,7 @@ export async function GET(req: NextRequest) {
 
       q = legacyOrderByAddedDesc
         ? q.order("nurture_added_at", { ascending: false })
-        : q.order("reply_at", { ascending: true });
+        : q.order(SORT_COLUMN[sortKey].legacy, { ascending: sortAsc, nullsFirst: false });
 
       // Same hard-block AI-category filter as the replies query
       q = q.or(
@@ -482,8 +503,28 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Sort the merged page by trigger_at desc so the sources interleave correctly.
-    items.sort((a, b) => (a.trigger_at < b.trigger_at ? 1 : -1));
+    // Sort the merged page using the same key that was applied per-source,
+    // so items from replies / seq / legacy interleave in the correct order.
+    const SAFETY_RANK: Record<string, number> = { safe: 0, unknown: 1, unsafe: 2 };
+    const cmpKey = (it: NurtureItem): string | number => {
+      switch (sortKey) {
+        case "email":       return it.email?.toLowerCase() || "~";
+        case "company":     return it.company?.toLowerCase() || "~";
+        case "client":      return it.client_tag?.toLowerCase() || "~";
+        case "source":      return it.source;
+        case "safety":      return it.source === "sequence_finished" ? 0 : SAFETY_RANK[it.nurture_safety || ""] ?? 3;
+        case "eligibility": return it.trigger_at;
+      }
+    };
+    const dir = sortAsc ? 1 : -1;
+    items.sort((a, b) => {
+      const av = cmpKey(a);
+      const bv = cmpKey(b);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      // Tiebreak by trigger_at ascending — most-due first within ties.
+      return a.trigger_at < b.trigger_at ? -1 : 1;
+    });
 
     // Trim to page size in case multiple sources contributed.
     const paged = items.slice(0, limit);
