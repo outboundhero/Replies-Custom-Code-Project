@@ -14,6 +14,16 @@ import supabase from "@/lib/supabase";
 
 const NURTURE_DAYS = 45;
 
+// Mirror of EXCLUDED_AI_CATEGORIES in /api/nurture/route.ts — keep in sync.
+const EXCLUDED_AI_CATEGORIES = [
+  "Do Not Contact",
+  "Wrong Person",
+  "Wrong Person (Change of Target)",
+  "Not Interested",
+  "Mailbox No Longer Active",
+  "Automated Error Message",
+];
+
 export async function GET(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
@@ -28,7 +38,10 @@ export async function GET(req: NextRequest) {
         .select("id", { count: "exact", head: true })
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
-        .not("reply_time", "is", null);
+        .not("reply_time", "is", null)
+        .or(
+          `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+        );
       if (clientTag) q = q.eq("client_tag", clientTag);
       return q;
     };

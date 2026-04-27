@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/auth";
 import { processTrackedReply } from "@/lib/processing/tracked";
 import { processUntrackedReply } from "@/lib/processing/untracked";
 import { sendToClayWebhook } from "@/lib/clay";
+import { blacklistDomain, blacklistEmail } from "@/lib/processing/domain-blacklist";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -27,6 +28,57 @@ export async function POST(req: NextRequest) {
 
   const stage = entry.stage as string;
   const entryPayload = entry.payload as string | null;
+
+  // ── Blacklist API errors (domain or email) ──
+  // Payload format from lib/processing/domain-blacklist.ts:
+  //   stage "blacklist"        → { domain, from_email, matched_phrase }
+  //   stage "email-blacklist"  → { email }
+  // Re-call the blacklist function, which is idempotent (422 "already taken"
+  // is treated as success). Clears the error on a clean call.
+  if ((stage === "blacklist" || stage === "email-blacklist") && entryPayload) {
+    try {
+      const parsed = JSON.parse(entryPayload);
+      try {
+        if (stage === "blacklist") {
+          if (!parsed.from_email) throw new Error("Missing from_email in payload");
+          await blacklistDomain(
+            parsed.from_email,
+            parsed.matched_phrase || "",
+            (entry.workflow as string) || "tracked"
+          );
+        } else {
+          if (!parsed.email) throw new Error("Missing email in payload");
+          await blacklistEmail(parsed.email, (entry.workflow as string) || "tracked");
+        }
+        // The blacklist function logs its own error if it fails again, so we
+        // verify by checking whether a fresh error row was just written.
+        const fresh = await db.execute({
+          sql: `SELECT id FROM error_log
+                WHERE stage = ? AND timestamp > datetime('now', '-10 seconds')
+                ORDER BY id DESC LIMIT 1`,
+          args: [stage],
+        });
+        if (fresh.rows.length > 0) {
+          return NextResponse.json(
+            { error: "Blacklist API still failing — check logs" },
+            { status: 502 }
+          );
+        }
+        await db.execute({ sql: "DELETE FROM error_log WHERE id = ?", args: [id] });
+        return NextResponse.json({ ok: true, message: "Blacklist retry successful" });
+      } catch (error) {
+        return NextResponse.json(
+          { error: `Blacklist retry failed: ${(error as Error).message}` },
+          { status: 500 }
+        );
+      }
+    } catch {
+      return NextResponse.json(
+        { error: "Stored blacklist payload is malformed JSON" },
+        { status: 400 }
+      );
+    }
+  }
 
   // Check if this is a Clay error with retry data
   if (stage === "clay" && entryPayload) {

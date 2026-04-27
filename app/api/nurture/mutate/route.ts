@@ -37,8 +37,15 @@ async function runWithConcurrency<T>(
   await Promise.all(runners);
 }
 
-async function classifyAndStore(r: { id: number; reply_we_got: string | null }) {
-  const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
+async function classifyAndStore(r: {
+  id: number;
+  reply_we_got: string | null;
+  ai_categorized_lead_category?: string | null;
+}) {
+  const result = await classifyNurtureSafety({
+    replyText: r.reply_we_got || "",
+    aiCategory: r.ai_categorized_lead_category ?? null,
+  });
   await supabase
     .from("replies")
     .update({
@@ -79,7 +86,7 @@ export async function POST(req: NextRequest) {
 
       const { data: rows, error } = await supabase
         .from("replies")
-        .select("id, reply_we_got")
+        .select("id, reply_we_got, ai_categorized_lead_category")
         .in("id", ids);
       if (error) throw new Error(error.message);
 
@@ -87,7 +94,10 @@ export async function POST(req: NextRequest) {
       await runWithConcurrency(
         rows || [],
         async (r) => {
-          const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
+          const result = await classifyNurtureSafety({
+            replyText: r.reply_we_got || "",
+            aiCategory: r.ai_categorized_lead_category ?? null,
+          });
           await supabase
             .from("replies")
             .update({
@@ -110,7 +120,7 @@ export async function POST(req: NextRequest) {
     if (action === "classify-all-unclassified") {
       const { data: rows, error } = await supabase
         .from("replies")
-        .select("id, reply_we_got")
+        .select("id, reply_we_got, ai_categorized_lead_category")
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .is("nurture_safety", null)
@@ -138,7 +148,7 @@ export async function POST(req: NextRequest) {
     if (action === "classify-reset-safe") {
       const { data: rows, error } = await supabase
         .from("replies")
-        .select("id, reply_we_got")
+        .select("id, reply_we_got, ai_categorized_lead_category")
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .eq("nurture_safety", "safe")
@@ -150,7 +160,10 @@ export async function POST(req: NextRequest) {
       await runWithConcurrency(
         rows || [],
         async (r) => {
-          const result = await classifyNurtureSafety({ replyText: r.reply_we_got || "" });
+          const result = await classifyNurtureSafety({
+            replyText: r.reply_we_got || "",
+            aiCategory: r.ai_categorized_lead_category ?? null,
+          });
           await supabase
             .from("replies")
             .update({

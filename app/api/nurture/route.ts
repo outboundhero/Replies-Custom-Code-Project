@@ -26,6 +26,20 @@ const NURTURE_DAYS = 45;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
+/**
+ * AI categories that should NEVER appear in the nurture queue, regardless of
+ * the nurture-safety classifier. Mirrors HARD_BLOCK_AI_CATEGORIES in
+ * lib/nurture/safety-classifier.ts.
+ */
+const EXCLUDED_AI_CATEGORIES = [
+  "Do Not Contact",
+  "Wrong Person",
+  "Wrong Person (Change of Target)",
+  "Not Interested",
+  "Mailbox No Longer Active",
+  "Automated Error Message",
+];
+
 function daysBetween(later: Date, earlier: Date): number {
   return Math.floor((later.getTime() - earlier.getTime()) / (1000 * 60 * 60 * 24));
 }
@@ -94,6 +108,12 @@ export async function GET(req: NextRequest) {
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .not("reply_time", "is", null)
+        // Exclude AI-categorized hard blocks (DNC, Wrong Person, etc.) so they
+        // never reach the nurture queue, even if unclassified by the safety
+        // classifier yet.
+        .or(
+          `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+        )
         .order("reply_time", { ascending: false });
 
       if (clientTag) q = q.eq("client_tag", clientTag);

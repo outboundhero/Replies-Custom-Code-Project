@@ -28,30 +28,59 @@ export interface NurtureSafetyResult {
   reason: string;
 }
 
+/**
+ * AI lead categories (from lib/processing/lead-categorizer.ts) that
+ * unconditionally block re-contact. If the original AI categorizer landed
+ * on any of these, the reply is unsafe for nurture — no GPT call needed.
+ */
+const HARD_BLOCK_AI_CATEGORIES = new Set([
+  "Do Not Contact",
+  "Wrong Person",
+  "Wrong Person (Change of Target)",
+  "Not Interested",
+  "Mailbox No Longer Active",
+  "Automated Error Message",
+]);
+
 const HARD_NO_PATTERNS: { regex: RegExp; reason: string }[] = [
+  // Explicit opt-out
   { regex: /\bdo\s*not\s*contact\b/i,                          reason: "Said 'do not contact'" },
   { regex: /\bdon'?t\s*contact\b/i,                            reason: "Said 'don't contact'" },
-  { regex: /\bdo\s*not\s*(email|reach\s*out|message)\b/i,      reason: "Said 'do not email/reach out'" },
-  { regex: /\bdon'?t\s*(email|reach\s*out|message)\b/i,        reason: "Said 'don't email/reach out'" },
+  { regex: /\bdo\s*not\s*(email|reach\s*out|message|call)\b/i, reason: "Said 'do not email/reach out'" },
+  { regex: /\bdon'?t\s*(email|reach\s*out|message|call)\b/i,   reason: "Said 'don't email/reach out'" },
   { regex: /\b(please\s+)?remove\s+(me|us|my|our)\b/i,         reason: "Asked to be removed" },
   { regex: /\btake\s+(me|us|my|our)\s+off\b/i,                 reason: "Asked to be taken off list" },
   { regex: /\bunsubscribe\b/i,                                 reason: "Said 'unsubscribe'" },
   { regex: /\bopt[\s-]?out\b/i,                                reason: "Said 'opt out'" },
-  { regex: /\bstop\s+(emailing|contacting|messaging|reaching)\b/i, reason: "Said 'stop emailing/contacting'" },
+  { regex: /\bstop\s+(emailing|contacting|messaging|reaching|sending)\b/i, reason: "Said 'stop emailing/contacting'" },
   { regex: /\bno\s+more\s+emails?\b/i,                         reason: "Said 'no more emails'" },
-  { regex: /\bcease\s+(and\s+desist|all\s+communication|contact)\b/i, reason: "Cease & desist" },
+  { regex: /\bcease\s+(and\s+desist|all\s+communication|contact|further)\b/i, reason: "Cease & desist" },
+
+  // Standalone hard-no words (treat very short replies as opt-out)
+  { regex: /^\s*(quit|stop|end|remove|cancel|unsubscribe|leave\s+me\s+alone)\s*[.!?]*\s*$/im, reason: "One-word opt-out" },
+  { regex: /\b(please\s+)?(stop|quit|end\s+this|cancel\s+this)\s*([.!?]|$)/i, reason: "Said stop/quit/end/cancel" },
+
+  // Hard refusal phrases
   { regex: /\bnot\s+interested\b/i,                            reason: "Said 'not interested'" },
   { regex: /\bnot\s+a?\s*fit\b/i,                              reason: "Said 'not a fit'" },
   { regex: /\bwe['']?re\s+(all\s+)?good\b/i,                   reason: "Said 'we're good'" },
   { regex: /\bwe\s+are\s+(all\s+)?good\b/i,                    reason: "Said 'we are good'" },
   { regex: /\bnever\s+(contact|email|reach)\b/i,               reason: "Said 'never contact'" },
+  { regex: /\b(we'?ll|we\s+will)\s+pass\b/i,                   reason: "Said 'we'll pass'" },
+  { regex: /\bno\s+thank(s|\s+you)\b/i,                        reason: "Said 'no thanks'" },
+  { regex: /\bgo\s+away\b/i,                                   reason: "Said 'go away'" },
+
+  // Wrong person / area
   { regex: /\bwrong\s+(person|contact|number|email)\b/i,       reason: "Wrong person" },
   { regex: /\b(no|not)\s+(the\s+)?right\s+(person|contact|fit)\b/i, reason: "Not right person/fit" },
   { regex: /\bwork\s+remote(ly)?\b/i,                          reason: "Remote / no office" },
   { regex: /\bno\s+(physical\s+)?(office|location)\b/i,        reason: "No office" },
   { regex: /\bdon'?t\s+have\s+(an?\s+)?office\b/i,             reason: "No office" },
+
+  // Compliance / spam
   { regex: /\bspam\s+(report|complaint)\b/i,                   reason: "Spam complaint threatened" },
   { regex: /\breport\s+(you|this)\s+(as\s+)?spam\b/i,          reason: "Spam report threatened" },
+  { regex: /\b(GDPR|CCPA|attorney|lawyer|legal\s+action)\b/i,  reason: "Legal/compliance threat" },
 ];
 
 function checkDenyList(text: string): { match: boolean; reason: string } {
@@ -65,7 +94,7 @@ const SYSTEM_PROMPT = `You are a strict B2B email-nurture safety classifier. Rea
   1. bucket  — what type of reply this is (descriptive)
   2. safety  — whether it is SAFE to email this lead again 45 days from now (decision)
 
-These are independent. Bucket does NOT determine safety. Always run the unsafe checklist regardless of bucket.
+DEFAULT POSITION: most replies are NOT safe to nurture. Only allow safe when the lead clearly says "not now, but possibly later" with no negative finality. When in doubt, choose "unsafe" — never "unknown" — because unknown leaks; unsafe excludes.
 
 BUCKETS (descriptive only):
 - "soft_negative"  → mild "not right now / bad timing" replies that do not explicitly close the door:
@@ -73,32 +102,55 @@ BUCKETS (descriptive only):
 - "out_of_office"  → automated OOO / vacation auto-reply (mentions being away, return date, alternate contact)
 - "other"          → anything else, including hard nos, opt-outs, wrong-person, and unrelated content
 
-SAFETY = "unsafe"  if the reply contains ANY of these signals:
-  • Hard no:        "no thanks", "not interested", "we're good", "we are good", "no need", "we'll pass", "not a fit"
+SAFETY = "unsafe"  if the reply contains ANY of these signals (always run this checklist regardless of bucket):
+  • Standalone words: "Quit", "Stop", "End", "Remove", "Cancel", "Pass", "No", "Leave me alone" (a one-word reply almost always means NO)
+  • Hard no:        "no thanks", "not interested", "we're good", "we are good", "no need", "we'll pass", "not a fit", "we'll decline"
   • Opt-out:        "do not contact", "don't contact", "remove me", "take me off", "unsubscribe", "stop emailing", "no more emails", "opt out", "cease"
   • Finality:       "never contact", "absolutely not", "do not email again", legal/compliance threats
   • Wrong person:   "wrong person", "not the right contact", "I don't handle this", "contact <someone else>", "this isn't my area"
   • No office:      "remote", "no office", "no physical location", "we work remotely", "no local presence"
   • Wrong area:     "wrong city/state/area", "we're not in <area>", "outside <region>", "we don't service <area>"
   • Spam threat:    "report you for spam", "spam complaint", GDPR/CCPA references
+  • Frustration:    profanity directed at sender, all-caps refusal, "stop already", "leave us alone"
 
 SAFETY = "safe"  ONLY if ALL of:
   • bucket is "soft_negative" OR "out_of_office"
   • NONE of the unsafe signals above appear
   • Reply does not express any frustration, finality, or rejection of the offer itself
-  • You are at least 80% confident the lead is open to being contacted again later
+  • The lead has positively signalled openness to a later conversation ("circle back", "ping me in Q3", "currently focused on X, revisit later")
+  • You are at least 85% confident the lead is open to being contacted again later
 
-SAFETY = "unknown"  for anything else. When in doubt, return unknown.
+SAFETY = "unsafe"  for anything else. Do not return "unknown" — that bucket is for system errors only.
+
+Examples:
+  "Quit" → unsafe (one-word stop)
+  "No thanks" → unsafe (hard no)
+  "Not right now, ping me in Q3" → safe + soft_negative
+  "I'm out until April 30, contact Sarah for urgent matters" → safe + out_of_office
+  "We use an internal team for this" → unsafe (rejection, no later opening)
+  "Please remove me from your list" → unsafe (opt-out)
 
 Respond ONLY with this JSON shape:
 {"safety": "safe" | "unsafe" | "unknown", "bucket": "soft_negative" | "out_of_office" | "other", "reason": "<one short sentence quoting the actual phrase used>"}`;
 
 export async function classifyNurtureSafety(input: {
   replyText: string;
+  aiCategory?: string | null;
 }): Promise<NurtureSafetyResult> {
   const text = input.replyText?.trim() || "";
   if (!text) {
     return { safety: "unknown", bucket: null, reason: "Reply text is empty" };
+  }
+
+  // ─── Layer 0: AI category hard-block ───
+  // If the original AI categorizer already flagged this reply as a clear
+  // opt-out / wrong-person / dead-mailbox, never re-contact.
+  if (input.aiCategory && HARD_BLOCK_AI_CATEGORIES.has(input.aiCategory)) {
+    return {
+      safety: "unsafe",
+      bucket: "other",
+      reason: `AI category "${input.aiCategory}" — hard block`,
+    };
   }
 
   // ─── Layer 1: hard deny-list pre-check (no GPT call) ───

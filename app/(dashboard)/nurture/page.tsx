@@ -178,17 +178,38 @@ export default function NurturePage() {
     [campaigns, clientFilter]
   );
 
-  // Search-filter the visible items client-side (fast, only paginated 50 at a time)
+  // Tick every 60s so days-left labels stay accurate without a refetch.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Recompute days_until_eligible / is_eligible from eligible_at + current time
+  // so the list stays accurate even hours after the initial fetch.
+  function withFreshDays(it: NurtureItem): NurtureItem {
+    const eligibleMs = new Date(it.eligible_at).getTime();
+    const daysLeft = Math.floor((eligibleMs - now) / (1000 * 60 * 60 * 24));
+    return { ...it, days_until_eligible: daysLeft, is_eligible: daysLeft <= 0 };
+  }
+
+  // Search-filter + sort the visible items client-side (only paginated 50 at a time)
   const visibleItems = useMemo(() => {
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(
-      (i) =>
-        i.email?.toLowerCase().includes(q) ||
-        i.company?.toLowerCase().includes(q) ||
-        `${i.first_name || ""} ${i.last_name || ""}`.toLowerCase().includes(q)
-    );
-  }, [items, search]);
+    let list = items.map(withFreshDays);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(
+        (i) =>
+          i.email?.toLowerCase().includes(q) ||
+          i.company?.toLowerCase().includes(q) ||
+          `${i.first_name || ""} ${i.last_name || ""}`.toLowerCase().includes(q)
+      );
+    }
+    // Sort by time-until-eligible ascending so the most-due items surface first.
+    // Eligible items (negative days) end up at the top, oldest-eligible first.
+    return list.sort((a, b) => a.days_until_eligible - b.days_until_eligible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, search, now]);
 
   function isPushable(it: NurtureItem): boolean {
     if (!it.is_eligible) return false;
@@ -686,9 +707,18 @@ function EligibilityPill({ it }: { it: NurtureItem }) {
     return <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600 border border-zinc-200 whitespace-nowrap">Skipped</span>;
   }
   if (it.is_eligible) {
-    return <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap">Eligible</span>;
+    const ago = Math.abs(it.days_until_eligible);
+    return (
+      <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap" title={`Eligible since ${new Date(it.eligible_at).toLocaleDateString()}`}>
+        {ago === 0 ? "Eligible today" : `Eligible ${ago}d ago`}
+      </span>
+    );
   }
-  return <span className="text-[11px] text-muted-foreground whitespace-nowrap">In {Math.abs(it.days_until_eligible)}d</span>;
+  return (
+    <span className="text-[11px] text-muted-foreground whitespace-nowrap" title={`Eligible on ${new Date(it.eligible_at).toLocaleDateString()}`}>
+      In {it.days_until_eligible}d
+    </span>
+  );
 }
 
 function SkeletonRows({ count }: { count: number }) {
