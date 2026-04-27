@@ -29,17 +29,43 @@ export interface NurtureSafetyResult {
 }
 
 /**
- * AI lead categories (from lib/processing/lead-categorizer.ts) that
- * unconditionally block re-contact. If the original AI categorizer landed
- * on any of these, the reply is unsafe for nurture — no GPT call needed.
+ * Lead categories that DISQUALIFY a row from the nurture queue.
+ *
+ * Two reasons to block:
+ *
+ * (a) Already-engaged (a nurture sequence here would step on an active
+ *     conversation handled by sales/CS):
+ *       - Interested, Meeting Request, Meeting Set
+ *
+ * (b) Definitively-not-contactable (already opted out, wrong contact, or
+ *     not a human at all):
+ *       - Do Not Contact, Wrong Person, Wrong Person (Change of Target),
+ *         Not Interested, Mailbox No Longer Active,
+ *         Automated Error Message, Automated Catch-All Message
+ *
+ * Categories that REMAIN nurture candidates (decided by reply-text safety
+ * classifier, not hard-blocked):
+ *   - Out Of Office, Follow Up at a Later Date, Open Response,
+ *     Unrecognizable by AI
+ *
+ * Includes both the AI-Categorized variant ("Meeting Request") and the
+ * human Lead-Category variant ("Meeting Set") because the import maps
+ * either to original_ai_category.
  */
 const HARD_BLOCK_AI_CATEGORIES = new Set([
+  // Hot leads — already engaged, nurture would interfere
+  "Interested",
+  "Meeting Request",
+  "Meeting Set",
+  // Hard opt-outs / bad contacts
   "Do Not Contact",
   "Wrong Person",
   "Wrong Person (Change of Target)",
   "Not Interested",
+  // Dead mailboxes / bots
   "Mailbox No Longer Active",
   "Automated Error Message",
+  "Automated Catch-All Message",
 ]);
 
 const HARD_NO_PATTERNS: { regex: RegExp; reason: string }[] = [

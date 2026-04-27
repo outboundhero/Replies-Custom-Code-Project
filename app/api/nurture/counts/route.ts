@@ -19,12 +19,16 @@ const NURTURE_DAYS = 45;
 
 // Mirror of EXCLUDED_AI_CATEGORIES in /api/nurture/route.ts — keep in sync.
 const EXCLUDED_AI_CATEGORIES = [
+  "Interested",
+  "Meeting Request",
+  "Meeting Set",
   "Do Not Contact",
   "Wrong Person",
   "Wrong Person (Change of Target)",
   "Not Interested",
   "Mailbox No Longer Active",
   "Automated Error Message",
+  "Automated Catch-All Message",
 ];
 
 // Noise-sender patterns are intentionally NOT filtered in this counts

@@ -30,17 +30,23 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
 /**
- * AI categories that should NEVER appear in the nurture queue, regardless of
- * the nurture-safety classifier. Mirrors HARD_BLOCK_AI_CATEGORIES in
- * lib/nurture/safety-classifier.ts.
+ * AI / Lead categories that should NEVER appear in the nurture queue.
+ * Mirrors HARD_BLOCK_AI_CATEGORIES in lib/nurture/safety-classifier.ts.
+ *
+ * Two reasons: hot leads already in active conversation (Interested,
+ * Meeting Request, Meeting Set), and hard opt-outs / dead mailboxes.
  */
 const EXCLUDED_AI_CATEGORIES = [
+  "Interested",
+  "Meeting Request",
+  "Meeting Set",
   "Do Not Contact",
   "Wrong Person",
   "Wrong Person (Change of Target)",
   "Not Interested",
   "Mailbox No Longer Active",
   "Automated Error Message",
+  "Automated Catch-All Message",
 ];
 
 /**
