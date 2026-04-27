@@ -74,6 +74,7 @@ export async function GET(req: NextRequest) {
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .not("reply_time", "is", null)
+        .neq("client_tag", "N/A")
         .or(
           `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );
@@ -94,6 +95,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("nurture_legacy_leads")
         .select("id", { count: "exact", head: true })
+        .neq("client_tag", "N/A")
         .or(
           `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );

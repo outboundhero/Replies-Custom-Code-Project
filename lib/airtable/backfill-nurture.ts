@@ -25,10 +25,24 @@
  */
 
 import supabase from "@/lib/supabase";
-import { listAllRecords, type AirtableRecord } from "@/lib/airtable";
+import { listAllRecords, listBaseSchema, type AirtableRecord } from "@/lib/airtable";
 
 export const DEFAULT_BASE_ID = "appqZiSdsbeBCuHEp"; // Section 1
 export const DEFAULT_TABLE_ID = "tbl1BnpnsUBrBGeuy"; // Master Inbox (Table)
+
+/** All 7 Airtable bases seeded in scripts/seed.ts (Sections 1–7). */
+export const ALL_BASES: { name: string; baseId: string }[] = [
+  { name: "Section 1", baseId: "appqZiSdsbeBCuHEp" },
+  { name: "Section 2", baseId: "appGsk8TNtjwVmZZ4" },
+  { name: "Section 3", baseId: "appQ8xxARCGmcft6E" },
+  { name: "Section 4", baseId: "appYWttC5gLjV3kso" },
+  { name: "Section 5", baseId: "appPmEI39HJfkFXjv" },
+  { name: "Section 6", baseId: "appRr92qMRKP5YCUw" },
+  { name: "Section 7", baseId: "appL5AaH8VcP2yWoQ" },
+];
+
+/** Client tags that should NEVER be imported — not useful for nurture. */
+const SKIP_CLIENT_TAGS = new Set(["N/A", "n/a", "NA", "na", ""]);
 
 export interface BackfillResult {
   baseId: string;
@@ -38,7 +52,24 @@ export interface BackfillResult {
   inserted: number;
   skippedNoReply: number;
   skippedNoEmail: number;
+  skippedBadClientTag: number;
   errors: number;
+}
+
+/**
+ * Look up the Master Inbox table id for a base by inspecting its schema.
+ * Falls back to DEFAULT_TABLE_ID if no name match. Each base in the
+ * Section template was created independently, so table ids may differ
+ * even though the table NAMES are consistent.
+ */
+export async function findMasterInboxTableId(baseId: string): Promise<string> {
+  const tables = await listBaseSchema(baseId);
+  // Prefer exact match, then loose contains match.
+  const exact = tables.find((t) => t.name === "Master Inbox (Table)" || t.name === "Master Inbox");
+  if (exact) return exact.id;
+  const loose = tables.find((t) => /master\s*inbox/i.test(t.name));
+  if (loose) return loose.id;
+  return DEFAULT_TABLE_ID;
 }
 
 function pickString(fields: Record<string, unknown>, ...keys: string[]): string | null {
@@ -95,7 +126,7 @@ function mapRecord(
   baseId: string,
   tableId: string,
   rec: AirtableRecord
-): LegacyRow | { skip: "no_email" | "no_reply" } {
+): LegacyRow | { skip: "no_email" | "no_reply" | "bad_client_tag" } {
   const f = rec.fields;
 
   const reply_text = pickRichText(f, "Reply we got");
@@ -103,6 +134,13 @@ function mapRecord(
 
   const lead_email = pickString(f, "Lead Email");
   if (!lead_email) return { skip: "no_email" };
+
+  const client_tag = pickString(f, "Client Tag");
+  // Skip rows with unhelpful client tags — these can never be routed to a
+  // client-specific nurture campaign anyway.
+  if (!client_tag || SKIP_CLIENT_TAGS.has(client_tag.trim())) {
+    return { skip: "bad_client_tag" };
+  }
 
   const reply_at = pickIso(f, "Time we got the reply", "Reply Time");
   // If we have no reply timestamp, fall back to Airtable's createdTime so the
@@ -118,7 +156,7 @@ function mapRecord(
     first_name: pickString(f, "First Name", "First Name (Extracted)"),
     last_name: pickString(f, "Last Name", "Last Name (Extracted)"),
     company: pickString(f, "Company Name"),
-    client_tag: pickString(f, "Client Tag"),
+    client_tag,
     reply_text,
     reply_at: finalReplyAt,
     original_ai_category: pickCategory(f),
@@ -144,6 +182,7 @@ export async function backfillTable(
     inserted: 0,
     skippedNoReply: 0,
     skippedNoEmail: 0,
+    skippedBadClientTag: 0,
     errors: 0,
   };
 
@@ -158,6 +197,7 @@ export async function backfillTable(
         const mapped = mapRecord(baseId, tableId, rec);
         if ("skip" in mapped) {
           if (mapped.skip === "no_email") result.skippedNoEmail++;
+          else if (mapped.skip === "bad_client_tag") result.skippedBadClientTag++;
           else result.skippedNoReply++;
           continue;
         }

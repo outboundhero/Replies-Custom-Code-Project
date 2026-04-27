@@ -114,6 +114,16 @@ function applyNoiseSenderFilter<T extends { not: (col: string, op: string, val: 
   return result;
 }
 
+/**
+ * Drop rows whose client_tag is "N/A" (or NULL). These can't be routed to
+ * a client-specific nurture campaign so they're useless in the queue.
+ * Note: .neq is NULL-aware in PostgREST — "X != 'N/A'" is NULL when X is
+ * NULL, and PostgreSQL filters NULL out, which is what we want.
+ */
+function applyClientTagFilter<T extends { neq: (col: string, val: string) => T }>(q: T): T {
+  return q.neq("client_tag", "N/A");
+}
+
 function daysBetween(later: Date, earlier: Date): number {
   return Math.floor((later.getTime() - earlier.getTime()) / (1000 * 60 * 60 * 24));
 }
@@ -203,6 +213,8 @@ export async function GET(req: NextRequest) {
 
       // Strip out automated newsletter / no-reply senders.
       q = applyNoiseSenderFilter(q);
+      // Drop rows with no real client tag — can't route them.
+      q = applyClientTagFilter(q);
 
       q = orderByAddedDesc
         ? q.order("nurture_added_at", { ascending: false })
@@ -378,6 +390,8 @@ export async function GET(req: NextRequest) {
       for (const p of NOISE_SENDER_PATTERNS) {
         q = q.not("lead_email", "ilike", p);
       }
+      // Same client-tag filter — drop N/A.
+      q = q.neq("client_tag", "N/A");
 
       if (clientTag) q = q.eq("client_tag", clientTag);
 
