@@ -885,28 +885,36 @@ function SafetyPill({ safety, source }: { safety: string | null | undefined; sou
   return <span className={`${cls} bg-amber-50 text-amber-700 border-amber-200`}>Unknown</span>;
 }
 
+function formatShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function EligibilityPill({ it }: { it: NurtureItem }) {
   const cls = "text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap";
-  if (it.added_at) return <span className={`${cls} bg-blue-50 text-blue-700 border-blue-200`}>Added</span>;
+  if (it.added_at) {
+    return (
+      <span className={`${cls} bg-blue-50 text-blue-700 border-blue-200`} title={`Added ${new Date(it.added_at).toLocaleString()}`}>
+        Added
+      </span>
+    );
+  }
   if (it.skipped) return <span className={`${cls} bg-zinc-100 text-zinc-600 border-zinc-200`}>Skipped</span>;
   if (it.is_eligible) {
     const ago = Math.abs(it.days_until_eligible);
     return (
-      <span
-        className={`${cls} bg-emerald-50 text-emerald-700 border-emerald-200`}
-        title={`Eligible since ${new Date(it.eligible_at).toLocaleDateString()}`}
-      >
-        {ago === 0 ? "Eligible today" : `Eligible ${ago}d ago`}
-      </span>
+      <div className="flex flex-col items-end gap-0.5 leading-tight">
+        <span className={`${cls} bg-emerald-50 text-emerald-700 border-emerald-200`}>
+          {ago === 0 ? "Eligible today" : `Eligible ${ago}d ago`}
+        </span>
+        <span className="text-[10px] text-muted-foreground">since {formatShortDate(it.eligible_at)}</span>
+      </div>
     );
   }
   return (
-    <span
-      className="text-[11px] text-muted-foreground whitespace-nowrap"
-      title={`Eligible on ${new Date(it.eligible_at).toLocaleDateString()}`}
-    >
-      In {it.days_until_eligible}d
-    </span>
+    <div className="flex flex-col items-end gap-0.5 leading-tight">
+      <span className="text-[11px] text-muted-foreground whitespace-nowrap">In {it.days_until_eligible}d</span>
+      <span className="text-[10px] text-muted-foreground">on {formatShortDate(it.eligible_at)}</span>
+    </div>
   );
 }
 

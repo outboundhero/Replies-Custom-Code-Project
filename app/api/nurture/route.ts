@@ -42,15 +42,18 @@ const EXCLUDED_AI_CATEGORIES = [
 
 /**
  * Sender email patterns we never want in the nurture queue. These are
- * automated newsletters / transactional senders that aren't real human
- * leads and would otherwise spam the queue with hundreds of duplicates.
- * Patterns are SQL ILIKE — `%` is a wildcard.
+ * automated newsletters / transactional senders / ticket systems that
+ * aren't real human leads. Patterns are SQL ILIKE — `%` is a wildcard.
  */
 const NOISE_SENDER_PATTERNS = [
-  "%@public.govdelivery.com",     // government newsletter platform
+  // Mass-email / newsletter platforms
+  "%@public.govdelivery.com",
   "%@govdelivery.com",
   "%@mailchimpapp.com",
   "%@em.%",                        // mass-email subdomains (em.foo.com)
+  "%@bounce.%",
+  "%@bounces.%",
+  // No-reply mailboxes
   "noreply@%",
   "no-reply@%",
   "no_reply@%",
@@ -58,10 +61,50 @@ const NOISE_SENDER_PATTERNS = [
   "do-not-reply@%",
   "do_not_reply@%",
   "notifications@%",
+  "notification@%",
   "newsletter@%",
   "mailer-daemon@%",
+  "mailer@%",
   "postmaster@%",
+  // Ticket / helpdesk systems
+  "jira@%",
+  "help@%",
+  "helpdesk@%",
+  "tickets@%",
+  "ticket@%",
+  "support-noreply@%",
+  "%@spiceworks.com",
+  "%.spiceworks.com",
+  "%@zendesk.com",
+  "%@freshdesk.com",
+  // Survey / feedback bots
+  "survey@%",
+  "surveys@%",
+  "feedback@%",
 ];
+
+/**
+ * Reply-body markers that indicate the message is an automated ticket
+ * confirmation, survey, or notification — not a real human reply.
+ * Applied client-side after fetch (cheap, runs over the page-sized batch).
+ */
+const NOISE_BODY_MARKERS = [
+  "reply above this line",
+  "type your reply above",
+  "this is a notification from",
+  "this is an automated message",
+  "this email was sent automatically",
+  "do not reply to this email",
+  "how did we do",                  // common survey opener
+  "## reply",                       // markdown ticket markers
+  "-- reply",
+];
+
+function isNoiseBody(reply: string | null | undefined): boolean {
+  if (!reply) return false;
+  const lower = reply.toLowerCase();
+  return NOISE_BODY_MARKERS.some((m) => lower.includes(m));
+}
 
 function applyNoiseSenderFilter<T extends { not: (col: string, op: string, val: string) => T }>(q: T): T {
   let result = q;
@@ -205,6 +248,8 @@ export async function GET(req: NextRequest) {
         if (!r.reply_time) continue;
         const email = (r.lead_email || "").toLowerCase();
         if (!email || seenEmails.has(email)) continue;
+        // Skip ticket / notification / survey auto-replies based on body markers.
+        if (isNoiseBody(r.reply_we_got)) continue;
         seenEmails.add(email);
 
         let source: NurtureItem["source"];
