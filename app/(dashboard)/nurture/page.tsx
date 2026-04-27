@@ -223,8 +223,11 @@ export default function NurturePage() {
   //   - If something is selected, show only campaigns matching the selected
   //     leads' client_tag(s).
   //   - Otherwise honour the page's client filter as a fallback.
-  //   - When campaigns lack a client_tag, fall back to matching by name
-  //     prefix (campaigns are named "TAG - …").
+  //   - Match in this order of confidence:
+  //       1. exact c.client_tag match (extracted by /api/nurture/campaigns)
+  //       2. name PREFIX match: "TAG - …", "TAG: …", "TAG | …", "TAG/…"
+  //       3. tag appears as a whole word ANYWHERE in the campaign name —
+  //          covers naming patterns like "[Nurture] AC Cooldown".
   const filteredCampaigns = useMemo(() => {
     const tagsToMatch =
       selectedClientTags.length > 0 ? selectedClientTags
@@ -233,10 +236,13 @@ export default function NurturePage() {
     if (!tagsToMatch) return campaigns;
     return campaigns.filter((c) => {
       if (c.client_tag && tagsToMatch.includes(c.client_tag)) return true;
-      // Fallback: match by name prefix "TAG - …" or "TAG -…"
-      const m = c.name.match(/^([A-Z0-9&]+)\s*[-–:]/);
-      if (m && tagsToMatch.includes(m[1])) return true;
-      return false;
+      const prefix = c.name.match(/^\s*([A-Za-z0-9&_]+)\s*[-–—:|/]/);
+      if (prefix && tagsToMatch.some((t) => t.toLowerCase() === prefix[1].toLowerCase())) return true;
+      // Whole-word match anywhere in the name (escapes regex specials in the tag).
+      return tagsToMatch.some((t) => {
+        const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`\\b${escaped}\\b`, "i").test(c.name);
+      });
     });
   }, [campaigns, selectedClientTags, clientFilter]);
 
@@ -690,25 +696,36 @@ export default function NurturePage() {
           >
             {bulkSelecting ? "Selecting…" : clientFilter ? `Select all for ${clientFilter}` : "Select all (pick a client first)"}
           </button>
-          <Select value={pushTargetCampaignId} onValueChange={setPushTargetCampaignId}>
-            <SelectTrigger className="h-9 w-72 text-sm" disabled={selected.size === 0}>
-              <SelectValue placeholder="Choose a nurture campaign…" />
-            </SelectTrigger>
-            <SelectContent>
-              {filteredCampaigns.length === 0 && (
-                <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                  {selectedClientTags.length > 0
-                    ? `No nurture campaigns for ${selectedClientTags.join(", ")}`
-                    : clientFilter
-                      ? `No nurture campaigns for ${clientFilter}`
-                      : "No nurture campaigns found"}
-                </div>
-              )}
-              {filteredCampaigns.map((c) => (
-                <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {filteredCampaigns.length === 0 ? (
+            // Radix Select can fail to open when SelectContent has zero
+            // SelectItems. Render a static, non-Select placeholder instead
+            // so the user always gets a clear, non-broken UX. The hint is
+            // explicit so they know how to fix it.
+            <div className="h-9 w-72 px-3 flex items-center text-xs text-muted-foreground border rounded-md bg-muted/40">
+              {(() => {
+                const target =
+                  selectedClientTags.length > 0 ? selectedClientTags.join(", ")
+                  : clientFilter || null;
+                if (target) {
+                  return `No "[Nurture]" campaign tagged ${target} (of ${campaigns.length} total)`;
+                }
+                return campaigns.length === 0
+                  ? "Loading nurture campaigns…"
+                  : `${campaigns.length} nurture campaigns — pick a client first`;
+              })()}
+            </div>
+          ) : (
+            <Select value={pushTargetCampaignId} onValueChange={setPushTargetCampaignId}>
+              <SelectTrigger className="h-9 w-72 text-sm" disabled={selected.size === 0}>
+                <SelectValue placeholder="Choose a nurture campaign…" />
+              </SelectTrigger>
+              <SelectContent>
+                {filteredCampaigns.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Button
             size="sm"
             onClick={pushSelected}
