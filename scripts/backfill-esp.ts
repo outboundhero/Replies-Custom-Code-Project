@@ -25,7 +25,7 @@ import { lookupEmailHost } from "../lib/email-guard";
 
 config({ path: ".env.local" });
 
-const PAGE_SIZE = 1000;
+const PAGE_SIZE = 500;
 
 interface TableSpec {
   name: string;
@@ -38,26 +38,40 @@ const TABLES: TableSpec[] = [
   { name: "nurture_sequence_finished", emailColumn: "email" },
 ];
 
+/**
+ * Cursor-paginated scan over a single table. Uses `id > lastId` instead
+ * of OFFSET so the query stays O(log N) per page no matter how deep we
+ * go — offset-based pagination on the 394K-row legacy table was timing
+ * out at the Supabase 8s statement limit. We do NOT filter on esp here:
+ * a B-tree index doesn't help with `IS NULL`, and a partial index on
+ * NULL is the wrong shape; instead we let the cursor walk every row and
+ * filter in JS, which is fast because each page is tiny.
+ */
 async function fetchAllUnsetEmails(table: string, emailCol: string): Promise<string[]> {
   const all: string[] = [];
-  let from = 0;
+  let lastId = 0;
+  let pages = 0;
   while (true) {
     const { data, error } = await supabase
       .from(table)
-      .select(emailCol)
-      .is("esp", null)
-      .not(emailCol, "is", null)
-      .neq(emailCol, "")
-      .range(from, from + PAGE_SIZE - 1);
+      .select(`id, ${emailCol}, esp`)
+      .gt("id", lastId)
+      .order("id", { ascending: true })
+      .limit(PAGE_SIZE);
     if (error) throw new Error(`${table} select failed: ${error.message}`);
-    const rows = (data || []) as unknown as Record<string, string>[];
+    const rows = (data || []) as unknown as Array<{ id: number; esp: string | null } & Record<string, string>>;
     if (rows.length === 0) break;
     for (const r of rows) {
+      if (r.esp) continue; // already classified — skip
       const e = r[emailCol]?.trim();
       if (e) all.push(e);
     }
+    lastId = rows[rows.length - 1].id;
+    pages++;
+    if (pages % 50 === 0) {
+      console.log(`  …scanned ${(pages * PAGE_SIZE).toLocaleString()} rows, ${all.length.toLocaleString()} unset so far (last id ${lastId})`);
+    }
     if (rows.length < PAGE_SIZE) break;
-    from += PAGE_SIZE;
   }
   return all;
 }
