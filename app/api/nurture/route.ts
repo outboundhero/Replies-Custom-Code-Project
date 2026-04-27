@@ -40,6 +40,37 @@ const EXCLUDED_AI_CATEGORIES = [
   "Automated Error Message",
 ];
 
+/**
+ * Sender email patterns we never want in the nurture queue. These are
+ * automated newsletters / transactional senders that aren't real human
+ * leads and would otherwise spam the queue with hundreds of duplicates.
+ * Patterns are SQL ILIKE — `%` is a wildcard.
+ */
+const NOISE_SENDER_PATTERNS = [
+  "%@public.govdelivery.com",     // government newsletter platform
+  "%@govdelivery.com",
+  "%@mailchimpapp.com",
+  "%@em.%",                        // mass-email subdomains (em.foo.com)
+  "noreply@%",
+  "no-reply@%",
+  "no_reply@%",
+  "donotreply@%",
+  "do-not-reply@%",
+  "do_not_reply@%",
+  "notifications@%",
+  "newsletter@%",
+  "mailer-daemon@%",
+  "postmaster@%",
+];
+
+function applyNoiseSenderFilter<T extends { not: (col: string, op: string, val: string) => T }>(q: T): T {
+  let result = q;
+  for (const p of NOISE_SENDER_PATTERNS) {
+    result = result.not("lead_email", "ilike", p);
+  }
+  return result;
+}
+
 function daysBetween(later: Date, earlier: Date): number {
   return Math.floor((later.getTime() - earlier.getTime()) / (1000 * 60 * 60 * 24));
 }
@@ -100,6 +131,13 @@ export async function GET(req: NextRequest) {
 
     // ── Replies-based candidates ──
     if (wantReplies) {
+      // For "added" view, sort by when they were added (newest first).
+      // For everything else, sort by reply_time ASC so the longest-waiting /
+      // most-due lead surfaces at the top of the page — the user wants to
+      // see what's overdue or about to be ready, not the most recently
+      // received noise.
+      const orderByAddedDesc = statusFilter === "added";
+
       let q = supabase
         .from("replies")
         .select(
@@ -113,8 +151,14 @@ export async function GET(req: NextRequest) {
         // classifier yet.
         .or(
           `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
-        )
-        .order("reply_time", { ascending: false });
+        );
+
+      // Strip out automated newsletter / no-reply senders.
+      q = applyNoiseSenderFilter(q);
+
+      q = orderByAddedDesc
+        ? q.order("nurture_added_at", { ascending: false })
+        : q.order("reply_time", { ascending: true });
 
       if (clientTag) q = q.eq("client_tag", clientTag);
 
@@ -146,12 +190,23 @@ export async function GET(req: NextRequest) {
         q = q.eq("nurture_safety", safetyFilter);
       }
 
-      q = q.range(offset, offset + limit - 1);
+      // Fetch 2x the requested limit so we can dedupe by email and still
+      // hand back close to `limit` distinct leads on the page.
+      q = q.range(offset, offset + limit * 2 - 1);
       const { data: rows, error } = await q;
       if (error) throw new Error(error.message);
 
+      // Dedupe by lead_email — multiple replies from the same address
+      // (e.g. a newsletter that survived noise filtering) collapse to one
+      // entry per email. The query is already ordered by reply_time, so the
+      // first occurrence is the most relevant one for the active view.
+      const seenEmails = new Set<string>();
       for (const r of rows || []) {
         if (!r.reply_time) continue;
+        const email = (r.lead_email || "").toLowerCase();
+        if (!email || seenEmails.has(email)) continue;
+        seenEmails.add(email);
+
         let source: NurtureItem["source"];
         if (r.nurture_bucket === "out_of_office") source = "out_of_office";
         else if (r.nurture_bucket === "soft_negative") source = "soft_negative";
@@ -184,17 +239,22 @@ export async function GET(req: NextRequest) {
           nurture_safety_reason: r.nurture_safety_reason,
           nurture_classified_at: r.nurture_classified_at,
         });
+        if (items.length >= limit) break;
       }
     }
 
     // ── Sequence-finished candidates ──
     if (wantSeq) {
+      const seqOrderByAddedDesc = statusFilter === "added";
       let q = supabase
         .from("nurture_sequence_finished")
         .select(
           "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, email, first_name, last_name, company, sequence_finished_at, added_at, skipped"
-        )
-        .order("sequence_finished_at", { ascending: false });
+        );
+
+      q = seqOrderByAddedDesc
+        ? q.order("added_at", { ascending: false })
+        : q.order("sequence_finished_at", { ascending: true });
 
       if (clientTag) q = q.eq("client_tag", clientTag);
 

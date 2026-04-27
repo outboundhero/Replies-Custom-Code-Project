@@ -24,6 +24,24 @@ const EXCLUDED_AI_CATEGORIES = [
   "Automated Error Message",
 ];
 
+// Mirror of NOISE_SENDER_PATTERNS in /api/nurture/route.ts — keep in sync.
+const NOISE_SENDER_PATTERNS = [
+  "%@public.govdelivery.com",
+  "%@govdelivery.com",
+  "%@mailchimpapp.com",
+  "%@em.%",
+  "noreply@%",
+  "no-reply@%",
+  "no_reply@%",
+  "donotreply@%",
+  "do-not-reply@%",
+  "do_not_reply@%",
+  "notifications@%",
+  "newsletter@%",
+  "mailer-daemon@%",
+  "postmaster@%",
+];
+
 export async function GET(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
@@ -42,6 +60,9 @@ export async function GET(req: NextRequest) {
         .or(
           `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );
+      for (const p of NOISE_SENDER_PATTERNS) {
+        q = q.not("lead_email", "ilike", p);
+      }
       if (clientTag) q = q.eq("client_tag", clientTag);
       return q;
     };
