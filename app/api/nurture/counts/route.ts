@@ -109,10 +109,28 @@ export async function GET(req: NextRequest) {
       return q;
     };
 
-    const runCount = async (q: ReturnType<typeof baseReplies> | ReturnType<typeof baseSeq> | ReturnType<typeof baseLegacy>) => {
-      const { count, error } = await q;
-      if (error) throw new Error(error.message);
-      return count ?? 0;
+    /**
+     * Run one count query. On failure (timeout, syntax, etc.) log the FULL
+     * error and return 0 so a single bad query doesn't blank the entire
+     * tile row. Empty error.message from PostgREST is common for
+     * statement-timeout errors — log the whole object so we can see code,
+     * details, hint.
+     */
+    const runCount = async (
+      label: string,
+      q: ReturnType<typeof baseReplies> | ReturnType<typeof baseSeq> | ReturnType<typeof baseLegacy>
+    ): Promise<number> => {
+      try {
+        const { count, error } = await q;
+        if (error) {
+          console.error(`[counts:${label}] Supabase error:`, JSON.stringify(error));
+          return 0;
+        }
+        return count ?? 0;
+      } catch (e) {
+        console.error(`[counts:${label}] threw:`, e);
+        return 0;
+      }
     };
 
     const [
@@ -131,14 +149,16 @@ export async function GET(req: NextRequest) {
       legacyWaiting,
       legacyAdded,
     ] = await Promise.all([
-      runCount(baseReplies()),
+      runCount("replies.total", baseReplies()),
       runCount(
+        "replies.eligible",
         baseReplies()
           .lte("reply_time", cutoffIso)
           .is("nurture_added_at", null)
           .or("nurture_skipped.is.null,nurture_skipped.eq.false")
       ),
       runCount(
+        "replies.eligibleSafe",
         baseReplies()
           .lte("reply_time", cutoffIso)
           .is("nurture_added_at", null)
@@ -146,34 +166,39 @@ export async function GET(req: NextRequest) {
           .eq("nurture_safety", "safe")
       ),
       runCount(
+        "replies.waiting",
         baseReplies()
           .gt("reply_time", cutoffIso)
           .is("nurture_added_at", null)
           .or("nurture_skipped.is.null,nurture_skipped.eq.false")
       ),
-      runCount(baseReplies().not("nurture_added_at", "is", null)),
-      runCount(baseSeq()),
+      runCount("replies.added", baseReplies().not("nurture_added_at", "is", null)),
+      runCount("seq.total", baseSeq()),
       runCount(
+        "seq.eligible",
         baseSeq()
           .lte("sequence_finished_at", cutoffIso)
           .is("added_at", null)
           .or("skipped.is.null,skipped.eq.false")
       ),
       runCount(
+        "seq.waiting",
         baseSeq()
           .gt("sequence_finished_at", cutoffIso)
           .is("added_at", null)
           .or("skipped.is.null,skipped.eq.false")
       ),
-      runCount(baseSeq().not("added_at", "is", null)),
-      runCount(baseLegacy()),
+      runCount("seq.added", baseSeq().not("added_at", "is", null)),
+      runCount("legacy.total", baseLegacy()),
       runCount(
+        "legacy.eligible",
         baseLegacy()
           .lte("reply_at", cutoffIso)
           .is("nurture_added_at", null)
           .or("nurture_skipped.is.null,nurture_skipped.eq.false")
       ),
       runCount(
+        "legacy.eligibleSafe",
         baseLegacy()
           .lte("reply_at", cutoffIso)
           .is("nurture_added_at", null)
@@ -181,12 +206,13 @@ export async function GET(req: NextRequest) {
           .eq("nurture_safety", "safe")
       ),
       runCount(
+        "legacy.waiting",
         baseLegacy()
           .gt("reply_at", cutoffIso)
           .is("nurture_added_at", null)
           .or("nurture_skipped.is.null,nurture_skipped.eq.false")
       ),
-      runCount(baseLegacy().not("nurture_added_at", "is", null)),
+      runCount("legacy.added", baseLegacy().not("nurture_added_at", "is", null)),
     ]);
 
     // NOTE: counts are per-source raw totals. The actual list dedupes by
