@@ -638,6 +638,13 @@ export default function NurturePage() {
       if (res.ok) {
         toast.success(`Added ${data.attached} leads to nurture campaign`);
         if (data.failures?.length) console.warn("Push failures:", data.failures);
+        // Successful push: clear selection + exit selection-view mode
+        // (banner clears, items revert to the regular paged view that no
+        // longer contains the just-pushed leads).
+        setSelected(new Set());
+        setSelectedMeta(new Map());
+        setPushTargetCampaignId("");
+        setSelectionScope(null);
       } else {
         toast.error(data.error || "Push failed");
         if (data.failures?.length) console.warn("Push failures:", data.failures);
@@ -659,6 +666,12 @@ export default function NurturePage() {
     const data = await res.json();
     if (res.ok) {
       toast.success(`Skipped ${data.updated} leads`);
+      // Same cleanup as push — skipped rows shouldn't linger in the
+      // selection view either.
+      setSelected(new Set());
+      setSelectedMeta(new Map());
+      setPushTargetCampaignId("");
+      setSelectionScope(null);
       await Promise.all([loadPage(true, false), loadCounts()]);
     } else toast.error(data.error);
   }
