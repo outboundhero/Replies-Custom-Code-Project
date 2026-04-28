@@ -4,18 +4,32 @@
  *   - nurture_legacy_leads     (lead_email)
  *   - nurture_sequence_finished (email)
  *
- * Per-email lookups via EmailGuard (one call per unique address). The
- * SAME email appearing across multiple tables / multiple rows is only
- * looked up ONCE thanks to the in-memory cache, but no domain-level
- * shortcut — every distinct address pays its own API call.
+ * Two design changes from the previous version:
+ *
+ * 1. INCREMENTAL WRITES — each lookup writes its result to Supabase
+ *    immediately. The old design cached all 378k results in memory then
+ *    flushed at the end; if the run died after lookup but before
+ *    flush, all work was lost. Now if the script crashes mid-run, every
+ *    completed lookup is already in the DB.
+ *
+ * 2. PRIORITY TIERS — the script processes leads in business-priority
+ *    order so the most-actionable rows get ESP first:
+ *      Tier 1: Ready-to-nurture (eligible + safe + not added/skipped)
+ *      Tier 2: All eligible (past 45-day cooldown, any safety)
+ *      Tier 3: Waiting (within 45-day cooldown)
+ *    The Nurture page becomes ESP-aware for Ready-to-nurture leads
+ *    within minutes, even though the full backfill still takes hours.
+ *
+ * Per-email cache (in-memory) means the same address appearing across
+ * multiple tiers / multiple tables only costs one EmailGuard call.
  *
  * Usage:
- *   npx tsx scripts/backfill-esp.ts                 # all 3 tables
- *   npx tsx scripts/backfill-esp.ts replies         # one table only
- *   npx tsx scripts/backfill-esp.ts --dry           # show counts, no writes
- *   npx tsx scripts/backfill-esp.ts --concurrency 16
+ *   npx tsx scripts/backfill-esp.ts                     # all 3 tiers
+ *   npx tsx scripts/backfill-esp.ts --tier 1            # only Ready
+ *   npx tsx scripts/backfill-esp.ts --concurrency 5
+ *   npx tsx scripts/backfill-esp.ts --reset-unknowns    # clear bad data
  *
- * Idempotent — re-runs only touch rows whose esp is still NULL.
+ * Idempotent — re-runs skip rows whose esp is already set.
  * Requires EMAILGUARD_API_KEY in .env.local.
  */
 
@@ -27,71 +41,69 @@ config({ path: ".env.local" });
 
 const PAGE_SIZE = 500;
 const DEFAULT_CONCURRENCY = 5;
+const NURTURE_DAYS = 45;
+
+// ── Mirror of EXCLUDED_AI_CATEGORIES in /api/nurture/route.ts ──
+const EXCLUDED_AI_CATEGORIES = [
+  "Interested", "Meeting Request", "Meeting Set",
+  "Do Not Contact", "Wrong Person", "Wrong Person (Change of Target)",
+  "Not Interested", "Mailbox No Longer Active",
+  "Automated Error Message", "Automated Catch-All Message",
+];
 
 interface TableSpec {
   name: string;
   emailColumn: string;
+  triggerColumn: string;       // reply_time / sequence_finished_at / reply_at
+  addedColumn: string;         // nurture_added_at / added_at
+  skippedColumn: string;       // nurture_skipped / skipped
+  safetyColumn?: string;       // nurture_safety (replies, legacy); seq has no safety
+  aiCategoryColumn?: string;   // ai_categorized_lead_category / original_ai_category; seq has none
 }
 
 const TABLES: TableSpec[] = [
-  { name: "replies", emailColumn: "lead_email" },
-  { name: "nurture_legacy_leads", emailColumn: "lead_email" },
-  { name: "nurture_sequence_finished", emailColumn: "email" },
+  {
+    name: "replies",
+    emailColumn: "lead_email",
+    triggerColumn: "reply_time",
+    addedColumn: "nurture_added_at",
+    skippedColumn: "nurture_skipped",
+    safetyColumn: "nurture_safety",
+    aiCategoryColumn: "ai_categorized_lead_category",
+  },
+  {
+    name: "nurture_legacy_leads",
+    emailColumn: "lead_email",
+    triggerColumn: "reply_at",
+    addedColumn: "nurture_added_at",
+    skippedColumn: "nurture_skipped",
+    safetyColumn: "nurture_safety",
+    aiCategoryColumn: "original_ai_category",
+  },
+  {
+    name: "nurture_sequence_finished",
+    emailColumn: "email",
+    triggerColumn: "sequence_finished_at",
+    addedColumn: "added_at",
+    skippedColumn: "skipped",
+  },
 ];
 
-/**
- * Cursor-paginated scan over a single table. Uses `id > lastId` instead
- * of OFFSET so the query stays O(log N) per page no matter how deep we
- * go — offset-based pagination on the 394K-row legacy table was timing
- * out at the Supabase 8s statement limit. We do NOT filter on esp here:
- * a B-tree index doesn't help with `IS NULL`, and a partial index on
- * NULL is the wrong shape; instead we let the cursor walk every row and
- * filter in JS, which is fast because each page is tiny.
- */
-async function fetchAllUnsetEmails(table: string, emailCol: string): Promise<string[]> {
-  const all: string[] = [];
-  let lastId = 0;
-  let pages = 0;
-  while (true) {
-    const { data, error } = await supabase
-      .from(table)
-      .select(`id, ${emailCol}, esp`)
-      .gt("id", lastId)
-      .order("id", { ascending: true })
-      .limit(PAGE_SIZE);
-    if (error) throw new Error(`${table} select failed: ${error.message}`);
-    const rows = (data || []) as unknown as Array<{ id: number; esp: string | null } & Record<string, string>>;
-    if (rows.length === 0) break;
-    for (const r of rows) {
-      if (r.esp) continue; // already classified — skip
-      const e = r[emailCol]?.trim();
-      if (e) all.push(e);
-    }
-    lastId = rows[rows.length - 1].id;
-    pages++;
-    if (pages % 50 === 0) {
-      console.log(`  …scanned ${(pages * PAGE_SIZE).toLocaleString()} rows, ${all.length.toLocaleString()} unset so far (last id ${lastId})`);
-    }
-    if (rows.length < PAGE_SIZE) break;
-  }
-  return all;
-}
+type Tier = 1 | 2 | 3;
+const TIER_LABEL: Record<Tier, string> = {
+  1: "Ready to nurture (eligible + safe)",
+  2: "All eligible (past 45-day cooldown)",
+  3: "Waiting (within 45-day cooldown)",
+};
 
-/**
- * Run an async function with retry on transient failure (network errors,
- * Supabase 5xx, etc.). The previous run had ~317k of these as the local
- * machine briefly lost connectivity over a 6-hour window. Both the
- * EmailGuard and Supabase paths now go through this.
- */
 async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T | null> {
   const delays = [1000, 2500, 5000, 10000, 20000];
   for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
       return await fn();
     } catch (e) {
-      const msg = (e as Error)?.message || String(e);
       if (attempt === delays.length) {
-        console.error(`[${label}] gave up after ${delays.length} retries: ${msg}`);
+        console.error(`[${label}] gave up: ${(e as Error)?.message || e}`);
         return null;
       }
       await new Promise((r) => setTimeout(r, delays[attempt]));
@@ -116,152 +128,198 @@ async function runWithConcurrency<T>(
   await Promise.all(runners);
 }
 
+/**
+ * Fetch the email list for one (table, tier) using cursor pagination on
+ * id. Each page applies the tier-specific predicate filters.
+ */
+async function fetchEmailsForTierTable(
+  t: TableSpec,
+  tier: Tier,
+  cutoffIso: string
+): Promise<string[]> {
+  const all: string[] = [];
+  let lastId = 0;
+  while (true) {
+    let q = supabase
+      .from(t.name)
+      .select(`id, ${t.emailColumn}`)
+      .is("esp", null)
+      .not(t.emailColumn, "is", null)
+      .neq(t.emailColumn, "")
+      .gt("id", lastId)
+      .order("id", { ascending: true })
+      .limit(PAGE_SIZE);
+
+    // Common filters: not added, not skipped (for tiers 1 & 2)
+    if (tier === 1 || tier === 2) {
+      q = q
+        .is(t.addedColumn, null)
+        .not(t.skippedColumn, "is", true);
+    }
+
+    // Eligibility (tier 1 & 2 = past cutoff; tier 3 = within cutoff)
+    if (tier === 1 || tier === 2) {
+      q = q.lte(t.triggerColumn, cutoffIso);
+    } else {
+      q = q.gt(t.triggerColumn, cutoffIso);
+    }
+
+    // Safety: tier 1 requires safe (or seq table which has no safety)
+    if (tier === 1 && t.safetyColumn) {
+      q = q.eq(t.safetyColumn, "safe");
+    }
+
+    // AI-category exclusions (replies + legacy)
+    if ((tier === 1 || tier === 2) && t.aiCategoryColumn) {
+      q = q.or(
+        `${t.aiCategoryColumn}.is.null,${t.aiCategoryColumn}.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+      );
+    }
+
+    const { data, error } = await q;
+    if (error) throw new Error(`${t.name} tier-${tier} select failed: ${error.message}`);
+    const rows = (data || []) as unknown as Array<{ id: number } & Record<string, string>>;
+    if (rows.length === 0) break;
+    for (const r of rows) {
+      const e = r[t.emailColumn]?.trim().toLowerCase();
+      if (e) all.push(e);
+    }
+    lastId = rows[rows.length - 1].id;
+    if (rows.length < PAGE_SIZE) break;
+  }
+  return all;
+}
+
+/**
+ * Look up + write ESP for a single email across ALL tables that contain
+ * it. Cache result so the next tier doesn't re-look-up. Per-table
+ * UPDATE is wrapped in withRetry to survive transient Supabase errors.
+ */
+async function processEmail(email: string, cache: Map<string, string | null>) {
+  if (cache.has(email)) {
+    // Already looked up in a previous tier; if we got a host, write it
+    // anywhere it might still be missing (other tables not yet updated).
+    const host = cache.get(email);
+    if (!host) return;
+    await writeHostToAllTables(email, host);
+    return;
+  }
+  const host = await lookupEmailHost(email);
+  cache.set(email, host); // even null — don't re-look-up failed addresses in this run
+  if (!host) return;
+  await writeHostToAllTables(email, host);
+}
+
+async function writeHostToAllTables(email: string, host: string) {
+  for (const t of TABLES) {
+    await withRetry(
+      async () => {
+        const { error } = await supabase
+          .from(t.name)
+          .update({ esp: host })
+          .ilike(t.emailColumn, email)
+          .is("esp", null);
+        if (error) throw new Error(error.message);
+      },
+      `update:${t.name}:${email}`
+    );
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry");
   const resetUnknowns = args.includes("--reset-unknowns");
   const concIdx = args.indexOf("--concurrency");
   const concurrency = concIdx >= 0 ? Math.max(1, Math.min(50, Number(args[concIdx + 1]))) : DEFAULT_CONCURRENCY;
-  const tableArg = args.find((a) => !a.startsWith("--") && isNaN(Number(a)));
-  const tables = tableArg ? TABLES.filter((t) => t.name === tableArg) : TABLES;
+  const tierIdx = args.indexOf("--tier");
+  const onlyTier: Tier | null = tierIdx >= 0 ? (Number(args[tierIdx + 1]) as Tier) : null;
 
   if (!process.env.EMAILGUARD_API_KEY) {
     console.error("EMAILGUARD_API_KEY is not set in .env.local");
     process.exit(1);
   }
-  if (tables.length === 0) {
-    console.error(`Unknown table: ${tableArg}. Choose from ${TABLES.map((t) => t.name).join(", ")}`);
-    process.exit(1);
-  }
 
-  console.log(`\nBackfilling esp for ${tables.length} table${tables.length === 1 ? "" : "s"}${dryRun ? " (DRY RUN)" : ""}`);
-  console.log(`Concurrency: ${concurrency}\n`);
+  console.log(`\nBackfilling esp${dryRun ? " (DRY RUN)" : ""}`);
+  console.log(`Concurrency: ${concurrency}`);
+  if (onlyTier) console.log(`Only tier: ${onlyTier} — ${TIER_LABEL[onlyTier]}`);
+  console.log("");
 
-  // Pre-step: reset rows previously marked "Unknown" by a botched / rate-
-  // limited run so they get re-attempted. Uses cursor pagination just
-  // like the main scan to avoid the 8s statement timeout.
   if (resetUnknowns) {
-    for (const t of tables) {
+    for (const t of TABLES) {
       console.log(`Resetting Unknown rows in ${t.name}…`);
       const { error, count } = await supabase
         .from(t.name)
         .update({ esp: null }, { count: "exact" })
         .eq("esp", "Unknown");
-      if (error) {
-        console.error(`  reset failed: ${error.message}`);
-      } else {
-        console.log(`  cleared ${(count || 0).toLocaleString()} rows`);
-      }
+      if (error) console.error(`  reset failed: ${error.message}`);
+      else console.log(`  cleared ${(count || 0).toLocaleString()} rows`);
     }
     console.log("");
   }
 
-  // 1. Build the union of unique emails across all selected tables.
-  const emailsByTable = new Map<string, Set<string>>();
-  const allEmails = new Set<string>();
-  for (const t of tables) {
-    console.log(`Scanning ${t.name}…`);
-    const emails = await fetchAllUnsetEmails(t.name, t.emailColumn);
-    const unique = new Set<string>();
-    for (const e of emails) {
-      const lower = e.toLowerCase();
-      unique.add(lower);
-      allEmails.add(lower);
-    }
-    emailsByTable.set(t.name, unique);
-    console.log(`  ${emails.length.toLocaleString()} rows missing esp → ${unique.size.toLocaleString()} unique emails`);
-  }
-
-  console.log(`\nTotal unique emails across all tables: ${allEmails.size.toLocaleString()}`);
-  if (dryRun) {
-    const sample = Array.from(allEmails).slice(0, 20);
-    console.log("\nSample emails:");
-    for (const e of sample) console.log(`  ${e}`);
-    return;
-  }
-
-  // 2. Look up each unique email ONCE via EmailGuard, cache the result.
+  const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const cache = new Map<string, string | null>();
-  const emailList = Array.from(allEmails);
-  let lookedUp = 0;
-  let nullCount = 0;
+  const tiers: Tier[] = onlyTier ? [onlyTier] : [1, 2, 3];
   const t0 = Date.now();
+  let totalEmailsProcessed = 0;
+  let totalLookupHits = 0;
 
-  await runWithConcurrency(
-    emailList,
-    async (email) => {
-      const host = await lookupEmailHost(email);
-      cache.set(email, host);
-      if (!host) nullCount++;
-      lookedUp++;
-      if (lookedUp % 100 === 0) {
-        const rate = lookedUp / ((Date.now() - t0) / 1000);
-        const eta = Math.round((emailList.length - lookedUp) / rate);
-        const etaText = eta < 90 ? `${eta}s` : eta < 3600 ? `${Math.round(eta / 60)}m` : `${(eta / 3600).toFixed(1)}h`;
-        console.log(`  Looked up ${lookedUp.toLocaleString()} / ${emailList.length.toLocaleString()} (${rate.toFixed(1)}/s, ETA ${etaText})`);
-      }
-    },
-    concurrency
-  );
+  for (const tier of tiers) {
+    console.log(`${"═".repeat(60)}`);
+    console.log(`Tier ${tier}: ${TIER_LABEL[tier]}`);
+    console.log(`${"═".repeat(60)}`);
 
-  console.log(`\nLookups complete: ${lookedUp.toLocaleString()} (${nullCount.toLocaleString()} unknown / failed)`);
+    // 1. Scan each table for this tier's emails
+    const tierEmails = new Set<string>();
+    for (const t of TABLES) {
+      console.log(`Scanning ${t.name}…`);
+      const emails = await fetchEmailsForTierTable(t, tier, cutoffIso);
+      for (const e of emails) tierEmails.add(e);
+      console.log(`  ${emails.length.toLocaleString()} rows missing esp`);
+    }
 
-  // 3. For each (table, email) pair, write the cached value back.
-  for (const t of tables) {
-    const emails = emailsByTable.get(t.name)!;
-    console.log(`\nUpdating ${t.name}…`);
-    let updated = 0;
-    let updateErrors = 0;
-    let skipped = 0;
+    // 2. Filter out already-cached (already looked up in a previous tier)
+    const newEmails = Array.from(tierEmails).filter((e) => !cache.has(e));
+    const reusedEmails = tierEmails.size - newEmails.length;
+    console.log(`Tier ${tier}: ${tierEmails.size.toLocaleString()} unique emails (${newEmails.length.toLocaleString()} new, ${reusedEmails.toLocaleString()} from cache)`);
+
+    if (dryRun) continue;
+
+    // 3. Process — lookup + immediate write per email
+    const tierStart = Date.now();
     let processed = 0;
+    let hits = 0;
 
     await runWithConcurrency(
-      Array.from(emails),
+      Array.from(tierEmails),
       async (email) => {
-        const host = cache.get(email);
+        const cachedBefore = cache.has(email);
+        await processEmail(email, cache);
         processed++;
-        // Lookup failed (rate-limit, network, EmailGuard outage) → leave
-        // esp as NULL so a future run re-attempts. Trying to mark a
-        // failed lookup as "Unknown" loses real data permanently the
-        // first time EmailGuard rate-limits us.
-        if (!host) {
-          if (processed % 500 === 0) {
-            console.log(`  Updated ${updated.toLocaleString()} / processed ${processed.toLocaleString()} unique emails`);
-          }
-          return;
-        }
-        const result = await withRetry(
-          async () => {
-            const { error, count } = await supabase
-              .from(t.name)
-              .update({ esp: host }, { count: "exact" })
-              .ilike(t.emailColumn, email)
-              .is("esp", null);
-            if (error) throw new Error(error.message);
-            return count || 0;
-          },
-          `update:${t.name}:${email}`
-        );
-        if (result === null) {
-          updateErrors++;
-          if (updateErrors <= 5) console.error(`  ${email} → update gave up after retries`);
-        } else if (result === 0) {
-          skipped++;
-        } else {
-          updated += result;
-        }
-        if (processed % 500 === 0) {
-          console.log(`  Updated ${updated.toLocaleString()} / processed ${processed.toLocaleString()} unique emails`);
+        if (!cachedBefore && cache.get(email)) hits++;
+        if (processed % 100 === 0) {
+          const rate = processed / ((Date.now() - tierStart) / 1000);
+          const eta = Math.round((tierEmails.size - processed) / rate);
+          const etaText = eta < 90 ? `${eta}s` : eta < 3600 ? `${Math.round(eta / 60)}m` : `${(eta / 3600).toFixed(1)}h`;
+          console.log(`  Tier ${tier}: ${processed.toLocaleString()} / ${tierEmails.size.toLocaleString()} (${rate.toFixed(1)}/s, ETA ${etaText})`);
         }
       },
       concurrency
     );
 
-    console.log(`  ${t.name}: ${updated.toLocaleString()} rows updated, ${skipped} no-op, ${updateErrors} errors`);
+    const tierSec = ((Date.now() - tierStart) / 1000).toFixed(1);
+    console.log(`Tier ${tier} done in ${tierSec}s — ${hits.toLocaleString()} new ESP values written this tier\n`);
+    totalEmailsProcessed += processed;
+    totalLookupHits += hits;
   }
 
-  const seconds = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`\nDone in ${seconds}s.`);
+  const totalSec = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`${"═".repeat(60)}`);
+  console.log(`Done in ${totalSec}s`);
+  console.log(`  Emails processed: ${totalEmailsProcessed.toLocaleString()}`);
+  console.log(`  ESP values written: ${totalLookupHits.toLocaleString()}`);
+  console.log(`  Cache hits (skipped re-lookup): ${(cache.size - totalLookupHits).toLocaleString()}`);
 }
 
 main().catch((err) => {
