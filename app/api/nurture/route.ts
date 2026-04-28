@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import { effectiveEsp } from "@/lib/nurture/esp";
 
 // Allow longer timeout — large legacy table can make page queries slow.
 export const maxDuration = 60;
@@ -151,6 +152,8 @@ interface NurtureItem {
   is_eligible: boolean;
   added_at: string | null;
   skipped: boolean;
+  esp_host: string | null;          // raw EmailGuard string ("Outlook", "Gmail", "Office 365", etc.)
+  esp_bucket: "outlook" | "other";  // routing bucket derived from esp_host (or fallback heuristic on email)
   reply_id?: number;
   ai_category?: string | null;
   reply_text?: string | null;
@@ -229,7 +232,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("replies")
         .select(
-          "id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped"
+          "id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
         )
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
@@ -324,6 +327,8 @@ export async function GET(req: NextRequest) {
           is_eligible: isEligible,
           added_at: r.nurture_added_at,
           skipped: !!r.nurture_skipped,
+          esp_host: r.esp ?? null,
+          esp_bucket: effectiveEsp(r.esp, r.lead_email),
           reply_id: r.reply_id,
           ai_category: r.ai_categorized_lead_category,
           reply_text: r.reply_we_got,
@@ -342,7 +347,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("nurture_sequence_finished")
         .select(
-          "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, email, first_name, last_name, company, sequence_finished_at, added_at, skipped"
+          "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, email, first_name, last_name, company, sequence_finished_at, added_at, skipped, esp"
         );
 
       q = seqOrderByAddedDesc
@@ -391,6 +396,8 @@ export async function GET(req: NextRequest) {
           is_eligible: isEligible,
           added_at: r.added_at,
           skipped: !!r.skipped,
+          esp_host: r.esp ?? null,
+          esp_bucket: effectiveEsp(r.esp, r.email),
           ob_lead_id: r.ob_lead_id,
           ob_campaign_id: r.ob_campaign_id,
           campaign_name: r.campaign_name || undefined,
@@ -404,7 +411,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("nurture_legacy_leads")
         .select(
-          "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped"
+          "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
         );
 
       q = legacyOrderByAddedDesc
@@ -492,6 +499,8 @@ export async function GET(req: NextRequest) {
           is_eligible: isEligible,
           added_at: r.nurture_added_at,
           skipped: !!r.nurture_skipped,
+          esp_host: r.esp ?? null,
+          esp_bucket: effectiveEsp(r.esp, r.lead_email),
           ai_category: r.original_ai_category,
           reply_text: r.reply_text,
           nurture_safety: r.nurture_safety,

@@ -28,6 +28,8 @@ interface NurtureItem {
   is_eligible: boolean;
   added_at: string | null;
   skipped: boolean;
+  esp_host: string | null;          // raw "Outlook" / "Gmail" / "Office 365" / null when un-backfilled
+  esp_bucket: "outlook" | "other";  // routing bucket
   reply_id?: number;
   ai_category?: string | null;
   reply_text?: string | null;
@@ -261,16 +263,32 @@ export default function NurturePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, search, now]);
 
-  // Group items by client when groupByClient is enabled
+  // Group items by client + ESP when groupByClient is enabled. Each
+  // client header rolls up the totals; under it sit two sub-groups
+  // (Outlook / Gmail + Others) so the user can bulk-select per ESP and
+  // route to the matching campaign.
   const groupedItems = useMemo(() => {
     if (!groupByClient) return null;
-    const groups = new Map<string, NurtureItem[]>();
+    type Sub = { esp: "outlook" | "other"; items: NurtureItem[] };
+    type Group = { client: string; subs: Sub[] };
+    const groups = new Map<string, Map<"outlook" | "other", NurtureItem[]>>();
     for (const it of visibleItems) {
-      const key = it.client_tag || "(no client)";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(it);
+      const client = it.client_tag || "(no client)";
+      if (!groups.has(client)) groups.set(client, new Map());
+      const subMap = groups.get(client)!;
+      const esp = it.esp_bucket;
+      if (!subMap.has(esp)) subMap.set(esp, []);
+      subMap.get(esp)!.push(it);
     }
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+    const out: Group[] = [];
+    for (const [client, subMap] of groups) {
+      const subs: Sub[] = [];
+      // Outlook first (smaller, distinct), then Gmail+Others
+      if (subMap.has("outlook")) subs.push({ esp: "outlook", items: subMap.get("outlook")! });
+      if (subMap.has("other"))   subs.push({ esp: "other",   items: subMap.get("other")! });
+      out.push({ client, subs });
+    }
+    return out.sort((a, b) => a.client.localeCompare(b.client));
   }, [visibleItems, groupByClient]);
 
   function isPushable(it: NurtureItem): boolean {
@@ -342,7 +360,7 @@ export default function NurturePage() {
    * nurture campaign doesn't make sense (campaigns are per-client). If
    * called without one, refuse and prompt the user to filter first.
    */
-  async function bulkSelectMatching(filters: { client_tag?: string; source?: string }) {
+  async function bulkSelectMatching(filters: { client_tag?: string; source?: string; esp?: "outlook" | "other" }) {
     if (!filters.client_tag) {
       toast.error("Pick a Client filter first — nurture campaigns are per-client, so the bulk select needs to be scoped to one client at a time.");
       return;
@@ -352,18 +370,40 @@ export default function NurturePage() {
       const p = new URLSearchParams();
       p.set("client_tag", filters.client_tag);
       if (filters.source && filters.source !== "all") p.set("source", filters.source);
+      if (filters.esp) p.set("esp", filters.esp);
       const res = await fetch(`/api/nurture/ids?${p}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         toast.error(body.error || `Bulk select failed (${res.status})`);
         return;
       }
-      const data = await res.json() as { items: Array<{ id: string; client_tag: string | null; ob_lead_id?: number }>; truncated: boolean };
+      const data = await res.json() as { items: Array<{ id: string; client_tag: string | null; ob_lead_id?: number; esp?: string }>; truncated: boolean };
       setSelected(new Set(data.items.map((i) => i.id)));
       setSelectedMeta(new Map(data.items.map((i) => [i.id, { client_tag: i.client_tag, ob_lead_id: i.ob_lead_id }])));
-      const noun = filters.client_tag ? `for ${filters.client_tag}` : "matching filters";
+
+      // Auto-pick the matching nurture campaign for this (client, ESP).
+      // We match by:
+      //   1. Campaign client_tag = filter client_tag
+      //   2. Campaign name contains the matching ESP keyword
+      // If exactly one match, set as the push target. Otherwise leave
+      // selection open and let the user pick.
+      if (filters.esp) {
+        const espNeedle = filters.esp === "outlook" ? /\boutlook\b/i : /\bgmail\b/i;
+        const matches = campaigns.filter((c) => {
+          const tagMatches =
+            (c.client_tag && c.client_tag === filters.client_tag) ||
+            new RegExp(`\\b${filters.client_tag}\\b`, "i").test(c.name);
+          return tagMatches && espNeedle.test(c.name);
+        });
+        if (matches.length === 1) {
+          setPushTargetCampaignId(String(matches[0].id));
+        }
+      }
+
+      const espLabel = filters.esp ? ` ${filters.esp === "outlook" ? "Outlook" : "Gmail+Others"}` : "";
+      const noun = `for ${filters.client_tag}${espLabel}`;
       if (data.truncated) {
-        toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun} (capped at 1000 — push these first, then re-run)`);
+        toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun} (capped at 1000)`);
       } else {
         toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun}`);
       }
@@ -839,68 +879,108 @@ export default function NurturePage() {
                 <TableHead className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
                   Reply
                 </TableHead>
+                <TableHead className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
+                  ESP
+                </TableHead>
                 <SortableHead label="Safety" k="safety" current={sortKey} dir={sortDir} onClick={toggleSort} />
                 <SortableHead label="Eligibility" k="eligibility" current={sortKey} dir={sortDir} onClick={toggleSort} />
               </TableRow>
             </TableHeader>
             <TableBody>
               {groupedItems
-                ? groupedItems.map(([group, gItems]) => {
-                    const collapsed = collapsedGroups.has(group);
-                    const groupPushable = gItems.filter(isPushable);
-                    const groupAllSelected = groupPushable.length > 0 && groupPushable.every((i) => selected.has(i.id));
+                ? groupedItems.map(({ client, subs }) => {
+                    const collapsed = collapsedGroups.has(client);
+                    const allItems = subs.flatMap((s) => s.items);
+                    const groupPushable = allItems.filter(isPushable);
                     return (
-                      <Fragment key={`group-${group}`}>
+                      <Fragment key={`group-${client}`}>
+                        {/* Client header */}
                         <TableRow
-                          className="bg-muted/30 hover:bg-muted/50 cursor-pointer"
-                          onClick={() => toggleGroupCollapse(group)}
+                          className="bg-muted/40 hover:bg-muted/60 cursor-pointer"
+                          onClick={() => toggleGroupCollapse(client)}
                         >
-                          <TableCell className="px-3">
-                            <input
-                              type="checkbox"
-                              checked={groupAllSelected}
-                              onChange={(e) => { e.stopPropagation(); toggleSelectAllInGroup(gItems); }}
-                              onClick={(e) => e.stopPropagation()}
-                              disabled={groupPushable.length === 0}
-                              className="size-4"
-                            />
-                          </TableCell>
-                          <TableCell colSpan={7} className="font-medium">
+                          <TableCell className="px-3" />
+                          <TableCell colSpan={8} className="font-semibold">
                             <div className="flex items-center justify-between gap-3">
                               <span className="inline-flex items-center gap-2">
                                 {collapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
-                                <span>{group}</span>
-                                <span className="text-xs text-muted-foreground">
-                                  · {gItems.length} on this page
+                                <span>{client}</span>
+                                <span className="text-xs text-muted-foreground font-normal">
+                                  · {allItems.length} on this page
                                   {groupPushable.length > 0 && <> · <span className="text-emerald-700">{groupPushable.length} ready</span></>}
                                 </span>
                               </span>
-                              {group !== "(no client)" && (
+                              {client !== "(no client)" && (
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    bulkSelectMatching({ client_tag: group, source: sourceFilter });
+                                    bulkSelectMatching({ client_tag: client, source: sourceFilter });
                                   }}
                                   disabled={bulkSelecting}
                                   className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline shrink-0"
-                                  title={`Select EVERY pushable ${group} lead across all pages (capped at 1000)`}
+                                  title={`Select EVERY pushable ${client} lead across all pages (capped at 1000)`}
                                 >
-                                  Select all {group}
+                                  Select all {client}
                                 </button>
                               )}
                             </div>
                           </TableCell>
                         </TableRow>
-                        {!collapsed && gItems.map((it) => (
-                          <LeadRow
-                            key={it.id}
-                            it={it}
-                            selected={selected.has(it.id)}
-                            pushable={isPushable(it)}
-                            onToggle={() => toggleSelect(it)}
-                            onClick={() => setDetailItem(it)}
-                          />
-                        ))}
+
+                        {/* ESP sub-groups under each client */}
+                        {!collapsed && subs.map((sub) => {
+                          const subPushable = sub.items.filter(isPushable);
+                          const subKey = `${client}__${sub.esp}`;
+                          const subCollapsed = collapsedGroups.has(subKey);
+                          const espLabel = sub.esp === "outlook" ? "Outlook" : "Gmail + Others";
+                          const espDot = sub.esp === "outlook" ? "bg-sky-500" : "bg-violet-500";
+                          return (
+                            <Fragment key={subKey}>
+                              <TableRow
+                                className="bg-muted/15 hover:bg-muted/30 cursor-pointer"
+                                onClick={() => toggleGroupCollapse(subKey)}
+                              >
+                                <TableCell className="px-3" />
+                                <TableCell colSpan={8}>
+                                  <div className="flex items-center justify-between gap-3 pl-4">
+                                    <span className="inline-flex items-center gap-2 text-sm">
+                                      {subCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                                      <span className={`size-2 rounded-full ${espDot}`} />
+                                      <span className="font-medium">{espLabel}</span>
+                                      <span className="text-xs text-muted-foreground font-normal">
+                                        · {sub.items.length} on this page
+                                        {subPushable.length > 0 && <> · <span className="text-emerald-700">{subPushable.length} ready</span></>}
+                                      </span>
+                                    </span>
+                                    {client !== "(no client)" && subPushable.length > 0 && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          bulkSelectMatching({ client_tag: client, esp: sub.esp, source: sourceFilter });
+                                        }}
+                                        disabled={bulkSelecting}
+                                        className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline shrink-0"
+                                        title={`Select all pushable ${client} ${espLabel} leads + auto-pick the matching campaign`}
+                                      >
+                                        Select all {client} {espLabel}
+                                      </button>
+                                    )}
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                              {!subCollapsed && sub.items.map((it: NurtureItem) => (
+                                <LeadRow
+                                  key={it.id}
+                                  it={it}
+                                  selected={selected.has(it.id)}
+                                  pushable={isPushable(it)}
+                                  onToggle={() => toggleSelect(it)}
+                                  onClick={() => setDetailItem(it)}
+                                />
+                              ))}
+                            </Fragment>
+                          );
+                        })}
                       </Fragment>
                     );
                   })
@@ -1241,12 +1321,43 @@ function LeadRow({
         </span>
       </TableCell>
       <TableCell className="cursor-pointer" onClick={onClick}>
+        <EspPill host={it.esp_host} bucket={it.esp_bucket} />
+      </TableCell>
+      <TableCell className="cursor-pointer" onClick={onClick}>
         <SafetyPill safety={it.nurture_safety} source={it.source} />
       </TableCell>
       <TableCell className="cursor-pointer" onClick={onClick}>
         <EligibilityPill it={it} />
       </TableCell>
     </TableRow>
+  );
+}
+
+function EspPill({ host, bucket }: { host: string | null; bucket: "outlook" | "other" }) {
+  const cls = "text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap";
+  if (!host) {
+    // Backfill hasn't reached this row yet — show a muted placeholder so
+    // the user can tell at a glance which leads still need lookup.
+    return (
+      <span
+        className={`${cls} bg-zinc-50 text-zinc-500 border-zinc-200`}
+        title="ESP not yet detected — backfill in progress, refresh in a few minutes"
+      >
+        —
+      </span>
+    );
+  }
+  if (bucket === "outlook") {
+    return (
+      <span className={`${cls} bg-sky-50 text-sky-700 border-sky-200`} title={`EmailGuard: ${host}`}>
+        {host}
+      </span>
+    );
+  }
+  return (
+    <span className={`${cls} bg-violet-50 text-violet-700 border-violet-200`} title={`EmailGuard: ${host}`}>
+      {host}
+    </span>
   );
 }
 
