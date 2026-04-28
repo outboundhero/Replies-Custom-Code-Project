@@ -119,12 +119,25 @@ function isNoiseBody(reply: string | null | undefined): boolean {
   return NOISE_BODY_MARKERS.some((m) => lower.includes(m));
 }
 
-function applyNoiseSenderFilter<T extends { not: (col: string, op: string, val: string) => T }>(q: T): T {
-  let result = q;
-  for (const p of NOISE_SENDER_PATTERNS) {
-    result = result.not("lead_email", "ilike", p);
-  }
-  return result;
+/**
+ * Single regex compiled from NOISE_SENDER_PATTERNS. Used JS-side instead
+ * of pushing 30+ NOT ILIKE clauses into SQL, which was hitting Supabase's
+ * statement timeout on the legacy table (390k rows × 30 ILIKE checks).
+ * The dedupe loop already iterates the rows; checking the sender here is
+ * essentially free.
+ */
+const NOISE_SENDER_REGEX = (() => {
+  const parts = NOISE_SENDER_PATTERNS.map((p) =>
+    p
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&") // escape regex specials except *, %
+      .replace(/%/g, ".*")                    // SQL wildcard → regex wildcard
+  );
+  return new RegExp(`^(${parts.join("|")})$`, "i");
+})();
+
+function isNoiseSender(email: string | null | undefined): boolean {
+  if (!email) return false;
+  return NOISE_SENDER_REGEX.test(email.trim());
 }
 
 /**
@@ -248,9 +261,10 @@ export async function GET(req: NextRequest) {
           `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );
 
-      // Strip out automated newsletter / no-reply senders.
-      q = applyNoiseSenderFilter(q);
-      // Drop rows with no real client tag — can't route them.
+      // Drop rows with no real client tag — can't route them. Noise-sender
+      // filtering happens JS-side in the dedupe loop below — pushing 30+
+      // NOT ILIKE clauses into SQL was hitting Supabase's statement timeout
+      // on the 390k-row legacy table.
       q = applyClientTagFilter(q);
 
       q = orderByAddedDesc
@@ -308,6 +322,8 @@ export async function GET(req: NextRequest) {
         if (!email) continue;
         const key = dedupeKey(email, r.client_tag);
         if (seenKeys.has(key)) continue;
+        // Skip newsletter / no-reply / helpdesk / bot senders.
+        if (isNoiseSender(r.lead_email)) continue;
         // Skip ticket / notification / survey auto-replies based on body markers.
         if (isNoiseBody(r.reply_we_got)) continue;
         seenKeys.add(key);
@@ -433,11 +449,9 @@ export async function GET(req: NextRequest) {
         `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
       );
 
-      // Same noise-sender filter as the replies query
-      for (const p of NOISE_SENDER_PATTERNS) {
-        q = q.not("lead_email", "ilike", p);
-      }
-      // Same client-tag filter — drop N/A.
+      // Noise-sender filtering happens JS-side in the dedupe loop below
+      // (see comment on the replies query). Same client-tag filter as
+      // replies — drop N/A.
       q = q.neq("client_tag", "N/A");
 
       if (clientTag) q = q.eq("client_tag", clientTag);
@@ -483,6 +497,8 @@ export async function GET(req: NextRequest) {
         if (!email) continue;
         const key = dedupeKey(email, r.client_tag);
         if (seenFromReplies.has(key) || seenLegacy.has(key)) continue;
+        // Noise sender + body filters (moved out of SQL — see top of file).
+        if (isNoiseSender(r.lead_email)) continue;
         if (isNoiseBody(r.reply_text)) continue;
         seenLegacy.add(key);
 
