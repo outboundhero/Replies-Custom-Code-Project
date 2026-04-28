@@ -112,6 +112,13 @@ export default function NurturePage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedMeta, setSelectedMeta] = useState<Map<string, { client_tag: string | null; ob_lead_id?: number }>>(new Map());
   const [bulkSelecting, setBulkSelecting] = useState(false);
+  // When non-null, the visible list IS the selection (not the normal
+  // filtered view). Set by bulkSelectMatching, cleared by Clear selection.
+  const [selectionScope, setSelectionScope] = useState<{
+    clientTag: string;
+    esp?: "outlook" | "other";
+    source?: string;
+  } | null>(null);
   const [pushTargetCampaignId, setPushTargetCampaignId] = useState<string>("");
   const [pushing, setPushing] = useState(false);
   const [classifying, setClassifying] = useState(false);
@@ -360,6 +367,19 @@ export default function NurturePage() {
    * nurture campaign doesn't make sense (campaigns are per-client). If
    * called without one, refuse and prompt the user to filter first.
    */
+  /**
+   * Bulk-select + REPLACE the visible list with the leads we just selected.
+   *
+   * Old behaviour was lossy: select 328 leads across pages, but only see
+   * the 3 that happened to be on the current page. Now bulk-select fires
+   * the main /api/nurture endpoint with the same filter (so we get full
+   * row data, not just IDs) AND swaps the items array so the user sees
+   * exactly what got selected.
+   *
+   * `selectionScope` tracks the active scope so the action bar can show
+   * "AC Outlook · 47 selected" and provide a clean "Clear selection"
+   * that reverts to the normal filtered view.
+   */
   async function bulkSelectMatching(filters: { client_tag?: string; source?: string; esp?: "outlook" | "other" }) {
     if (!filters.client_tag) {
       toast.error("Pick a Client filter first — nurture campaigns are per-client, so the bulk select needs to be scoped to one client at a time.");
@@ -369,24 +389,38 @@ export default function NurturePage() {
     try {
       const p = new URLSearchParams();
       p.set("client_tag", filters.client_tag);
+      p.set("status", "eligible");
+      p.set("safety", "safe");
+      p.set("limit", "1000");
       if (filters.source && filters.source !== "all") p.set("source", filters.source);
       if (filters.esp) p.set("esp", filters.esp);
-      const res = await fetch(`/api/nurture/ids?${p}`);
+
+      const res = await fetch(`/api/nurture?${p}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         toast.error(body.error || `Bulk select failed (${res.status})`);
         return;
       }
-      const data = await res.json() as { items: Array<{ id: string; client_tag: string | null; ob_lead_id?: number; esp?: string }>; truncated: boolean };
-      setSelected(new Set(data.items.map((i) => i.id)));
-      setSelectedMeta(new Map(data.items.map((i) => [i.id, { client_tag: i.client_tag, ob_lead_id: i.ob_lead_id }])));
+      const data = await res.json() as { items: NurtureItem[]; page?: { hasMore?: boolean } };
+      const fetched = data.items || [];
+
+      // Replace the visible items with the selected set so the user can
+      // SEE what they just selected (not just trust the count).
+      setItems(fetched);
+      setHasMore(false);
+      setOffset(fetched.length);
+      setSelectionScope({
+        clientTag: filters.client_tag,
+        esp: filters.esp,
+        source: filters.source && filters.source !== "all" ? filters.source : undefined,
+      });
+      setSelected(new Set(fetched.map((i) => i.id)));
+      setSelectedMeta(new Map(fetched.map((i) => [
+        i.id,
+        { client_tag: i.client_tag, ob_lead_id: i.ob_lead_id },
+      ])));
 
       // Auto-pick the matching nurture campaign for this (client, ESP).
-      // We match by:
-      //   1. Campaign client_tag = filter client_tag
-      //   2. Campaign name contains the matching ESP keyword
-      // If exactly one match, set as the push target. Otherwise leave
-      // selection open and let the user pick.
       if (filters.esp) {
         const espNeedle = filters.esp === "outlook" ? /\boutlook\b/i : /\bgmail\b/i;
         const matches = campaigns.filter((c) => {
@@ -402,11 +436,12 @@ export default function NurturePage() {
 
       const espLabel = filters.esp ? ` ${filters.esp === "outlook" ? "Outlook" : "Gmail+Others"}` : "";
       const noun = `for ${filters.client_tag}${espLabel}`;
-      if (data.truncated) {
-        toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun} (capped at 1000)`);
-      } else {
-        toast.success(`Selected ${data.items.length.toLocaleString()} leads ${noun}`);
-      }
+      const truncated = fetched.length === 1000;
+      toast.success(
+        truncated
+          ? `Selected ${fetched.length.toLocaleString()} leads ${noun} (capped at 1000 — push these first, then re-run)`
+          : `Selected ${fetched.length.toLocaleString()} leads ${noun}`
+      );
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -419,6 +454,22 @@ export default function NurturePage() {
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
+  }
+
+  /**
+   * Clears selection AND exits selection-view mode (the items array goes
+   * back to the regular paged filter view). Used by both the action bar
+   * "Clear" button and the selection-mode banner's "Back to all leads".
+   */
+  function exitSelectionScope() {
+    setSelected(new Set());
+    setSelectedMeta(new Map());
+    setPushTargetCampaignId("");
+    if (selectionScope) {
+      setSelectionScope(null);
+      // Reload the normal filtered view
+      loadPage(true, false);
+    }
   }
 
   /**
@@ -759,6 +810,29 @@ export default function NurturePage() {
         </Button>
       </div>
 
+      {/* ── Selection-mode banner ── */}
+      {selectionScope && (
+        <div className="rounded-lg border-2 border-primary/40 bg-primary/5 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-sm">
+            <span className="font-semibold">Selection view active:</span>{" "}
+            <span className="text-foreground">{selectionScope.clientTag}</span>
+            {selectionScope.esp && (
+              <span> · <span className={selectionScope.esp === "outlook" ? "text-sky-700" : "text-violet-700"}>
+                {selectionScope.esp === "outlook" ? "Outlook" : "Gmail + Others"}
+              </span></span>
+            )}
+            {selectionScope.source && <span> · {selectionScope.source}</span>}
+            <span className="text-muted-foreground"> · showing all {items.length.toLocaleString()} matching leads, {selected.size.toLocaleString()} selected</span>
+          </div>
+          <button
+            onClick={exitSelectionScope}
+            className="text-xs text-primary hover:underline shrink-0"
+          >
+            ← Back to all leads
+          </button>
+        </div>
+      )}
+
       {/* ── Sticky bulk action bar ── */}
       <div className="sticky top-0 z-20 -mx-1 px-1 py-2 bg-background/95 backdrop-blur border-b">
         <div className="flex items-center gap-3 flex-wrap">
@@ -772,7 +846,15 @@ export default function NurturePage() {
             />
             <span className="text-sm text-muted-foreground">
               {selected.size > 0 ? (
-                <span className="text-foreground font-medium">{selected.size} selected</span>
+                <span>
+                  <span className="text-foreground font-medium">{selected.size.toLocaleString()} selected</span>
+                  {selectionScope && (
+                    <span className="text-xs ml-1.5">
+                      ({selectionScope.clientTag}
+                      {selectionScope.esp && ` · ${selectionScope.esp === "outlook" ? "Outlook" : "Gmail+Others"}`})
+                    </span>
+                  )}
+                </span>
               ) : (
                 <>
                   <span className="text-foreground font-medium">{visibleItems.length}</span> shown
@@ -846,10 +928,10 @@ export default function NurturePage() {
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => { setSelected(new Set()); setSelectedMeta(new Map()); }}
+              onClick={exitSelectionScope}
               className="h-9 ml-auto"
             >
-              Clear selection
+              {selectionScope ? "Clear & back to all leads" : "Clear selection"}
             </Button>
           )}
         </div>

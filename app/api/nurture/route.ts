@@ -199,6 +199,7 @@ export async function GET(req: NextRequest) {
     const clientTag = req.nextUrl.searchParams.get("client_tag");
     const statusFilter = req.nextUrl.searchParams.get("status") || "all";
     const safetyFilter = req.nextUrl.searchParams.get("safety") || "all";
+    const espFilter = (req.nextUrl.searchParams.get("esp") || "").toLowerCase(); // "outlook" | "other" | ""
     const sortParam = req.nextUrl.searchParams.get("sort");
     const sortKey: SortKey = isSortKey(sortParam) ? sortParam : "eligibility";
     const sortDir = req.nextUrl.searchParams.get("dir") === "desc" ? "desc" : "asc";
@@ -284,8 +285,13 @@ export async function GET(req: NextRequest) {
       }
 
       // Fetch 2x the requested limit so we can dedupe by email and still
-      // hand back close to `limit` distinct leads on the page.
-      q = q.range(offset, offset + limit * 2 - 1);
+      // hand back close to `limit` distinct leads on the page. When an
+      // ESP filter is active we over-fetch much more aggressively because
+      // Outlook is rare (~5-10% of B2B addresses) and the bucket check
+      // happens in JS (it spans multiple stored host strings: Outlook,
+      // Office 365, Hotmail, Exchange, Microsoft).
+      const repliesFetch = espFilter ? Math.min(2000, limit * 20) : limit * 2;
+      q = q.range(offset, offset + repliesFetch - 1);
       const { data: rows, error } = await q;
       if (error) throw new Error(error.message);
 
@@ -372,7 +378,8 @@ export async function GET(req: NextRequest) {
           .or("skipped.is.null,skipped.eq.false");
       }
 
-      q = q.range(offset, offset + limit - 1);
+      const seqFetch = espFilter ? Math.min(2000, limit * 20) : limit;
+      q = q.range(offset, offset + seqFetch - 1);
       const { data: seqRows, error } = await q;
       if (error) throw new Error(error.message);
 
@@ -455,8 +462,9 @@ export async function GET(req: NextRequest) {
         q = q.eq("nurture_safety", safetyFilter);
       }
 
-      // Fetch 2x for dedupe headroom (same pattern as replies)
-      q = q.range(offset, offset + limit * 2 - 1);
+      // Fetch 2x for dedupe headroom; over-fetch for ESP filter same as replies.
+      const legacyFetch = espFilter ? Math.min(2000, limit * 20) : limit * 2;
+      q = q.range(offset, offset + legacyFetch - 1);
       const { data: legacyRows, error } = await q;
       if (error) throw new Error(error.message);
 
@@ -535,12 +543,19 @@ export async function GET(req: NextRequest) {
       return a.trigger_at < b.trigger_at ? -1 : 1;
     });
 
+    // ESP routing filter — applied AFTER per-row esp_bucket is computed.
+    // Has to be JS-side because the bucket spans multiple stored host
+    // strings (Outlook / Office 365 / Hotmail / Microsoft / Exchange).
+    const espFiltered = espFilter
+      ? items.filter((i) => i.esp_bucket === espFilter)
+      : items;
+
     // Trim to page size in case multiple sources contributed.
-    const paged = items.slice(0, limit);
+    const paged = espFiltered.slice(0, limit);
 
     return NextResponse.json({
       items: paged,
-      page: { limit, offset, returned: paged.length, hasMore: items.length === limit },
+      page: { limit, offset, returned: paged.length, hasMore: espFiltered.length === limit },
     });
   } catch (error) {
     console.error("[api/nurture] GET failed:", error);
