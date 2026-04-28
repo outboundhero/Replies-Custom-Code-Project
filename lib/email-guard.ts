@@ -26,7 +26,44 @@ export interface EmailGuardResult {
  * Returns the raw email_host string from EmailGuard ("Gmail", "Outlook",
  * "Office 365", "Yahoo", etc.) or null on lookup failure / missing key.
  * Never throws — callers can treat failures as "unknown ESP" and proceed.
+ *
+ * Retries up to 5 times on EVERY transient failure: HTTP 429, HTTP 5xx,
+ * AND network-level errors (TypeError: fetch failed, ECONNRESET, etc.).
+ * The previous version only retried on HTTP errors and returned null
+ * immediately on connection drops — fine for a single webhook, fatal
+ * across a multi-hour 378K-row backfill where local network blips
+ * compounded into 85% loss.
  */
+const RETRY_DELAYS_MS = [1500, 3000, 6000, 12000, 24000];
+
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response | null> {
+  let attempt = 0;
+  let lastErr: unknown = null;
+  while (attempt <= RETRY_DELAYS_MS.length) {
+    try {
+      const res = await fetch(url, init);
+      // 429 / 5xx → retry. Other non-2xx → return so caller can decide.
+      if (res.status === 429 || res.status >= 500) {
+        if (attempt === RETRY_DELAYS_MS.length) return res;
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        attempt++;
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (attempt === RETRY_DELAYS_MS.length) {
+        console.warn(`[email-guard] network error after ${RETRY_DELAYS_MS.length} retries:`, e);
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+      attempt++;
+    }
+  }
+  console.warn(`[email-guard] retry loop fell through:`, lastErr);
+  return null;
+}
+
 export async function lookupEmailHost(email: string): Promise<string | null> {
   const apiKey = process.env.EMAILGUARD_API_KEY;
   if (!apiKey) {
@@ -35,46 +72,24 @@ export async function lookupEmailHost(email: string): Promise<string | null> {
   }
   if (!email || !email.includes("@")) return null;
 
+  const res = await fetchWithRetry(EMAIL_GUARD_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ email }),
+  });
+  if (!res) return null;
+  if (!res.ok) {
+    console.warn(`[email-guard] ${email} → ${res.status}`);
+    return null;
+  }
   try {
-    const res = await fetch(EMAIL_GUARD_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ email }),
-    });
-    if (!res.ok) {
-      // 429 (rate limit) and 5xx warrant exponential retries up to 5 times.
-      // Everything else is fatal-soft.
-      if (res.status === 429 || res.status >= 500) {
-        const delays = [1500, 3000, 6000, 12000, 24000];
-        for (const delay of delays) {
-          await new Promise((r) => setTimeout(r, delay));
-          const retry = await fetch(EMAIL_GUARD_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify({ email }),
-          });
-          if (retry.ok) {
-            const d = await retry.json();
-            return (d?.data?.email_host as string | null) ?? null;
-          }
-          if (retry.status !== 429 && retry.status < 500) {
-            console.warn(`[email-guard] ${email} → ${retry.status} after ${delay}ms backoff`);
-            return null;
-          }
-        }
-        console.warn(`[email-guard] ${email} → exhausted ${delays.length} retries (rate-limit)`);
-        return null;
-      }
-      console.warn(`[email-guard] ${email} → ${res.status}`);
-      return null;
-    }
     const data = await res.json();
     return (data?.data?.email_host as string | null) ?? null;
   } catch (e) {
-    console.warn(`[email-guard] ${email} → threw`, e);
+    console.warn(`[email-guard] ${email} → JSON parse failed`, e);
     return null;
   }
 }

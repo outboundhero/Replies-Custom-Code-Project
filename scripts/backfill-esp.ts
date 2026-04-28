@@ -77,6 +77,29 @@ async function fetchAllUnsetEmails(table: string, emailCol: string): Promise<str
   return all;
 }
 
+/**
+ * Run an async function with retry on transient failure (network errors,
+ * Supabase 5xx, etc.). The previous run had ~317k of these as the local
+ * machine briefly lost connectivity over a 6-hour window. Both the
+ * EmailGuard and Supabase paths now go through this.
+ */
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T | null> {
+  const delays = [1000, 2500, 5000, 10000, 20000];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = (e as Error)?.message || String(e);
+      if (attempt === delays.length) {
+        console.error(`[${label}] gave up after ${delays.length} retries: ${msg}`);
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+  }
+  return null;
+}
+
 async function runWithConcurrency<T>(
   items: T[],
   worker: (item: T, i: number) => Promise<void>,
@@ -207,18 +230,26 @@ async function main() {
           }
           return;
         }
-        const { error, count } = await supabase
-          .from(t.name)
-          .update({ esp: host }, { count: "exact" })
-          .ilike(t.emailColumn, email)
-          .is("esp", null);
-        if (error) {
+        const result = await withRetry(
+          async () => {
+            const { error, count } = await supabase
+              .from(t.name)
+              .update({ esp: host }, { count: "exact" })
+              .ilike(t.emailColumn, email)
+              .is("esp", null);
+            if (error) throw new Error(error.message);
+            return count || 0;
+          },
+          `update:${t.name}:${email}`
+        );
+        if (result === null) {
           updateErrors++;
-          if (updateErrors <= 5) console.error(`  ${email} → update error: ${error.message}`);
-          return;
+          if (updateErrors <= 5) console.error(`  ${email} → update gave up after retries`);
+        } else if (result === 0) {
+          skipped++;
+        } else {
+          updated += result;
         }
-        if ((count || 0) === 0) skipped++;
-        else updated += count || 0;
         if (processed % 500 === 0) {
           console.log(`  Updated ${updated.toLocaleString()} / processed ${processed.toLocaleString()} unique emails`);
         }
