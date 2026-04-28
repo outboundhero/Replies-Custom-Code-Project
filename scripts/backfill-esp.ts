@@ -129,15 +129,17 @@ async function runWithConcurrency<T>(
 }
 
 /**
- * Fetch the email list for one (table, tier) using cursor pagination on
- * id. Each page applies the tier-specific predicate filters.
+ * Fetch (id, email) pairs for one (table, tier) using cursor pagination.
+ * Returns the rows so the caller can build an email → [(table, id)] map.
+ * UPDATE by primary-key id is O(log N), avoiding the statement timeout
+ * we hit when trying ILIKE on the 394k-row legacy table.
  */
-async function fetchEmailsForTierTable(
+async function fetchRowsForTierTable(
   t: TableSpec,
   tier: Tier,
   cutoffIso: string
-): Promise<string[]> {
-  const all: string[] = [];
+): Promise<Array<{ id: number; email: string }>> {
+  const all: Array<{ id: number; email: string }> = [];
   let lastId = 0;
   while (true) {
     let q = supabase
@@ -150,26 +152,15 @@ async function fetchEmailsForTierTable(
       .order("id", { ascending: true })
       .limit(PAGE_SIZE);
 
-    // Common filters: not added, not skipped (for tiers 1 & 2)
     if (tier === 1 || tier === 2) {
-      q = q
-        .is(t.addedColumn, null)
-        .not(t.skippedColumn, "is", true);
-    }
-
-    // Eligibility (tier 1 & 2 = past cutoff; tier 3 = within cutoff)
-    if (tier === 1 || tier === 2) {
+      q = q.is(t.addedColumn, null).not(t.skippedColumn, "is", true);
       q = q.lte(t.triggerColumn, cutoffIso);
     } else {
       q = q.gt(t.triggerColumn, cutoffIso);
     }
-
-    // Safety: tier 1 requires safe (or seq table which has no safety)
     if (tier === 1 && t.safetyColumn) {
       q = q.eq(t.safetyColumn, "safe");
     }
-
-    // AI-category exclusions (replies + legacy)
     if ((tier === 1 || tier === 2) && t.aiCategoryColumn) {
       q = q.or(
         `${t.aiCategoryColumn}.is.null,${t.aiCategoryColumn}.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
@@ -182,7 +173,7 @@ async function fetchEmailsForTierTable(
     if (rows.length === 0) break;
     for (const r of rows) {
       const e = r[t.emailColumn]?.trim().toLowerCase();
-      if (e) all.push(e);
+      if (e) all.push({ id: r.id, email: e });
     }
     lastId = rows[rows.length - 1].id;
     if (rows.length < PAGE_SIZE) break;
@@ -190,40 +181,50 @@ async function fetchEmailsForTierTable(
   return all;
 }
 
-/**
- * Look up + write ESP for a single email across ALL tables that contain
- * it. Cache result so the next tier doesn't re-look-up. Per-table
- * UPDATE is wrapped in withRetry to survive transient Supabase errors.
- */
-async function processEmail(email: string, cache: Map<string, string | null>) {
-  if (cache.has(email)) {
-    // Already looked up in a previous tier; if we got a host, write it
-    // anywhere it might still be missing (other tables not yet updated).
-    const host = cache.get(email);
-    if (!host) return;
-    await writeHostToAllTables(email, host);
-    return;
-  }
-  const host = await lookupEmailHost(email);
-  cache.set(email, host); // even null — don't re-look-up failed addresses in this run
-  if (!host) return;
-  await writeHostToAllTables(email, host);
-}
+interface RowRef { table: string; id: number; }
 
-async function writeHostToAllTables(email: string, host: string) {
-  for (const t of TABLES) {
-    await withRetry(
-      async () => {
-        const { error } = await supabase
-          .from(t.name)
-          .update({ esp: host })
-          .ilike(t.emailColumn, email)
-          .is("esp", null);
-        if (error) throw new Error(error.message);
-      },
-      `update:${t.name}:${email}`
-    );
+/**
+ * Look up + write ESP for one unique email. Writes go directly to the
+ * specific row IDs collected during the scan — primary-key updates are
+ * O(log N) regardless of table size, so 394k-row legacy never times out.
+ * Cache result so the next tier doesn't re-look-up.
+ */
+async function processEmail(
+  email: string,
+  rowsByEmail: Map<string, RowRef[]>,
+  cache: Map<string, string | null>
+) {
+  let host = cache.get(email);
+  if (host === undefined) {
+    host = await lookupEmailHost(email);
+    cache.set(email, host); // even null — don't re-attempt failed addresses this run
   }
+  if (!host) return 0;
+
+  const refs = rowsByEmail.get(email) || [];
+  // Group by table so we can batch UPDATE WHERE id IN (...)
+  const byTable = new Map<string, number[]>();
+  for (const r of refs) {
+    if (!byTable.has(r.table)) byTable.set(r.table, []);
+    byTable.get(r.table)!.push(r.id);
+  }
+
+  let written = 0;
+  for (const [tableName, ids] of byTable) {
+    const result = await withRetry(
+      async () => {
+        const { error, count } = await supabase
+          .from(tableName)
+          .update({ esp: host }, { count: "exact" })
+          .in("id", ids);
+        if (error) throw new Error(error.message);
+        return count || 0;
+      },
+      `update:${tableName}:${email}`
+    );
+    if (result !== null) written += result;
+  }
+  return written;
 }
 
 async function main() {
@@ -270,48 +271,59 @@ async function main() {
     console.log(`Tier ${tier}: ${TIER_LABEL[tier]}`);
     console.log(`${"═".repeat(60)}`);
 
-    // 1. Scan each table for this tier's emails
-    const tierEmails = new Set<string>();
+    // 1. Scan each table — collect (id, email) pairs per row so we can
+    //    UPDATE by primary-key id later (avoids ILIKE table scans).
+    const rowsByEmail = new Map<string, RowRef[]>();
+    let totalRows = 0;
     for (const t of TABLES) {
       console.log(`Scanning ${t.name}…`);
-      const emails = await fetchEmailsForTierTable(t, tier, cutoffIso);
-      for (const e of emails) tierEmails.add(e);
-      console.log(`  ${emails.length.toLocaleString()} rows missing esp`);
+      const rows = await fetchRowsForTierTable(t, tier, cutoffIso);
+      for (const r of rows) {
+        if (!rowsByEmail.has(r.email)) rowsByEmail.set(r.email, []);
+        rowsByEmail.get(r.email)!.push({ table: t.name, id: r.id });
+      }
+      totalRows += rows.length;
+      console.log(`  ${rows.length.toLocaleString()} rows missing esp`);
     }
 
-    // 2. Filter out already-cached (already looked up in a previous tier)
-    const newEmails = Array.from(tierEmails).filter((e) => !cache.has(e));
-    const reusedEmails = tierEmails.size - newEmails.length;
-    console.log(`Tier ${tier}: ${tierEmails.size.toLocaleString()} unique emails (${newEmails.length.toLocaleString()} new, ${reusedEmails.toLocaleString()} from cache)`);
+    const tierEmails = Array.from(rowsByEmail.keys());
+    const newEmails = tierEmails.filter((e) => !cache.has(e));
+    console.log(`Tier ${tier}: ${tierEmails.length.toLocaleString()} unique emails covering ${totalRows.toLocaleString()} rows (${newEmails.length.toLocaleString()} need lookup, ${(tierEmails.length - newEmails.length).toLocaleString()} cached)`);
 
     if (dryRun) continue;
+    if (tierEmails.length === 0) {
+      console.log(`Tier ${tier} has nothing to do — moving on.\n`);
+      continue;
+    }
 
-    // 3. Process — lookup + immediate write per email
+    // 2. Process — lookup + immediate UPDATE BY ID per email
     const tierStart = Date.now();
     let processed = 0;
-    let hits = 0;
+    let written = 0;
+    let lookups = 0;
 
     await runWithConcurrency(
-      Array.from(tierEmails),
+      tierEmails,
       async (email) => {
         const cachedBefore = cache.has(email);
-        await processEmail(email, cache);
+        const w = await processEmail(email, rowsByEmail, cache);
+        written += w;
         processed++;
-        if (!cachedBefore && cache.get(email)) hits++;
+        if (!cachedBefore && cache.get(email)) lookups++;
         if (processed % 100 === 0) {
           const rate = processed / ((Date.now() - tierStart) / 1000);
-          const eta = Math.round((tierEmails.size - processed) / rate);
+          const eta = Math.round((tierEmails.length - processed) / rate);
           const etaText = eta < 90 ? `${eta}s` : eta < 3600 ? `${Math.round(eta / 60)}m` : `${(eta / 3600).toFixed(1)}h`;
-          console.log(`  Tier ${tier}: ${processed.toLocaleString()} / ${tierEmails.size.toLocaleString()} (${rate.toFixed(1)}/s, ETA ${etaText})`);
+          console.log(`  Tier ${tier}: ${processed.toLocaleString()} / ${tierEmails.length.toLocaleString()} (${rate.toFixed(1)}/s, ETA ${etaText}, ${written.toLocaleString()} rows written)`);
         }
       },
       concurrency
     );
 
     const tierSec = ((Date.now() - tierStart) / 1000).toFixed(1);
-    console.log(`Tier ${tier} done in ${tierSec}s — ${hits.toLocaleString()} new ESP values written this tier\n`);
+    console.log(`Tier ${tier} done in ${tierSec}s — ${lookups.toLocaleString()} new ESP lookups, ${written.toLocaleString()} rows updated\n`);
     totalEmailsProcessed += processed;
-    totalLookupHits += hits;
+    totalLookupHits += lookups;
   }
 
   const totalSec = ((Date.now() - t0) / 1000).toFixed(1);
