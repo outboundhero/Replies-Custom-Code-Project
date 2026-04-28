@@ -28,7 +28,10 @@ export const maxDuration = 60;
 
 const NURTURE_DAYS = 45;
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+// Bumped from 200 → 2000 because bulk-select-and-show requires
+// fetching the full set (up to 1000) of selected leads in one call.
+// The default page size stays 50; only explicit overrides go higher.
+const MAX_LIMIT = 2000;
 
 /**
  * AI / Lead categories that should NEVER appear in the nurture queue.
