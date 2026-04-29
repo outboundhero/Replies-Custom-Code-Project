@@ -228,70 +228,144 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "nurtureCampaignId and items required" }, { status: 400 });
       }
 
-      // 1. Resolve each item to an OutboundHero lead ID
+      // 1. Resolve each item to an OutboundHero lead ID.
+      //
+      // Old version did one Supabase .single() per item AND one
+      // findLeadByEmail per item without ob_lead_id, all sequentially —
+      // pushing 90 leads took 30–60s before the actual attach call fired.
+      //
+      // New flow:
+      //   a) Group item IDs by source up-front.
+      //   b) Run THREE parallel batched SELECTs (one per source) using
+      //      .in("id", [...]) — the whole validation phase is two round
+      //      trips no matter how many leads.
+      //   c) For items still missing ob_lead_id after step (b), run
+      //      findLeadByEmail with bounded concurrency 10 instead of one
+      //      at a time.
       const leadIds: number[] = [];
       const replyIdsBeingAdded: number[] = [];
       const seqIdsBeingAdded: number[] = [];
       const legacyIdsBeingAdded: number[] = [];
       const failures: Array<{ id: string; reason: string }> = [];
 
+      // (a) Group by source
+      const replyItemsByRowId = new Map<number, ItemRef>();
+      const seqItemsByRowId = new Map<number, ItemRef>();
+      const legacyItemsByRowId = new Map<number, ItemRef>();
       for (const it of items) {
         const parsed = parseItemId(it.id);
         if (!parsed) { failures.push({ id: it.id, reason: "Invalid item id" }); continue; }
+        if (parsed.source === "reply") replyItemsByRowId.set(parsed.rowId, it);
+        else if (parsed.source === "seq") seqItemsByRowId.set(parsed.rowId, it);
+        else legacyItemsByRowId.set(parsed.rowId, it);
+      }
 
-        if (parsed.source === "seq") {
-          // Sequence-finished items already have ob_lead_id stored
-          const { data: row } = await supabase
-            .from("nurture_sequence_finished")
-            .select("ob_lead_id, added_at, skipped")
-            .eq("id", parsed.rowId)
-            .single();
-          if (!row || !row.ob_lead_id) { failures.push({ id: it.id, reason: "Lead not found" }); continue; }
-          if (row.added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
-          if (row.skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
-          leadIds.push(row.ob_lead_id);
-          seqIdsBeingAdded.push(parsed.rowId);
-        } else if (parsed.source === "legacy") {
-          // Legacy Airtable rows: look up OutboundHero lead by email
-          const { data: row } = await supabase
-            .from("nurture_legacy_leads")
-            .select("lead_email, nurture_added_at, nurture_skipped, nurture_safety")
-            .eq("id", parsed.rowId)
-            .single();
-          if (!row) { failures.push({ id: it.id, reason: "Legacy lead not found" }); continue; }
-          if (row.nurture_added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
-          if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
-          if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); continue; }
+      // (b) Three parallel batched SELECTs
+      const replyRowIds = Array.from(replyItemsByRowId.keys());
+      const seqRowIds = Array.from(seqItemsByRowId.keys());
+      const legacyRowIds = Array.from(legacyItemsByRowId.keys());
 
-          let obLeadId = it.ob_lead_id;
-          if (!obLeadId && row.lead_email) {
-            const lead = await findLeadByEmail(row.lead_email);
-            if (lead) obLeadId = lead.id;
-          }
-          if (!obLeadId) { failures.push({ id: it.id, reason: "Could not find lead in OutboundHero" }); continue; }
-          leadIds.push(obLeadId);
-          legacyIdsBeingAdded.push(parsed.rowId);
-        } else {
-          // Reply-based: look up the lead in OutboundHero by email
-          const { data: row } = await supabase
-            .from("replies")
-            .select("lead_email, nurture_added_at, nurture_skipped, nurture_safety")
-            .eq("id", parsed.rowId)
-            .single();
-          if (!row) { failures.push({ id: it.id, reason: "Reply not found" }); continue; }
-          if (row.nurture_added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
-          if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
-          if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); continue; }
+      const [replyRowsRes, seqRowsRes, legacyRowsRes] = await Promise.all([
+        replyRowIds.length
+          ? supabase
+              .from("replies")
+              .select("id, lead_email, nurture_added_at, nurture_skipped, nurture_safety")
+              .in("id", replyRowIds)
+          : Promise.resolve({ data: [], error: null }),
+        seqRowIds.length
+          ? supabase
+              .from("nurture_sequence_finished")
+              .select("id, ob_lead_id, added_at, skipped")
+              .in("id", seqRowIds)
+          : Promise.resolve({ data: [], error: null }),
+        legacyRowIds.length
+          ? supabase
+              .from("nurture_legacy_leads")
+              .select("id, lead_email, nurture_added_at, nurture_skipped, nurture_safety")
+              .in("id", legacyRowIds)
+          : Promise.resolve({ data: [], error: null }),
+      ]);
 
-          let obLeadId = it.ob_lead_id;
-          if (!obLeadId && row.lead_email) {
-            const lead = await findLeadByEmail(row.lead_email);
-            if (lead) obLeadId = lead.id;
-          }
-          if (!obLeadId) { failures.push({ id: it.id, reason: "Could not find lead in OutboundHero" }); continue; }
-          leadIds.push(obLeadId);
-          replyIdsBeingAdded.push(parsed.rowId);
+      if (replyRowsRes.error) throw new Error(`replies select: ${replyRowsRes.error.message}`);
+      if (seqRowsRes.error) throw new Error(`seq select: ${seqRowsRes.error.message}`);
+      if (legacyRowsRes.error) throw new Error(`legacy select: ${legacyRowsRes.error.message}`);
+
+      const replyRowMap = new Map((replyRowsRes.data || []).map((r) => [r.id as number, r]));
+      const seqRowMap = new Map((seqRowsRes.data || []).map((r) => [r.id as number, r]));
+      const legacyRowMap = new Map((legacyRowsRes.data || []).map((r) => [r.id as number, r]));
+
+      // Validate seq rows synchronously (no email lookup needed — ob_lead_id is on the row)
+      for (const [rowId, it] of seqItemsByRowId) {
+        const row = seqRowMap.get(rowId);
+        if (!row || !row.ob_lead_id) { failures.push({ id: it.id, reason: "Lead not found" }); continue; }
+        if (row.added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
+        if (row.skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
+        leadIds.push(row.ob_lead_id as number);
+        seqIdsBeingAdded.push(rowId);
+      }
+
+      // Validate reply + legacy rows. Items still needing findLeadByEmail
+      // get pushed into a queue and resolved in parallel below.
+      interface PendingLookup {
+        itemId: string;
+        rowId: number;
+        source: "reply" | "legacy";
+        email: string;
+      }
+      const pendingLookups: PendingLookup[] = [];
+
+      const validateEmailRow = (
+        source: "reply" | "legacy",
+        rowId: number,
+        it: ItemRef,
+        row:
+          | { lead_email: string | null; nurture_added_at: string | null; nurture_skipped: boolean | null; nurture_safety: string | null }
+          | undefined,
+        notFoundReason: string,
+      ) => {
+        if (!row) { failures.push({ id: it.id, reason: notFoundReason }); return; }
+        if (row.nurture_added_at) { failures.push({ id: it.id, reason: "Already added" }); return; }
+        if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); return; }
+        if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); return; }
+
+        if (it.ob_lead_id) {
+          leadIds.push(it.ob_lead_id);
+          if (source === "reply") replyIdsBeingAdded.push(rowId);
+          else legacyIdsBeingAdded.push(rowId);
+          return;
         }
+        if (!row.lead_email) {
+          failures.push({ id: it.id, reason: "Could not find lead in OutboundHero" });
+          return;
+        }
+        pendingLookups.push({ itemId: it.id, rowId, source, email: row.lead_email });
+      };
+
+      for (const [rowId, it] of replyItemsByRowId) {
+        validateEmailRow("reply", rowId, it, replyRowMap.get(rowId) as never, "Reply not found");
+      }
+      for (const [rowId, it] of legacyItemsByRowId) {
+        validateEmailRow("legacy", rowId, it, legacyRowMap.get(rowId) as never, "Legacy lead not found");
+      }
+
+      // (c) Parallel findLeadByEmail for everything that didn't have a
+      // pre-resolved ob_lead_id. Concurrency 10 keeps us safely under the
+      // OutboundHero rate limit while collapsing wall time ~10x.
+      if (pendingLookups.length) {
+        await runWithConcurrency(
+          pendingLookups,
+          async (p) => {
+            const lead = await findLeadByEmail(p.email);
+            if (!lead) {
+              failures.push({ id: p.itemId, reason: "Could not find lead in OutboundHero" });
+              return;
+            }
+            leadIds.push(lead.id);
+            if (p.source === "reply") replyIdsBeingAdded.push(p.rowId);
+            else legacyIdsBeingAdded.push(p.rowId);
+          },
+          10,
+        );
       }
 
       if (leadIds.length === 0) {
