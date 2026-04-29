@@ -89,6 +89,10 @@ export default function NurturePage() {
   const [items, setItems] = useState<NurtureItem[]>([]);
   const [counts, setCounts] = useState<Counts | null>(null);
   const [campaigns, setCampaigns] = useState<NurtureCampaign[]>([]);
+  // Canonical client list from Turso (client_tags table). Populates the
+  // filter dropdown with EVERY client, not just the ones that happen to be
+  // on the current page of items.
+  const [allClients, setAllClients] = useState<string[]>([]);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -198,6 +202,21 @@ export default function NurturePage() {
       .catch(() => {});
   }, []);
 
+  // Pull the full client list once on mount so the filter dropdown is
+  // complete regardless of which leads happen to be on the current page.
+  useEffect(() => {
+    fetch("/api/config/clients")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rows) => {
+        if (!Array.isArray(rows)) return;
+        const tags = Array.from(
+          new Set(rows.map((r: { tag?: string }) => r.tag).filter(Boolean))
+        ).sort() as string[];
+        setAllClients(tags);
+      })
+      .catch(() => {});
+  }, []);
+
   // Tick every 60s so days-left labels stay accurate without a refetch.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -212,11 +231,13 @@ export default function NurturePage() {
     return { ...it, days_until_eligible: daysLeft, is_eligible: daysLeft <= 0 };
   }
 
-  // Distinct client tags from current page items (for the filter dropdown)
-  const clientTags = useMemo(
-    () => Array.from(new Set(items.map((i) => i.client_tag).filter(Boolean))).sort() as string[],
-    [items]
-  );
+  // Filter dropdown source: prefer the canonical list from Turso (every
+  // client the system knows about), and fall back to whatever's on the
+  // current page if that fetch hasn't landed / failed.
+  const clientTags = useMemo(() => {
+    if (allClients.length > 0) return allClients;
+    return Array.from(new Set(items.map((i) => i.client_tag).filter(Boolean))).sort() as string[];
+  }, [allClients, items]);
 
   // Distinct client_tags currently in the selection — used to filter the
   // campaign dropdown so the user only sees that client's nurture campaigns.
