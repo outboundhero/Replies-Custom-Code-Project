@@ -131,6 +131,19 @@ export default function NurturePage() {
 
   const [detailItem, setDetailItem] = useState<NurtureItem | null>(null);
 
+  // Rich modal shown after every push attempt — success, partial, or fail.
+  const [pushResult, setPushResult] = useState<{
+    status: "success" | "partial" | "error";
+    requested: number;
+    attached: number | null;
+    campaignId: number | null;
+    campaignName: string | null;
+    message?: string;
+    obMessage?: string;
+    error?: string;
+    failures?: Array<{ id: string; reason: string }>;
+  } | null>(null);
+
   const loadPage = useCallback(
     async (resetOffset: boolean, append: boolean) => {
       if (append) setLoadingMore(true);
@@ -656,9 +669,23 @@ export default function NurturePage() {
         }),
       });
       const data = await res.json();
-      if (res.ok) {
-        toast.success(`Added ${data.attached} leads to nurture campaign`);
-        if (data.failures?.length) console.warn("Push failures:", data.failures);
+      const campaign = campaigns.find((c) => c.id === Number(pushTargetCampaignId)) || null;
+
+      // Three terminal states:
+      //   - success: ok=true, OB confirmed all attached, DB updated
+      //   - partial: ok=false + partial=true, OB attached < requested, DB NOT updated
+      //   - error:   ok=false otherwise (HTTP error, no leads resolved, etc.)
+      if (res.ok && data.ok) {
+        toast.success(`Added ${data.attached} leads to ${campaign?.name || "the campaign"}`);
+        setPushResult({
+          status: "success",
+          requested: data.requested ?? data.attached,
+          attached: data.attached,
+          campaignId: campaign?.id ?? null,
+          campaignName: campaign?.name ?? null,
+          message: data.message,
+          failures: data.failures || [],
+        });
         // Successful push: clear selection + exit selection-view mode
         // (banner clears, items revert to the regular paged view that no
         // longer contains the just-pushed leads).
@@ -666,10 +693,33 @@ export default function NurturePage() {
         setSelectedMeta(new Map());
         setPushTargetCampaignId("");
         setSelectionScope(null);
+      } else if (data.partial) {
+        toast.warning(`Partial: ${data.attached} of ${data.requested} attached — see details`);
+        setPushResult({
+          status: "partial",
+          requested: data.requested,
+          attached: data.attached,
+          campaignId: campaign?.id ?? null,
+          campaignName: campaign?.name ?? null,
+          message: data.message,
+          obMessage: data.obMessage,
+          failures: data.failures || [],
+        });
+        // Don't clear selection on partial — user may want to re-push after
+        // investigating in OutboundHero.
       } else {
         toast.error(data.error || "Push failed");
-        if (data.failures?.length) console.warn("Push failures:", data.failures);
+        setPushResult({
+          status: "error",
+          requested: data.requested ?? itemRefs.length,
+          attached: 0,
+          campaignId: campaign?.id ?? null,
+          campaignName: campaign?.name ?? null,
+          error: data.error || "Push failed",
+          failures: data.failures || [],
+        });
       }
+      if (data.failures?.length) console.warn("Push failures:", data.failures);
       await Promise.all([loadPage(true, false), loadCounts()]);
     } catch (e) {
       toast.error((e as Error).message);
@@ -1210,6 +1260,9 @@ export default function NurturePage() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* ── Push result modal ── */}
+      <PushResultDialog result={pushResult} onClose={() => setPushResult(null)} />
     </div>
   );
 }
@@ -1329,6 +1382,125 @@ function Stat({ label, value }: { label: string; value: string }) {
       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="font-medium tabular-nums">{value}</p>
     </div>
+  );
+}
+
+interface PushResultData {
+  status: "success" | "partial" | "error";
+  requested: number;
+  attached: number | null;
+  campaignId: number | null;
+  campaignName: string | null;
+  message?: string;
+  obMessage?: string;
+  error?: string;
+  failures?: Array<{ id: string; reason: string }>;
+}
+
+function PushResultDialog({
+  result,
+  onClose,
+}: {
+  result: PushResultData | null;
+  onClose: () => void;
+}) {
+  // Group validation failures by reason for a clean breakdown.
+  const failureBuckets = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const f of result?.failures || []) {
+      m.set(f.reason, (m.get(f.reason) || 0) + 1);
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  }, [result]);
+
+  if (!result) return null;
+
+  const accent =
+    result.status === "success"
+      ? { bg: "bg-emerald-50", border: "border-emerald-200", ring: "ring-emerald-500/20", text: "text-emerald-700", num: "text-emerald-700" }
+      : result.status === "partial"
+      ? { bg: "bg-amber-50", border: "border-amber-200", ring: "ring-amber-500/20", text: "text-amber-700", num: "text-amber-700" }
+      : { bg: "bg-rose-50", border: "border-rose-200", ring: "ring-rose-500/20", text: "text-rose-700", num: "text-rose-700" };
+
+  const title =
+    result.status === "success"
+      ? "Push complete"
+      : result.status === "partial"
+      ? "Partial push — needs review"
+      : "Push failed";
+
+  const subtitle =
+    result.status === "success"
+      ? `All ${result.requested} leads landed in OutboundHero.`
+      : result.status === "partial"
+      ? `OutboundHero accepted ${result.attached} of ${result.requested}. Nothing was marked as added in the dashboard — investigate, then re-push.`
+      : result.error || "The push request failed.";
+
+  return (
+    <Dialog open={!!result} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="text-base">{title}</DialogTitle>
+        </DialogHeader>
+
+        {/* Hero stat */}
+        <div className={`rounded-lg border ${accent.border} ${accent.bg} p-4 ring-4 ${accent.ring}`}>
+          <p className="text-xs uppercase tracking-wide text-muted-foreground">Attached to OutboundHero</p>
+          <p className={`mt-1 text-3xl font-semibold tabular-nums ${accent.num}`}>
+            {(result.attached ?? 0).toLocaleString()}
+            <span className="text-lg text-muted-foreground font-normal"> / {result.requested.toLocaleString()}</span>
+          </p>
+          {result.campaignName && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Campaign: <span className="font-medium text-foreground">{result.campaignName}</span>
+            </p>
+          )}
+        </div>
+
+        {/* Status line */}
+        <p className={`text-sm ${accent.text}`}>{subtitle}</p>
+
+        {/* OutboundHero's own message (when present and informative) */}
+        {result.obMessage && (
+          <div className="rounded border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground mb-1">OutboundHero said:</p>
+            <p className="italic">{result.obMessage}</p>
+          </div>
+        )}
+
+        {/* Validation-failure breakdown (rows our server rejected before
+            ever calling OutboundHero — different from the OB-side skip). */}
+        {failureBuckets.length > 0 && (
+          <div>
+            <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
+              Skipped before push ({failureBuckets.reduce((s, [, n]) => s + n, 0)})
+            </p>
+            <ul className="space-y-1 text-sm">
+              {failureBuckets.map(([reason, count]) => (
+                <li key={reason} className="flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground">{reason}</span>
+                  <span className="font-medium tabular-nums">{count}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          {result.campaignId && (
+            <a
+              href={`https://app.outboundhero.co/campaigns/${result.campaignId}/leads`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs px-3 py-1.5 rounded border border-border hover:bg-muted"
+            >
+              Open campaign in OutboundHero
+            </a>
+          )}
+          <Button size="sm" onClick={onClose}>Close</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

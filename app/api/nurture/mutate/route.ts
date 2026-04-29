@@ -372,13 +372,46 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, attached: 0, failures }, { status: 400 });
       }
 
-      // 2. Push them all to the nurture campaign in one call
+      // 2. Push them all to the nurture campaign in one call.
+      //    allow_parallel_sending defaults to TRUE inside attachLeadsToCampaign
+      //    — without it, OutboundHero silently drops leads already in another
+      //    active campaign and still returns 200 OK.
       const result = await attachLeadsToCampaign(nurtureCampaignId, leadIds);
       if (!result.ok) {
-        return NextResponse.json({ ok: false, error: result.error, attached: 0, failures }, { status: 502 });
+        return NextResponse.json({ ok: false, error: result.error, attached: 0, requested: leadIds.length, failures }, { status: 502 });
       }
 
-      // 3. Mark them as added in our DB
+      // 3. Decide whether to mark them as added in our DB.
+      //
+      //    If OutboundHero confirms attachedCount === requestedCount, mark
+      //    everything. If the count is unknown (response shape didn't expose
+      //    one), trust the request size — that's the legacy behavior, fine
+      //    when allow_parallel_sending is true.
+      //
+      //    If OutboundHero attached FEWER than we asked for, we don't know
+      //    WHICH leads were dropped (the response doesn't itemize). Mark
+      //    nothing as added and return a partial-success payload so the
+      //    user can investigate in OutboundHero before re-pushing. This is
+      //    deliberately conservative — better to re-push than to silently
+      //    record unattached leads as added (which is exactly the bug that
+      //    triggered this whole change).
+      const fullySucceeded =
+        result.attachedCount === null || result.attachedCount === leadIds.length;
+
+      if (!fullySucceeded) {
+        return NextResponse.json({
+          ok: false,
+          partial: true,
+          attached: result.attachedCount,
+          requested: leadIds.length,
+          message:
+            `OutboundHero attached only ${result.attachedCount} of ${leadIds.length} leads — likely some are blocked, deleted, or in another campaign that doesn't allow parallel sending. ` +
+            `Nothing has been marked as added in the dashboard. Inspect the campaign in OutboundHero and re-push.`,
+          obMessage: result.message,
+          failures,
+        });
+      }
+
       const nowIso = new Date().toISOString();
       if (replyIdsBeingAdded.length) {
         await supabase.from("replies").update({
@@ -402,6 +435,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         ok: true,
         attached: leadIds.length,
+        requested: leadIds.length,
         message: result.message,
         failures,
       });

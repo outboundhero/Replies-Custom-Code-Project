@@ -179,12 +179,35 @@ export async function listCampaignLeads(
   return all;
 }
 
-/** Attach existing leads (by ID) to a campaign. Used to push qualified leads into a [Nurture] campaign. */
+/**
+ * Attach existing leads (by ID) to a campaign. Used to push qualified leads
+ * into a [Nurture] campaign.
+ *
+ * `allowParallelSending` defaults to `true` — without it, OutboundHero
+ * silently drops any lead that is already in another active campaign and
+ * still returns 200 OK. We learned this the hard way: a 90-lead push
+ * recorded 89 as "added" in our dashboard but only 8 actually attached
+ * because the other 81 were already in their original outbound campaigns.
+ *
+ * The response is parsed for the actual attached count when possible. If
+ * the count returned is lower than the count we sent, the caller MUST NOT
+ * mark all leads as added — see app/api/nurture/mutate/route.ts.
+ */
 export async function attachLeadsToCampaign(
   campaignId: number,
   leadIds: number[],
-  allowParallelSending = false,
-): Promise<{ ok: boolean; message?: string; error?: string }> {
+  allowParallelSending = true,
+): Promise<{
+  ok: boolean;
+  /** Number of leads OutboundHero confirmed as attached. null = unknown (response didn't include a count). */
+  attachedCount: number | null;
+  /** Number of leads we sent in the request. */
+  requestedCount: number;
+  message?: string;
+  error?: string;
+  /** Raw response body for diagnostics. */
+  raw?: unknown;
+}> {
   const res = await fetch(`${API_BASE}/campaigns/${campaignId}/leads/attach-leads`, {
     method: "POST",
     headers,
@@ -194,8 +217,51 @@ export async function attachLeadsToCampaign(
     }),
   });
   const body = await res.json().catch(() => null);
-  if (res.ok) return { ok: true, message: body?.data?.message };
-  return { ok: false, error: `${res.status}: ${JSON.stringify(body)}` };
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      attachedCount: null,
+      requestedCount: leadIds.length,
+      error: `${res.status}: ${JSON.stringify(body)}`,
+      raw: body,
+    };
+  }
+
+  // Try several shapes OutboundHero may return for the attached count.
+  // We've seen `data.message` in success responses; the count fields below
+  // are defensive — if none match we treat the count as unknown and the
+  // caller decides whether to trust the request size.
+  const data = body?.data ?? body ?? {};
+  const candidates = [
+    data?.attached_count,
+    data?.attached,
+    data?.successful_count,
+    data?.success_count,
+    data?.created_count,
+    data?.added_count,
+    Array.isArray(data?.attached_lead_ids) ? data.attached_lead_ids.length : undefined,
+    Array.isArray(data?.attached_leads) ? data.attached_leads.length : undefined,
+  ];
+  const attachedCount = candidates.find((v) => typeof v === "number" && Number.isFinite(v)) as number | undefined;
+
+  // Log full body whenever the count is missing or doesn't match — this
+  // gives us the data we need to harden the parser if the API shape
+  // changes. Stringified once, never spammy.
+  if (attachedCount === undefined || attachedCount !== leadIds.length) {
+    console.log(
+      `[outboundhero] attach-leads response (campaign ${campaignId}, requested ${leadIds.length}, parsed attached=${attachedCount ?? "unknown"}):`,
+      JSON.stringify(body),
+    );
+  }
+
+  return {
+    ok: true,
+    attachedCount: attachedCount ?? null,
+    requestedCount: leadIds.length,
+    message: data?.message,
+    raw: body,
+  };
 }
 
 /** Find a single lead by email (search). Returns the first matching lead or null. */
