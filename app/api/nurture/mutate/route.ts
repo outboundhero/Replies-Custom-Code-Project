@@ -413,15 +413,14 @@ export async function POST(req: NextRequest) {
       }
 
       // (c) Parallel findLeadByEmail for everything that didn't have a
-      // pre-resolved id on the row. Concurrency 25 — OutboundHero's /leads
-      // search comfortably handles this. For 90 lookups this brings wall
-      // time from ~10s (concurrency 10) to ~3-4s.
+      // pre-resolved id on the row. Concurrency 40 — OutboundHero's /leads
+      // search comfortably handles this in our experience. For 90 lookups
+      // this brings wall time to ~2-3s.
       //
       // Resolved IDs are written back to nurture_legacy_leads.ob_lead_id
       // so the next push for the same lead skips the lookup entirely.
       // Replies already carry lead_id from the webhook, no write-back
-      // needed there. Write-back is fire-and-forget — a failure doesn't
-      // block the push.
+      // needed there.
       const writeBackByRowId: number[] = [];
       const writeBackIds: number[] = [];
       if (pendingLookups.length) {
@@ -441,25 +440,32 @@ export async function POST(req: NextRequest) {
               writeBackIds.push(lead.id);
             }
           },
-          25,
+          40,
         );
       }
 
-      // Fire-and-forget cache write-back for legacy rows. The ob_lead_id
-      // column is per-row, so we batch by id pairs. Awaiting all promises
-      // in parallel — failures are logged but never block the push.
+      // AWAIT the cache write-back. Previously this was fire-and-forget,
+      // but in Vercel serverless the function can be torn down once the
+      // response is sent — meaning the writes never actually persisted.
+      // That defeated the entire point of the cache: every "subsequent"
+      // push hit the OutboundHero API again. With 95-lead batches and
+      // ~50ms per UPDATE WHERE id = $1 in parallel (concurrency 25),
+      // this adds ~150-300ms — well worth it for guaranteed persistence.
       if (writeBackByRowId.length) {
-        Promise.all(
-          writeBackByRowId.map((rowId, i) =>
-            supabase
+        const writeBackPairs = writeBackByRowId.map((rowId, i) => ({ rowId, obLeadId: writeBackIds[i] }));
+        await runWithConcurrency(
+          writeBackPairs,
+          async (pair) => {
+            const { error } = await supabase
               .from("nurture_legacy_leads")
-              .update({ ob_lead_id: writeBackIds[i] })
-              .eq("id", rowId)
-              .then(({ error }) => {
-                if (error) console.warn(`[push-to-nurture] ob_lead_id write-back failed for row ${rowId}:`, error.message);
-              }),
-          ),
-        ).catch((e) => console.warn("[push-to-nurture] write-back batch failed:", e));
+              .update({ ob_lead_id: pair.obLeadId })
+              .eq("id", pair.rowId);
+            if (error) {
+              console.warn(`[push-to-nurture] ob_lead_id write-back failed for row ${pair.rowId}:`, error.message);
+            }
+          },
+          25,
+        );
       }
 
       if (leadIds.length === 0) {
