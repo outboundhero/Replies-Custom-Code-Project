@@ -269,7 +269,9 @@ export async function POST(req: NextRequest) {
         replyRowIds.length
           ? supabase
               .from("replies")
-              .select("id, lead_email, nurture_added_at, nurture_skipped, nurture_safety")
+              // lead_id is the OutboundHero lead id captured from the original
+              // webhook; if present we skip the findLeadByEmail round trip.
+              .select("id, lead_email, lead_id, nurture_added_at, nurture_skipped, nurture_safety")
               .in("id", replyRowIds)
           : Promise.resolve({ data: [], error: null }),
         seqRowIds.length
@@ -281,7 +283,10 @@ export async function POST(req: NextRequest) {
         legacyRowIds.length
           ? supabase
               .from("nurture_legacy_leads")
-              .select("id, lead_email, nurture_added_at, nurture_skipped, nurture_safety")
+              // ob_lead_id is the OB id resolved by the backfill script
+              // (scripts/backfill-ob-lead-id.ts) or written back from a
+              // previous push. When present we skip findLeadByEmail.
+              .select("id, lead_email, ob_lead_id, nurture_added_at, nurture_skipped, nurture_safety")
               .in("id", legacyRowIds)
           : Promise.resolve({ data: [], error: null }),
       ]);
@@ -319,7 +324,14 @@ export async function POST(req: NextRequest) {
         rowId: number,
         it: ItemRef,
         row:
-          | { lead_email: string | null; nurture_added_at: string | null; nurture_skipped: boolean | null; nurture_safety: string | null }
+          | {
+              lead_email: string | null;
+              lead_id?: number | null;        // replies-only column from the OB webhook
+              ob_lead_id?: number | null;     // legacy-only column from backfill / write-back
+              nurture_added_at: string | null;
+              nurture_skipped: boolean | null;
+              nurture_safety: string | null;
+            }
           | undefined,
         notFoundReason: string,
       ) => {
@@ -328,8 +340,16 @@ export async function POST(req: NextRequest) {
         if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); return; }
         if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); return; }
 
-        if (it.ob_lead_id) {
-          leadIds.push(it.ob_lead_id);
+        // Prefer the stored OB lead id from the row itself — replies have
+        // it from the original webhook (`lead_id`), legacy rows have it
+        // from the backfill script or a prior write-back (`ob_lead_id`).
+        // Falls back to the client-supplied ItemRef.ob_lead_id, then to
+        // an on-demand findLeadByEmail call below.
+        const storedId = source === "reply" ? row.lead_id : row.ob_lead_id;
+        const obLeadId = storedId ?? it.ob_lead_id ?? null;
+
+        if (obLeadId) {
+          leadIds.push(obLeadId);
           if (source === "reply") replyIdsBeingAdded.push(rowId);
           else legacyIdsBeingAdded.push(rowId);
           return;
@@ -349,10 +369,17 @@ export async function POST(req: NextRequest) {
       }
 
       // (c) Parallel findLeadByEmail for everything that didn't have a
-      // pre-resolved ob_lead_id. Concurrency 25 — OutboundHero's /leads
-      // search endpoint comfortably handles this; we have not seen rate
-      // limit pushback. For 90 lookups this brings wall time from ~10s
-      // (concurrency 10) to ~3-4s.
+      // pre-resolved id on the row. Concurrency 25 — OutboundHero's /leads
+      // search comfortably handles this. For 90 lookups this brings wall
+      // time from ~10s (concurrency 10) to ~3-4s.
+      //
+      // Resolved IDs are written back to nurture_legacy_leads.ob_lead_id
+      // so the next push for the same lead skips the lookup entirely.
+      // Replies already carry lead_id from the webhook, no write-back
+      // needed there. Write-back is fire-and-forget — a failure doesn't
+      // block the push.
+      const writeBackByRowId: number[] = [];
+      const writeBackIds: number[] = [];
       if (pendingLookups.length) {
         await runWithConcurrency(
           pendingLookups,
@@ -364,10 +391,31 @@ export async function POST(req: NextRequest) {
             }
             leadIds.push(lead.id);
             if (p.source === "reply") replyIdsBeingAdded.push(p.rowId);
-            else legacyIdsBeingAdded.push(p.rowId);
+            else {
+              legacyIdsBeingAdded.push(p.rowId);
+              writeBackByRowId.push(p.rowId);
+              writeBackIds.push(lead.id);
+            }
           },
           25,
         );
+      }
+
+      // Fire-and-forget cache write-back for legacy rows. The ob_lead_id
+      // column is per-row, so we batch by id pairs. Awaiting all promises
+      // in parallel — failures are logged but never block the push.
+      if (writeBackByRowId.length) {
+        Promise.all(
+          writeBackByRowId.map((rowId, i) =>
+            supabase
+              .from("nurture_legacy_leads")
+              .update({ ob_lead_id: writeBackIds[i] })
+              .eq("id", rowId)
+              .then(({ error }) => {
+                if (error) console.warn(`[push-to-nurture] ob_lead_id write-back failed for row ${rowId}:`, error.message);
+              }),
+          ),
+        ).catch((e) => console.warn("[push-to-nurture] write-back batch failed:", e));
       }
 
       if (leadIds.length === 0) {
