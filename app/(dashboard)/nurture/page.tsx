@@ -343,6 +343,14 @@ export default function NurturePage() {
     return true;
   }
 
+  // What a checkbox-tickable row looks like depends on the view:
+  //   - Added view  → row must be added (so Rollback is meaningful)
+  //   - everything else → same as pushable (eligible + safe + not added/skipped)
+  function isSelectable(it: NurtureItem): boolean {
+    if (view === "added") return !!it.added_at;
+    return isPushable(it);
+  }
+
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -367,21 +375,21 @@ export default function NurturePage() {
   }
 
   function toggleSelectAllInGroup(groupItems: NurtureItem[]) {
-    const pushables = groupItems.filter(isPushable);
-    if (pushables.length === 0) return;
-    const allSelected = pushables.every((i) => selected.has(i.id));
+    const selectables = groupItems.filter(isSelectable);
+    if (selectables.length === 0) return;
+    const allSelected = selectables.every((i) => selected.has(i.id));
     setSelected((prev) => {
       const next = new Set(prev);
-      if (allSelected) pushables.forEach((i) => next.delete(i.id));
-      else pushables.forEach((i) => next.add(i.id));
+      if (allSelected) selectables.forEach((i) => next.delete(i.id));
+      else selectables.forEach((i) => next.add(i.id));
       return next;
     });
     setSelectedMeta((prev) => {
       const next = new Map(prev);
       if (allSelected) {
-        pushables.forEach((i) => next.delete(i.id));
+        selectables.forEach((i) => next.delete(i.id));
       } else {
-        pushables.forEach((i) =>
+        selectables.forEach((i) =>
           next.set(i.id, { client_tag: i.client_tag, ob_lead_id: i.ob_lead_id })
         );
       }
@@ -753,8 +761,40 @@ export default function NurturePage() {
     } else toast.error(data.error);
   }
 
+  async function rollbackSelected() {
+    if (selected.size === 0) return;
+    const n = selected.size;
+    const ok = window.confirm(
+      `Rollback ${n} lead${n === 1 ? "" : "s"} from "Added" back to "Ready to Nurture"?\n\n` +
+      `This only clears the dashboard's added-at timestamp. The lead is NOT removed from the OutboundHero campaign — you must remove it there manually if needed.`
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch("/api/nurture/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "rollback-from-added", itemIds: Array.from(selected) }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(`Rolled back ${data.updated} lead${data.updated === 1 ? "" : "s"} to Ready`);
+        setSelected(new Set());
+        setSelectedMeta(new Map());
+        setSelectionScope(null);
+        await Promise.all([loadPage(true, false), loadCounts()]);
+      } else {
+        toast.error(data.error || "Rollback failed");
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  }
+
   const pushableInView = visibleItems.filter(isPushable);
-  const allInViewSelected = pushableInView.length > 0 && pushableInView.every((i) => selected.has(i.id));
+  // selectableInView covers the active view's notion of a tickable row
+  // (Added view → already-added rows for Rollback; other views → pushable).
+  const selectableInView = visibleItems.filter(isSelectable);
+  const allInViewSelected = selectableInView.length > 0 && selectableInView.every((i) => selected.has(i.id));
 
   return (
     <div className="space-y-6 max-w-[1500px]">
@@ -931,7 +971,7 @@ export default function NurturePage() {
               type="checkbox"
               checked={allInViewSelected}
               onChange={toggleSelectAllVisible}
-              disabled={pushableInView.length === 0}
+              disabled={selectableInView.length === 0}
               className="size-4"
             />
             <span className="text-sm text-muted-foreground">
@@ -1014,6 +1054,22 @@ export default function NurturePage() {
           >
             Skip
           </Button>
+          {/* Rollback only makes sense on the Added view — clears
+              nurture_added_at + nurture_campaign_id so the row reappears
+              under Ready to Nurture. The lead is NOT detached from the
+              OutboundHero campaign — confirm modal warns the user. */}
+          {view === "added" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={rollbackSelected}
+              disabled={selected.size === 0}
+              className="h-9 text-amber-700 border-amber-300 hover:bg-amber-50 hover:text-amber-800"
+              title="Move selected leads from 'Added' back to 'Ready to Nurture'. Does NOT remove them from the OutboundHero campaign."
+            >
+              Rollback to Ready{selected.size > 0 ? ` (${selected.size})` : ""}
+            </Button>
+          )}
           {selected.size > 0 && (
             <Button
               size="sm"
@@ -1063,7 +1119,7 @@ export default function NurturePage() {
                 ? groupedItems.map(({ client, subs }) => {
                     const collapsed = collapsedGroups.has(client);
                     const allItems = subs.flatMap((s) => s.items);
-                    const groupPushable = allItems.filter(isPushable);
+                    const groupSelectable = allItems.filter(isSelectable);
                     return (
                       <Fragment key={`group-${client}`}>
                         {/* Client header */}
@@ -1079,7 +1135,9 @@ export default function NurturePage() {
                                 <span>{client}</span>
                                 <span className="text-xs text-muted-foreground font-normal">
                                   · {allItems.length} on this page
-                                  {groupPushable.length > 0 && <> · <span className="text-emerald-700">{groupPushable.length} ready</span></>}
+                                  {groupSelectable.length > 0 && (
+                                    <> · <span className="text-emerald-700">{groupSelectable.length} {view === "added" ? "added" : "ready"}</span></>
+                                  )}
                                 </span>
                               </span>
                               {client !== "(no client)" && (
@@ -1101,7 +1159,7 @@ export default function NurturePage() {
 
                         {/* ESP sub-groups under each client */}
                         {!collapsed && subs.map((sub) => {
-                          const subPushable = sub.items.filter(isPushable);
+                          const subSelectable = sub.items.filter(isSelectable);
                           const subKey = `${client}__${sub.esp}`;
                           const subCollapsed = collapsedGroups.has(subKey);
                           const espLabel = sub.esp === "outlook" ? "Outlook" : "Gmail + Others";
@@ -1121,10 +1179,12 @@ export default function NurturePage() {
                                       <span className="font-medium">{espLabel}</span>
                                       <span className="text-xs text-muted-foreground font-normal">
                                         · {sub.items.length} on this page
-                                        {subPushable.length > 0 && <> · <span className="text-emerald-700">{subPushable.length} ready</span></>}
+                                        {subSelectable.length > 0 && (
+                                          <> · <span className="text-emerald-700">{subSelectable.length} {view === "added" ? "added" : "ready"}</span></>
+                                        )}
                                       </span>
                                     </span>
-                                    {client !== "(no client)" && subPushable.length > 0 && (
+                                    {client !== "(no client)" && subSelectable.length > 0 && (
                                       <button
                                         onClick={(e) => {
                                           e.stopPropagation();
@@ -1145,7 +1205,7 @@ export default function NurturePage() {
                                   key={it.id}
                                   it={it}
                                   selected={selected.has(it.id)}
-                                  pushable={isPushable(it)}
+                                  pushable={isSelectable(it)}
                                   onToggle={() => toggleSelect(it)}
                                   onClick={() => setDetailItem(it)}
                                 />
@@ -1161,7 +1221,7 @@ export default function NurturePage() {
                       key={it.id}
                       it={it}
                       selected={selected.has(it.id)}
-                      pushable={isPushable(it)}
+                      pushable={isSelectable(it)}
                       onToggle={() => toggleSelect(it)}
                       onClick={() => setDetailItem(it)}
                     />

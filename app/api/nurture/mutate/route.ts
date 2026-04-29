@@ -220,6 +220,50 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, updated: items.length });
     }
 
+    // ── rollback from added → ready ──
+    // Clears nurture_added_at + nurture_campaign_id on selected rows so they
+    // reappear in the "Ready to Nurture" view. Used after a botched push or
+    // when the user wants to re-route a lead to a different campaign.
+    //
+    // NOTE: this only undoes our DB bookkeeping — the lead is NOT detached
+    // from the OutboundHero campaign. Caller is responsible for removing
+    // it from the campaign in OutboundHero if needed.
+    if (action === "rollback-from-added") {
+      const items: string[] = body.itemIds || [];
+      if (!Array.isArray(items) || items.length === 0) {
+        return NextResponse.json({ error: "itemIds required" }, { status: 400 });
+      }
+      const replyIds: number[] = [];
+      const seqIds: number[] = [];
+      const legacyIds: number[] = [];
+      for (const id of items) {
+        const parsed = parseItemId(id);
+        if (!parsed) continue;
+        if (parsed.source === "reply") replyIds.push(parsed.rowId);
+        else if (parsed.source === "seq") seqIds.push(parsed.rowId);
+        else legacyIds.push(parsed.rowId);
+      }
+      if (replyIds.length) {
+        await supabase
+          .from("replies")
+          .update({ nurture_added_at: null, nurture_campaign_id: null })
+          .in("id", replyIds);
+      }
+      if (seqIds.length) {
+        await supabase
+          .from("nurture_sequence_finished")
+          .update({ added_at: null, nurture_campaign_id: null })
+          .in("id", seqIds);
+      }
+      if (legacyIds.length) {
+        await supabase
+          .from("nurture_legacy_leads")
+          .update({ nurture_added_at: null, nurture_campaign_id: null })
+          .in("id", legacyIds);
+      }
+      return NextResponse.json({ ok: true, updated: replyIds.length + seqIds.length + legacyIds.length });
+    }
+
     // ── push to nurture ──
     if (action === "push-to-nurture") {
       const nurtureCampaignId: number = body.nurtureCampaignId;
