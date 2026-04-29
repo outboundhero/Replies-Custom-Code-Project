@@ -432,10 +432,17 @@ export default function NurturePage() {
     }
     setBulkSelecting(true);
     try {
+      // Inherit the active view's status/safety filters so bulk-select
+      // pulls the same population the page is showing. Critical on the
+      // Added view — we used to hardcode status=eligible+safety=safe,
+      // which meant the per-group "Select all" buttons returned 0–3 rows
+      // (whatever happened to also be eligible+safe), making rollback
+      // unusable at scale.
+      const { status: viewStatus, safety: viewSafety } = viewToFilters(view);
       const p = new URLSearchParams();
       p.set("client_tag", filters.client_tag);
-      p.set("status", "eligible");
-      p.set("safety", "safe");
+      p.set("status", viewStatus);
+      p.set("safety", viewSafety);
       p.set("limit", "1000");
       if (filters.source && filters.source !== "all") p.set("source", filters.source);
       if (filters.esp) p.set("esp", filters.esp);
