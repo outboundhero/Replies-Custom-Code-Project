@@ -44,6 +44,8 @@ interface NurtureItem {
 
 interface NurtureCampaign {
   id: number;
+  /** UUID used in OutboundHero dashboard URLs (different from the numeric id used by the API) */
+  uuid: string | null;
   name: string;
   status: string;
   client_tag: string | null;
@@ -137,6 +139,7 @@ export default function NurturePage() {
     requested: number;
     attached: number | null;
     campaignId: number | null;
+    campaignUuid: string | null;
     campaignName: string | null;
     message?: string;
     obMessage?: string;
@@ -682,6 +685,7 @@ export default function NurturePage() {
           requested: data.requested ?? data.attached,
           attached: data.attached,
           campaignId: campaign?.id ?? null,
+          campaignUuid: campaign?.uuid ?? null,
           campaignName: campaign?.name ?? null,
           message: data.message,
           failures: data.failures || [],
@@ -700,6 +704,7 @@ export default function NurturePage() {
           requested: data.requested,
           attached: data.attached,
           campaignId: campaign?.id ?? null,
+          campaignUuid: campaign?.uuid ?? null,
           campaignName: campaign?.name ?? null,
           message: data.message,
           obMessage: data.obMessage,
@@ -714,6 +719,7 @@ export default function NurturePage() {
           requested: data.requested ?? itemRefs.length,
           attached: 0,
           campaignId: campaign?.id ?? null,
+          campaignUuid: campaign?.uuid ?? null,
           campaignName: campaign?.name ?? null,
           error: data.error || "Push failed",
           failures: data.failures || [],
@@ -1390,6 +1396,7 @@ interface PushResultData {
   requested: number;
   attached: number | null;
   campaignId: number | null;
+  campaignUuid: string | null;
   campaignName: string | null;
   message?: string;
   obMessage?: string;
@@ -1487,9 +1494,13 @@ function PushResultDialog({
         )}
 
         <div className="flex justify-end gap-2 pt-2">
-          {result.campaignId && (
+          {(result.campaignUuid || result.campaignId) && (
             <a
-              href={`https://app.outboundhero.co/campaigns/${result.campaignId}/leads`}
+              href={
+                result.campaignUuid
+                  ? `https://app.outboundhero.co/campaigns/${result.campaignUuid}`
+                  : `https://app.outboundhero.co/campaigns/${result.campaignId}/leads`
+              }
               target="_blank"
               rel="noreferrer"
               className="text-xs px-3 py-1.5 rounded border border-border hover:bg-muted"

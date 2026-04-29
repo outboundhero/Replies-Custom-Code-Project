@@ -12,6 +12,7 @@ import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 interface CachedCampaigns {
   data: Array<{
     id: number;
+    uuid: string | null;
     name: string;
     status: string;
     client_tag: string | null;
@@ -42,6 +43,7 @@ export async function GET() {
     const all = allCampaigns.filter((c) => /\bnurture\b/i.test(c.name || ""));
     const data = all.map((c) => ({
       id: c.id,
+      uuid: c.uuid ?? null,
       name: c.name,
       status: c.status,
       client_tag: extractTagFromCampaignName(c.name) || null,

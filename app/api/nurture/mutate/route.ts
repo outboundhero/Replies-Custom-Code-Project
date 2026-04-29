@@ -349,8 +349,10 @@ export async function POST(req: NextRequest) {
       }
 
       // (c) Parallel findLeadByEmail for everything that didn't have a
-      // pre-resolved ob_lead_id. Concurrency 10 keeps us safely under the
-      // OutboundHero rate limit while collapsing wall time ~10x.
+      // pre-resolved ob_lead_id. Concurrency 25 — OutboundHero's /leads
+      // search endpoint comfortably handles this; we have not seen rate
+      // limit pushback. For 90 lookups this brings wall time from ~10s
+      // (concurrency 10) to ~3-4s.
       if (pendingLookups.length) {
         await runWithConcurrency(
           pendingLookups,
@@ -364,7 +366,7 @@ export async function POST(req: NextRequest) {
             if (p.source === "reply") replyIdsBeingAdded.push(p.rowId);
             else legacyIdsBeingAdded.push(p.rowId);
           },
-          10,
+          25,
         );
       }
 

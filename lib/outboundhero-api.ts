@@ -102,6 +102,8 @@ export async function sendOneOffReply(params: {
 
 export interface OutboundCampaign {
   id: number;
+  /** UUID-style identifier OutboundHero uses in dashboard URLs (e.g. /campaigns/{uuid}). Distinct from the numeric `id` used by the API. */
+  uuid?: string | null;
   name: string;
   status: string;
   type: string;
@@ -133,17 +135,58 @@ export interface OutboundLead {
   updated_at: string;
 }
 
-/** List ALL campaigns by paginating through every page. Filters client-side by name substring. */
+/**
+ * List ALL campaigns by paginating through every page. Filters client-side by name substring.
+ *
+ * Captures whichever UUID-shaped identifier OutboundHero exposes — used to
+ * build dashboard URLs like /campaigns/{uuid}. The API's numeric `id` is
+ * what attach-leads / list-leads actually consume, so both are kept.
+ */
+function pickUuid(row: Record<string, unknown>): string | null {
+  // Defensive: OB has used different field names in the past. Try the
+  // most common ones and pick the first that looks like a UUID.
+  const candidates = ["uuid", "public_id", "external_id", "campaign_uuid", "slug"];
+  const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const k of candidates) {
+    const v = row[k];
+    if (typeof v === "string" && uuidLike.test(v)) return v;
+  }
+  // Last resort: scan all string fields for one that matches UUID shape.
+  for (const v of Object.values(row)) {
+    if (typeof v === "string" && uuidLike.test(v)) return v;
+  }
+  return null;
+}
+
 export async function listCampaigns(opts?: { nameContains?: string }): Promise<OutboundCampaign[]> {
   const all: OutboundCampaign[] = [];
   let page = 1;
+  let loggedSample = false;
   while (true) {
     const res = await fetch(`${API_BASE}/campaigns?page=${page}&per_page=100`, { headers });
     if (!res.ok) throw new Error(`listCampaigns failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
-    const rows: OutboundCampaign[] = data?.data || [];
+    const rows: Array<Record<string, unknown>> = data?.data || [];
     if (rows.length === 0) break;
-    all.push(...rows);
+    if (!loggedSample && rows[0]) {
+      // One-time field-shape log so we can confirm the UUID source if it
+      // ever changes. Keys only — no values, to keep logs slim.
+      console.log("[outboundhero] listCampaigns sample row keys:", Object.keys(rows[0]));
+      loggedSample = true;
+    }
+    for (const row of rows) {
+      all.push({
+        id: row.id as number,
+        uuid: pickUuid(row),
+        name: (row.name as string) ?? "",
+        status: (row.status as string) ?? "",
+        type: (row.type as string) ?? "",
+        total_leads: row.total_leads as number | undefined,
+        emails_sent: row.emails_sent as number | undefined,
+        replied: row.replied as number | undefined,
+        bounced: row.bounced as number | undefined,
+      });
+    }
     const lastPage = data?.meta?.last_page ?? page;
     if (page >= lastPage) break;
     page++;
