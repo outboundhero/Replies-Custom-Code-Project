@@ -184,7 +184,18 @@ async function main() {
           console.log(`  [${err.id}] unknown workflow ${err.workflow} — skip`);
           return;
         }
+        // Delete the airtable error AND its webhook-stage sibling (the one
+        // that supplied the payload). Without this, every successful retry
+        // leaves an orphaned webhook row behind — those orphans pile up
+        // and the /errors page count never drops.
         await db.execute({ sql: "DELETE FROM error_log WHERE id = ?", args: [err.id] });
+        await db.execute({
+          sql: `DELETE FROM error_log
+                WHERE stage = 'webhook' AND workflow = ?
+                  AND timestamp >= datetime(?, '-5 minutes')
+                  AND timestamp <= datetime(?, '+5 minutes')`,
+          args: [err.workflow, err.timestamp, err.timestamp],
+        });
         succeeded++;
         if ((succeeded + failed) % 10 === 0) {
           const rate = (succeeded + failed) / ((Date.now() - t0) / 1000);
