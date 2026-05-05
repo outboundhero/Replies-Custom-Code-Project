@@ -8,6 +8,10 @@
     {
       "path": "/api/cron/nurture-sync-sequence",
       "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/retry-airtable-errors",
+      "schedule": "0 */2 * * *"
     }
   ]
 }
