@@ -138,7 +138,7 @@ async function main() {
   console.log("");
 
   const where: string[] = ["stage = 'airtable'"];
-  const args: unknown[] = [];
+  const args: string[] = [];
   if (workflowFilter) { where.push("workflow = ?"); args.push(workflowFilter); }
 
   const result = await db.execute({
