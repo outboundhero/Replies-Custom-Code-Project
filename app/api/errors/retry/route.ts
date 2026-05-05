@@ -119,14 +119,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // If no payload on this entry, look for the webhook-stage sibling
+  // If no payload on this entry, look for the webhook-stage sibling.
+  // ±5s was too tight under load — the webhook-stage error logs after
+  // the throw bubbles up, which can take many seconds for late-stage
+  // failures (Airtable retries internally, Clay timeouts, etc.).
+  // ±5 minutes covers the slowest realistic failure path.
   if (!payload) {
     const siblings = await db.execute({
       sql: `SELECT payload FROM error_log
             WHERE workflow = ? AND stage = 'webhook' AND payload IS NOT NULL
-            AND timestamp >= datetime(?, '-5 seconds') AND timestamp <= datetime(?, '+5 seconds')
-            ORDER BY id DESC LIMIT 1`,
-      args: [entry.workflow as string, entry.timestamp as string, entry.timestamp as string],
+            AND timestamp >= datetime(?, '-5 minutes') AND timestamp <= datetime(?, '+5 minutes')
+            ORDER BY ABS(strftime('%s', timestamp) - strftime('%s', ?)) ASC LIMIT 1`,
+      args: [entry.workflow as string, entry.timestamp as string, entry.timestamp as string, entry.timestamp as string],
     });
 
     if (siblings.rows[0]?.payload) {
