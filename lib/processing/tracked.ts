@@ -144,7 +144,11 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     "Sender ID": sender_email.id,
     "Sender Name": sender_email.name,
     "Email Subject": reply.email_subject,
-    "Reply we got": cleanedReply,
+    // Airtable's "Long text" cell tops out at 100,000 characters. Long
+    // email threads (with quoted history) blow past this and the create
+    // call fails with INVALID_VALUE_FOR_COLUMN. Truncate just for Airtable —
+    // Supabase's reply_we_got column gets the full text below.
+    "Reply we got": cleanedReply.length > 100_000 ? cleanedReply.slice(0, 100_000) : cleanedReply,
     "Reply ID": reply.id,
     "From Name": reply.from_name,
     "From Email": reply.from_email_address,
@@ -226,10 +230,15 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
       action = "created";
     }
   } catch (error) {
+    // Store the original webhook payload alongside the context so the
+    // /api/errors/retry route can replay the full pipeline. Without this
+    // the user only gets the webhook-stage sibling row's payload, and the
+    // ±5s sibling lookup is fragile under load — this guarantees retry.
     await logError("tracked", "airtable", (error as Error).message, {
       tag: campaignTag,
       section: section.name,
       lead_email: lead.email,
+      _webhook_payload: payload,
     });
     throw error;
   }
