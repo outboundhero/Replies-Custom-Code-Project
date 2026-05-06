@@ -55,6 +55,28 @@ export async function POST(req: NextRequest) {
           extras.change_of_target = await handleChangeOfTarget(id);
         }
 
+        // Not Interested (Send Reply) → schedule a polite acknowledgment
+        // for 5–10 minutes from now. The /api/cron/auto-reply-not-interested
+        // job (every 2 minutes) drains pending rows and replies in-thread.
+        // Random delay keeps the cadence human — back-to-back marks don't
+        // all fire at the exact same minute.
+        if (category === "Not Interested (Send Reply)") {
+          const delayMs = (5 + Math.random() * 5) * 60 * 1000;
+          const dueAt = new Date(Date.now() + delayMs).toISOString();
+          const { error: schedErr } = await supabase
+            .from("replies")
+            .update({ auto_reply_due_at: dueAt, auto_reply_sent_at: null })
+            .eq("id", id);
+          if (schedErr) {
+            // Most likely the auto_reply_* columns haven't been added to
+            // Supabase yet — surface to the client without blocking the
+            // categorization.
+            extras.auto_reply_schedule_error = schedErr.message;
+          } else {
+            extras.auto_reply_due_at = dueAt;
+          }
+        }
+
         // Auto-push to Google Sheet for qualifying categories
         if (SHEET_PUSH_CATEGORIES.some((c) => c.toLowerCase() === category?.toLowerCase())) {
           const { data: reply } = await supabase.from("replies").select("*").eq("id", id).single();

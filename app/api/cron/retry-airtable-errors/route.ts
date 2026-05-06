@@ -13,7 +13,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { retryAirtableErrorsBatch, cleanupOrphanWebhookErrors } from "@/lib/errors/auto-retry";
+import { retryAirtableErrorsBatch, cleanupOrphanWebhookErrors, cleanupUnrecoverableAirtableErrors } from "@/lib/errors/auto-retry";
 
 // Each retry replays the full processing pipeline (Airtable + Supabase
 // + classifier + Clay). At ~1.5/s with concurrency 5, 60s = ~90 retries
@@ -41,12 +41,14 @@ export async function GET(req: NextRequest) {
       deadlineMs,
     });
 
-    const cleanupResult = await cleanupOrphanWebhookErrors();
+    const orphanCleanup = await cleanupOrphanWebhookErrors();
+    const unrecoverableCleanup = await cleanupUnrecoverableAirtableErrors();
 
     return NextResponse.json({
       ok: true,
       retry: retryResult,
-      cleanup: cleanupResult,
+      cleanup_orphans: orphanCleanup,
+      cleanup_unrecoverable: unrecoverableCleanup,
     });
   } catch (error) {
     console.error("[cron/retry-airtable-errors] failed:", error);

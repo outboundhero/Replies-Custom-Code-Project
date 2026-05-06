@@ -211,6 +211,68 @@ export async function retryAirtableErrorsBatch(opts: RetryBatchOptions = {}): Pr
 }
 
 /**
+ * Delete airtable-stage errors that are permanently unrecoverable —
+ * meaning the row has been in the log for >30 minutes (so nothing in-flight
+ * could still produce a sibling), has no _webhook_payload of its own, AND
+ * has no webhook-stage sibling to recover one from. These rows can NEVER
+ * succeed on retry, so leaving them sets the /errors count permanently
+ * above zero and causes every retry pass to waste cycles re-checking them.
+ *
+ * Conservative by design: 30-minute age gate avoids deleting an error
+ * that's being processed by another concurrent retry, and the sibling
+ * lookup uses the same ±5 minute window the retry route uses.
+ */
+export async function cleanupUnrecoverableAirtableErrors(): Promise<{ deleted: number }> {
+  const stale = await db.execute(`
+    SELECT a.id, a.payload
+    FROM error_log a
+    WHERE a.stage = 'airtable'
+      AND a.timestamp < datetime('now', '-30 minutes')
+      AND NOT EXISTS (
+        SELECT 1 FROM error_log w
+        WHERE w.stage = 'webhook'
+          AND w.workflow = a.workflow
+          AND w.payload IS NOT NULL
+          AND w.timestamp >= datetime(a.timestamp, '-5 minutes')
+          AND w.timestamp <= datetime(a.timestamp, '+5 minutes')
+      )
+  `);
+
+  // Filter further in JS — keep rows whose own payload contains
+  // _webhook_payload (those CAN retry, even without a sibling).
+  const deletable: number[] = [];
+  for (const row of stale.rows) {
+    const id = row.id as number;
+    const payloadStr = row.payload as string | null;
+    if (!payloadStr) {
+      deletable.push(id);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(payloadStr);
+      if (!parsed?._webhook_payload) deletable.push(id);
+    } catch {
+      // Malformed payload = unrecoverable.
+      deletable.push(id);
+    }
+  }
+  if (deletable.length === 0) return { deleted: 0 };
+
+  const CHUNK = 500;
+  let deleted = 0;
+  for (let i = 0; i < deletable.length; i += CHUNK) {
+    const chunk = deletable.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await db.execute({
+      sql: `DELETE FROM error_log WHERE id IN (${placeholders})`,
+      args: chunk as number[],
+    });
+    deleted += res.rowsAffected ?? chunk.length;
+  }
+  return { deleted };
+}
+
+/**
  * Sweep webhook-stage rows whose airtable counterpart no longer exists.
  * Safe to call after retryAirtableErrorsBatch — pre-fix orphans get
  * cleaned up here. Always uses a 5-minute "in flight" buffer so we

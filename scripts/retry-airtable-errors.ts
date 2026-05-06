@@ -15,7 +15,7 @@
  */
 
 import { config } from "dotenv";
-import { retryAirtableErrorsBatch, cleanupOrphanWebhookErrors } from "../lib/errors/auto-retry";
+import { retryAirtableErrorsBatch, cleanupOrphanWebhookErrors, cleanupUnrecoverableAirtableErrors } from "../lib/errors/auto-retry";
 
 config({ path: ".env.local" });
 
@@ -60,6 +60,10 @@ async function main() {
   console.log(`\nSweeping orphan webhook rows…`);
   const sweep = await cleanupOrphanWebhookErrors();
   console.log(`  Deleted ${sweep.deleted} orphan webhook rows`);
+
+  console.log(`\nSweeping unrecoverable airtable rows (>30 min old, no payload, no sibling)…`);
+  const stale = await cleanupUnrecoverableAirtableErrors();
+  console.log(`  Deleted ${stale.deleted} unrecoverable airtable rows`);
 }
 
 main().catch((e) => {
