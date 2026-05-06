@@ -253,6 +253,17 @@ export async function POST(req: NextRequest) {
   }
 }
 
+/** Escape user-supplied strings before inlining into the wrapped HTML
+ *  email so a stray `<` in someone's name can't break the body. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 interface ChangeOfTargetResult {
   ok: boolean;
   reason?: string;       // why it didn't ok (no lead_id, no email in reply, etc.)
@@ -315,11 +326,32 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
       return { ok: false, reason: "First sent email has no sender_email — cannot re-send" };
     }
 
-    // 3. Send the same subject + body to the new contact via /replies/new.
+    // 3. Wrap the original cold email with context so the new contact
+    //    knows why they're getting it, and send to them via /replies/new.
+    //
+    //    Earlier version blasted the raw cold body — the new contact had
+    //    no idea where it came from or why. Now we frame it: who pointed
+    //    us to them (original lead's name), then quote the original
+    //    email below, signed off with the original sender's name.
+    const newContactFirstName =
+      (extracted.name || "").trim().split(/\s+/)[0] || "there";
+    const originalLeadDisplayName =
+      ((reply.lead_name as string | null) || "").trim() || originalLeadEmail || "the lead we contacted";
+    const senderName = (firstEmail.sender_email.name || "").trim() || "the team";
+
+    const wrappedMessage =
+      `<p>Hi ${escapeHtml(newContactFirstName)},</p>` +
+      `<p>We received your email from ${escapeHtml(originalLeadDisplayName)} — here's the email we sent them:</p>` +
+      `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
+      (firstEmail.email_body || "") +
+      `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
+      `<p>Let me know,</p>` +
+      `<p>${escapeHtml(senderName)}</p>`;
+
     const send = await sendOneOffReply({
       senderEmailId: firstEmail.sender_email.id,
       subject: firstEmail.email_subject || "(no subject)",
-      message: firstEmail.email_body || "",
+      message: wrappedMessage,
       toEmail: extracted.email,
       toName: extracted.name || "",
     });
