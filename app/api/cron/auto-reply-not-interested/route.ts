@@ -94,7 +94,10 @@ export async function GET(req: NextRequest) {
   const failures: Array<{ id: number; reason: string }> = [];
 
   for (const rowRaw of due) {
-    const row = rowRaw as DueRow;
+    // Supabase's typed-string parser doesn't recognise this many columns
+    // in one .select() so it returns GenericStringError; cast through
+    // unknown to land back on our concrete shape.
+    const row = rowRaw as unknown as DueRow;
 
     // Required fields to send an in-thread reply via OB.
     if (!row.reply_id || !row.sender_id || !row.lead_email) {
