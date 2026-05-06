@@ -56,7 +56,13 @@ export async function createRecord(
     const res = await fetch(`${AIRTABLE_API}/${baseId}/${tableId}`, {
       method: "POST",
       headers: getHeaders(),
-      body: JSON.stringify({ fields }),
+      // typecast=true lets Airtable auto-create new singleSelect /
+      // multipleSelects options on the fly. Without it, sending a value
+      // that isn't already in the field's option list (e.g. a brand-new
+      // AI category like "Referral Given") fails with
+      // INVALID_MULTIPLE_CHOICE_OPTIONS. The PAT must have
+      // schema.bases:write for typecast to actually write the new option.
+      body: JSON.stringify({ fields, typecast: true }),
     });
     if (!res.ok) {
       const body = await res.text();
@@ -82,7 +88,8 @@ export async function updateRecord(
       {
         method: "PATCH",
         headers: getHeaders(),
-        body: JSON.stringify({ fields }),
+        // See createRecord — same typecast semantics.
+        body: JSON.stringify({ fields, typecast: true }),
       }
     );
     if (!res.ok) {
