@@ -87,9 +87,12 @@ export async function sendOneOffReply(params: {
       sender_email_id: params.senderEmailId,
       content_type: "html",
       to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
-      cc_emails: params.ccEmails?.length ? params.ccEmails : null,
-      bcc_emails: null,
-      attachments: null,
+      // OB now rejects nulls for these — must be empty arrays. Hit during
+      // a Change-of-Target re-pitch:
+      //   422: "The cc emails field must be an array. (and 2 more errors)"
+      cc_emails: params.ccEmails?.length ? params.ccEmails : [],
+      bcc_emails: [],
+      attachments: [],
     }),
   });
 
