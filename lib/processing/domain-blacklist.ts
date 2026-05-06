@@ -1,4 +1,9 @@
 import { logActivity, logError } from "@/lib/errors";
+// Re-export the pure helpers so server-side callers can keep importing
+// from this module. Browser-side callers must import from
+// @/lib/processing/personal-domains directly — this file pulls in db.
+import { PROTECTED_DOMAINS, extractDomain, isPersonalDomain } from "./personal-domains";
+export { PROTECTED_DOMAINS, extractDomain, isPersonalDomain };
 
 const BLACKLIST_DOMAIN_API_URL = "https://app.outboundhero.co/api/blacklisted-domains";
 const BLACKLIST_EMAIL_API_URL = "https://app.outboundhero.co/api/blacklisted-emails";
@@ -130,23 +135,7 @@ const BLACKLIST_TRIGGERS = [
   "your emails are unwelcome at our",
 ];
 
-/** Personal/free email domains — never blacklist these */
-export const PROTECTED_DOMAINS = new Set([
-  "gmail.com", "googlemail.com", "yahoo.com", "yahoo.ca", "ymail.com", "rocketmail.com",
-  "aol.com", "aim.com", "outlook.com", "hotmail.com", "hotmail.ca", "live.com", "msn.com",
-  "icloud.com", "me.com", "mac.com", "att.net", "currently.com", "comcast.net", "xfinity.com",
-  "verizon.net", "sbcglobal.net", "bellsouth.net", "cox.net", "charter.net", "spectrum.net",
-  "frontier.com", "frontiernet.net", "optonline.net", "roadrunner.com", "rr.com", "twc.com",
-  "centurylink.net", "q.com", "embarqmail.com", "earthlink.net", "juno.com", "netzero.net",
-  "peoplepc.com", "myway.com", "gmx.com", "gmx.us", "mail.com", "email.com", "inbox.com",
-  "usa.net", "zoho.com", "protonmail.com", "proton.me", "pm.me", "fastmail.com", "fastmail.fm",
-  "hushmail.com", "hush.com", "hey.com", "pobox.com", "lycos.com", "excite.com", "cs.com",
-  "vfemail.net", "duck.com", "relay.firefox.com", "mailfence.com", "startmail.com",
-  "tutanota.com", "tutamail.com", "mailbox.org", "posteo.net", "runbox.com", "safe-mail.net",
-  "lavabit.com", "iname.com", "consultant.com", "accountant.com", "engineer.com",
-  "executive.com", "dr.com", "writeme.com", "programmer.net", "linuxmail.org", "rogers.com",
-  "bell.net", "sympatico.ca", "shaw.ca", "telus.net", "videotron.ca",
-]);
+// PROTECTED_DOMAINS now lives in ./personal-domains (re-exported above).
 
 /**
  * Check if the reply body or subject contains any blacklist trigger phrase.
@@ -156,25 +145,7 @@ export function shouldBlacklistDomain(subject: string, body: string): string | n
   return BLACKLIST_TRIGGERS.find((trigger) => combined.includes(trigger)) || null;
 }
 
-/**
- * Extract domain from an email address.
- */
-export function extractDomain(email: string): string | null {
-  const parts = email.split("@");
-  return parts.length === 2 ? parts[1].toLowerCase() : null;
-}
-
-/**
- * True if the given email or domain is a free / personal mailbox provider.
- * Used by the inbox UI + the blacklist mutate route to refuse blacklisting
- * gmail.com, outlook.com, etc. — blacklisting one of those would break us
- * for every legitimate prospect on that provider.
- */
-export function isPersonalDomain(emailOrDomain: string): boolean {
-  if (!emailOrDomain) return false;
-  const domain = emailOrDomain.includes("@") ? extractDomain(emailOrDomain) : emailOrDomain.trim().toLowerCase();
-  return !!domain && PROTECTED_DOMAINS.has(domain);
-}
+// extractDomain + isPersonalDomain now live in ./personal-domains (re-exported above).
 
 /**
  * Blacklist a domain via the OutboundHero API and log the activity.

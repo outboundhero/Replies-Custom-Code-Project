@@ -9,7 +9,9 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
 import { INBOX_VIEWS } from "@/lib/inbox-views";
-import { isPersonalDomain } from "@/lib/processing/domain-blacklist";
+// Pure / no server deps — must NOT import from domain-blacklist (which
+// pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
+import { isPersonalDomain } from "@/lib/processing/personal-domains";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
