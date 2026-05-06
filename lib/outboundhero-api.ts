@@ -348,15 +348,27 @@ export async function getSentEmails(leadId: number): Promise<OutboundSentEmail[]
 }
 
 /**
- * The very first email we sent to this lead — the original cold pitch.
- * "First" = oldest sent_at (the API returns newest first by id).
+ * The first email we sent to this lead in a given campaign — the original
+ * cold pitch for that specific campaign. "First" = oldest sent_at.
+ *
+ * Why scoped to campaign: a lead is often touched by multiple campaigns
+ * over time. The Change-of-Target re-pitch needs to mirror the cold
+ * email from the SAME campaign as the reply we're acting on, not some
+ * older / unrelated outreach. Pass campaignId to honor that.
+ *
+ * Pass campaignId = null to get the absolute-first across any campaign
+ * (the legacy behavior — kept for callers that don't have campaign context).
  */
-export async function getFirstSentEmail(leadId: number): Promise<OutboundSentEmail | null> {
+export async function getFirstSentEmail(
+  leadId: number,
+  campaignId: number | null = null,
+): Promise<OutboundSentEmail | null> {
   const all = await getSentEmails(leadId);
-  if (all.length === 0) return null;
+  const scoped = campaignId == null ? all : all.filter((e) => e.campaign_id === campaignId);
+  if (scoped.length === 0) return null;
   // Sort ascending by sent_at; fall back to id for emails without sent_at.
-  const withTime = all.filter((e) => e.sent_at);
-  const sorted = (withTime.length ? withTime : all).sort((a, b) => {
+  const withTime = scoped.filter((e) => e.sent_at);
+  const sorted = (withTime.length ? withTime : scoped).sort((a, b) => {
     if (a.sent_at && b.sent_at) return a.sent_at.localeCompare(b.sent_at);
     return a.id - b.id;
   });

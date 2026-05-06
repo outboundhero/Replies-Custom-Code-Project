@@ -274,7 +274,7 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
   try {
     const { data: reply, error } = await supabase
       .from("replies")
-      .select("lead_id, lead_email, lead_name, reply_we_got, client_tag, workflow")
+      .select("lead_id, lead_email, lead_name, reply_we_got, client_tag, workflow, campaign_id")
       .eq("id", replyId)
       .single();
 
@@ -283,11 +283,15 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
     }
 
     const leadId = reply.lead_id as number | null;
+    const campaignId = (reply.campaign_id as number | null) ?? null;
     const originalLeadEmail = (reply.lead_email as string | null) || "";
     const replyBody = (reply.reply_we_got as string | null) || "";
 
     if (!leadId) {
       return { ok: false, reason: "No lead_id on this reply — was an untracked reply?" };
+    }
+    if (!campaignId) {
+      return { ok: false, reason: "No campaign_id on this reply — can't scope the cold email lookup to the correct campaign" };
     }
     if (!replyBody.trim()) {
       return { ok: false, reason: "Reply body is empty — nothing to extract from" };
@@ -299,10 +303,13 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
       return { ok: false, reason: "Could not find an alternative contact email in the reply" };
     }
 
-    // 2. Fetch the very first cold email we sent to the original lead.
-    const firstEmail = await getFirstSentEmail(leadId);
+    // 2. Fetch the FIRST cold email we sent to this lead within the SAME
+    // campaign the reply belongs to. A lead can sit in multiple
+    // campaigns over time and we need to mirror the cold email from the
+    // exact one this reply came from — not some unrelated older outreach.
+    const firstEmail = await getFirstSentEmail(leadId, campaignId);
     if (!firstEmail) {
-      return { ok: false, reason: `No sent emails found for lead ${leadId}` };
+      return { ok: false, reason: `No sent emails found for lead ${leadId} in campaign ${campaignId}` };
     }
     if (!firstEmail.sender_email?.id) {
       return { ok: false, reason: "First sent email has no sender_email — cannot re-send" };
@@ -348,6 +355,7 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
         lead_email: originalLeadEmail,
         details: {
           reply_id: replyId,
+          campaign_id: campaignId,
           new_email: extracted.email,
           new_name: extracted.name,
           first_email_id: firstEmail.id,
