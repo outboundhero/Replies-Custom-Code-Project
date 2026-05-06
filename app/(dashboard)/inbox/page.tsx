@@ -29,12 +29,31 @@ interface ReplyListItem {
   created_at: string; reply_id: number;
 }
 
+// Order: Open Response on top, then the three positive-engagement values
+// (Interested, Meeting Request, Meeting Set), then everything else alphabetically.
+// Keeps the most-used categories one click away.
 const LEAD_CATEGORIES = [
-  "Open Response", "Interested", "Meeting Set", "Not Interested", "Do Not Contact",
-  "Out Of Office", "Wrong Person", "Lost", "Meeting-Ready Lead", "Follow Up",
-  "Automated Reply", "Needs Review", "Change Of Target", "Not Interested (Send Reply)",
-  "Unqualified (Cleaning)", "Closed Won", "Mailbox No Longer Active", "Referral Given",
+  "Open Response",
+  "Interested",
+  "Meeting Request",
+  "Meeting Set",
+  // ── alphabetical from here ──
+  "Automated Reply",
+  "Change Of Target",
+  "Closed Won",
+  "Do Not Contact",
+  "Follow Up",
   "Internally Forwarded",
+  "Lost",
+  "Mailbox No Longer Active",
+  "Meeting-Ready Lead",
+  "Needs Review",
+  "Not Interested",
+  "Not Interested (Send Reply)",
+  "Out Of Office",
+  "Referral Given",
+  "Unqualified (Cleaning)",
+  "Wrong Person",
 ];
 
 const POSITIVE_CATEGORIES = ["Interested", "Meeting Set", "Meeting-Ready Lead", "Follow Up", "Referral Given", "Internally Forwarded"];
@@ -303,6 +322,16 @@ export default function InboxPage() {
       toast.success(`Category: ${cat}`);
       if (d.pushed_to_sheet) toast.success("Auto-pushed to Google Sheet");
       if (d.sheet_error) toast.error(`Sheet: ${d.sheet_error}`);
+      // Change-of-Target re-pitch outcome (server fetched the first
+      // cold email + sent it to the AI-extracted new contact).
+      if (d.change_of_target) {
+        const cot = d.change_of_target as { ok: boolean; reason?: string; new_email?: string; first_email_subject?: string };
+        if (cot.ok) {
+          toast.success(`Re-pitched original cold email to ${cot.new_email}${cot.first_email_subject ? ` ("${cot.first_email_subject}")` : ""}`);
+        } else {
+          toast.error(`Change of Target: ${cot.reason || "send failed"}`);
+        }
+      }
     } else {
       // Rollback on failure
       toast.error(d.error || "Category update failed — reverting");

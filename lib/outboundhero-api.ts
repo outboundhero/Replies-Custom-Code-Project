@@ -307,6 +307,62 @@ export async function attachLeadsToCampaign(
   };
 }
 
+/**
+ * Sent-email record returned by GET /leads/{leadId}/sent-emails.
+ * Only the fields we currently consume are typed — the upstream payload is
+ * much larger.
+ */
+export interface OutboundSentEmail {
+  id: number;
+  campaign_id: number;
+  email_subject: string;
+  email_body: string;
+  status: string;
+  scheduled_date: string;
+  sent_at: string | null;
+  thread_reply: boolean;
+  sender_email: { id: number; name: string; email: string } | null;
+}
+
+/**
+ * Fetch every sent email we've delivered to a given lead, in OB's native
+ * order (newest by id desc). Used by the Change-of-Target workflow to
+ * find the very first cold email so we can re-pitch it to a redirected
+ * contact.
+ */
+export async function getSentEmails(leadId: number): Promise<OutboundSentEmail[]> {
+  const res = await fetch(`${API_BASE}/leads/${leadId}/sent-emails`, { headers });
+  if (!res.ok) {
+    throw new Error(`getSentEmails(${leadId}) failed: ${res.status} ${await res.text()}`);
+  }
+  const data = await res.json();
+  // Upstream wraps the array in an extra { data: [{ data: [...] }] } envelope
+  // (per the example payload), so unwrap defensively.
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.data)) {
+    const inner = data.data;
+    if (inner.length && Array.isArray(inner[0]?.data)) return inner[0].data;
+    return inner as OutboundSentEmail[];
+  }
+  return [];
+}
+
+/**
+ * The very first email we sent to this lead — the original cold pitch.
+ * "First" = oldest sent_at (the API returns newest first by id).
+ */
+export async function getFirstSentEmail(leadId: number): Promise<OutboundSentEmail | null> {
+  const all = await getSentEmails(leadId);
+  if (all.length === 0) return null;
+  // Sort ascending by sent_at; fall back to id for emails without sent_at.
+  const withTime = all.filter((e) => e.sent_at);
+  const sorted = (withTime.length ? withTime : all).sort((a, b) => {
+    if (a.sent_at && b.sent_at) return a.sent_at.localeCompare(b.sent_at);
+    return a.id - b.id;
+  });
+  return sorted[0] || null;
+}
+
 /** Find a single lead by email (search). Returns the first matching lead or null. */
 export async function findLeadByEmail(email: string): Promise<OutboundLead | null> {
   const res = await fetch(`${API_BASE}/leads?search=${encodeURIComponent(email)}&per_page=10`, { headers });
