@@ -131,7 +131,7 @@ const BLACKLIST_TRIGGERS = [
 ];
 
 /** Personal/free email domains — never blacklist these */
-const PROTECTED_DOMAINS = new Set([
+export const PROTECTED_DOMAINS = new Set([
   "gmail.com", "googlemail.com", "yahoo.com", "yahoo.ca", "ymail.com", "rocketmail.com",
   "aol.com", "aim.com", "outlook.com", "hotmail.com", "hotmail.ca", "live.com", "msn.com",
   "icloud.com", "me.com", "mac.com", "att.net", "currently.com", "comcast.net", "xfinity.com",
@@ -159,9 +159,21 @@ export function shouldBlacklistDomain(subject: string, body: string): string | n
 /**
  * Extract domain from an email address.
  */
-function extractDomain(email: string): string | null {
+export function extractDomain(email: string): string | null {
   const parts = email.split("@");
   return parts.length === 2 ? parts[1].toLowerCase() : null;
+}
+
+/**
+ * True if the given email or domain is a free / personal mailbox provider.
+ * Used by the inbox UI + the blacklist mutate route to refuse blacklisting
+ * gmail.com, outlook.com, etc. — blacklisting one of those would break us
+ * for every legitimate prospect on that provider.
+ */
+export function isPersonalDomain(emailOrDomain: string): boolean {
+  if (!emailOrDomain) return false;
+  const domain = emailOrDomain.includes("@") ? extractDomain(emailOrDomain) : emailOrDomain.trim().toLowerCase();
+  return !!domain && PROTECTED_DOMAINS.has(domain);
 }
 
 /**

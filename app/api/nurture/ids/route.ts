@@ -44,6 +44,8 @@ const EXCLUDED_AI_CATEGORIES = [
   "Mailbox No Longer Active",
   "Automated Error Message",
   "Automated Catch-All Message",
+  "Referral Given",
+  "Internally Forwarded",
 ];
 
 const NOISE_SENDER_PATTERNS = [

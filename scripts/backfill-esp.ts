@@ -49,6 +49,7 @@ const EXCLUDED_AI_CATEGORIES = [
   "Do Not Contact", "Wrong Person", "Wrong Person (Change of Target)",
   "Not Interested", "Mailbox No Longer Active",
   "Automated Error Message", "Automated Catch-All Message",
+  "Referral Given", "Internally Forwarded",
 ];
 
 interface TableSpec {

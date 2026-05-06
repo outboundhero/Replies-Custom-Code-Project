@@ -3,7 +3,7 @@ import { requireAuth } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { sendReply, forwardReply, sendOneOffReply } from "@/lib/outboundhero-api";
-import { blacklistDomain } from "@/lib/processing/domain-blacklist";
+import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 
 export async function POST(req: NextRequest) {
@@ -22,6 +22,25 @@ export async function POST(req: NextRequest) {
           .update({ lead_category: category, updated_at: new Date().toISOString() })
           .eq("id", id);
         if (error) throw new Error(error.message);
+
+        // Manual DNC also blacklists the email in OutboundHero — same
+        // behavior the auto-categorizer applies in tracked.ts/untracked.ts
+        // so a lead can't be marked DNC in the inbox and still receive
+        // future outbound. Fire-and-forget; logging is internal.
+        if (category === "Do Not Contact") {
+          const { data: reply } = await supabase
+            .from("replies")
+            .select("lead_email, client_tag, workflow")
+            .eq("id", id)
+            .single();
+          if (reply?.lead_email) {
+            await blacklistEmail(
+              reply.lead_email,
+              (reply.workflow as string) || "inbox",
+              { client_tag: reply.client_tag as string | undefined },
+            );
+          }
+        }
 
         // Auto-push to Google Sheet for qualifying categories
         if (SHEET_PUSH_CATEGORIES.some((c) => c.toLowerCase() === category?.toLowerCase())) {
@@ -157,10 +176,20 @@ export async function POST(req: NextRequest) {
 
       case "blacklist-domain": {
         const { email } = body;
-        const domain = email?.split("@")[1];
-        if (domain) {
-          await blacklistDomain(email, "manual blacklist", "inbox");
+        const domain = extractDomain(email || "");
+        if (!domain) {
+          return NextResponse.json({ error: "Invalid email — no domain to blacklist" }, { status: 400 });
         }
+        // Hard-stop personal mailbox providers server-side too — even if
+        // somehow the UI guard is bypassed, blacklisting gmail.com /
+        // outlook.com etc. would break us for every legitimate prospect.
+        if (isPersonalDomain(domain)) {
+          return NextResponse.json(
+            { error: `Cannot blacklist ${domain} — it's a personal email provider. Blacklist the address instead.` },
+            { status: 400 },
+          );
+        }
+        await blacklistDomain(email, "manual blacklist", "inbox");
         return NextResponse.json({ ok: true });
       }
 

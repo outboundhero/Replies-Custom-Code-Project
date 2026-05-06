@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
 import { INBOX_VIEWS } from "@/lib/inbox-views";
+import { isPersonalDomain } from "@/lib/processing/domain-blacklist";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -61,7 +62,9 @@ export default function InboxPage() {
   const [search, setSearch] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
   const [filterClient, setFilterClient] = useState("");
-  const [view, setView] = useState<string>("all");
+  // Default to the curated Cherry view — that's where the team lives day-to-day.
+  // Master Inbox ("all") is still selectable from the dropdown.
+  const [view, setView] = useState<string>("base-clients-cherry");
   const [clientTags, setClientTags] = useState<string[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -363,9 +366,24 @@ export default function InboxPage() {
   }
 
   async function handleBlacklist() {
-    if (!detail || !confirm(`Blacklist domain ${detail.lead_email?.split("@")[1]}?`)) return;
-    await mutate({ action: "blacklist-domain", id: detail.id, email: detail.lead_email });
-    toast.success("Domain blacklisted");
+    if (!detail?.lead_email) return;
+    const domain = detail.lead_email.split("@")[1] || "";
+
+    // Personal mailbox providers (gmail.com, outlook.com, …) must NEVER be
+    // blacklisted — that would block every legitimate prospect on that
+    // provider. Reject early with a clear error.
+    if (isPersonalDomain(domain)) {
+      toast.error(`Cannot blacklist ${domain} — it's a personal email provider (gmail.com, outlook.com, etc.). Use email-level blacklist instead.`);
+      return;
+    }
+
+    if (!confirm(
+      `Blacklist domain ${domain}?\n\nThis will block ALL future emails from any address ending @${domain} across every campaign in OutboundHero. This action is hard to reverse.`
+    )) return;
+
+    const r = await mutate({ action: "blacklist-domain", id: detail.id, email: detail.lead_email });
+    if (r.ok) toast.success(`Domain ${domain} blacklisted`);
+    else toast.error(r.error || "Blacklist failed");
   }
 
   const showRealloc = detail && (

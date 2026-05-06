@@ -66,6 +66,10 @@ const HARD_BLOCK_AI_CATEGORIES = new Set([
   "Mailbox No Longer Active",
   "Automated Error Message",
   "Automated Catch-All Message",
+  // Lead has handed us off — original address is no longer the right
+  // recipient, so nurture would be pointless or rude.
+  "Referral Given",
+  "Internally Forwarded",
 ]);
 
 const HARD_NO_PATTERNS: { regex: RegExp; reason: string }[] = [
