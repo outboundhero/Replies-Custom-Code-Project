@@ -5,6 +5,7 @@ import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
+import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
@@ -130,11 +131,9 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     "Sender ID": sender_email.id,
     "Sender Name": sender_email.name,
     "Email Subject": reply.email_subject,
-    // Airtable's "Long text" cell tops out at 100,000 characters. Long
-    // email threads (with quoted history) blow past this and the create
-    // call fails with INVALID_VALUE_FOR_COLUMN. Truncate just for Airtable —
-    // Supabase's reply_we_got column gets the full text below.
-    "Reply we got": cleanedReply.length > 100_000 ? cleanedReply.slice(0, 100_000) : cleanedReply,
+    // See lib/processing/sanitize-airtable.ts — same Airtable Long-text
+    // pitfalls as the tracked path (byte limit, control chars).
+    "Reply we got": sanitizeForAirtableLongText(cleanedReply),
     "Reply ID": reply.id,
     "From Name": reply.from_name,
     "From Email": reply.from_email_address,

@@ -5,6 +5,7 @@ import { cleanReply } from "./reply-cleaner";
 import { shouldFilter } from "./bounce-filter";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
+import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
@@ -144,11 +145,13 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     "Sender ID": sender_email.id,
     "Sender Name": sender_email.name,
     "Email Subject": reply.email_subject,
-    // Airtable's "Long text" cell tops out at 100,000 characters. Long
-    // email threads (with quoted history) blow past this and the create
-    // call fails with INVALID_VALUE_FOR_COLUMN. Truncate just for Airtable —
-    // Supabase's reply_we_got column gets the full text below.
-    "Reply we got": cleanedReply.length > 100_000 ? cleanedReply.slice(0, 100_000) : cleanedReply,
+    // Airtable's "Long text" cell tops out at 100,000 characters but
+    // also rejects strings with stray null bytes / control characters
+    // that show up in some email replies. Truncate to 90k for byte-
+    // limit margin (multi-byte UTF-8 can push 100k chars over 100k
+    // bytes) AND strip control chars. Supabase's reply_we_got column
+    // still gets the full untouched text below.
+    "Reply we got": sanitizeForAirtableLongText(cleanedReply),
     "Reply ID": reply.id,
     "From Name": reply.from_name,
     "From Email": reply.from_email_address,
