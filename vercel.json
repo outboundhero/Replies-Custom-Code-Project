@@ -14,7 +14,7 @@
       "schedule": "0 */2 * * *"
     },
     {
-      "path": "/api/cron/auto-reply-not-interested",
+      "path": "/api/cron/auto-reply",
       "schedule": "*/2 * * * *"
     }
   ]

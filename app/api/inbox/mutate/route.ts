@@ -6,6 +6,7 @@ import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/l
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 import { extractRedirectEmail } from "@/lib/processing/extract-redirect-email";
+import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
@@ -56,24 +57,57 @@ export async function POST(req: NextRequest) {
         }
 
         // Not Interested (Send Reply) → schedule a polite acknowledgment
-        // for 5–10 minutes from now. The /api/cron/auto-reply-not-interested
-        // job (every 2 minutes) drains pending rows and replies in-thread.
-        // Random delay keeps the cadence human — back-to-back marks don't
-        // all fire at the exact same minute.
+        // for 5–10 minutes from now. The /api/cron/auto-reply job (every
+        // 2 minutes) drains pending rows and replies in-thread. Random
+        // delay keeps the cadence human.
         if (category === "Not Interested (Send Reply)") {
           const delayMs = (5 + Math.random() * 5) * 60 * 1000;
           const dueAt = new Date(Date.now() + delayMs).toISOString();
           const { error: schedErr } = await supabase
             .from("replies")
-            .update({ auto_reply_due_at: dueAt, auto_reply_sent_at: null })
+            .update({
+              auto_reply_due_at: dueAt,
+              auto_reply_kind: "not_interested",
+              auto_reply_sent_at: null,
+            })
             .eq("id", id);
-          if (schedErr) {
-            // Most likely the auto_reply_* columns haven't been added to
-            // Supabase yet — surface to the client without blocking the
-            // categorization.
-            extras.auto_reply_schedule_error = schedErr.message;
+          if (schedErr) extras.auto_reply_schedule_error = schedErr.message;
+          else extras.auto_reply_due_at = dueAt;
+        }
+
+        // Out Of Office → AI extracts the return date from the reply,
+        // then the auto-reply cron sends the original first cold email
+        // back to the lead on that date with a "Looks like you are back…"
+        // intro. If the AI can't pin a date, we skip scheduling and tell
+        // the user — categorization itself still succeeds.
+        if (category === "Out Of Office") {
+          const { data: ooReply } = await supabase
+            .from("replies")
+            .select("reply_we_got")
+            .eq("id", id)
+            .single();
+          const replyText = (ooReply?.reply_we_got as string | null) || "";
+          const returnDate = await extractReturnDate(replyText);
+          if (!returnDate) {
+            extras.out_of_office_return_date = null;
+            extras.out_of_office_reason = "No clear return date found in the reply — auto-reschedule skipped.";
           } else {
-            extras.auto_reply_due_at = dueAt;
+            // Fire at 09:00 PT on the return date so the lead sees it
+            // first thing Monday morning rather than at midnight.
+            const dueAt = new Date(`${returnDate}T16:00:00Z`).toISOString(); // 09:00 PDT = 16:00 UTC
+            const { error: schedErr } = await supabase
+              .from("replies")
+              .update({
+                auto_reply_due_at: dueAt,
+                auto_reply_kind: "out_of_office",
+                auto_reply_sent_at: null,
+              })
+              .eq("id", id);
+            if (schedErr) extras.auto_reply_schedule_error = schedErr.message;
+            else {
+              extras.out_of_office_return_date = returnDate;
+              extras.auto_reply_due_at = dueAt;
+            }
           }
         }
 

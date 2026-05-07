@@ -322,6 +322,16 @@ export default function InboxPage() {
       toast.success(`Category: ${cat}`);
       if (d.pushed_to_sheet) toast.success("Auto-pushed to Google Sheet");
       if (d.sheet_error) toast.error(`Sheet: ${d.sheet_error}`);
+      // Out Of Office auto-reschedule outcome (server extracted the
+      // return date from the lead's reply; cron re-sends the original
+      // first cold email on that date).
+      if (cat === "Out Of Office") {
+        if (d.out_of_office_return_date) {
+          toast.success(`Will re-send the original cold email on ${d.out_of_office_return_date} (lead's stated return date)`);
+        } else if (d.out_of_office_reason) {
+          toast.warning(d.out_of_office_reason);
+        }
+      }
       // Change-of-Target re-pitch outcome (server fetched the first
       // cold email + sent it to the AI-extracted new contact).
       if (d.change_of_target) {
