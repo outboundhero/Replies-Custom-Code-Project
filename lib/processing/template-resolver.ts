@@ -204,9 +204,27 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
   }
 
   if (resolved.includes("{PHONE}")) {
-    // Priority: AI-extracted from reply (with mobile/office priority + extensions) → Bison company phone
-    const phone = extracted?.phone || sanitizePhone(vars.phoneNumber) || "";
-    resolved = resolved.replaceAll("{PHONE}", phone);
+    // Priority: AI-extracted from reply (with mobile/office priority + extensions) → Bison company phone.
+    //
+    // When the phone came from the LEAD'S reply, it's almost certainly
+    // their direct line and we can speak confidently. When we fall back
+    // to the Bison custom-variable phone, it's the company switchboard
+    // or a generic line — append a disclaimer so the reader doesn't
+    // promise something we don't know to be true.
+    //
+    // Confident:   "Looks like a good number to call is (812) 508-6685."
+    // Fallback:    "Looks like a good number to call is (812) 508-6685,
+    //               but not sure if it's direct to Ryan's phone yet."
+    const replyPhone = extracted?.phone;
+    const fallbackPhone = sanitizePhone(vars.phoneNumber);
+    const phone = replyPhone || fallbackPhone || "";
+    const isFallback = !replyPhone && !!fallbackPhone;
+    const firstName = (vars.firstName || "").trim();
+    const replacement =
+      isFallback && phone && firstName
+        ? `${phone}, but not sure if it's direct to ${firstName}'s phone yet`
+        : phone;
+    resolved = resolved.replaceAll("{PHONE}", replacement);
   }
 
   return resolved;
