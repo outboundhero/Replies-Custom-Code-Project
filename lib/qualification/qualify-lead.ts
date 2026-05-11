@@ -17,6 +17,7 @@ import { logActivity, logError } from "@/lib/errors";
 import { enrichLead, type EnrichedLeadData } from "./enrich-lead";
 import { auditIndustry } from "./industry-audit";
 import { auditLocation } from "./location-audit";
+import { extractReplyLocation } from "./extract-reply-location";
 
 interface QualifyLeadParams {
   campaignTag: string;
@@ -90,12 +91,46 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     industryResult = { result: "Passed", reason: "Industry audit error — defaulting to Passed" };
   }
 
-  // 4. Location audit with enriched data
+  // 4. Location audit. Priority of sources is now explicit:
+  //   1. Anything the LEAD said in their reply (body or signature)
+  //   2. The enriched location (website + signature parsing)
+  //   3. CRM custom variables (built into enrichment as last resort)
+  // Step 1 is a separate strict GPT extraction so the audit can't be
+  // fooled into passing a lead on stale CRM city/state when the lead
+  // themselves spelled out a different location.
+  let locResolved = {
+    city: enriched.city,
+    state: enriched.state,
+    address: enriched.address,
+    zip: enriched.zip,
+    source: `enrichment (${enriched.dataSources})`,
+    confidence: enriched.confidence,
+  };
+  try {
+    const replyLoc = await extractReplyLocation(replyText);
+    if (replyLoc && (replyLoc.city || replyLoc.address)) {
+      locResolved = {
+        city: replyLoc.city || enriched.city,
+        state: replyLoc.state || enriched.state,
+        address: replyLoc.address || enriched.address,
+        zip: replyLoc.zip || enriched.zip,
+        source: `lead reply (${replyLoc.source})`,
+        // Anything the lead wrote about themselves is high confidence.
+        confidence: "high",
+      };
+    }
+  } catch (error) {
+    await logError("tracked", "qualification-extract-reply-location", (error as Error).message, {
+      tag: campaignTag, record_id: recordId,
+    });
+    // Fall through with enrichment-only location.
+  }
+
   let locationResult: { result: "Passed" | "Failed"; reason: string };
   try {
     locationResult = await auditLocation(
-      enriched.city, enriched.state, enriched.address, enriched.zip,
-      inclusionLocations, enriched.confidence,
+      locResolved.city, locResolved.state, locResolved.address, locResolved.zip,
+      inclusionLocations, locResolved.confidence,
     );
   } catch (error) {
     await logError("tracked", "qualification-location", (error as Error).message, {
@@ -114,9 +149,9 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     reasons.push(`Industry audit: ${industryResult.reason}`);
   }
   reasons.push(`Location audit: ${locationResult.reason}`);
+  reasons.push(`Location source: ${locResolved.source} → ${[locResolved.address, locResolved.city, locResolved.state, locResolved.zip].filter(Boolean).join(", ") || "(none)"}`);
   if (enriched.website) reasons.push(`Website: ${enriched.website}`);
   if (enriched.industry) reasons.push(`Verified industry: ${enriched.industry}`);
-  if (enriched.zip) reasons.push(`Verified location: ${enriched.city}, ${enriched.state} ${enriched.zip}`);
   reasons.push(`Data: ${enriched.dataSources} (${enriched.confidence} confidence)`);
   const qualificationReason = reasons.join(" | ");
 
