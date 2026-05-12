@@ -35,7 +35,7 @@ interface ClientSummary {
   total: number;
 }
 
-type SortKey = "ready" | "eligible" | "waiting" | "added" | "tag";
+type SortKey = "ready" | "waiting" | "added" | "tag";
 
 export default function NurtureHub() {
   const [counts, setCounts] = useState<OverallCounts | null>(null);
@@ -133,10 +133,10 @@ export default function NurtureHub() {
         </button>
       </div>
 
-      {/* Overall tiles */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      {/* Overall tiles — Eligible bucket dropped per workflow update;
+          every safe + eligible lead lives under "Ready". */}
+      <div className="grid grid-cols-3 gap-3">
         <Tile label="Ready to nurture" sublabel="Eligible & safe — push these" value={counts?.eligibleSafe} accent="text-emerald-700" loading={!counts} />
-        <Tile label="All eligible" sublabel="Past 45-day cooldown" value={counts?.eligible} accent="text-sky-700" loading={!counts} />
         <Tile label="Waiting" sublabel="Cooldown still ticking" value={counts?.waiting} accent="text-amber-700" loading={!counts} />
         <Tile label="Added" sublabel="Already pushed to a campaign" value={counts?.added} accent="text-violet-700" loading={!counts} />
       </div>
@@ -171,7 +171,6 @@ export default function NurtureHub() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ready">Sort: Ready (high → low)</SelectItem>
-            <SelectItem value="eligible">Sort: Eligible</SelectItem>
             <SelectItem value="waiting">Sort: Waiting</SelectItem>
             <SelectItem value="added">Sort: Added</SelectItem>
             <SelectItem value="tag">Sort: Tag (A → Z)</SelectItem>
@@ -223,8 +222,7 @@ function Tile({
 }
 
 function ClientCard({ c }: { c: ClientSummary & { hasCounts: boolean } }) {
-  const eligibleNotReady = Math.max(0, c.eligible - c.ready);
-  const total = c.ready + eligibleNotReady + c.waiting + c.added;
+  const total = c.ready + c.waiting + c.added;
   const seg = (n: number) => (total === 0 ? 0 : (n / total) * 100);
 
   return (
@@ -237,18 +235,16 @@ function ClientCard({ c }: { c: ClientSummary & { hasCounts: boolean } }) {
         <ArrowRight className="size-4 text-muted-foreground group-hover:text-emerald-700 group-hover:translate-x-0.5 transition-transform" />
       </div>
 
-      <div className="grid grid-cols-4 gap-2 mb-3">
-        <Mini label="Ready"    value={c.hasCounts ? c.ready    : null} accent="text-emerald-700" />
-        <Mini label="Eligible" value={c.hasCounts ? c.eligible : null} accent="text-sky-700" />
-        <Mini label="Waiting"  value={c.hasCounts ? c.waiting  : null} accent="text-amber-700" />
-        <Mini label="Added"    value={c.hasCounts ? c.added    : null} accent="text-violet-700" />
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <Mini label="Ready"   value={c.hasCounts ? c.ready   : null} accent="text-emerald-700" />
+        <Mini label="Waiting" value={c.hasCounts ? c.waiting : null} accent="text-amber-700" />
+        <Mini label="Added"   value={c.hasCounts ? c.added   : null} accent="text-violet-700" />
       </div>
 
       {/* Stacked breakdown bar — shows skeleton-grey until counts arrive */}
       {c.hasCounts ? (
         <div className="h-1.5 w-full rounded-full bg-muted/40 overflow-hidden flex">
           <div className="bg-emerald-500" style={{ width: `${seg(c.ready)}%` }} />
-          <div className="bg-sky-400"     style={{ width: `${seg(eligibleNotReady)}%` }} />
           <div className="bg-amber-400"   style={{ width: `${seg(c.waiting)}%` }} />
           <div className="bg-violet-400"  style={{ width: `${seg(c.added)}%` }} />
         </div>

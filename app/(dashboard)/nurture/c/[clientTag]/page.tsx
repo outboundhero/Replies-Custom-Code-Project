@@ -28,6 +28,9 @@ interface NurtureItem {
   first_name: string | null;
   last_name: string | null;
   company: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
   trigger_at: string;
   eligible_at: string;
   days_until_eligible: number;
@@ -66,7 +69,11 @@ interface Counts {
   added: number;
 }
 
-const PAGE_SIZE = 50;
+// Show all rows up-front instead of paginating. /api/nurture caps each
+// request at 2000; loadPage auto-chains follow-ups when hasMore is true,
+// up to ABSOLUTE_CAP, so a single client's full pool lands in one scroll.
+const PAGE_SIZE = 2000;
+const ABSOLUTE_CAP = 10000;
 
 const SOURCE_LABEL: Record<Source, string> = {
   soft_negative: "Soft Negative",
@@ -178,30 +185,53 @@ export default function NurturePage() {
       else setLoading(true);
       try {
         const { status, safety } = viewToFilters(view);
-        const nextOffset = resetOffset ? 0 : offset;
-        const p = new URLSearchParams();
-        p.set("status", status);
-        p.set("safety", safety);
-        p.set("limit", String(PAGE_SIZE));
-        p.set("offset", String(nextOffset));
-        p.set("sort", sortKey);
-        p.set("dir", sortDir);
-        if (clientFilter) p.set("client_tag", clientFilter);
-        if (sourceFilter !== "all") p.set("source", sourceFilter);
+        let cursor = resetOffset ? 0 : offset;
+        const accumulated: NurtureItem[] = [];
+        let pageHasMore = false;
 
-        const res = await fetch(`/api/nurture?${p}`);
-        if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          setFetchError(data.error || `HTTP ${res.status}`);
-          return;
+        // Auto-paginate: keep fetching pages until the API says hasMore=false
+        // or we hit the safety cap. The user wants to see every lead at once
+        // for a client, so we don't surface a Load-more button anymore.
+        const maxFetches = Math.ceil(ABSOLUTE_CAP / PAGE_SIZE);
+        for (let i = 0; i < maxFetches; i++) {
+          const p = new URLSearchParams();
+          p.set("status", status);
+          p.set("safety", safety);
+          p.set("limit", String(PAGE_SIZE));
+          p.set("offset", String(cursor));
+          p.set("sort", sortKey);
+          p.set("dir", sortDir);
+          if (clientFilter) p.set("client_tag", clientFilter);
+          if (sourceFilter !== "all") p.set("source", sourceFilter);
+
+          const res = await fetch(`/api/nurture?${p}`);
+          if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            setFetchError(data.error || `HTTP ${res.status}`);
+            return;
+          }
+          const data = await res.json();
+          const newItems: NurtureItem[] = data.items || [];
+          accumulated.push(...newItems);
+          cursor += newItems.length;
+          pageHasMore = !!data.page?.hasMore;
+          // After the FIRST page paint the table immediately so the user
+          // sees something while we keep fetching the rest in background.
+          if (i === 0) {
+            if (append) setItems((prev) => [...prev, ...accumulated]);
+            else { setItems(accumulated.slice()); setSelected(new Set()); setSelectedMeta(new Map()); }
+            if (pageHasMore) setLoadingMore(true); // banner stays up while we keep going
+          }
+          if (!pageHasMore || newItems.length === 0) break;
         }
-        const data = await res.json();
-        const newItems: NurtureItem[] = data.items || [];
-        if (append) setItems((prev) => [...prev, ...newItems]);
-        else { setItems(newItems); setSelected(new Set()); setSelectedMeta(new Map()); }
-        setHasMore(!!data.page?.hasMore);
-        setOffset(nextOffset + newItems.length);
+
+        // Final replace once everything's in to capture all rows from the
+        // chained fetches.
+        if (append) setItems((prev) => [...prev.slice(0, prev.length - accumulated.length), ...accumulated]);
+        else setItems(accumulated);
+        setHasMore(false); // we always drain to the end now
+        setOffset(cursor);
         setFetchError(null);
       } catch (e) {
         setFetchError((e as Error).message);
@@ -883,8 +913,10 @@ export default function NurturePage() {
         </div>
       </div>
 
-      {/* ── Stat tiles (also act as view tabs) ── */}
-      <div className="grid grid-cols-4 gap-3">
+      {/* ── Stat tiles (also act as view tabs) — Eligible tile dropped
+            per workflow simplification: every safe-and-eligible lead just
+            shows up under Ready. Unsafe leads stay out of the queue. ── */}
+      <div className="grid grid-cols-3 gap-3">
         <StatTile
           label="Ready to nurture"
           sublabel="Eligible & safe — push these"
@@ -893,15 +925,6 @@ export default function NurturePage() {
           active={view === "actionable"}
           activeBorder="border-emerald-500"
           onClick={() => setView("actionable")}
-        />
-        <StatTile
-          label="All eligible"
-          sublabel="Past 45-day cooldown"
-          value={counts?.eligible}
-          accent="text-sky-700"
-          active={view === "eligible"}
-          activeBorder="border-sky-500"
-          onClick={() => setView("eligible")}
         />
         <StatTile
           label="Waiting"
@@ -1148,7 +1171,10 @@ export default function NurturePage() {
                 <TableHead className="w-10 px-3"></TableHead>
                 <SortableHead label="Lead" k="email" current={sortKey} dir={sortDir} onClick={toggleSort} />
                 <SortableHead label="Company" k="company" current={sortKey} dir={sortDir} onClick={toggleSort} />
-                <SortableHead label="Client" k="client" current={sortKey} dir={sortDir} onClick={toggleSort} />
+                {/* "Client" column dropped — page is locked to one client */}
+                <TableHead className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
+                  Address
+                </TableHead>
                 <SortableHead label="Source" k="source" current={sortKey} dir={sortDir} onClick={toggleSort} />
                 <TableHead className="text-xs uppercase tracking-wide text-muted-foreground font-medium">
                   Reply
@@ -1275,11 +1301,9 @@ export default function NurturePage() {
             </TableBody>
           </Table>
         )}
-        {hasMore && (
-          <div className="p-3 text-center border-t bg-muted/20">
-            <Button size="sm" variant="outline" onClick={() => loadPage(false, true)} disabled={loadingMore}>
-              {loadingMore ? "Loading…" : "Load more"}
-            </Button>
+        {loadingMore && items.length > 0 && (
+          <div className="p-2 text-center border-t bg-muted/20 text-xs text-muted-foreground">
+            Loading more rows in the background…
           </div>
         )}
       </div>
@@ -1705,11 +1729,16 @@ function LeadRow({
       <TableCell className="cursor-pointer max-w-[180px]" onClick={onClick}>
         <span className="text-sm truncate block">{it.company || "—"}</span>
       </TableCell>
-      <TableCell className="cursor-pointer" onClick={onClick}>
-        {it.client_tag ? (
-          <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-            {it.client_tag}
-          </span>
+      <TableCell className="cursor-pointer max-w-[220px]" onClick={onClick}>
+        {it.address || it.city || it.state ? (
+          <div className="text-xs leading-tight">
+            {it.address && <div className="truncate">{it.address}</div>}
+            {(it.city || it.state) && (
+              <div className="text-muted-foreground truncate">
+                {[it.city, it.state].filter(Boolean).join(", ")}
+              </div>
+            )}
+          </div>
         ) : (
           <span className="text-xs text-muted-foreground">—</span>
         )}

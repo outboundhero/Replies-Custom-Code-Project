@@ -164,6 +164,9 @@ interface NurtureItem {
   first_name: string | null;
   last_name: string | null;
   company: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
   trigger_at: string;
   eligible_at: string;
   days_until_eligible: number;
@@ -251,7 +254,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("replies")
         .select(
-          "id, reply_id, client_tag, lead_email, first_name, last_name, company_name, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
+          "id, reply_id, client_tag, lead_email, first_name, last_name, company_name, address, city, state, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
         )
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
@@ -348,6 +351,9 @@ export async function GET(req: NextRequest) {
           first_name: r.first_name,
           last_name: r.last_name,
           company: r.company_name,
+          address: r.address || null,
+          city: r.city || null,
+          state: r.state || null,
           trigger_at: r.reply_time,
           eligible_at: eligibleAt.toISOString(),
           days_until_eligible: daysLeft,
@@ -418,6 +424,9 @@ export async function GET(req: NextRequest) {
           first_name: r.first_name,
           last_name: r.last_name,
           company: r.company,
+          address: null,
+          city: null,
+          state: null,
           trigger_at: r.sequence_finished_at,
           eligible_at: eligibleAt.toISOString(),
           days_until_eligible: daysLeft,
@@ -439,7 +448,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("nurture_legacy_leads")
         .select(
-          "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
+          "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp, raw_fields"
         );
 
       q = legacyOrderByAddedDesc
@@ -514,6 +523,13 @@ export async function GET(req: NextRequest) {
         const daysLeft = daysBetween(eligibleAt, now);
         const isEligible = daysLeft <= 0;
 
+        // Address lives inside the Airtable raw_fields JSON for legacy
+        // rows (no dedicated columns). Pull from a few common keys.
+        const rawFields = (r.raw_fields ?? {}) as Record<string, unknown>;
+        const legacyAddress = (rawFields["Address"] || rawFields["address"] || rawFields["Street Address"] || null) as string | null;
+        const legacyCity = (rawFields["City"] || rawFields["city"] || null) as string | null;
+        const legacyState = (rawFields["State"] || rawFields["state"] || null) as string | null;
+
         items.push({
           id: `legacy:${r.id}`,
           source,
@@ -522,6 +538,9 @@ export async function GET(req: NextRequest) {
           first_name: r.first_name,
           last_name: r.last_name,
           company: r.company,
+          address: legacyAddress,
+          city: legacyCity,
+          state: legacyState,
           trigger_at: r.reply_at,
           eligible_at: eligibleAt.toISOString(),
           days_until_eligible: daysLeft,

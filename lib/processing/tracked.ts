@@ -6,6 +6,7 @@ import { shouldFilter } from "./bounce-filter";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sanitizeForAirtableLongText } from "./sanitize-airtable";
+import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
@@ -246,10 +247,40 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     throw error;
   }
 
+  // 5. Inline nurture-safety classification — so a brand new reply
+  // lands in `replies` already classified instead of waiting for the
+  // every-5-min cron to back-fill it. Means a fresh OOO/Soft-Negative
+  // reply shows up in the client's Ready bucket immediately (modulo
+  // the 45-day cooldown) instead of sitting unclassified for minutes.
+  // Failures fall back to NULL — the cron picks the row up later.
+  let nurtureClassification: { safety: string | null; bucket: string | null; reason: string | null; classifiedAt: string | null } = {
+    safety: null, bucket: null, reason: null, classifiedAt: null,
+  };
+  if (!isBounce) {
+    try {
+      const result = await classifyNurtureSafety({
+        replyText: cleanedReply,
+        aiCategory: aiCategory ?? null,
+      });
+      nurtureClassification = {
+        safety: result.safety,
+        bucket: result.bucket,
+        reason: result.reason,
+        classifiedAt: new Date().toISOString(),
+      };
+    } catch (e) {
+      console.warn("[tracked] inline nurture classify failed (cron will retry):", (e as Error).message);
+    }
+  }
+
   // 5a. Store in Supabase (non-blocking, skip bounces)
   const replyStatus = action === "created" ? "Pending" : "Pending again";
   if (!isBounce) supabase.from("replies").upsert({
     workflow: "tracked",
+    nurture_safety: nurtureClassification.safety,
+    nurture_bucket: nurtureClassification.bucket,
+    nurture_safety_reason: nurtureClassification.reason,
+    nurture_classified_at: nurtureClassification.classifiedAt,
     lead_id: lead.id,
     lead_email: reply.from_email_address,
     lead_name: `${lead.first_name} ${lead.last_name}`.trim(),
