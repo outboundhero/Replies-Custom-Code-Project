@@ -41,7 +41,7 @@ async function main() {
       sql: "SELECT COUNT(*) AS n FROM error_log WHERE message LIKE ?",
       args: [pattern],
     });
-    const n = Number((countRes.rows[0] as { n: number }).n);
+    const n = Number((countRes.rows[0] as unknown as { n: number }).n);
     totalMatched += n;
     console.log(`  ${pattern}  →  ${n.toLocaleString()} rows`);
 
