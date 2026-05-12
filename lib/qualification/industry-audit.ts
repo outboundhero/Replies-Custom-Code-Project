@@ -16,26 +16,63 @@ interface IndustryAuditResult {
 
 /**
  * GLOBAL EXCLUSION: Cleaning/washing companies are competitors, not prospects.
- * Checked against company name, website, AND verified industry.
- * These are always excluded for ALL clients.
+ * Checked against company name, website, verified industry, AND the lead's
+ * own email domain (in case the company name field is blank but the lead
+ * emails from a known competitor brand domain, e.g. paul@jantize.com).
+ *
+ * Two categories:
+ *   1. Generic industry keywords  ("cleaning", "janitorial", …)
+ *   2. Franchise / brand names    ("jantize", "jan-pro", …) — caught even
+ *      when the company name doesn't contain a generic industry word.
+ *
+ * Anything matched here fails for EVERY client — no exceptions.
  */
 const COMPETITOR_KEYWORDS = [
+  // ── Generic industry terms ──
   "cleaning", "window cleaning", "carpet cleaning",
   "pressure washing", "power washing", "exterior cleaning",
   "parking lot cleaning", "janitorial", "maid service",
   "house cleaning", "home cleaning",
+  // ── Known cleaning / janitorial franchise brands ──
+  // These are catch-all substrings — if a lead's company or email
+  // contains any of them, they're almost certainly a competitor.
+  "jantize",
+  "jan-pro", "janpro",
+  "jani-king", "janiking",
+  "coverall",
+  "vanguard cleaning",
+  "stratus building",
+  "anago",
+  "servicemaster",
+  "servpro", "serv-pro",
+  "chem-dry", "chemdry",
+  "city wide facility", "city wide commercial",
+  "merry maids",
+  "molly maid",
+  "the cleaning authority",
+  "two maids",
+  "coit cleaning",
+  "stanley steemer",
 ];
 
 /**
- * Check company data (name + website + industry) for competitor companies.
- * This runs for ALL clients — no exceptions.
+ * Check company data (name + website + industry + lead email) for
+ * competitor companies. The email is included as a backstop: when
+ * enrichment fails (CRM-only path) the website + industry fields are
+ * empty, but the lead's own email often gives us the domain — and a
+ * lead emailing from @jantize.com is unambiguously a competitor even
+ * if every other field is blank.
  */
 function checkCompanyForCompetitor(
   companyName: string,
   website: string | null,
   industry: string,
+  leadEmail: string | null,
 ): { keyword: string } | null {
-  const combined = [companyName, website, industry].filter(Boolean).join(" ").toLowerCase();
+  const combined = [companyName, website, industry, leadEmail]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
   const match = COMPETITOR_KEYWORDS.find((kw) => combined.includes(kw));
   return match ? { keyword: match } : null;
 }
@@ -110,9 +147,13 @@ export async function auditIndustry(
   confidence: string,
   dataSources: string,
   replyText: string,
+  leadEmail: string | null = null,
 ): Promise<IndustryAuditResult> {
-  // 1. GLOBAL: Check if company itself is a cleaning/washing competitor
-  const competitorCheck = checkCompanyForCompetitor(companyName, website, industry);
+  // 1. GLOBAL: Check if company itself is a cleaning/washing competitor.
+  //    Includes the lead's email so we catch competitor-domain leads
+  //    (e.g. paul@jantize.com) even when the enrichment step failed
+  //    and we have no website or verified industry.
+  const competitorCheck = checkCompanyForCompetitor(companyName, website, industry, leadEmail);
   if (competitorCheck) {
     return {
       result: "Failed",

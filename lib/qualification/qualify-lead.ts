@@ -82,7 +82,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     industryResult = await auditIndustry(
       enriched.companyName, enriched.website, enriched.industry,
       exclusionIndustries, enriched.confidence, enriched.dataSources,
-      replyText,
+      replyText, leadEmail,
     );
   } catch (error) {
     await logError("tracked", "qualification-industry", (error as Error).message, {
