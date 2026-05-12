@@ -859,7 +859,7 @@ export default function NurturePage() {
   const allInViewSelected = selectableInView.length > 0 && selectableInView.every((i) => selected.has(i.id));
 
   return (
-    <div className="space-y-6 max-w-[1500px]">
+    <div className="space-y-6 max-w-[1500px] mx-auto">
       {/* ── Header ── */}
       <div className="flex items-start justify-between gap-4">
         <div>

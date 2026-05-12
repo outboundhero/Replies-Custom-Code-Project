@@ -112,7 +112,7 @@ export default function NurtureHub() {
   }, [cards, search, sortKey]);
 
   return (
-    <div className="space-y-6 max-w-[1500px]">
+    <div className="space-y-6 max-w-[1500px] mx-auto">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
