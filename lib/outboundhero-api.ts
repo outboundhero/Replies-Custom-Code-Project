@@ -162,38 +162,56 @@ function pickUuid(row: Record<string, unknown>): string | null {
 }
 
 export async function listCampaigns(opts?: { nameContains?: string }): Promise<OutboundCampaign[]> {
-  const all: OutboundCampaign[] = [];
-  let page = 1;
-  let loggedSample = false;
-  while (true) {
-    const res = await fetch(`${API_BASE}/campaigns?page=${page}&per_page=100`, { headers });
-    if (!res.ok) throw new Error(`listCampaigns failed: ${res.status} ${await res.text()}`);
+  const PER_PAGE = 100;
+  const CONCURRENCY = 6; // matches OB's typical rate-limit headroom
+
+  // Fetch one page from the upstream API and normalise to OutboundCampaign[].
+  async function fetchPage(page: number): Promise<{ rows: OutboundCampaign[]; lastPage: number }> {
+    const res = await fetch(`${API_BASE}/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers });
+    if (!res.ok) throw new Error(`listCampaigns page ${page} failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
-    const rows: Array<Record<string, unknown>> = data?.data || [];
-    if (rows.length === 0) break;
-    if (!loggedSample && rows[0]) {
-      // One-time field-shape log so we can confirm the UUID source if it
-      // ever changes. Keys only — no values, to keep logs slim.
-      console.log("[outboundhero] listCampaigns sample row keys:", Object.keys(rows[0]));
-      loggedSample = true;
-    }
-    for (const row of rows) {
-      all.push({
-        id: row.id as number,
-        uuid: pickUuid(row),
-        name: (row.name as string) ?? "",
-        status: (row.status as string) ?? "",
-        type: (row.type as string) ?? "",
-        total_leads: row.total_leads as number | undefined,
-        emails_sent: row.emails_sent as number | undefined,
-        replied: row.replied as number | undefined,
-        bounced: row.bounced as number | undefined,
-      });
-    }
-    const lastPage = data?.meta?.last_page ?? page;
-    if (page >= lastPage) break;
-    page++;
+    const rawRows: Array<Record<string, unknown>> = data?.data || [];
+    const lastPage = (data?.meta?.last_page as number | undefined) ?? page;
+    const rows: OutboundCampaign[] = rawRows.map((row) => ({
+      id: row.id as number,
+      uuid: pickUuid(row),
+      name: (row.name as string) ?? "",
+      status: (row.status as string) ?? "",
+      type: (row.type as string) ?? "",
+      total_leads: row.total_leads as number | undefined,
+      emails_sent: row.emails_sent as number | undefined,
+      replied: row.replied as number | undefined,
+      bounced: row.bounced as number | undefined,
+    }));
+    return { rows, lastPage };
   }
+
+  // Page 1 first — gives us the total page count via meta.last_page.
+  const { rows: first, lastPage } = await fetchPage(1);
+
+  // Sequential pagination was the bottleneck: ~30 pages × 300 ms each is
+  // ~9 s. Fetch pages 2..last_page in parallel with bounded concurrency.
+  const pagesToFetch: number[] = [];
+  for (let p = 2; p <= lastPage; p++) pagesToFetch.push(p);
+
+  const results: OutboundCampaign[][] = new Array(pagesToFetch.length);
+  let idx = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, pagesToFetch.length) }, async () => {
+      while (idx < pagesToFetch.length) {
+        const myIdx = idx++;
+        try {
+          const r = await fetchPage(pagesToFetch[myIdx]);
+          results[myIdx] = r.rows;
+        } catch (e) {
+          console.warn("[outboundhero] listCampaigns page error:", (e as Error).message);
+          results[myIdx] = [];
+        }
+      }
+    }),
+  );
+
+  const all = first.concat(...results);
   if (opts?.nameContains) {
     const needle = opts.nameContains.toLowerCase();
     return all.filter((c) => c.name?.toLowerCase().includes(needle));

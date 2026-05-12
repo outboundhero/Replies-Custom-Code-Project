@@ -1,10 +1,17 @@
 /**
  * GET /api/nurture/campaigns
  * Returns all OutboundHero campaigns whose name contains "[Nurture]".
- * Cached in-memory for 60 seconds to avoid hammering the upstream API.
+ *
+ * Cached in-memory for 10 minutes — the campaign list barely changes,
+ * and the upstream OB API pagination (parallelised in listCampaigns)
+ * still takes ~1–2 s on a cold call. 10 min keeps the per-client
+ * detail page snappy when navigating between clients.
+ *
+ * Pass ?fresh=1 to bypass the cache (used by the Refresh button on the
+ * hub once we want).
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { listCampaigns } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
@@ -22,15 +29,17 @@ interface CachedCampaigns {
 }
 
 let cache: CachedCampaigns | null = null;
-const CACHE_TTL_MS = 60 * 1000;
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const denied = await requireAuth();
   if (denied) return denied;
 
+  const fresh = req.nextUrl.searchParams.get("fresh") === "1";
+
   try {
     const now = Date.now();
-    if (cache && now - cache.ts < CACHE_TTL_MS) {
+    if (!fresh && cache && now - cache.ts < CACHE_TTL_MS) {
       return NextResponse.json({ campaigns: cache.data, cached: true });
     }
 
