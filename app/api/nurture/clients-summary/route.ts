@@ -22,6 +22,13 @@ import db from "@/lib/db";
 
 export const maxDuration = 60;
 
+// In-memory cache. Computing all clients' counts takes ~10–30s on cold
+// start (12 queries × ~50 clients) — too slow to do on every page view.
+// 5-minute TTL is fine: counts don't change minute-to-minute. The
+// Refresh button on the hub bypasses the cache via ?fresh=1.
+let cache: { ts: number; data: ClientSummary[] } | null = null;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
 const NURTURE_DAYS = 45;
 const CONCURRENCY = 8;
 
@@ -133,12 +140,18 @@ async function fetchSummaryFor(clientTag: string, cutoffIso: string): Promise<Cl
   };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const denied = await requireAdmin();
   if (denied) return denied;
 
+  const fresh = new URL(req.url).searchParams.get("fresh") === "1";
+  const now = Date.now();
+  if (!fresh && cache && now - cache.ts < CACHE_TTL_MS) {
+    return NextResponse.json({ clients: cache.data, cached: true });
+  }
+
   try {
-    const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const cutoffIso = new Date(now - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
     // Canonical list of clients from Turso. Skip "N/A" — not real clients.
     const tagsRes = await db.execute("SELECT DISTINCT tag FROM client_tags WHERE tag IS NOT NULL AND tag != 'N/A' ORDER BY tag");
@@ -157,7 +170,8 @@ export async function GET() {
       CONCURRENCY,
     );
 
-    return NextResponse.json({ clients: out });
+    cache = { ts: now, data: out };
+    return NextResponse.json({ clients: out, cached: false });
   } catch (error) {
     console.error("[api/nurture/clients-summary] GET failed:", error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
