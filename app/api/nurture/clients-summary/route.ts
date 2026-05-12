@@ -1,144 +1,109 @@
 /**
  * GET /api/nurture/clients-summary
  *
- * Per-client snapshot for the Nurture hub page. For every client tag in
- * the Turso `client_tags` table, returns the four headline counts (Ready,
- * Eligible, Waiting, Added) that drive the client cards on the hub.
+ * Returns one row per client tag with the four headline counts
+ * (Ready / Eligible / Waiting / Added) that drive the hub's client cards.
  *
- * Implementation: one Supabase HEAD-count per (client, view) — 4 counts
- * across 3 source tables (replies + nurture_sequence_finished +
- * nurture_legacy_leads) means up to 12 queries per client. Parallelised
- * with bounded concurrency 8 so 50 clients × 12 ≈ 75 batches, finishing
- * in ~2–4 s on warm planner stats.
+ * Implementation: a single Supabase RPC call to `nurture_clients_summary`,
+ * a Postgres function that UNION-ALLs the three source tables, GROUPs by
+ * client_tag, and returns the aggregated counts in one round trip.
  *
- * Counts use `count: "estimated"` (the planner-cached value) so this
- * endpoint stays fast even on the 400k+ row legacy table.
+ * INSTALL THIS in Supabase SQL editor before this endpoint can work:
+ *
+ *   CREATE OR REPLACE FUNCTION nurture_clients_summary(cutoff timestamptz)
+ *   RETURNS TABLE (
+ *     client_tag text, ready bigint, eligible bigint, waiting bigint, added bigint
+ *   )
+ *   LANGUAGE sql STABLE
+ *   AS $$
+ *     WITH excluded AS (
+ *       SELECT unnest(ARRAY[
+ *         'Interested','Meeting Request','Meeting Set','Do Not Contact',
+ *         'Wrong Person','Wrong Person (Change of Target)','Not Interested',
+ *         'Mailbox No Longer Active','Automated Error Message',
+ *         'Automated Catch-All Message','Referral Given','Internally Forwarded'
+ *       ]) AS cat
+ *     ),
+ *     unioned AS (
+ *       SELECT
+ *         client_tag,
+ *         CASE WHEN reply_time <= cutoff AND nurture_added_at IS NULL
+ *                   AND COALESCE(nurture_skipped, false) = false
+ *                   AND nurture_safety = 'safe' THEN 1 ELSE 0 END AS ready,
+ *         CASE WHEN reply_time <= cutoff AND nurture_added_at IS NULL
+ *                   AND COALESCE(nurture_skipped, false) = false THEN 1 ELSE 0 END AS eligible,
+ *         CASE WHEN reply_time >  cutoff AND nurture_added_at IS NULL
+ *                   AND COALESCE(nurture_skipped, false) = false THEN 1 ELSE 0 END AS waiting,
+ *         CASE WHEN nurture_added_at IS NOT NULL THEN 1 ELSE 0 END AS added
+ *       FROM replies
+ *       WHERE reply_we_got IS NOT NULL AND reply_we_got <> ''
+ *         AND reply_time IS NOT NULL
+ *         AND client_tag IS NOT NULL AND client_tag <> 'N/A'
+ *         AND (ai_categorized_lead_category IS NULL
+ *              OR ai_categorized_lead_category NOT IN (SELECT cat FROM excluded))
+ *
+ *       UNION ALL
+ *
+ *       SELECT
+ *         client_tag,
+ *         CASE WHEN sequence_finished_at <= cutoff AND added_at IS NULL
+ *                   AND COALESCE(skipped, false) = false THEN 1 ELSE 0 END,
+ *         CASE WHEN sequence_finished_at <= cutoff AND added_at IS NULL
+ *                   AND COALESCE(skipped, false) = false THEN 1 ELSE 0 END,
+ *         CASE WHEN sequence_finished_at >  cutoff AND added_at IS NULL
+ *                   AND COALESCE(skipped, false) = false THEN 1 ELSE 0 END,
+ *         CASE WHEN added_at IS NOT NULL THEN 1 ELSE 0 END
+ *       FROM nurture_sequence_finished
+ *       WHERE client_tag IS NOT NULL AND client_tag <> 'N/A'
+ *
+ *       UNION ALL
+ *
+ *       SELECT
+ *         client_tag,
+ *         CASE WHEN reply_at <= cutoff AND nurture_added_at IS NULL
+ *                   AND COALESCE(nurture_skipped, false) = false
+ *                   AND nurture_safety = 'safe' THEN 1 ELSE 0 END,
+ *         CASE WHEN reply_at <= cutoff AND nurture_added_at IS NULL
+ *                   AND COALESCE(nurture_skipped, false) = false THEN 1 ELSE 0 END,
+ *         CASE WHEN reply_at >  cutoff AND nurture_added_at IS NULL
+ *                   AND COALESCE(nurture_skipped, false) = false THEN 1 ELSE 0 END,
+ *         CASE WHEN nurture_added_at IS NOT NULL THEN 1 ELSE 0 END
+ *       FROM nurture_legacy_leads
+ *       WHERE client_tag IS NOT NULL AND client_tag <> 'N/A'
+ *         AND (original_ai_category IS NULL
+ *              OR original_ai_category NOT IN (SELECT cat FROM excluded))
+ *     )
+ *     SELECT
+ *       client_tag,
+ *       SUM(ready)::bigint    AS ready,
+ *       SUM(eligible)::bigint AS eligible,
+ *       SUM(waiting)::bigint  AS waiting,
+ *       SUM(added)::bigint    AS added
+ *     FROM unioned
+ *     GROUP BY client_tag
+ *     ORDER BY client_tag;
+ *   $$;
  */
 
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
-import db from "@/lib/db";
 
 export const maxDuration = 60;
 
-// In-memory cache. Computing all clients' counts takes ~10–30s on cold
-// start (12 queries × ~50 clients) — too slow to do on every page view.
-// 5-minute TTL is fine: counts don't change minute-to-minute. The
-// Refresh button on the hub bypasses the cache via ?fresh=1.
-let cache: { ts: number; data: ClientSummary[] } | null = null;
-const CACHE_TTL_MS = 5 * 60 * 1000;
-
 const NURTURE_DAYS = 45;
-const CONCURRENCY = 8;
-
-// Same exclusion list as the rest of the nurture endpoints.
-const EXCLUDED_AI_CATEGORIES = [
-  "Interested",
-  "Meeting Request",
-  "Meeting Set",
-  "Do Not Contact",
-  "Wrong Person",
-  "Wrong Person (Change of Target)",
-  "Not Interested",
-  "Mailbox No Longer Active",
-  "Automated Error Message",
-  "Automated Catch-All Message",
-  "Referral Given",
-  "Internally Forwarded",
-];
-
-const excludedInList = EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",");
 
 interface ClientSummary {
   clientTag: string;
-  ready: number;      // eligible + safe + not added/skipped
-  eligible: number;   // eligible (any safety) + not added/skipped
-  waiting: number;    // not yet eligible + not added/skipped
-  added: number;      // already pushed
-  total: number;      // ready + eligible + waiting + added (rough)
+  ready: number;
+  eligible: number;
+  waiting: number;
+  added: number;
+  total: number;
 }
 
-async function runWithConcurrency<T>(items: T[], worker: (i: T) => Promise<void>, conc: number) {
-  let i = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(conc, items.length) }, async () => {
-      while (i < items.length) {
-        const idx = i++;
-        try { await worker(items[idx]); } catch { /* swallow */ }
-      }
-    }),
-  );
-}
-
-async function safeCount(q: PromiseLike<{ count: number | null; error: unknown }>): Promise<number> {
-  try {
-    const { count } = await q;
-    return count ?? 0;
-  } catch { return 0; }
-}
-
-async function fetchSummaryFor(clientTag: string, cutoffIso: string): Promise<ClientSummary> {
-  // ── replies base
-  const baseReplies = () =>
-    supabase
-      .from("replies")
-      .select("id", { count: "estimated", head: true })
-      .eq("client_tag", clientTag)
-      .not("reply_we_got", "is", null)
-      .neq("reply_we_got", "")
-      .not("reply_time", "is", null)
-      .or(`ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${excludedInList})`);
-
-  const baseSeq = () =>
-    supabase
-      .from("nurture_sequence_finished")
-      .select("id", { count: "estimated", head: true })
-      .eq("client_tag", clientTag);
-
-  const baseLegacy = () =>
-    supabase
-      .from("nurture_legacy_leads")
-      .select("id", { count: "estimated", head: true })
-      .eq("client_tag", clientTag)
-      .or(`original_ai_category.is.null,original_ai_category.not.in.(${excludedInList})`);
-
-  const [
-    rReady, rEligible, rWaiting, rAdded,
-    sEligible, sWaiting, sAdded,
-    lReady, lEligible, lWaiting, lAdded,
-  ] = await Promise.all([
-    // replies
-    safeCount(baseReplies().lte("reply_time", cutoffIso).is("nurture_added_at", null).not("nurture_skipped", "is", true).eq("nurture_safety", "safe")),
-    safeCount(baseReplies().lte("reply_time", cutoffIso).is("nurture_added_at", null).not("nurture_skipped", "is", true)),
-    safeCount(baseReplies().gt("reply_time", cutoffIso).is("nurture_added_at", null).not("nurture_skipped", "is", true)),
-    safeCount(baseReplies().not("nurture_added_at", "is", null)),
-    // seq (no safety column — treat all eligible as ready)
-    safeCount(baseSeq().lte("sequence_finished_at", cutoffIso).is("added_at", null).not("skipped", "is", true)),
-    safeCount(baseSeq().gt("sequence_finished_at", cutoffIso).is("added_at", null).not("skipped", "is", true)),
-    safeCount(baseSeq().not("added_at", "is", null)),
-    // legacy
-    safeCount(baseLegacy().lte("reply_at", cutoffIso).is("nurture_added_at", null).not("nurture_skipped", "is", true).eq("nurture_safety", "safe")),
-    safeCount(baseLegacy().lte("reply_at", cutoffIso).is("nurture_added_at", null).not("nurture_skipped", "is", true)),
-    safeCount(baseLegacy().gt("reply_at", cutoffIso).is("nurture_added_at", null).not("nurture_skipped", "is", true)),
-    safeCount(baseLegacy().not("nurture_added_at", "is", null)),
-  ]);
-
-  // Sequence rows have no safety classifier — treat all eligible as Ready.
-  const ready = rReady + sEligible + lReady;
-  const eligible = rEligible + sEligible + lEligible;
-  const waiting = rWaiting + sWaiting + lWaiting;
-  const added = rAdded + sAdded + lAdded;
-
-  return {
-    clientTag,
-    ready,
-    eligible,
-    waiting,
-    added,
-    total: ready + waiting + added,
-  };
-}
+let cache: { ts: number; data: ClientSummary[] } | null = null;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 export async function GET(req: Request) {
   const denied = await requireAdmin();
@@ -153,22 +118,35 @@ export async function GET(req: Request) {
   try {
     const cutoffIso = new Date(now - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-    // Canonical list of clients from Turso. Skip "N/A" — not real clients.
-    const tagsRes = await db.execute("SELECT DISTINCT tag FROM client_tags WHERE tag IS NOT NULL AND tag != 'N/A' ORDER BY tag");
-    const tags = (tagsRes.rows as unknown as Array<{ tag: string }>).map((r) => r.tag).filter(Boolean);
-
-    if (tags.length === 0) {
-      return NextResponse.json({ clients: [] });
+    const { data, error } = await supabase.rpc("nurture_clients_summary", { cutoff: cutoffIso });
+    if (error) {
+      const msg = error.message || "";
+      const hint = error.hint || "";
+      // Postgres returns "function nurture_clients_summary(...) does not exist"
+      // when the SQL function hasn't been installed yet. Give a useful hint.
+      if (msg.includes("nurture_clients_summary") && msg.includes("does not exist")) {
+        return NextResponse.json(
+          {
+            error: "Postgres function `nurture_clients_summary` is not installed in Supabase. Install it via the SQL editor (see the SQL in the route file's docblock) and refresh.",
+            installRequired: true,
+          },
+          { status: 503 },
+        );
+      }
+      console.error("[api/nurture/clients-summary] RPC failed:", msg, hint);
+      return NextResponse.json({ error: msg }, { status: 500 });
     }
 
-    const out: ClientSummary[] = new Array(tags.length);
-    await runWithConcurrency(
-      tags.map((tag, i) => ({ tag, i })),
-      async ({ tag, i }) => {
-        out[i] = await fetchSummaryFor(tag, cutoffIso);
-      },
-      CONCURRENCY,
-    );
+    type RpcRow = { client_tag: string; ready: number; eligible: number; waiting: number; added: number };
+    const rows = (data as RpcRow[] | null) || [];
+    const out: ClientSummary[] = rows.map((r) => ({
+      clientTag: r.client_tag,
+      ready: Number(r.ready) || 0,
+      eligible: Number(r.eligible) || 0,
+      waiting: Number(r.waiting) || 0,
+      added: Number(r.added) || 0,
+      total: (Number(r.ready) || 0) + (Number(r.waiting) || 0) + (Number(r.added) || 0),
+    }));
 
     cache = { ts: now, data: out };
     return NextResponse.json({ clients: out, cached: false });
