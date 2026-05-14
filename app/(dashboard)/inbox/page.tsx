@@ -87,6 +87,12 @@ export default function InboxPage() {
   // Master Inbox ("all") is still selectable from the dropdown.
   const [view, setView] = useState<string>("base-clients-cherry");
   const [clientTags, setClientTags] = useState<string[]>([]);
+  // Per-user client scoping. When non-null + non-empty, this user can
+  // only see leads whose client_tag is in this list — the API enforces
+  // it server-side; we mirror it in the UI so the controls don't lie.
+  const [allowedClientTags, setAllowedClientTags] = useState<string[] | null>(null);
+  // Local search box for the category dropdowns (filter list + detail).
+  const [categorySearch, setCategorySearch] = useState("");
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -107,6 +113,32 @@ export default function InboxPage() {
     fetch("/api/inbox?mode=client_tags")
       .then((r) => r.ok ? r.json() : null)
       .then((d) => { if (d?.tags) setClientTags(d.tags); })
+      .catch(() => {});
+  }, []);
+
+  // Load the current user's session so we know their per-user scope.
+  // The inbox API will enforce this regardless, but we mirror it in the
+  // UI so the dropdowns and counts only show what the user can see.
+  useEffect(() => {
+    fetch("/api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "session" }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (Array.isArray(d?.allowedClientTags) && d.allowedClientTags.length) {
+          setAllowedClientTags(d.allowedClientTags);
+          // If the user is scoped to exactly one tag, lock the filter
+          // to it. With multiple, leave the filter at "All" (which the
+          // API still constrains to the allowed list via `IN (...)`).
+          if (d.allowedClientTags.length === 1) {
+            setFilterClient(d.allowedClientTags[0]);
+          }
+        } else {
+          setAllowedClientTags(null);
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -172,12 +204,18 @@ export default function InboxPage() {
     setExpanded(new Set());
   }, [search, filterClient, view]);
 
-  // Realtime: listen for new inserts
+  // Realtime: listen for new inserts. Realtime uses the anon key directly
+  // (bypasses our /api/inbox auth), so for client-scoped users we MUST
+  // drop any row whose client_tag isn't in their allowed list — otherwise
+  // their counts and lists would silently leak other clients' inserts.
   useEffect(() => {
     const channel = realtimeSupabase
       .channel("inbox-realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "replies" }, (payload) => {
         const newRow = payload.new as ReplyListItem;
+        if (allowedClientTags && allowedClientTags.length) {
+          if (!newRow.client_tag || !allowedClientTags.includes(newRow.client_tag)) return;
+        }
         const cat = newRow.lead_category || "Open Response";
         // Update counts
         setCounts((prev) => ({ ...prev, [cat]: (prev[cat] || 0) + 1 }));
@@ -192,7 +230,7 @@ export default function InboxPage() {
       .subscribe();
 
     return () => { realtimeSupabase.removeChannel(channel); };
-  }, []);
+  }, [allowedClientTags]);
 
   async function loadDetail(id: number) {
     setSelectedId(id);
@@ -469,18 +507,46 @@ export default function InboxPage() {
         <div className="p-2.5 space-y-1.5 border-b">
           <Input placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)} className="h-7 text-xs" />
           <div className="flex gap-1">
-            <Select value={filterClient || "all"} onValueChange={(v) => { setFilterClient(v === "all" ? "" : v); }}>
-              <SelectTrigger className="h-6 text-[11px]"><SelectValue placeholder="All Clients" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Clients</SelectItem>
-                {clientTags.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={filterCategory || "all"} onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); }}>
+            {/* Scoped users with exactly one allowed tag see a locked badge
+                instead of a dropdown — there's nothing to choose. With
+                multiple allowed tags they get a normal dropdown limited
+                to that subset. */}
+            {allowedClientTags && allowedClientTags.length === 1 ? (
+              <div className="flex-1 h-6 px-2 flex items-center text-[11px] font-mono font-bold bg-primary/10 text-primary rounded border border-primary/30" title="You are scoped to this client only">
+                {allowedClientTags[0]}
+              </div>
+            ) : (
+              <Select value={filterClient || "all"} onValueChange={(v) => { setFilterClient(v === "all" ? "" : v); }}>
+                <SelectTrigger className="h-6 text-[11px]"><SelectValue placeholder="All Clients" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{allowedClientTags ? `All (${allowedClientTags.length} clients)` : "All Clients"}</SelectItem>
+                  {(allowedClientTags ?? clientTags).map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            <Select
+              value={filterCategory || "all"}
+              onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); }}
+            >
               <SelectTrigger className="h-6 text-[11px]"><SelectValue placeholder="All Categories" /></SelectTrigger>
               <SelectContent>
+                {/* Sticky search input. stopPropagation is required so the
+                    Select's built-in type-ahead / arrow-key handling
+                    doesn't swallow keystrokes meant for the input. */}
+                <div className="px-2 py-1.5 sticky top-0 bg-popover border-b z-10">
+                  <Input
+                    placeholder="Search categories..."
+                    value={categorySearch}
+                    onChange={(e) => setCategorySearch(e.target.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    className="h-6 text-[11px]"
+                  />
+                </div>
                 <SelectItem value="all">All Categories</SelectItem>
-                {LEAD_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                {LEAD_CATEGORIES
+                  .filter((c) => c.toLowerCase().includes(categorySearch.toLowerCase()))
+                  .map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -620,7 +686,21 @@ export default function InboxPage() {
               <span className="text-xs text-muted-foreground shrink-0">Category</span>
               <Select value={detail.lead_category || "Open Response"} onValueChange={updateCategory}>
                 <SelectTrigger className="w-52 h-8 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>{LEAD_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                <SelectContent>
+                  <div className="px-2 py-1.5 sticky top-0 bg-popover border-b z-10">
+                    <Input
+                      placeholder="Search categories..."
+                      value={categorySearch}
+                      onChange={(e) => setCategorySearch(e.target.value)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                  {LEAD_CATEGORIES
+                    .filter((c) => c.toLowerCase().includes(categorySearch.toLowerCase()))
+                    .map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                </SelectContent>
               </Select>
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>

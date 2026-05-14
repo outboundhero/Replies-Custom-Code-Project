@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
 
     // --- CREATE USER ---
     if (action === "create") {
-      const { email, password, role } = body;
+      const { email, password, role, allowedClientTags } = body;
       if (!email || !password || !role) {
         return NextResponse.json({ error: "Email, password, and role required" }, { status: 400 });
       }
@@ -22,10 +22,16 @@ export async function POST(req: NextRequest) {
       }
 
       const hash = await bcrypt.hash(password, 12);
+      const tags = normalizeTags(allowedClientTags);
 
       const { error } = await supabase
         .from("app_users")
-        .insert({ email: email.toLowerCase().trim(), password_hash: hash, role });
+        .insert({
+          email: email.toLowerCase().trim(),
+          password_hash: hash,
+          role,
+          allowed_client_tags: tags,
+        });
 
       if (error) {
         if (error.message.includes("duplicate")) {
@@ -34,6 +40,21 @@ export async function POST(req: NextRequest) {
         throw new Error(error.message);
       }
 
+      return NextResponse.json({ ok: true });
+    }
+
+    // --- UPDATE ALLOWED CLIENT TAGS ---
+    if (action === "update-allowed-tags") {
+      const { id, allowedClientTags } = body;
+      if (!id) {
+        return NextResponse.json({ error: "ID required" }, { status: 400 });
+      }
+      const tags = normalizeTags(allowedClientTags);
+      const { error } = await supabase
+        .from("app_users")
+        .update({ allowed_client_tags: tags, updated_at: new Date().toISOString() })
+        .eq("id", id);
+      if (error) throw new Error(error.message);
       return NextResponse.json({ ok: true });
     }
 
@@ -95,4 +116,32 @@ export async function POST(req: NextRequest) {
     console.error("[api/users/mutate] POST failed:", error);
     return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
+}
+
+/**
+ * Normalize a user-supplied list of client tags. Accepts:
+ *   - undefined / null / "" → null (= unrestricted)
+ *   - array of strings → trimmed, uppercased, deduped, empty entries dropped
+ *   - comma/space-separated string → split and treated like an array
+ * Empty result also returns null so the column stays nullable instead of [].
+ */
+function normalizeTags(input: unknown): string[] | null {
+  if (input === undefined || input === null || input === "") return null;
+  let arr: unknown[] = [];
+  if (Array.isArray(input)) {
+    arr = input;
+  } else if (typeof input === "string") {
+    arr = input.split(/[,\s]+/);
+  } else {
+    return null;
+  }
+  const cleaned = Array.from(
+    new Set(
+      arr
+        .filter((t): t is string => typeof t === "string")
+        .map((t) => t.trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  );
+  return cleaned.length ? cleaned : null;
 }

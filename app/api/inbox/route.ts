@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireAuth, getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { getView, type InboxView } from "@/lib/inbox-views";
 
@@ -76,8 +76,22 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
 
   try {
+    const session = await getSession();
+    const allowed = session?.allowedClientTags ?? null;
+
     const mode = req.nextUrl.searchParams.get("mode");
-    const clientTag = req.nextUrl.searchParams.get("client_tag");
+    const requestedClientTag = req.nextUrl.searchParams.get("client_tag");
+    // Hard-enforce per-user client scoping. If the caller asks for a tag
+    // they're not allowed to see, override to one of their allowed tags
+    // (or one that matches none → empty results) — never expose the row.
+    let clientTag = requestedClientTag;
+    if (allowed && allowed.length) {
+      if (clientTag && !allowed.includes(clientTag)) {
+        // Asked for a tag outside their scope → force the first allowed
+        // tag so nothing else leaks.
+        clientTag = allowed[0];
+      }
+    }
     const category = req.nextUrl.searchParams.get("category");
     const workflow = req.nextUrl.searchParams.get("workflow");
     const search = req.nextUrl.searchParams.get("search");
@@ -85,6 +99,11 @@ export async function GET(req: NextRequest) {
 
     // Mode: client_tags — return distinct client tags
     if (mode === "client_tags") {
+      // Scoped users only see their allowed list; skip the (slow) full
+      // distinct-scan entirely for them.
+      if (allowed && allowed.length) {
+        return NextResponse.json({ tags: allowed.slice().sort() });
+      }
       const data = await fetchAllRows<{ client_tag: string }>((from, to) => {
         let q = supabase.from("replies").select("client_tag").range(from, to);
         return q as any;
@@ -102,6 +121,7 @@ export async function GET(req: NextRequest) {
       const baseQuery = () => {
         let q = supabase.from("replies").select("id", { count: "estimated", head: true });
         if (clientTag) q = q.eq("client_tag", clientTag);
+        else if (allowed && allowed.length) q = q.in("client_tag", allowed);
         if (workflow) q = q.eq("workflow", workflow);
         if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
         q = applyView(q, view);
@@ -150,6 +170,7 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
     if (clientTag) q = q.eq("client_tag", clientTag);
+    else if (allowed && allowed.length) q = q.in("client_tag", allowed);
     if (category) q = q.eq("lead_category", category);
     if (workflow) q = q.eq("workflow", workflow);
     if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);

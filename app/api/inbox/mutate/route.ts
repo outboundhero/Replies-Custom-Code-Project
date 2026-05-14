@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireAuth, getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
@@ -16,6 +16,24 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action, id } = body;
+
+    // Per-user client scoping: if this user is restricted to specific
+    // client_tags, the row they're mutating must belong to one of them.
+    // Verified by a single quick lookup before any side effect runs.
+    if (id) {
+      const session = await getSession();
+      const allowed = session?.allowedClientTags ?? null;
+      if (allowed && allowed.length) {
+        const { data: row } = await supabase
+          .from("replies")
+          .select("client_tag")
+          .eq("id", id)
+          .single();
+        if (!row || !row.client_tag || !allowed.includes(row.client_tag)) {
+          return NextResponse.json({ error: "Not found" }, { status: 404 });
+        }
+      }
+    }
 
     switch (action) {
       case "update-category": {

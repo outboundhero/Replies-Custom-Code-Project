@@ -9,10 +9,20 @@ export type UserRole = "admin" | "inbox_manager";
 interface SessionPayload {
   email: string;
   role: UserRole;
+  /**
+   * If set + non-empty, this user can ONLY see leads whose client_tag
+   * is in this list. Enforced server-side in /api/inbox. Empty / null
+   * means unrestricted (admins, plus inbox_managers with no scoping).
+   */
+  allowedClientTags?: string[] | null;
 }
 
-export async function createSession(email: string, role: UserRole) {
-  const token = await new SignJWT({ email, role })
+export async function createSession(
+  email: string,
+  role: UserRole,
+  allowedClientTags?: string[] | null,
+) {
+  const token = await new SignJWT({ email, role, allowedClientTags: allowedClientTags ?? null })
     .setProtectedHeader({ alg: "HS256" })
     .setExpirationTime("7d")
     .sign(SECRET);
@@ -43,7 +53,15 @@ export async function getSession(): Promise<SessionPayload | null> {
     const token = (await cookies()).get(COOKIE_NAME)?.value;
     if (!token) return null;
     const { payload } = await jwtVerify(token, SECRET);
-    return { email: payload.email as string, role: payload.role as UserRole };
+    const raw = payload.allowedClientTags;
+    const allowedClientTags = Array.isArray(raw)
+      ? (raw.filter((t) => typeof t === "string" && t.trim()) as string[])
+      : null;
+    return {
+      email: payload.email as string,
+      role: payload.role as UserRole,
+      allowedClientTags: allowedClientTags && allowedClientTags.length ? allowedClientTags : null,
+    };
   } catch {
     return null;
   }

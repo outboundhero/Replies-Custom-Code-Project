@@ -5,7 +5,7 @@
  */
 
 import { google } from "googleapis";
-import supabase from "@/lib/supabase";
+import { getSheetForClient } from "@/lib/google-sheets-registry";
 
 function getAuth() {
   return new google.auth.GoogleAuth({
@@ -51,15 +51,17 @@ interface ReplyData {
 }
 
 export async function pushToSheet(clientTag: string, data: ReplyData): Promise<{ ok: boolean; error?: string }> {
-  // Look up client's sheet
-  const { data: sheet } = await supabase
-    .from("client_sheets")
-    .select("sheet_id, sheet_name")
-    .eq("client_tag", clientTag)
-    .single();
+  // Look up client's sheet from the canonical external registry.
+  let sheet: { sheet_id: string; sheet_name: string } | null = null;
+  try {
+    const found = await getSheetForClient(clientTag);
+    if (found) sheet = { sheet_id: found.id, sheet_name: found.sheetName };
+  } catch (err) {
+    return { ok: false, error: `Sheet registry fetch failed: ${(err as Error).message}` };
+  }
 
   if (!sheet) {
-    return { ok: false, error: `No Google Sheet found for client ${clientTag}` };
+    return { ok: false, error: `No Google Sheet registered for client ${clientTag}. Add it in the tracked-sheets dashboard first.` };
   }
 
   const auth = getAuth();

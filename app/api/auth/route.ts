@@ -23,7 +23,11 @@ export async function POST(req: NextRequest) {
     if (action === "session") {
       const session = await getSession();
       if (!session) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-      return NextResponse.json({ email: session.email, role: session.role });
+      return NextResponse.json({
+        email: session.email,
+        role: session.role,
+        allowedClientTags: session.allowedClientTags ?? null,
+      });
     }
 
     // --- LOGIN ---
@@ -36,7 +40,7 @@ export async function POST(req: NextRequest) {
     // Look up user in Supabase
     const { data: user, error: dbError } = await supabase
       .from("app_users")
-      .select("email, password_hash, role")
+      .select("email, password_hash, role, allowed_client_tags")
       .eq("email", email.toLowerCase().trim())
       .single();
 
@@ -50,7 +54,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid email or password" }, { status: 401 });
     }
 
-    await createSession(user.email, user.role);
+    const allowedClientTags = Array.isArray(user.allowed_client_tags)
+      ? (user.allowed_client_tags as string[]).filter((t) => typeof t === "string" && t.trim())
+      : null;
+
+    await createSession(user.email, user.role, allowedClientTags);
     return NextResponse.json({ ok: true, role: user.role });
   } catch (error) {
     console.error("[auth] Login failed:", error);
