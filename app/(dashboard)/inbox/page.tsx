@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SearchableCombobox } from "@/components/ui/searchable-combobox";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
@@ -91,8 +92,6 @@ export default function InboxPage() {
   // only see leads whose client_tag is in this list — the API enforces
   // it server-side; we mirror it in the UI so the controls don't lie.
   const [allowedClientTags, setAllowedClientTags] = useState<string[] | null>(null);
-  // Local search box for the category dropdowns (filter list + detail).
-  const [categorySearch, setCategorySearch] = useState("");
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -524,31 +523,16 @@ export default function InboxPage() {
                 </SelectContent>
               </Select>
             )}
-            <Select
-              value={filterCategory || "all"}
-              onValueChange={(v) => { setFilterCategory(v === "all" ? "" : v); }}
-            >
-              <SelectTrigger className="h-6 text-[11px]"><SelectValue placeholder="All Categories" /></SelectTrigger>
-              <SelectContent>
-                {/* Sticky search input. stopPropagation is required so the
-                    Select's built-in type-ahead / arrow-key handling
-                    doesn't swallow keystrokes meant for the input. */}
-                <div className="px-2 py-1.5 sticky top-0 bg-popover border-b z-10">
-                  <Input
-                    placeholder="Search categories..."
-                    value={categorySearch}
-                    onChange={(e) => setCategorySearch(e.target.value)}
-                    onKeyDown={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    className="h-6 text-[11px]"
-                  />
-                </div>
-                <SelectItem value="all">All Categories</SelectItem>
-                {LEAD_CATEGORIES
-                  .filter((c) => c.toLowerCase().includes(categorySearch.toLowerCase()))
-                  .map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            {/* Searchable combobox — Radix Select doesn't tolerate a nested
+                Input (typing made the popper detach and float right). */}
+            <SearchableCombobox
+              value={filterCategory}
+              onValueChange={(v) => setFilterCategory(v === "All Categories" ? "" : v)}
+              options={["All Categories", ...LEAD_CATEGORIES]}
+              placeholder="All Categories"
+              searchPlaceholder="Search categories..."
+              triggerClassName="h-6 text-[11px] py-0"
+            />
           </div>
           <p className="text-[10px] text-muted-foreground">{total} leads</p>
         </div>
@@ -684,24 +668,14 @@ export default function InboxPage() {
             {/* Category */}
             <div className="flex items-center gap-3 rounded border bg-white px-4 py-3">
               <span className="text-xs text-muted-foreground shrink-0">Category</span>
-              <Select value={detail.lead_category || "Open Response"} onValueChange={updateCategory}>
-                <SelectTrigger className="w-52 h-8 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <div className="px-2 py-1.5 sticky top-0 bg-popover border-b z-10">
-                    <Input
-                      placeholder="Search categories..."
-                      value={categorySearch}
-                      onChange={(e) => setCategorySearch(e.target.value)}
-                      onKeyDown={(e) => e.stopPropagation()}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      className="h-7 text-xs"
-                    />
-                  </div>
-                  {LEAD_CATEGORIES
-                    .filter((c) => c.toLowerCase().includes(categorySearch.toLowerCase()))
-                    .map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <SearchableCombobox
+                value={detail.lead_category || "Open Response"}
+                onValueChange={updateCategory}
+                options={LEAD_CATEGORIES}
+                placeholder="Open Response"
+                searchPlaceholder="Search categories..."
+                triggerClassName="w-52 h-8 text-xs"
+              />
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
