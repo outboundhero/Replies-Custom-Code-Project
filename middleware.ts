@@ -27,6 +27,12 @@ export async function middleware(req: NextRequest) {
   try {
     const { payload } = await jwtVerify(token, SECRET);
     const role = payload.role as string;
+    // Per-user client scoping. If non-empty, this user is restricted to
+    // those tags AND we shrink their nav down to just the Inbox — no
+    // Clients or Qualification (they have no business browsing the
+    // broader system when they're locked to a single client).
+    const rawTags = payload.allowedClientTags;
+    const isScoped = Array.isArray(rawTags) && rawTags.length > 0;
 
     // Admin can access everything
     if (role === "admin") {
@@ -35,13 +41,19 @@ export async function middleware(req: NextRequest) {
 
     // Inbox manager: restrict to allowed routes
     if (role === "inbox_manager") {
-      const allowed = INBOX_MANAGER_ROUTES.some((r) => pathname === r || pathname.startsWith(r + "/"));
-
-      // Root "/" redirects to /inbox for inbox managers
+      // Root "/" always redirects inbox managers to /inbox
       if (pathname === "/") {
         return NextResponse.redirect(new URL("/inbox", req.url));
       }
 
+      // Scoped users are inbox-only: anything outside /inbox bounces back.
+      if (isScoped) {
+        const isInbox = pathname === "/inbox" || pathname.startsWith("/inbox/");
+        if (!isInbox) return NextResponse.redirect(new URL("/inbox", req.url));
+        return NextResponse.next();
+      }
+
+      const allowed = INBOX_MANAGER_ROUTES.some((r) => pathname === r || pathname.startsWith(r + "/"));
       if (!allowed) {
         return NextResponse.redirect(new URL("/inbox", req.url));
       }

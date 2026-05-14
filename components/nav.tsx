@@ -28,6 +28,9 @@ export function Nav() {
   const router = useRouter();
   const [role, setRole] = useState<string | null>(null);
   const [email, setEmail] = useState<string | null>(null);
+  // Scoped users (allowed_client_tags non-empty) get an inbox-only nav —
+  // no Clients, no Qualification. Mirrors the middleware's hard block.
+  const [isScoped, setIsScoped] = useState(false);
 
   useEffect(() => {
     fetch("/api/auth", {
@@ -40,6 +43,7 @@ export function Nav() {
         if (d) {
           setRole(d.role);
           setEmail(d.email);
+          setIsScoped(Array.isArray(d.allowedClientTags) && d.allowedClientTags.length > 0);
         }
       })
       .catch(() => {});
@@ -56,6 +60,9 @@ export function Nav() {
 
   const visibleLinks = links.filter((link) => {
     if (role === "admin") return true;
+    // Scoped inbox managers only see /inbox — every other link is hidden,
+    // even the ones non-scoped inbox managers can normally visit.
+    if (isScoped) return link.href === "/inbox";
     return !link.adminOnly;
   });
 
