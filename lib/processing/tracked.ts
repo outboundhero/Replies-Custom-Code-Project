@@ -58,7 +58,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   if (!campaignTag) {
     await logActivity("tracked", "unroutable", {
       lead_email: lead.email,
-      details: { reason: "No tag found in campaign name", campaign: campaign.name },
+      details: { reason: "No tag found in campaign name", campaign: campaign.name, bison_instance: bisonInstance },
     });
     return;
   }
@@ -69,7 +69,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     await logActivity("tracked", "unroutable", {
       client_tag: campaignTag,
       lead_email: lead.email,
-      details: { reason: "Tag not mapped to any section", tag: campaignTag },
+      details: { reason: "Tag not mapped to any section", tag: campaignTag, bison_instance: bisonInstance },
     });
     return;
   }
@@ -129,7 +129,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       await logActivity("tracked", "bbs-routed", {
         client_tag: campaignTag,
         lead_email: reply.from_email_address,
-        details: { assignment: route.assignment, reason: route.reason },
+        details: { assignment: route.assignment, reason: route.reason, bison_instance: bisonInstance },
       });
     } catch (error) {
       await logError("tracked", "bbs-routing", (error as Error).message, {
@@ -526,6 +526,6 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     client_tag: campaignTag,
     section_name: section.name,
     lead_email: reply.from_email_address,
-    details: { airtable_base_id: section.airtable_base_id, record_id: recordId, ai_category: aiCategory },
+    details: { airtable_base_id: section.airtable_base_id, record_id: recordId, ai_category: aiCategory, bison_instance: bisonInstance },
   });
 }

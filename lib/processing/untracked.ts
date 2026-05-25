@@ -46,7 +46,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
   if (filtered) {
     await logActivity("untracked", "filtered", {
       lead_email: reply.from_email_address,
-      details: { from_name: reply.from_name, subject: reply.email_subject },
+      details: { from_name: reply.from_name, subject: reply.email_subject, bison_instance: bisonInstance },
     });
     return;
   }
@@ -389,6 +389,6 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     client_tag: companyCode,
     section_name: sectionName,
     lead_email: reply.from_email_address,
-    details: { airtable_base_id: airtableBaseId, record_id: recordId, ai_category: aiCategory },
+    details: { airtable_base_id: airtableBaseId, record_id: recordId, ai_category: aiCategory, bison_instance: bisonInstance },
   });
 }
