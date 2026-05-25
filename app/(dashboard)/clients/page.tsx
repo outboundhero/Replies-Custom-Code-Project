@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
+import { BISON_INSTANCES, DEFAULT_INSTANCE, getInstanceLabel } from "@/lib/bison-instances-shared";
 
 interface Client {
   id: number;
@@ -29,6 +30,8 @@ interface Client {
   bcc_name_2: string | null; bcc_email_2: string | null;
   reply_template: string | null;
   updated_at: string | null;
+  /** null = no mapping row yet → rendered as default instance. */
+  bison_instance: string | null;
 }
 
 interface Section {
@@ -174,6 +177,28 @@ export default function ClientsPage() {
     }
   }
 
+  async function updateInstance(tag: string, instanceKey: string) {
+    // Optimistic UI — flip the badge instantly, revert on failure.
+    setClients((prev) => prev.map((c) => (c.tag === tag ? { ...c, bison_instance: instanceKey } : c)));
+    try {
+      const res = await fetch("/api/clients/instance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_tag: tag, instance_key: instanceKey }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Failed to update instance for ${tag}: ${data.error || res.statusText}`);
+        loadClients(); // re-pull truth
+        return;
+      }
+      toast.success(`${tag} → ${getInstanceLabel(instanceKey)}`);
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+      loadClients();
+    }
+  }
+
   async function removeClient(tag: string) {
     if (!confirm(`Remove client "${tag}"? This will delete the tag and its config.`)) return;
     try {
@@ -271,6 +296,25 @@ export default function ClientsPage() {
                           BCC: {[client.bcc_email_1, client.bcc_email_2].filter(Boolean).length}
                         </Badge>
                       )}
+                    </div>
+                    {/* Bison instance picker — stops click propagation so
+                        opening the menu doesn't toggle the expanded row. */}
+                    <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+                      <Select
+                        value={client.bison_instance ?? DEFAULT_INSTANCE}
+                        onValueChange={(v) => updateInstance(client.tag, v)}
+                      >
+                        <SelectTrigger className="h-7 w-40 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {BISON_INSTANCES.map((i) => (
+                            <SelectItem key={i.key} value={i.key} className="text-xs">
+                              {i.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                     <button
                       onClick={(e) => { e.stopPropagation(); removeClient(client.tag); }}

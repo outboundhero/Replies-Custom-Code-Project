@@ -17,6 +17,7 @@ import supabase from "@/lib/supabase";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
+import { coerceInstance } from "@/lib/bison-instances";
 
 interface ClientConfig {
   cc_name_1?: string | null; cc_email_1?: string | null;
@@ -44,8 +45,13 @@ async function getClientConfig(tag: string): Promise<ClientConfig | null> {
   }
 }
 
-export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
+export async function processTrackedReply(payload: EmailBisonWebhookPayload, instanceKey?: string) {
   const { lead, reply, campaign, sender_email } = payload.data;
+  // The Bison instance this webhook came from. Stamped on the row so
+  // every later action (Send Reply, blacklist, push-to-nurture, etc.)
+  // can route back to the right instance. Defaults to outboundhero for
+  // safety when an older webhook URL is hit without an instance key.
+  const bisonInstance = coerceInstance(instanceKey);
 
   // 1. Extract tag from campaign name
   const campaignTag = extractTagFromCampaignName(campaign.name);
@@ -277,6 +283,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   const replyStatus = action === "created" ? "Pending" : "Pending again";
   if (!isBounce) supabase.from("replies").upsert({
     workflow: "tracked",
+    bison_instance: bisonInstance,
     nurture_safety: nurtureClassification.safety,
     nurture_bucket: nurtureClassification.bucket,
     nurture_safety_reason: nurtureClassification.reason,
@@ -335,7 +342,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
     } : {}),
     our_reply: baseFields["Our reply"] ? String(baseFields["Our reply"]) : null,
     updated_at: new Date().toISOString(),
-  }, { onConflict: "reply_id,campaign_id" }).then(({ error }) => {
+  }, { onConflict: "reply_id,campaign_id,bison_instance" }).then(({ error }) => {
     if (error) {
       console.error("[tracked] Supabase upsert failed:", error.message);
       return;
@@ -500,7 +507,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
   // 6c. Domain blacklisting (trigger phrases in reply)
   const blacklistMatch = shouldBlacklistDomain(reply.email_subject, reply.text_body);
   if (blacklistMatch) {
-    await blacklistDomain(reply.from_email_address, blacklistMatch, "tracked", {
+    await blacklistDomain(bisonInstance, reply.from_email_address, blacklistMatch, "tracked", {
       client_tag: campaignTag,
       section_name: section.name,
     });
@@ -508,7 +515,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload) {
 
   // 6d. Email blacklisting (Do Not Contact category)
   if (aiCategory === "Do Not Contact") {
-    await blacklistEmail(reply.from_email_address, "tracked", {
+    await blacklistEmail(bisonInstance, reply.from_email_address, "tracked", {
       client_tag: campaignTag,
       section_name: section.name,
     });

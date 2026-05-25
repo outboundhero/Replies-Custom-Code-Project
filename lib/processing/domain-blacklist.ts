@@ -1,13 +1,10 @@
 import { logActivity, logError } from "@/lib/errors";
+import { getInstanceConfig } from "@/lib/bison-instances";
 // Re-export the pure helpers so server-side callers can keep importing
 // from this module. Browser-side callers must import from
 // @/lib/processing/personal-domains directly — this file pulls in db.
 import { PROTECTED_DOMAINS, extractDomain, isPersonalDomain } from "./personal-domains";
 export { PROTECTED_DOMAINS, extractDomain, isPersonalDomain };
-
-const BLACKLIST_DOMAIN_API_URL = "https://app.outboundhero.co/api/blacklisted-domains";
-const BLACKLIST_EMAIL_API_URL = "https://app.outboundhero.co/api/blacklisted-emails";
-const BLACKLIST_API_KEY = "60|QACwd4xuHycuYxLh8knGlKvKEuRkVSUw2obSpCNSd2ba2ebd";
 
 const BLACKLIST_TRIGGERS = [
   "don't have a physical office",
@@ -148,10 +145,18 @@ export function shouldBlacklistDomain(subject: string, body: string): string | n
 // extractDomain + isPersonalDomain now live in ./personal-domains (re-exported above).
 
 /**
- * Blacklist a domain via the OutboundHero API and log the activity.
- * Non-blocking — errors are logged but don't throw.
+ * Blacklist a domain via the Bison API for a specific instance, and log
+ * the activity. Non-blocking — errors are logged but don't throw.
+ *
+ * `instanceKey` is required because each Bison instance has its own
+ * blacklist. Blacklisting a domain on outboundhero does not blacklist
+ * it on facilityreach — the operator must call this once per instance
+ * if they want it banned everywhere. (For now we only blacklist on the
+ * instance the lead came from, which is the right answer for the
+ * inbox/auto-categorizer flow.)
  */
 export async function blacklistDomain(
+  instanceKey: string,
   fromEmail: string,
   matchedPhrase: string,
   workflow: string,
@@ -162,11 +167,12 @@ export async function blacklistDomain(
   if (PROTECTED_DOMAINS.has(domain)) return;
 
   try {
-    const res = await fetch(BLACKLIST_DOMAIN_API_URL, {
+    const { baseUrl, token } = getInstanceConfig(instanceKey);
+    const res = await fetch(`${baseUrl}/api/blacklisted-domains`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${BLACKLIST_API_KEY}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ domain }),
     });
@@ -180,7 +186,7 @@ export async function blacklistDomain(
           client_tag: opts?.client_tag,
           section_name: opts?.section_name,
           lead_email: fromEmail,
-          details: { domain, matched_phrase: matchedPhrase },
+          details: { domain, matched_phrase: matchedPhrase, bison_instance: instanceKey },
         });
         return;
       }
@@ -191,23 +197,25 @@ export async function blacklistDomain(
       client_tag: opts?.client_tag,
       section_name: opts?.section_name,
       lead_email: fromEmail,
-      details: { domain, matched_phrase: matchedPhrase },
+      details: { domain, matched_phrase: matchedPhrase, bison_instance: instanceKey },
     });
   } catch (error) {
     await logError(workflow, "blacklist", (error as Error).message, {
       domain,
       from_email: fromEmail,
       matched_phrase: matchedPhrase,
+      bison_instance: instanceKey,
     });
   }
 }
 
 /**
- * Blacklist an email address via the OutboundHero API.
+ * Blacklist an email address via the Bison API for a specific instance.
  * Called when AI categorizes a reply as "Do Not Contact".
  * Non-blocking — errors are logged but don't throw.
  */
 export async function blacklistEmail(
+  instanceKey: string,
   email: string,
   workflow: string,
   opts?: { client_tag?: string; section_name?: string }
@@ -215,11 +223,12 @@ export async function blacklistEmail(
   if (!email) return;
 
   try {
-    const res = await fetch(BLACKLIST_EMAIL_API_URL, {
+    const { baseUrl, token } = getInstanceConfig(instanceKey);
+    const res = await fetch(`${baseUrl}/api/blacklisted-emails`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${BLACKLIST_API_KEY}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ email }),
     });
@@ -231,7 +240,7 @@ export async function blacklistEmail(
           client_tag: opts?.client_tag,
           section_name: opts?.section_name,
           lead_email: email,
-          details: { email },
+          details: { email, bison_instance: instanceKey },
         });
         return;
       }
@@ -242,11 +251,12 @@ export async function blacklistEmail(
       client_tag: opts?.client_tag,
       section_name: opts?.section_name,
       lead_email: email,
-      details: { email },
+      details: { email, bison_instance: instanceKey },
     });
   } catch (error) {
     await logError(workflow, "email-blacklist", (error as Error).message, {
       email,
+      bison_instance: instanceKey,
     });
   }
 }

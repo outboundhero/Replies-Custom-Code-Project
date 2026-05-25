@@ -16,6 +16,7 @@ import supabase from "@/lib/supabase";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { classifyOneBatch } from "@/lib/nurture/auto-classify";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
+import { coerceInstance } from "@/lib/bison-instances";
 
 const CLASSIFY_CONCURRENCY = 8;
 
@@ -268,6 +269,11 @@ export async function POST(req: NextRequest) {
     if (action === "push-to-nurture") {
       const nurtureCampaignId: number = body.nurtureCampaignId;
       const items: ItemRef[] = body.items || [];
+      // Destination instance — every Bison call in this branch must target it.
+      // The UI gets it from /api/nurture/campaigns (each row carries
+      // `bison_instance`) and sends it alongside the campaign id.
+      // Phase-1 safety: default to outboundhero if not sent.
+      const instanceKey = coerceInstance(body.bisonInstance);
       if (!nurtureCampaignId || !items.length) {
         return NextResponse.json({ error: "nurtureCampaignId and items required" }, { status: 400 });
       }
@@ -427,7 +433,7 @@ export async function POST(req: NextRequest) {
         await runWithConcurrency(
           pendingLookups,
           async (p) => {
-            const lead = await findLeadByEmail(p.email);
+            const lead = await findLeadByEmail(instanceKey, p.email);
             if (!lead) {
               failures.push({ id: p.itemId, reason: "Could not find lead in OutboundHero" });
               return;
@@ -476,7 +482,7 @@ export async function POST(req: NextRequest) {
       //    allow_parallel_sending defaults to TRUE inside attachLeadsToCampaign
       //    — without it, OutboundHero silently drops leads already in another
       //    active campaign and still returns 200 OK.
-      const result = await attachLeadsToCampaign(nurtureCampaignId, leadIds);
+      const result = await attachLeadsToCampaign(instanceKey, nurtureCampaignId, leadIds);
       if (!result.ok) {
         return NextResponse.json({ ok: false, error: result.error, attached: 0, requested: leadIds.length, failures }, { status: 502 });
       }

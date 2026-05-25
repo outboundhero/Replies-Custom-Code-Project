@@ -30,6 +30,11 @@
  *   npx tsx --env-file=.env.local scripts/backfill-ob-lead-id.ts --tier 1
  *   npx tsx --env-file=.env.local scripts/backfill-ob-lead-id.ts --concurrency 15
  *   npx tsx --env-file=.env.local scripts/backfill-ob-lead-id.ts --dry
+ *   npx tsx --env-file=.env.local scripts/backfill-ob-lead-id.ts --instance facilityreach
+ *
+ * Multi-instance: defaults to outboundhero. Pass --instance <key> to
+ * search a specific Bison instance (e.g. when backfilling legacy leads
+ * for a client that has been moved to a new instance).
  *
  * Idempotent — re-runs only touch rows where ob_lead_id IS NULL.
  */
@@ -37,6 +42,7 @@
 import { config } from "dotenv";
 import supabase from "../lib/supabase";
 import { findLeadByEmail } from "../lib/outboundhero-api";
+import { DEFAULT_INSTANCE, isValidInstance } from "../lib/bison-instances";
 
 config({ path: ".env.local" });
 
@@ -147,12 +153,13 @@ async function processEmail(
   email: string,
   rowsByEmail: Map<string, number[]>,
   cache: Map<string, number | null>,
+  instanceKey: string,
 ): Promise<{ written: number; lookupFired: boolean }> {
   let cachedId = cache.get(email);
   let lookupFired = false;
   if (cachedId === undefined) {
     lookupFired = true;
-    const lead = await withRetry(() => findLeadByEmail(email), `findLeadByEmail:${email}`);
+    const lead = await withRetry(() => findLeadByEmail(instanceKey, email), `findLeadByEmail:${email}`);
     cachedId = lead?.id ?? null;
     cache.set(email, cachedId);
   }
@@ -184,8 +191,16 @@ async function main() {
     : DEFAULT_CONCURRENCY;
   const tierIdx = args.indexOf("--tier");
   const onlyTier: Tier | null = tierIdx >= 0 ? (Number(args[tierIdx + 1]) as Tier) : null;
+  const instIdx = args.indexOf("--instance");
+  const instanceArg = instIdx >= 0 ? args[instIdx + 1] : DEFAULT_INSTANCE;
+  if (!isValidInstance(instanceArg)) {
+    console.error(`Unknown --instance "${instanceArg}". Valid: outboundhero, outboundclean, cleaningoutbound, facilityreach`);
+    process.exit(1);
+  }
+  const instanceKey: string = instanceArg;
 
   console.log(`\nBackfilling nurture_legacy_leads.ob_lead_id${dryRun ? " (DRY RUN)" : ""}`);
+  console.log(`Bison instance: ${instanceKey}`);
   console.log(`Concurrency: ${concurrency}`);
   if (onlyTier) console.log(`Only tier: ${onlyTier} — ${TIER_LABEL[onlyTier]}`);
   console.log("");
@@ -231,7 +246,7 @@ async function main() {
     await runWithConcurrency(
       tierEmails,
       async (email) => {
-        const { written: w, lookupFired } = await processEmail(email, rowsByEmail, cache);
+        const { written: w, lookupFired } = await processEmail(email, rowsByEmail, cache, instanceKey);
         written += w;
         processed++;
         if (lookupFired) lookups++;

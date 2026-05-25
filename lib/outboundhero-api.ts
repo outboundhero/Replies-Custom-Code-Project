@@ -1,29 +1,42 @@
 /**
- * OutboundHero API helpers for sending replies, forwarding, and one-off emails.
+ * Bison (EmailBison) API helpers — instance-aware.
+ *
+ * Every exported function takes an `instanceKey` as its first parameter,
+ * looked up via `lib/bison-instances.ts`. This module no longer has any
+ * hardcoded base URL or token — those come from the registry + env vars.
+ *
+ * Callers that don't know which instance to use should resolve it from
+ * the row's `bison_instance` column (for existing rows) or via
+ * `resolveInstanceForClient(clientTag)` (for new actions keyed by client).
  */
 
-const API_BASE = "https://app.outboundhero.co/api";
-const API_TOKEN = "60|QACwd4xuHycuYxLh8knGlKvKEuRkVSUw2obSpCNSd2ba2ebd";
+import { getInstanceConfig } from "@/lib/bison-instances";
 
-const headers = {
-  "Content-Type": "application/json",
-  Authorization: `Bearer ${API_TOKEN}`,
-};
+function buildHeaders(token: string) {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+}
 
 interface EmailRecipient {
   name: string;
   email_address: string;
 }
 
-export async function sendReply(params: {
-  replyId: number;
-  senderEmailId: number;
-  message: string;
-  toEmail: string;
-  toName: string;
-  ccEmails?: EmailRecipient[];
-  bccEmails?: EmailRecipient[];
-}): Promise<{ ok: boolean; error?: string }> {
+export async function sendReply(
+  instanceKey: string,
+  params: {
+    replyId: number;
+    senderEmailId: number;
+    message: string;
+    toEmail: string;
+    toName: string;
+    ccEmails?: EmailRecipient[];
+    bccEmails?: EmailRecipient[];
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
   const payload: Record<string, unknown> = {
     inject_previous_email_body: true,
     message: params.message,
@@ -35,9 +48,9 @@ export async function sendReply(params: {
   if (params.ccEmails?.length) payload.cc_emails = params.ccEmails;
   if (params.bccEmails?.length) payload.bcc_emails = params.bccEmails;
 
-  const res = await fetch(`${API_BASE}/replies/${params.replyId}/reply`, {
+  const res = await fetch(`${baseUrl}/api/replies/${params.replyId}/reply`, {
     method: "POST",
-    headers,
+    headers: buildHeaders(token),
     body: JSON.stringify(payload),
   });
 
@@ -46,16 +59,20 @@ export async function sendReply(params: {
   return { ok: false, error: `${res.status}: ${body}` };
 }
 
-export async function forwardReply(params: {
-  replyId: number;
-  senderEmailId: number;
-  message: string;
-  forwardTo: string;
-  leadName: string;
-}): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetch(`${API_BASE}/replies/${params.replyId}/forward?plain_text=true`, {
+export async function forwardReply(
+  instanceKey: string,
+  params: {
+    replyId: number;
+    senderEmailId: number;
+    message: string;
+    forwardTo: string;
+    leadName: string;
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetch(`${baseUrl}/api/replies/${params.replyId}/forward?plain_text=true`, {
     method: "POST",
-    headers,
+    headers: buildHeaders(token),
     body: JSON.stringify({
       inject_previous_email_body: true,
       message: params.message,
@@ -70,17 +87,21 @@ export async function forwardReply(params: {
   return { ok: false, error: `${res.status}: ${body}` };
 }
 
-export async function sendOneOffReply(params: {
-  senderEmailId: number;
-  subject: string;
-  message: string;
-  toEmail: string;
-  toName: string;
-  ccEmails?: EmailRecipient[];
-}): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetch(`${API_BASE}/replies/new`, {
+export async function sendOneOffReply(
+  instanceKey: string,
+  params: {
+    senderEmailId: number;
+    subject: string;
+    message: string;
+    toEmail: string;
+    toName: string;
+    ccEmails?: EmailRecipient[];
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetch(`${baseUrl}/api/replies/new`, {
     method: "POST",
-    headers,
+    headers: buildHeaders(token),
     body: JSON.stringify({
       subject: params.subject,
       message: params.message,
@@ -161,14 +182,19 @@ function pickUuid(row: Record<string, unknown>): string | null {
   return null;
 }
 
-export async function listCampaigns(opts?: { nameContains?: string }): Promise<OutboundCampaign[]> {
+export async function listCampaigns(
+  instanceKey: string,
+  opts?: { nameContains?: string },
+): Promise<OutboundCampaign[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
   const PER_PAGE = 100;
   const CONCURRENCY = 6; // matches OB's typical rate-limit headroom
 
   // Fetch one page from the upstream API and normalise to OutboundCampaign[].
   async function fetchPage(page: number): Promise<{ rows: OutboundCampaign[]; lastPage: number }> {
-    const res = await fetch(`${API_BASE}/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers });
-    if (!res.ok) throw new Error(`listCampaigns page ${page} failed: ${res.status} ${await res.text()}`);
+    const res = await fetch(`${baseUrl}/api/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers });
+    if (!res.ok) throw new Error(`listCampaigns(${instanceKey}) page ${page} failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rawRows: Array<Record<string, unknown>> = data?.data || [];
     const lastPage = (data?.meta?.last_page as number | undefined) ?? page;
@@ -204,7 +230,7 @@ export async function listCampaigns(opts?: { nameContains?: string }): Promise<O
           const r = await fetchPage(pagesToFetch[myIdx]);
           results[myIdx] = r.rows;
         } catch (e) {
-          console.warn("[outboundhero] listCampaigns page error:", (e as Error).message);
+          console.warn(`[outboundhero:${instanceKey}] listCampaigns page error:`, (e as Error).message);
           results[myIdx] = [];
         }
       }
@@ -221,17 +247,20 @@ export async function listCampaigns(opts?: { nameContains?: string }): Promise<O
 
 /** List leads in a specific campaign filtered by lead_campaign_status. Paginates through all pages. */
 export async function listCampaignLeads(
+  instanceKey: string,
   campaignId: number,
   opts: { leadCampaignStatus?: string; perPage?: number } = {},
 ): Promise<OutboundLead[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
   const perPage = opts.perPage ?? 100;
   const all: OutboundLead[] = [];
   let page = 1;
   while (true) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
     if (opts.leadCampaignStatus) params.set("filters.lead_campaign_status", opts.leadCampaignStatus);
-    const res = await fetch(`${API_BASE}/campaigns/${campaignId}/leads?${params}`, { headers });
-    if (!res.ok) throw new Error(`listCampaignLeads failed: ${res.status} ${await res.text()}`);
+    const res = await fetch(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers });
+    if (!res.ok) throw new Error(`listCampaignLeads(${instanceKey}, ${campaignId}) failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rows: OutboundLead[] = data?.data || [];
     if (rows.length === 0) break;
@@ -258,6 +287,7 @@ export async function listCampaignLeads(
  * mark all leads as added — see app/api/nurture/mutate/route.ts.
  */
 export async function attachLeadsToCampaign(
+  instanceKey: string,
   campaignId: number,
   leadIds: number[],
   allowParallelSending = true,
@@ -272,9 +302,10 @@ export async function attachLeadsToCampaign(
   /** Raw response body for diagnostics. */
   raw?: unknown;
 }> {
-  const res = await fetch(`${API_BASE}/campaigns/${campaignId}/leads/attach-leads`, {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetch(`${baseUrl}/api/campaigns/${campaignId}/leads/attach-leads`, {
     method: "POST",
-    headers,
+    headers: buildHeaders(token),
     body: JSON.stringify({
       allow_parallel_sending: allowParallelSending,
       lead_ids: leadIds,
@@ -314,7 +345,7 @@ export async function attachLeadsToCampaign(
   // changes. Stringified once, never spammy.
   if (attachedCount === undefined || attachedCount !== leadIds.length) {
     console.log(
-      `[outboundhero] attach-leads response (campaign ${campaignId}, requested ${leadIds.length}, parsed attached=${attachedCount ?? "unknown"}):`,
+      `[outboundhero:${instanceKey}] attach-leads response (campaign ${campaignId}, requested ${leadIds.length}, parsed attached=${attachedCount ?? "unknown"}):`,
       JSON.stringify(body),
     );
   }
@@ -351,10 +382,11 @@ export interface OutboundSentEmail {
  * find the very first cold email so we can re-pitch it to a redirected
  * contact.
  */
-export async function getSentEmails(leadId: number): Promise<OutboundSentEmail[]> {
-  const res = await fetch(`${API_BASE}/leads/${leadId}/sent-emails`, { headers });
+export async function getSentEmails(instanceKey: string, leadId: number): Promise<OutboundSentEmail[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetch(`${baseUrl}/api/leads/${leadId}/sent-emails`, { headers: buildHeaders(token) });
   if (!res.ok) {
-    throw new Error(`getSentEmails(${leadId}) failed: ${res.status} ${await res.text()}`);
+    throw new Error(`getSentEmails(${instanceKey}, ${leadId}) failed: ${res.status} ${await res.text()}`);
   }
   const data = await res.json();
   // Upstream wraps the array in an extra { data: [{ data: [...] }] } envelope
@@ -381,10 +413,11 @@ export async function getSentEmails(leadId: number): Promise<OutboundSentEmail[]
  * (the legacy behavior — kept for callers that don't have campaign context).
  */
 export async function getFirstSentEmail(
+  instanceKey: string,
   leadId: number,
   campaignId: number | null = null,
 ): Promise<OutboundSentEmail | null> {
-  const all = await getSentEmails(leadId);
+  const all = await getSentEmails(instanceKey, leadId);
   const scoped = campaignId == null ? all : all.filter((e) => e.campaign_id === campaignId);
   if (scoped.length === 0) return null;
   // Sort ascending by sent_at; fall back to id for emails without sent_at.
@@ -397,8 +430,9 @@ export async function getFirstSentEmail(
 }
 
 /** Find a single lead by email (search). Returns the first matching lead or null. */
-export async function findLeadByEmail(email: string): Promise<OutboundLead | null> {
-  const res = await fetch(`${API_BASE}/leads?search=${encodeURIComponent(email)}&per_page=10`, { headers });
+export async function findLeadByEmail(instanceKey: string, email: string): Promise<OutboundLead | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetch(`${baseUrl}/api/leads?search=${encodeURIComponent(email)}&per_page=10`, { headers: buildHeaders(token) });
   if (!res.ok) return null;
   const data = await res.json();
   const rows: OutboundLead[] = data?.data || [];

@@ -13,6 +13,7 @@ import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
+import { coerceInstance } from "@/lib/bison-instances";
 
 async function getUntrackedConfig(): Promise<UntrackedConfig> {
   const result = await db.execute("SELECT * FROM untracked_config WHERE id = 1");
@@ -26,8 +27,11 @@ async function getUntrackedConfig(): Promise<UntrackedConfig> {
   };
 }
 
-export async function processUntrackedReply(payload: EmailBisonUntrackedPayload) {
+export async function processUntrackedReply(payload: EmailBisonUntrackedPayload, instanceKey?: string) {
   const { reply, sender_email } = payload.data;
+  // Bison instance this webhook came from. Stamped on the row + every
+  // blacklist call so later actions route back to the right instance.
+  const bisonInstance = coerceInstance(instanceKey);
 
   // 1. Bounce filtering
   const toAddress = reply.to?.[0]?.address || "";
@@ -209,6 +213,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   const untrackedReplyStatus = action === "created" ? "Pending" : "Pending again";
   supabase.from("replies").upsert({
     workflow: "untracked",
+    bison_instance: bisonInstance,
     lead_email: reply.from_email_address,
     lead_name: reply.from_name,
     from_name: reply.from_name,
@@ -252,7 +257,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
     our_reply: baseFields["Our reply"] ? String(baseFields["Our reply"]) : null,
     campaign_id: 0, // untracked has no campaign — use 0 for unique constraint
     updated_at: new Date().toISOString(),
-  }, { onConflict: "reply_id,campaign_id" }).then(({ error }) => {
+  }, { onConflict: "reply_id,campaign_id,bison_instance" }).then(({ error }) => {
     if (error) {
       console.error("[untracked] Supabase upsert failed:", error.message);
       return;
@@ -365,7 +370,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
   // 8c. Domain blacklisting (trigger phrases in reply)
   const blacklistMatch = shouldBlacklistDomain(reply.email_subject, reply.text_body);
   if (blacklistMatch) {
-    await blacklistDomain(reply.from_email_address, blacklistMatch, "untracked", {
+    await blacklistDomain(bisonInstance, reply.from_email_address, blacklistMatch, "untracked", {
       client_tag: companyCode,
       section_name: sectionName,
     });
@@ -373,7 +378,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload)
 
   // 8d. Email blacklisting (Do Not Contact category)
   if (aiCategory === "Do Not Contact") {
-    await blacklistEmail(reply.from_email_address, "untracked", {
+    await blacklistEmail(bisonInstance, reply.from_email_address, "untracked", {
       client_tag: companyCode,
       section_name: sectionName,
     });

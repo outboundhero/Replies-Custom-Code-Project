@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
+import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -59,6 +60,8 @@ interface NurtureCampaign {
   status: string;
   client_tag: string | null;
   total_leads?: number;
+  /** Which Bison instance this campaign lives on (e.g. "outboundhero", "facilityreach"). */
+  bison_instance: string;
 }
 
 interface Counts {
@@ -173,6 +176,8 @@ export default function NurturePage() {
     campaignId: number | null;
     campaignUuid: string | null;
     campaignName: string | null;
+    /** Bison instance the campaign lives on — used to build dashboard URLs. */
+    bisonInstance: string;
     message?: string;
     obMessage?: string;
     error?: string;
@@ -267,11 +272,15 @@ export default function NurturePage() {
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
   useEffect(() => {
-    fetch("/api/nurture/campaigns")
+    // Pass the client tag so the API only hits THIS client's Bison
+    // instance (fast path — one fetch instead of fanning out across
+    // all four instances).
+    const q = lockedClientTag ? `?clientTag=${encodeURIComponent(lockedClientTag)}` : "";
+    fetch(`/api/nurture/campaigns${q}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d?.campaigns) setCampaigns(d.campaigns); })
       .catch(() => {});
-  }, []);
+  }, [lockedClientTag]);
 
   // Pull the full client list once on mount so the filter dropdown is
   // complete regardless of which leads happen to be on the current page.
@@ -732,17 +741,21 @@ export default function NurturePage() {
         const it = itemMap.get(id);
         return { id, ob_lead_id: meta?.ob_lead_id ?? it?.ob_lead_id };
       });
+      const campaign = campaigns.find((c) => c.id === Number(pushTargetCampaignId)) || null;
       const res = await fetch("/api/nurture/mutate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "push-to-nurture",
           nurtureCampaignId: Number(pushTargetCampaignId),
+          // Route the attach to whichever Bison instance the campaign
+          // lives on. /api/nurture/campaigns now returns bison_instance
+          // per row, so we just forward it.
+          bisonInstance: campaign?.bison_instance,
           items: itemRefs,
         }),
       });
       const data = await res.json();
-      const campaign = campaigns.find((c) => c.id === Number(pushTargetCampaignId)) || null;
 
       // Three terminal states:
       //   - success: ok=true, OB confirmed all attached, DB updated
@@ -757,6 +770,7 @@ export default function NurturePage() {
           campaignId: campaign?.id ?? null,
           campaignUuid: campaign?.uuid ?? null,
           campaignName: campaign?.name ?? null,
+          bisonInstance: campaign?.bison_instance ?? "outboundhero",
           message: data.message,
           failures: data.failures || [],
         });
@@ -776,6 +790,7 @@ export default function NurturePage() {
           campaignId: campaign?.id ?? null,
           campaignUuid: campaign?.uuid ?? null,
           campaignName: campaign?.name ?? null,
+          bisonInstance: campaign?.bison_instance ?? "outboundhero",
           message: data.message,
           obMessage: data.obMessage,
           failures: data.failures || [],
@@ -791,6 +806,7 @@ export default function NurturePage() {
           campaignId: campaign?.id ?? null,
           campaignUuid: campaign?.uuid ?? null,
           campaignName: campaign?.name ?? null,
+          bisonInstance: campaign?.bison_instance ?? "outboundhero",
           error: data.error || "Push failed",
           failures: data.failures || [],
         });
@@ -1528,6 +1544,8 @@ interface PushResultData {
   campaignId: number | null;
   campaignUuid: string | null;
   campaignName: string | null;
+  /** Bison instance the campaign lives on — used to build dashboard URLs. */
+  bisonInstance: string;
   message?: string;
   obMessage?: string;
   error?: string;
@@ -1628,8 +1646,8 @@ function PushResultDialog({
             <a
               href={
                 result.campaignUuid
-                  ? `https://app.outboundhero.co/campaigns/${result.campaignUuid}`
-                  : `https://app.outboundhero.co/campaigns/${result.campaignId}/leads`
+                  ? `${getInstanceBaseUrl(result.bisonInstance)}/campaigns/${result.campaignUuid}`
+                  : `${getInstanceBaseUrl(result.bisonInstance)}/campaigns/${result.campaignId}/leads`
               }
               target="_blank"
               rel="noreferrer"
@@ -2104,7 +2122,7 @@ function ClientInsights({
             {clientCampaigns.map((c) => (
               <a
                 key={c.id}
-                href={c.uuid ? `https://app.outboundhero.co/campaigns/${c.uuid}` : `https://app.outboundhero.co/campaigns/${c.id}/leads`}
+                href={c.uuid ? `${getInstanceBaseUrl(c.bison_instance)}/campaigns/${c.uuid}` : `${getInstanceBaseUrl(c.bison_instance)}/campaigns/${c.id}/leads`}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/30"

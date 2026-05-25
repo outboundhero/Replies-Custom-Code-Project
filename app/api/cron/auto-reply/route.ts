@@ -32,6 +32,7 @@ import supabase from "@/lib/supabase";
 import { sendReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { logActivity, logError } from "@/lib/errors";
+import { coerceInstance } from "@/lib/bison-instances";
 
 export const maxDuration = 60;
 
@@ -47,6 +48,7 @@ interface DueRow {
   lead_category: string | null;
   auto_reply_kind: string | null;
   auto_reply_due_at: string | null;
+  bison_instance: string | null;
   cc_name_1: string | null; cc_email_1: string | null;
   cc_name_2: string | null; cc_email_2: string | null;
   cc_name_3: string | null; cc_email_3: string | null;
@@ -85,7 +87,7 @@ interface BuildResult {
   plainSummary: string;   // What we mirror into replies.sent_reply for the inbox UI
 }
 
-async function buildBodyForKind(row: DueRow): Promise<{ ok: true; build: BuildResult } | { ok: false; reason: string }> {
+async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok: true; build: BuildResult } | { ok: false; reason: string }> {
   const kind = row.auto_reply_kind || "not_interested";
 
   if (kind === "not_interested") {
@@ -97,7 +99,7 @@ async function buildBodyForKind(row: DueRow): Promise<{ ok: true; build: BuildRe
     if (!row.lead_id) return { ok: false, reason: "missing lead_id (untracked reply?)" };
     if (!row.campaign_id) return { ok: false, reason: "missing campaign_id" };
 
-    const firstEmail = await getFirstSentEmail(row.lead_id, row.campaign_id);
+    const firstEmail = await getFirstSentEmail(instanceKey, row.lead_id, row.campaign_id);
     if (!firstEmail) return { ok: false, reason: `no sent emails for lead ${row.lead_id} in campaign ${row.campaign_id}` };
 
     const intro = `<p>Looks like you are back, so I am sending the initial email again.</p><br>`;
@@ -124,7 +126,7 @@ export async function GET(req: NextRequest) {
     .from("replies")
     .select(
       "id, reply_id, sender_id, lead_id, campaign_id, lead_email, lead_name, sender_name, " +
-      "lead_category, auto_reply_kind, auto_reply_due_at, " +
+      "lead_category, auto_reply_kind, auto_reply_due_at, bison_instance, " +
       "cc_name_1, cc_email_1, cc_name_2, cc_email_2, cc_name_3, cc_email_3, " +
       "cc_name_4, cc_email_4, cc_name_5, cc_email_5, cc_name_6, cc_email_6, " +
       "bcc_name_1, bcc_email_1, bcc_name_2, bcc_email_2"
@@ -177,9 +179,14 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
-    const built = await buildBodyForKind(row);
+    // Per-row instance routing. The row's IDs (sender_id, reply_id,
+    // campaign_id) are only valid on the instance the reply originally
+    // came from — that's stamped on row.bison_instance at webhook time.
+    const instanceKey = coerceInstance(row.bison_instance);
+
+    const built = await buildBodyForKind(row, instanceKey);
     if (!built.ok) {
-      await logError("inbox", `${kind}-auto-reply`, `build skipped: ${built.reason}`, { row_id: row.id });
+      await logError("inbox", `${kind}-auto-reply`, `build skipped: ${built.reason}`, { row_id: row.id, bison_instance: instanceKey });
       // Mark sent so we don't loop on a permanently-broken row.
       await supabase
         .from("replies")
@@ -192,7 +199,7 @@ export async function GET(req: NextRequest) {
     const ccEmails = collectRecipients(row, "cc");
     const bccEmails = collectRecipients(row, "bcc");
 
-    const result = await sendReply({
+    const result = await sendReply(instanceKey, {
       replyId: row.reply_id,
       senderEmailId: row.sender_id,
       message: built.build.message,
@@ -213,7 +220,7 @@ export async function GET(req: NextRequest) {
         .eq("id", row.id);
       await logActivity("inbox", `${kind}-auto-reply-sent`, {
         lead_email: row.lead_email,
-        details: { reply_id: row.reply_id, kind, lead_name: row.lead_name, sender_name: row.sender_name },
+        details: { reply_id: row.reply_id, kind, bison_instance: instanceKey, lead_name: row.lead_name, sender_name: row.sender_name },
       });
       sent++;
     } else {
@@ -221,6 +228,7 @@ export async function GET(req: NextRequest) {
         row_id: row.id,
         reply_id: row.reply_id,
         lead_email: row.lead_email,
+        bison_instance: instanceKey,
       });
       failed++;
       failures.push({ id: row.id, reason: result.error || "send failed" });

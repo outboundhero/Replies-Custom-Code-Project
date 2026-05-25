@@ -1,16 +1,23 @@
 /**
- * Legacy untracked-reply webhook URL — preserved so the original
- * outboundhero Bison config keeps working without reconfiguration.
+ * Per-instance untracked-reply webhook.
  *
- * Functionally identical to /api/webhook/untracked/outboundhero.
+ * URL: POST /api/webhook/untracked/<instanceKey>
+ *
+ * Same shape as the tracked variant — see that file's header for why.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { processUntrackedReply } from "@/lib/processing/untracked";
 import { logError } from "@/lib/errors";
-import { DEFAULT_INSTANCE } from "@/lib/bison-instances";
+import { isValidInstance } from "@/lib/bison-instances";
 
-export async function POST(req: NextRequest) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ instanceKey: string }> }) {
+  const { instanceKey } = await params;
+
+  if (!isValidInstance(instanceKey)) {
+    return NextResponse.json({ error: `Unknown Bison instance: ${instanceKey}` }, { status: 404 });
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let payload: any;
   try {
@@ -23,12 +30,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await processUntrackedReply(payload, DEFAULT_INSTANCE);
-    return NextResponse.json({ ok: true, instance: DEFAULT_INSTANCE });
+    await processUntrackedReply(payload, instanceKey);
+    return NextResponse.json({ ok: true, instance: instanceKey });
   } catch (error) {
     await logError("untracked", "webhook", (error as Error).message, {
       _webhook_payload: payload,
-      bison_instance: DEFAULT_INSTANCE,
+      bison_instance: instanceKey,
     });
     return NextResponse.json({ error: "Processing failed" }, { status: 500 });
   }

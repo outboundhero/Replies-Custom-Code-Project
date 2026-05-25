@@ -5,6 +5,7 @@ import { processTrackedReply } from "@/lib/processing/tracked";
 import { processUntrackedReply } from "@/lib/processing/untracked";
 import { sendToClayWebhook } from "@/lib/clay";
 import { blacklistDomain, blacklistEmail } from "@/lib/processing/domain-blacklist";
+import { coerceInstance } from "@/lib/bison-instances";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -39,16 +40,20 @@ export async function POST(req: NextRequest) {
     try {
       const parsed = JSON.parse(entryPayload);
       try {
+        // Pre-multi-instance error rows didn't store bison_instance; fall
+        // back to the default. New rows carry it explicitly.
+        const retryInstance = coerceInstance(parsed.bison_instance);
         if (stage === "blacklist") {
           if (!parsed.from_email) throw new Error("Missing from_email in payload");
           await blacklistDomain(
+            retryInstance,
             parsed.from_email,
             parsed.matched_phrase || "",
             (entry.workflow as string) || "tracked"
           );
         } else {
           if (!parsed.email) throw new Error("Missing email in payload");
-          await blacklistEmail(parsed.email, (entry.workflow as string) || "tracked");
+          await blacklistEmail(retryInstance, parsed.email, (entry.workflow as string) || "tracked");
         }
         // The blacklist function logs its own error if it fails again, so we
         // verify by checking whether a fresh error row was just written.

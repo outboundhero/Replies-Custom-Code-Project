@@ -8,6 +8,7 @@ import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 import { extractRedirectEmail } from "@/lib/processing/extract-redirect-email";
 import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
+import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -17,22 +18,26 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { action, id } = body;
 
-    // Per-user client scoping: if this user is restricted to specific
-    // client_tags, the row they're mutating must belong to one of them.
-    // Verified by a single quick lookup before any side effect runs.
+    // Per-user client scoping + per-row instance lookup. Both rely on the
+    // same row, so fetch once. `rowInstance` is the Bison instance every
+    // outgoing API call in this handler should target — it's the only
+    // instance this row's IDs (sender_id, reply_id, campaign_id) are
+    // valid on.
+    let rowInstance: string = DEFAULT_INSTANCE;
     if (id) {
       const session = await getSession();
       const allowed = session?.allowedClientTags ?? null;
+      const { data: row } = await supabase
+        .from("replies")
+        .select("client_tag, bison_instance")
+        .eq("id", id)
+        .single();
       if (allowed && allowed.length) {
-        const { data: row } = await supabase
-          .from("replies")
-          .select("client_tag")
-          .eq("id", id)
-          .single();
         if (!row || !row.client_tag || !allowed.includes(row.client_tag)) {
           return NextResponse.json({ error: "Not found" }, { status: 404 });
         }
       }
+      rowInstance = coerceInstance(row?.bison_instance);
     }
 
     switch (action) {
@@ -60,6 +65,7 @@ export async function POST(req: NextRequest) {
             .single();
           if (reply?.lead_email) {
             await blacklistEmail(
+              rowInstance,
               reply.lead_email,
               (reply.workflow as string) || "inbox",
               { client_tag: reply.client_tag as string | undefined },
@@ -71,7 +77,7 @@ export async function POST(req: NextRequest) {
         // contact the lead redirected us to (extract new email from the
         // reply, fetch the first sent email, send it via /replies/new).
         if (category === "Change Of Target") {
-          extras.change_of_target = await handleChangeOfTarget(id);
+          extras.change_of_target = await handleChangeOfTarget(id, rowInstance);
         }
 
         // Not Interested (Send Reply) → schedule a polite acknowledgment
@@ -233,7 +239,7 @@ export async function POST(req: NextRequest) {
 
       case "send-reply": {
         const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails } = body;
-        const result = await sendReply({ replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails });
+        const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails });
         if (result.ok) {
           await supabase.from("replies").update({
             sent_reply: message,
@@ -245,7 +251,7 @@ export async function POST(req: NextRequest) {
 
       case "forward": {
         const { replyId, senderEmailId, message, forwardTo, leadName } = body;
-        const result = await forwardReply({ replyId, senderEmailId, message, forwardTo, leadName });
+        const result = await forwardReply(rowInstance, { replyId, senderEmailId, message, forwardTo, leadName });
         if (result.ok) {
           await supabase.from("replies").update({
             forwarded_to: forwardTo,
@@ -258,7 +264,7 @@ export async function POST(req: NextRequest) {
 
       case "send-one-off": {
         const { senderEmailId, subject, message, toEmail, toName, ccEmails } = body;
-        const result = await sendOneOffReply({ senderEmailId, subject, message, toEmail, toName, ccEmails });
+        const result = await sendOneOffReply(rowInstance, { senderEmailId, subject, message, toEmail, toName, ccEmails });
         return NextResponse.json(result);
       }
 
@@ -277,7 +283,7 @@ export async function POST(req: NextRequest) {
             { status: 400 },
           );
         }
-        await blacklistDomain(email, "manual blacklist", "inbox");
+        await blacklistDomain(rowInstance, email, "manual blacklist", "inbox");
         return NextResponse.json({ ok: true });
       }
 
@@ -355,7 +361,7 @@ interface ChangeOfTargetResult {
  * Failures are logged to error_log so the user sees them on /errors and
  * can retry manually if needed.
  */
-async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResult> {
+async function handleChangeOfTarget(replyId: number, instanceKey: string): Promise<ChangeOfTargetResult> {
   try {
     const { data: reply, error } = await supabase
       .from("replies")
@@ -392,7 +398,7 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
     // campaign the reply belongs to. A lead can sit in multiple
     // campaigns over time and we need to mirror the cold email from the
     // exact one this reply came from — not some unrelated older outreach.
-    const firstEmail = await getFirstSentEmail(leadId, campaignId);
+    const firstEmail = await getFirstSentEmail(instanceKey, leadId, campaignId);
     if (!firstEmail) {
       return { ok: false, reason: `No sent emails found for lead ${leadId} in campaign ${campaignId}` };
     }
@@ -422,7 +428,7 @@ async function handleChangeOfTarget(replyId: number): Promise<ChangeOfTargetResu
       `<p>Let me know,</p>` +
       `<p>${escapeHtml(senderName)}</p>`;
 
-    const send = await sendOneOffReply({
+    const send = await sendOneOffReply(instanceKey, {
       senderEmailId: firstEmail.sender_email.id,
       subject: firstEmail.email_subject || "(no subject)",
       message: wrappedMessage,

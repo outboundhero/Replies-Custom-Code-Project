@@ -79,11 +79,18 @@ export async function initializeDatabase() {
       reply_template TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
+    `CREATE TABLE IF NOT EXISTS client_instances (
+      client_tag TEXT PRIMARY KEY,
+      instance_key TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_by TEXT
+    )`,
     `CREATE INDEX IF NOT EXISTS idx_client_tags_tag ON client_tags(tag)`,
     `CREATE INDEX IF NOT EXISTS idx_client_config_tag ON client_config(client_tag)`,
     `CREATE INDEX IF NOT EXISTS idx_company_codes_priority ON company_codes(priority DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_error_log_timestamp ON error_log(timestamp DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_activity_log_timestamp ON activity_log(timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_client_instances_key ON client_instances(instance_key)`,
   ];
 
   for (const sql of statements) {
