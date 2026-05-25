@@ -127,27 +127,55 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(payload);
     }
 
-    // Mode: counts — one HEAD count per known category, run in parallel.
-    // Old approach paginated every reply row into memory and tallied in JS;
-    // that scaled linearly with the table and was the source of the
-    // "category opening is slow" complaint. Now: ~20 head queries,
-    // estimated counts (planner-based, O(1)).
+    // Mode: counts — single Postgres function call returns all category
+    // counts in one round trip with one query plan. Replaces 20 parallel
+    // HEAD count queries, each of which forced the planner to re-evaluate
+    // the 32-clause cherry view NOT ILIKE chain.
     //
-    // Cached for 60s keyed by every filter that affects the answer + the
-    // mutate version counter. Realtime client-side updates keep the UI
-    // current during that window, so the staleness is invisible.
+    // Falls back to the legacy 20-query path if the RPC isn't installed
+    // yet (so a fresh deploy doesn't break before the SQL is applied).
+    //
+    // Cached for 60s; mutations + new replies bump the version counter.
     if (mode === "counts") {
+      const viewParam = req.nextUrl.searchParams.get("view");
       const cacheKey = `counts:v${getCacheVersion()}:${JSON.stringify({
         clientTag,
         allowed,
-        workflow: req.nextUrl.searchParams.get("workflow"),
-        search: req.nextUrl.searchParams.get("search"),
-        view: req.nextUrl.searchParams.get("view"),
+        workflow,
+        search,
+        view: viewParam,
       })}`;
       if (!fresh) {
         const hit = getInboxCache<{ counts: Record<string, number>; total: number }>(cacheKey, COUNTS_TTL_MS);
         if (hit) return NextResponse.json(hit);
       }
+
+      // Fast path: one RPC call.
+      const { data: rpcRows, error: rpcErr } = await supabase.rpc("inbox_category_counts", {
+        p_client_tag: clientTag,
+        p_allowed_tags: clientTag ? null : (allowed && allowed.length ? allowed : null),
+        p_workflow: workflow,
+        p_search: search,
+        p_view: viewParam,
+      });
+
+      if (!rpcErr && Array.isArray(rpcRows)) {
+        const counts: Record<string, number> = {};
+        LEAD_CATEGORIES.forEach((cat) => { counts[cat] = 0; });
+        let total = 0;
+        for (const row of rpcRows as Array<{ lead_category: string; n: number }>) {
+          const n = Number(row.n) || 0;
+          if (row.lead_category in counts) counts[row.lead_category] = n;
+          total += n;
+        }
+        const payload = { counts, total };
+        setInboxCache(cacheKey, payload);
+        return NextResponse.json(payload);
+      }
+
+      // Slow-path fallback: legacy 20-query fan-out. Used only if the RPC
+      // isn't installed (one-time, until the SQL is applied) or if it errors.
+      if (rpcErr) console.warn("[inbox/counts] RPC failed, falling back:", rpcErr.message);
 
       const baseQuery = () => {
         let q = supabase.from("replies").select("id", { count: "estimated", head: true });
