@@ -136,6 +136,10 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     "Sender ID": sender_email.id,
     "Sender Name": sender_email.name,
     "Email Subject": reply.email_subject,
+    // Bison workspace this reply came from. Airtable silently ignores
+    // unknown fields, so this is safe to write even on bases that don't
+    // have the "Bison Instance" column yet.
+    "Bison Instance": bisonInstance,
     // See lib/processing/sanitize-airtable.ts — same Airtable Long-text
     // pitfalls as the tracked path (byte limit, control chars).
     "Reply we got": sanitizeForAirtableLongText(cleanedReply),

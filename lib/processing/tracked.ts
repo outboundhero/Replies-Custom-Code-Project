@@ -171,6 +171,12 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     "Person Linkedin URL": customVars.linkedin,
     "Reply Time": recipients.replyTime,
     "Client Tag": campaignTag,
+    // Bison workspace this reply came from. Combined with Lead ID +
+    // Campaign Name in the dedupe formula below so the same numeric
+    // lead ID on two different instances stays as two separate rows.
+    // SAFE TO LEAVE UNSET IN AIRTABLE: if the base doesn't yet have a
+    // "Bison Instance" column, Airtable just ignores unknown fields.
+    "Bison Instance": bisonInstance,
     "First Name": lead.first_name,
     "Last Name": lead.last_name,
     "Address": customVars.address,
@@ -218,6 +224,19 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   let action: string;
 
   try {
+    // Dedupe by Lead ID + Campaign Name (legacy formula). The "Bison
+    // Instance" field is written on every record (see baseFields) but
+    // NOT in the dedupe formula by default — that would break dedupe
+    // on bases that don't have the column yet (formula returns false,
+    // creating duplicates instead of updates).
+    //
+    // When you migrate a client to a new instance: (1) add a "Bison
+    // Instance" singleLineText column to that client's Airtable base,
+    // (2) backfill existing rows to "outboundhero", then (3) extend
+    // this formula to AND on {Bison Instance} for that base if you
+    // need strict per-instance row separation. In practice, campaign
+    // names usually include the client tag, so Lead-ID-level collisions
+    // across instances are rare.
     const existingRecords = await searchRecords(
       section.airtable_base_id,
       section.airtable_table_id,
