@@ -9,6 +9,7 @@ import { extractRedirectEmail } from "@/lib/processing/extract-redirect-email";
 import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
+import { bumpCacheVersion } from "@/lib/inbox-cache";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -48,6 +49,8 @@ export async function POST(req: NextRequest) {
           .update({ lead_category: category, updated_at: new Date().toISOString() })
           .eq("id", id);
         if (error) throw new Error(error.message);
+        // Counts cache stale now — category moved between buckets.
+        bumpCacheVersion();
 
         // Side-effect outputs accumulated below, then merged into the
         // single final response so the client can show one toast.
@@ -234,6 +237,8 @@ export async function POST(req: NextRequest) {
         }
         const { error } = await supabase.from("replies").update(updateData).eq("id", id);
         if (error) throw new Error(error.message);
+        // Client tag changed — inbox counts + client-tag list both stale.
+        bumpCacheVersion();
         return NextResponse.json({ ok: true });
       }
 
@@ -474,6 +479,7 @@ async function handleChangeOfTarget(replyId: number, instanceKey: string): Promi
           first_email_subject: firstEmail.email_subject,
           first_email_sent_at: firstEmail.sent_at,
           sender_email_id: firstEmail.sender_email.id,
+          bison_instance: instanceKey,
         },
       },
     );

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { getView, type InboxView } from "@/lib/inbox-views";
+import { getInboxCache, setInboxCache, getCacheVersion } from "@/lib/inbox-cache";
 
 // Counts + leads can be slow on the big replies table.
 export const maxDuration = 60;
@@ -9,6 +10,11 @@ export const maxDuration = 60;
 const BATCH_SIZE = 1000;
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 500;
+
+// Cache TTLs — short enough that realtime UI updates make stale data invisible,
+// long enough that repeat page loads inside the same session are instant.
+const COUNTS_TTL_MS = 60 * 1000;       // 60s — counts shift slowly per category
+const CLIENT_TAGS_TTL_MS = 5 * 60 * 1000; // 5min — tags barely change
 
 /**
  * Mirror of LEAD_CATEGORIES in app/(dashboard)/inbox/page.tsx — keep in sync.
@@ -80,6 +86,7 @@ export async function GET(req: NextRequest) {
     const allowed = session?.allowedClientTags ?? null;
 
     const mode = req.nextUrl.searchParams.get("mode");
+    const fresh = req.nextUrl.searchParams.get("fresh") === "1";
     const requestedClientTag = req.nextUrl.searchParams.get("client_tag");
     // Hard-enforce per-user client scoping. If the caller asks for a tag
     // they're not allowed to see, override to one of their allowed tags
@@ -104,12 +111,20 @@ export async function GET(req: NextRequest) {
       if (allowed && allowed.length) {
         return NextResponse.json({ tags: allowed.slice().sort() });
       }
+      // Cached for 5 minutes — distinct client tags barely change.
+      const cacheKey = `tags:v${getCacheVersion()}`;
+      if (!fresh) {
+        const hit = getInboxCache<{ tags: string[] }>(cacheKey, CLIENT_TAGS_TTL_MS);
+        if (hit) return NextResponse.json(hit);
+      }
       const data = await fetchAllRows<{ client_tag: string }>((from, to) => {
         let q = supabase.from("replies").select("client_tag").range(from, to);
         return q as any;
       });
       const tags = [...new Set(data.map((r) => r.client_tag).filter(Boolean))].sort();
-      return NextResponse.json({ tags });
+      const payload = { tags };
+      setInboxCache(cacheKey, payload);
+      return NextResponse.json(payload);
     }
 
     // Mode: counts — one HEAD count per known category, run in parallel.
@@ -117,7 +132,23 @@ export async function GET(req: NextRequest) {
     // that scaled linearly with the table and was the source of the
     // "category opening is slow" complaint. Now: ~20 head queries,
     // estimated counts (planner-based, O(1)).
+    //
+    // Cached for 60s keyed by every filter that affects the answer + the
+    // mutate version counter. Realtime client-side updates keep the UI
+    // current during that window, so the staleness is invisible.
     if (mode === "counts") {
+      const cacheKey = `counts:v${getCacheVersion()}:${JSON.stringify({
+        clientTag,
+        allowed,
+        workflow: req.nextUrl.searchParams.get("workflow"),
+        search: req.nextUrl.searchParams.get("search"),
+        view: req.nextUrl.searchParams.get("view"),
+      })}`;
+      if (!fresh) {
+        const hit = getInboxCache<{ counts: Record<string, number>; total: number }>(cacheKey, COUNTS_TTL_MS);
+        if (hit) return NextResponse.json(hit);
+      }
+
       const baseQuery = () => {
         let q = supabase.from("replies").select("id", { count: "estimated", head: true });
         if (clientTag) q = q.eq("client_tag", clientTag);
@@ -154,7 +185,9 @@ export async function GET(req: NextRequest) {
         counts[cat] = categoryCounts[i];
       });
 
-      return NextResponse.json({ counts, total: totalCount });
+      const payload = { counts, total: totalCount };
+      setInboxCache(cacheKey, payload);
+      return NextResponse.json(payload);
     }
 
     // Default mode: fetch leads for a specific category, paginated.

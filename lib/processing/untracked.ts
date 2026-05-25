@@ -14,6 +14,7 @@ import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
 import { coerceInstance } from "@/lib/bison-instances";
+import { bumpCacheVersion } from "@/lib/inbox-cache";
 
 async function getUntrackedConfig(): Promise<UntrackedConfig> {
   const result = await db.execute("SELECT * FROM untracked_config WHERE id = 1");
@@ -262,6 +263,8 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
       console.error("[untracked] Supabase upsert failed:", error.message);
       return;
     }
+    // Invalidate inbox cache so the next page load sees the new row.
+    bumpCacheVersion();
     // Fire-and-forget ESP detection — same pattern as tracked.ts.
     if (reply.from_email_address) {
       import("@/lib/email-guard").then(({ lookupEmailHost }) =>

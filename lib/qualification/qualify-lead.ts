@@ -34,12 +34,14 @@ interface QualifyLeadParams {
   recordId: string;
   airtableBaseId: string;
   airtableTableId: string;
+  /** Bison workspace the original reply came from — surfaced in the activity log. */
+  bisonInstance?: string;
 }
 
 export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   const {
     campaignTag, companyName, city, state, address, googleMapsUrl, phone,
-    leadEmail, replyText, replySubject, recordId, airtableBaseId, airtableTableId,
+    leadEmail, replyText, replySubject, recordId, airtableBaseId, airtableTableId, bisonInstance,
   } = params;
 
   // 1. Get exclusion/inclusion rules from Supabase
@@ -205,6 +207,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
       suggested: suggestedClients || undefined,
       enriched_confidence: enriched.confidence,
       enriched_industry: enriched.industry || undefined,
+      bison_instance: bisonInstance,
     },
   });
 }

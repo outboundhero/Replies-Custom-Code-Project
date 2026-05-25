@@ -18,6 +18,7 @@ import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
 import { coerceInstance } from "@/lib/bison-instances";
+import { bumpCacheVersion } from "@/lib/inbox-cache";
 
 interface ClientConfig {
   cc_name_1?: string | null; cc_email_1?: string | null;
@@ -347,6 +348,9 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       console.error("[tracked] Supabase upsert failed:", error.message);
       return;
     }
+    // Invalidate the inbox counts/tags cache so the next page load sees
+    // the new row immediately (instead of waiting up to 60s for TTL).
+    bumpCacheVersion();
     // Fire-and-forget ESP detection. Looks up the recipient's mailbox
     // provider via EmailGuard and writes it back. Non-blocking so the
     // webhook keeps responding fast; the cron / backfill catches any
@@ -392,6 +396,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       recordId,
       airtableBaseId: section.airtable_base_id,
       airtableTableId: section.airtable_table_id,
+      bisonInstance,
     }).catch(async (error) => {
       await logError("tracked", "qualification", (error as Error).message, {
         tag: campaignTag,
