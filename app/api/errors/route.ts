@@ -17,8 +17,13 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(result.rows[0] || null);
     }
 
-    // List query excludes payload to avoid Turso response size limits
-    let sql = "SELECT id, timestamp, workflow, stage, message, (payload IS NOT NULL) as has_payload FROM error_log";
+    // List query excludes payload to avoid Turso response size limits, but
+    // surfaces bison_instance via json_extract so the list view can show a
+    // workspace badge per row without loading the full payload. Returns
+    // NULL for rows without that key (legacy/non-Bison errors).
+    let sql = "SELECT id, timestamp, workflow, stage, message, (payload IS NOT NULL) as has_payload, " +
+      "CASE WHEN payload IS NOT NULL AND json_valid(payload) THEN json_extract(payload, '$.bison_instance') ELSE NULL END as bison_instance " +
+      "FROM error_log";
     const args: (string | number)[] = [];
     const conditions: string[] = [];
 

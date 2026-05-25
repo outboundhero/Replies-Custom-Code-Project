@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { InstanceBadge } from "@/components/instance-badge";
 
 interface ActivityEntry {
   id: number;
@@ -22,6 +23,7 @@ interface ErrorEntry {
   workflow: string;
   stage: string;
   message: string;
+  bison_instance: string | null;
 }
 
 export default function DashboardPage() {
@@ -184,6 +186,9 @@ export default function DashboardPage() {
                           {entry.action}
                         </Badge>
                         <Badge variant="outline">{entry.workflow}</Badge>
+                        {details?.bison_instance && (
+                          <InstanceBadge instance={details.bison_instance as string} size="xs" />
+                        )}
                         {entry.client_tag && (
                           <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
                             {entry.client_tag}
@@ -268,6 +273,9 @@ export default function DashboardPage() {
                         <Badge variant="outline" className="text-xs">
                           {entry.workflow}
                         </Badge>
+                        {entry.bison_instance && (
+                          <InstanceBadge instance={entry.bison_instance} size="xs" />
+                        )}
                         <span className="text-xs text-muted-foreground">
                           {entry.stage}
                         </span>

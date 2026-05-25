@@ -166,7 +166,7 @@ export async function GET(req: NextRequest) {
 
     let q = supabase
       .from("replies")
-      .select("id, workflow, lead_email, lead_name, company_name, client_tag, ai_categorized_lead_category, lead_category, reply_status, industry_audit, location_audit, created_at, reply_id")
+      .select("id, workflow, lead_email, lead_name, company_name, client_tag, bison_instance, ai_categorized_lead_category, lead_category, reply_status, industry_audit, location_audit, created_at, reply_id")
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
     if (clientTag) q = q.eq("client_tag", clientTag);

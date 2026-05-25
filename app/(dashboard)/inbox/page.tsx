@@ -13,6 +13,7 @@ import { INBOX_VIEWS } from "@/lib/inbox-views";
 // Pure / no server deps — must NOT import from domain-blacklist (which
 // pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
+import { InstanceBadge } from "@/components/instance-badge";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -25,7 +26,8 @@ type ReplyDetail = Record<string, any>;
 
 interface ReplyListItem {
   id: number; workflow: string; lead_email: string; lead_name: string; company_name: string;
-  client_tag: string; ai_categorized_lead_category: string; lead_category: string;
+  client_tag: string; bison_instance: string | null;
+  ai_categorized_lead_category: string; lead_category: string;
   reply_status: string; industry_audit: string | null; location_audit: string | null;
   created_at: string; reply_id: number;
 }
@@ -568,6 +570,7 @@ export default function InboxPage() {
                       <div className="flex items-center gap-1 mt-0.5">
                         <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category || "—"}</span>
                         <span className="text-[10px] font-mono font-bold text-primary/60">{r.client_tag || "N/A"}</span>
+                        <InstanceBadge instance={r.bison_instance} size="xs" />
                       </div>
                     </button>
                   ))}
@@ -610,6 +613,7 @@ export default function InboxPage() {
                   </a>
                 )}
                 <span className="text-[11px] font-mono font-bold bg-primary/10 text-primary px-2 py-0.5 rounded">{detail.client_tag || "N/A"}</span>
+                <InstanceBadge instance={detail.bison_instance} />
                 <span className="text-[11px] bg-muted px-2 py-0.5 rounded">{detail.workflow}</span>
               </div>
             </div>

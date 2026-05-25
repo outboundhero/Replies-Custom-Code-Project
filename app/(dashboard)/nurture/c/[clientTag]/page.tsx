@@ -11,6 +11,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
+import { InstanceBadge } from "@/components/instance-badge";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -25,6 +26,8 @@ interface NurtureItem {
   id: string;
   source: Source;
   client_tag: string | null;
+  /** Bison workspace the row originated from. Null for legacy/Airtable rows. */
+  bison_instance: string | null;
   email: string;
   first_name: string | null;
   last_name: string | null;
@@ -1762,10 +1765,13 @@ function LeadRow({
         )}
       </TableCell>
       <TableCell className="cursor-pointer" onClick={onClick}>
-        <span className="inline-flex items-center gap-1.5 text-xs">
-          <span className={`size-2 rounded-full ${SOURCE_DOT[it.source]}`} />
-          <span className="text-muted-foreground">{SOURCE_LABEL[it.source]}</span>
-        </span>
+        <div className="flex flex-col gap-1">
+          <span className="inline-flex items-center gap-1.5 text-xs">
+            <span className={`size-2 rounded-full ${SOURCE_DOT[it.source]}`} />
+            <span className="text-muted-foreground">{SOURCE_LABEL[it.source]}</span>
+          </span>
+          <InstanceBadge instance={it.bison_instance} size="xs" />
+        </div>
       </TableCell>
       <TableCell className="cursor-pointer max-w-[280px] whitespace-normal" onClick={onClick}>
         <span className="text-xs text-muted-foreground italic line-clamp-1">

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { InstanceBadge } from "@/components/instance-badge";
 
 interface ErrorEntry {
   id: number;
@@ -12,6 +13,8 @@ interface ErrorEntry {
   stage: string;
   message: string;
   has_payload: number;
+  /** Pulled server-side from payload.bison_instance via json_extract. null for non-Bison errors. */
+  bison_instance: string | null;
 }
 
 export default function ErrorsPage() {
@@ -233,6 +236,7 @@ export default function ErrorsPage() {
                       }}
                     >
                       <Badge variant="outline">{entry.workflow}</Badge>
+                      {entry.bison_instance && <InstanceBadge instance={entry.bison_instance} size="xs" />}
                       <span className="text-xs font-mono text-muted-foreground">
                         {entry.stage}
                       </span>

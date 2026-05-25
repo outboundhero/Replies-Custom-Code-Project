@@ -160,6 +160,8 @@ interface NurtureItem {
   id: string;
   source: "soft_negative" | "out_of_office" | "sequence_finished" | "legacy_airtable" | "other";
   client_tag: string | null;
+  /** Bison workspace this row originated from (or NULL for legacy/Airtable rows that pre-date instance routing). */
+  bison_instance: string | null;
   email: string;
   first_name: string | null;
   last_name: string | null;
@@ -254,7 +256,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("replies")
         .select(
-          "id, reply_id, client_tag, lead_email, first_name, last_name, company_name, address, city, state, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
+          "id, reply_id, client_tag, bison_instance, lead_email, first_name, last_name, company_name, address, city, state, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
         )
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
@@ -347,6 +349,7 @@ export async function GET(req: NextRequest) {
           id: `reply:${r.id}`,
           source,
           client_tag: r.client_tag,
+          bison_instance: r.bison_instance ?? null,
           email: r.lead_email,
           first_name: r.first_name,
           last_name: r.last_name,
@@ -380,7 +383,7 @@ export async function GET(req: NextRequest) {
       let q = supabase
         .from("nurture_sequence_finished")
         .select(
-          "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, email, first_name, last_name, company, sequence_finished_at, added_at, skipped, esp"
+          "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, bison_instance, email, first_name, last_name, company, sequence_finished_at, added_at, skipped, esp"
         );
 
       q = seqOrderByAddedDesc
@@ -420,6 +423,7 @@ export async function GET(req: NextRequest) {
           id: `seq:${r.id}`,
           source: "sequence_finished",
           client_tag: r.client_tag,
+          bison_instance: r.bison_instance ?? null,
           email: r.email,
           first_name: r.first_name,
           last_name: r.last_name,
@@ -534,6 +538,8 @@ export async function GET(req: NextRequest) {
           id: `legacy:${r.id}`,
           source,
           client_tag: r.client_tag,
+          // Legacy rows pre-date instance routing — badge falls back to default.
+          bison_instance: null,
           email: r.lead_email,
           first_name: r.first_name,
           last_name: r.last_name,
