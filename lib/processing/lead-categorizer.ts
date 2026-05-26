@@ -103,7 +103,26 @@ Note: if the prospect's email reply is something like: "Unsure" or "Maybe", retu
 
 1. Analyze the reply body and reply subject to determine the latest reply email's category.
 2. Prioritize explicit phrases that clearly indicate a category, such as "I'm out of the office", "I'm on vacation", "Please contact someone else", "Stop contacting me", or "Do not contact".
-3. If the AI cannot confidently classify the email based on the provided data, assign it to "Unrecognizable by AI". Note: if the person replying provides only their phone number in their reply (and is the lead themselves, not redirecting), then categorize it as "Interested".
+
+3. OPT-OUT KEYWORDS — if the reply body OR subject contains ANY of the following words/phrases (case-insensitive, substring match), categorize as "Do Not Contact" regardless of any other content in the reply:
+
+   Standard opt-out phrases:
+   "STOP", "QUIT", "END", "NO MORE", "NO MORE EMAILS", "REMOVE ME", "remove me",
+   "remove my email", "take me off", "take my email off", "take my email out",
+   "unsubscribe", "unsubscribe me", "end outreach", "stop outreach",
+   "halt outreach", "kick rocks", "add to blacklist"
+
+   QA codewords — these are testing signals; ALWAYS treat as Do Not Contact even
+   though they look like food/animal words and have no opt-out meaning in English:
+   "HOT DOG", "PINEAPPLE", "TACO", "BANANA", "WAFFLE", "PIZZA", "BURRITO",
+   "PICKLE", "HAMBURGER", "MEATBALL", "NACHO", "PRETZEL", "MUFFIN", "POTATO",
+   "DONUT", "NOODLE", "PENGUIN", "LLAMA", "OTTER", "KAZOO"
+
+   These keywords override every other rule including the referral / forward /
+   wrong-person decision tree. If a reply contains "BANANA" the answer is
+   "Do Not Contact" — full stop.
+
+4. If the AI cannot confidently classify the email based on the provided data, assign it to "Unrecognizable by AI". Note: if the person replying provides only their phone number in their reply (and is the lead themselves, not redirecting), then categorize it as "Interested".
 
 Please categorize replies as Do Not Contact if there's anything mentioned in the reply as something was attached like a Docusign, agreement link, or invoice – these replies are either malicious links or documents OR they are trying to have us pay them money.
 
@@ -299,6 +318,21 @@ Example 36 — WRONG PERSON — automated, no alternative:
   Reply Subject: "Automatic reply"
   Reply Body: "I have left the company. This mailbox is no longer monitored."
 Expected Output: "Wrong Person" — automated, no alternative contact provided.
+
+Example 37 — QA codeword (food):
+  Reply Subject: "RE: Quick cleaning question"
+  Reply Body: "BANANA"
+Expected Output: "Do Not Contact" — QA opt-out codeword.
+
+Example 38 — Standard opt-out keyword:
+  Reply Subject: "Re: Cleaning"
+  Reply Body: "QUIT"
+Expected Output: "Do Not Contact" — explicit one-word opt-out.
+
+Example 39 — Opt-out phrase embedded in a sentence:
+  Reply Subject: "Re: Service inquiry"
+  Reply Body: "Please take my email off your list and end outreach. Thank you."
+Expected Output: "Do Not Contact" — contains "take my email off" and "end outreach".
 
 #OUTPUT FORMAT#
 
