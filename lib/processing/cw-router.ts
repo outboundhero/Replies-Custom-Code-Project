@@ -133,7 +133,7 @@ export async function runCwAutoReroute(args: CwRerouteArgs): Promise<CwRerouteRe
     await supabase
       .from("replies")
       .update({
-        suggested_client: `No CW match for ZIP ${leadZip}`,
+        suggested_client: `No City Wide Facility Solutions match for ZIP ${leadZip}`,
         updated_at: new Date().toISOString(),
       })
       .eq("id", rowId);

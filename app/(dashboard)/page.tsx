@@ -35,20 +35,25 @@ export default function DashboardPage() {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<string | null>(null);
   const [clientTagFilter, setClientTagFilter] = useState<string | null>(null);
+  const [allClientTags, setAllClientTags] = useState<string[]>([]);
   const lastActivityIdRef = useRef(0);
   const lastErrorIdRef = useRef(0);
 
-  // Distinct client tags appearing in the current activity window (capped at
-  // 500 entries above). Sorted alphabetically; "All clients" pinned on top
-  // so the dropdown can also be used to clear the filter.
-  const clientTagOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const e of activity) {
-      const t = e.client_tag?.trim();
-      if (t) set.add(t);
-    }
-    return [ALL_CLIENTS_OPTION, ...Array.from(set).sort()];
-  }, [activity]);
+  // Full client-tag catalogue — same source the inbox uses. Lets the filter
+  // show every client even if their most recent activity is older than the
+  // 500-entry polling window. For scoped users, the API returns only their
+  // allowed tags automatically.
+  useEffect(() => {
+    fetch("/api/inbox?mode=client_tags")
+      .then((r) => (r.ok ? r.json() : { tags: [] }))
+      .then((d: { tags?: string[] }) => setAllClientTags(d.tags ?? []))
+      .catch(() => {});
+  }, []);
+
+  const clientTagOptions = useMemo(
+    () => [ALL_CLIENTS_OPTION, ...allClientTags],
+    [allClientTags],
+  );
 
   useEffect(() => {
     async function poll() {
