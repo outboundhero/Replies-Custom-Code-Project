@@ -87,6 +87,29 @@ interface BuildResult {
   plainSummary: string;   // What we mirror into replies.sent_reply for the inbox UI
 }
 
+/**
+ * Bison errors come back as "${status}: ${body}" from outboundhero-api.ts.
+ * Some statuses are permanent — retrying tomorrow won't help and just
+ * generates duplicate error logs every 2 minutes. Detect those and drain
+ * the row so the queue stops looping on it.
+ *
+ * - 400 / 422 → malformed request or invalid resource id (e.g. the sender
+ *   mailbox was disconnected, so `sender_email_id` is now invalid)
+ * - 401 / 403 → token revoked / forbidden — the instance config is broken,
+ *   draining stops the storm; will need a separate fix to restore sending
+ * - 404 / 410 → the reply, lead, or campaign no longer exists on Bison
+ *
+ * Anything else (429 rate limit, 5xx server-side, network) stays in the
+ * retry pool because it legitimately gets better on the next run.
+ */
+function isPermanentSendError(error: string | undefined): boolean {
+  if (!error) return false;
+  const status = parseInt(error.split(":")[0]?.trim() || "", 10);
+  if (Number.isNaN(status)) return false;
+  return status === 400 || status === 401 || status === 403
+      || status === 404 || status === 410 || status === 422;
+}
+
 async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok: true; build: BuildResult } | { ok: false; reason: string }> {
   const kind = row.auto_reply_kind || "not_interested";
 
@@ -224,12 +247,23 @@ export async function GET(req: NextRequest) {
       });
       sent++;
     } else {
+      const permanent = isPermanentSendError(result.error);
       await logError("inbox", `${kind}-auto-reply`, result.error || "sendReply !ok", {
         row_id: row.id,
         reply_id: row.reply_id,
         lead_email: row.lead_email,
         bison_instance: instanceKey,
+        permanent,
       });
+      // Permanent failures (disconnected sender, deleted resource, revoked
+      // token) never get better on retry — drain the row so the 2-min cron
+      // doesn't re-log the same error forever.
+      if (permanent) {
+        await supabase
+          .from("replies")
+          .update({ auto_reply_sent_at: new Date().toISOString() })
+          .eq("id", row.id);
+      }
       failed++;
       failures.push({ id: row.id, reason: result.error || "send failed" });
     }
