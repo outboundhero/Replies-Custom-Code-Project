@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { InstanceBadge } from "@/components/instance-badge";
+import { SearchableCombobox } from "@/components/ui/searchable-combobox";
+
+const ALL_CLIENTS_OPTION = "All clients";
 
 interface ActivityEntry {
   id: number;
@@ -31,8 +34,21 @@ export default function DashboardPage() {
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<string | null>(null);
+  const [clientTagFilter, setClientTagFilter] = useState<string | null>(null);
   const lastActivityIdRef = useRef(0);
   const lastErrorIdRef = useRef(0);
+
+  // Distinct client tags appearing in the current activity window (capped at
+  // 500 entries above). Sorted alphabetically; "All clients" pinned on top
+  // so the dropdown can also be used to clear the filter.
+  const clientTagOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of activity) {
+      const t = e.client_tag?.trim();
+      if (t) set.add(t);
+    }
+    return [ALL_CLIENTS_OPTION, ...Array.from(set).sort()];
+  }, [activity]);
 
   useEffect(() => {
     async function poll() {
@@ -119,9 +135,21 @@ export default function DashboardPage() {
         <div className="lg:col-span-2">
           <Card>
             <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <CardTitle className="text-base">Recent Activity</CardTitle>
-                <div className="flex gap-1.5 flex-wrap">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="w-[160px]">
+                    <SearchableCombobox
+                      value={clientTagFilter || ALL_CLIENTS_OPTION}
+                      onValueChange={(next) =>
+                        setClientTagFilter(next === ALL_CLIENTS_OPTION ? null : next)
+                      }
+                      options={clientTagOptions}
+                      placeholder="All clients"
+                      searchPlaceholder="Filter by tag…"
+                      triggerClassName="h-6 text-xs"
+                    />
+                  </div>
                   {[
                     { value: null, label: "All" },
                     { value: "created,updated", label: "Created/Updated" },
@@ -152,6 +180,7 @@ export default function DashboardPage() {
               ) : (
                 <div className="space-y-2 max-h-[600px] overflow-y-auto">
                   {activity.filter((entry) => {
+                    if (clientTagFilter && entry.client_tag !== clientTagFilter) return false;
                     if (!activityFilter) return true;
                     const actions = activityFilter.split(",");
                     return actions.includes(entry.action);
