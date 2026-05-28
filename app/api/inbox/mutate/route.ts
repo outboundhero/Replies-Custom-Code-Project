@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
-import db from "@/lib/db";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
@@ -10,7 +9,7 @@ import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
-import { resolveTemplate } from "@/lib/processing/template-resolver";
+import { applyReallocate } from "@/lib/processing/apply-reallocate";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -207,76 +206,8 @@ export async function POST(req: NextRequest) {
 
       case "reallocate": {
         const { client_tag } = body;
-        // Fetch new client's config (CC/BCC/template)
-        const configResult = await db.execute({
-          sql: "SELECT * FROM client_config WHERE client_tag = ?",
-          args: [client_tag],
-        });
-        const cfg = configResult.rows[0];
-        const updateData: Record<string, unknown> = {
-          client_tag,
-          updated_at: new Date().toISOString(),
-        };
-        if (cfg) {
-          updateData.cc_name_1 = cfg.cc_name_1 ? String(cfg.cc_name_1) : null;
-          updateData.cc_email_1 = cfg.cc_email_1 ? String(cfg.cc_email_1) : null;
-          updateData.cc_name_2 = cfg.cc_name_2 ? String(cfg.cc_name_2) : null;
-          updateData.cc_email_2 = cfg.cc_email_2 ? String(cfg.cc_email_2) : null;
-          updateData.cc_name_3 = cfg.cc_name_3 ? String(cfg.cc_name_3) : null;
-          updateData.cc_email_3 = cfg.cc_email_3 ? String(cfg.cc_email_3) : null;
-          updateData.cc_name_4 = cfg.cc_name_4 ? String(cfg.cc_name_4) : null;
-          updateData.cc_email_4 = cfg.cc_email_4 ? String(cfg.cc_email_4) : null;
-          updateData.cc_name_5 = cfg.cc_name_5 ? String(cfg.cc_name_5) : null;
-          updateData.cc_email_5 = cfg.cc_email_5 ? String(cfg.cc_email_5) : null;
-          updateData.cc_name_6 = cfg.cc_name_6 ? String(cfg.cc_name_6) : null;
-          updateData.cc_email_6 = cfg.cc_email_6 ? String(cfg.cc_email_6) : null;
-          updateData.bcc_name_1 = cfg.bcc_name_1 ? String(cfg.bcc_name_1) : null;
-          updateData.bcc_email_1 = cfg.bcc_email_1 ? String(cfg.bcc_email_1) : null;
-          updateData.bcc_name_2 = cfg.bcc_name_2 ? String(cfg.bcc_name_2) : null;
-          updateData.bcc_email_2 = cfg.bcc_email_2 ? String(cfg.bcc_email_2) : null;
-
-          // Resolve template variables ({FIRST_NAME}, {COMPANY}, {PHONE},
-          // {CONTEXT}, {SENDER_NAME}) against the row's lead context so
-          // the Send Reply textarea shows usable text immediately —
-          // matching what webhook ingestion does. Without this, the user
-          // sees raw {FIRST_NAME} tokens after reallocating.
-          if (cfg.reply_template) {
-            const { data: leadRow } = await supabase
-              .from("replies")
-              .select("first_name, lead_name, phone, company_name, sender_name, reply_we_got, email_subject")
-              .eq("id", id)
-              .single();
-            // Use `||` not `??` so empty-string first_name falls through
-            // to the lead_name first-word fallback.
-            const firstName =
-              ((leadRow?.first_name as string | null) || "").trim()
-              || ((leadRow?.lead_name as string | null) || "").trim().split(/\s+/)[0]
-              || "";
-            const senderFirstName =
-              ((leadRow?.sender_name as string | null) || "").trim().split(/\s+/)[0] || "";
-            try {
-              updateData.our_reply = await resolveTemplate(String(cfg.reply_template), {
-                firstName: firstName || "",
-                phoneNumber: String(leadRow?.phone || ""),
-                companyName: String(leadRow?.company_name || ""),
-                senderFirstName,
-                replyBody: String(leadRow?.reply_we_got || ""),
-                replySubject: String(leadRow?.email_subject || ""),
-              });
-            } catch (e) {
-              // Resolver failure (e.g. OpenAI down) — fall back to the
-              // raw template rather than blocking the reallocation.
-              console.warn("[reallocate] template resolve failed, using raw template:", (e as Error).message);
-              updateData.our_reply = String(cfg.reply_template);
-            }
-          } else {
-            updateData.our_reply = null;
-          }
-        }
-        const { error } = await supabase.from("replies").update(updateData).eq("id", id);
-        if (error) throw new Error(error.message);
-        // Client tag changed — inbox counts + client-tag list both stale.
-        bumpCacheVersion();
+        const result = await applyReallocate(id, client_tag);
+        if (!result.ok) throw new Error(result.error);
         return NextResponse.json({ ok: true });
       }
 

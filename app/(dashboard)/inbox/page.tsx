@@ -625,6 +625,7 @@ export default function InboxPage() {
                   { l: "Company", v: detail.company_name },
                   { l: "Phone", v: detail.phone },
                   { l: "Location", v: [detail.city, detail.state].filter(Boolean).join(", ") },
+                  { l: "ZIP", v: detail.zip },
                   { l: "Address", v: detail.address },
                   { l: "Campaign", v: detail.campaign_name },
                   { l: "Sender", v: detail.sender_email },

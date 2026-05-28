@@ -18,6 +18,7 @@ import { enrichLead, type EnrichedLeadData } from "./enrich-lead";
 import { auditIndustry } from "./industry-audit";
 import { auditLocation } from "./location-audit";
 import { extractReplyLocation } from "./extract-reply-location";
+import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
 
 interface QualifyLeadParams {
   campaignTag: string;
@@ -195,6 +196,35 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   }).eq("airtable_record_id", recordId).then(({ error }) => {
     if (error) console.error("[qualification] Supabase update failed:", error.message);
   });
+
+  // 7c. CW ZIP auto-router. For City Wide tags (CWSJ/CWSV/…), check whether
+  // the lead's resolved ZIP belongs to a DIFFERENT CW client and, if so,
+  // swap the client_tag + CC/template via the shared applyReallocate path
+  // — exactly what the inbox Reallocate button does. For non-CW tags this
+  // call just persists zip + zip_source for audit and returns.
+  //
+  // Runs AFTER the qualification update above so suggested_client from
+  // cross-client matching has already landed; the CW router may overwrite
+  // it with a more specific CW-routing note.
+  try {
+    const zipSource: ZipSource = !locResolved.zip
+      ? "missing"
+      : locResolved.source.startsWith("lead reply")
+        ? "reply_signature"
+        : "enrichment";
+    await runCwAutoReroute({
+      airtableRecordId: recordId,
+      currentClientTag: campaignTag,
+      leadZip: locResolved.zip || null,
+      zipSource,
+      leadEmail,
+      bisonInstance: bisonInstance || "",
+    });
+  } catch (error) {
+    await logError("tracked", "cw-auto-reroute", (error as Error).message, {
+      tag: campaignTag, record_id: recordId,
+    });
+  }
 
   // 8. Log activity
   await logActivity("tracked", "qualified", {
