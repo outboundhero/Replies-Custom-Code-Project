@@ -146,6 +146,16 @@ export async function runCwAutoReroute(args: CwRerouteArgs): Promise<CwRerouteRe
   }
 
   if (owner === currentClientTag) {
+    // Write an explicit "routed correctly" note so the inbox UI can
+    // confirm the router ran and approved the current tag, rather than
+    // leaving the user unsure whether the router fired at all.
+    await supabase
+      .from("replies")
+      .update({
+        suggested_client: `Routed correctly to ${currentClientTag} — ZIP ${leadZip} is in this client's service area`,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", rowId);
     return { rerouted: false, newTag: owner, note: "kept_original" };
   }
 

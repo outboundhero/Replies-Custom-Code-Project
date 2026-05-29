@@ -125,7 +125,7 @@ async function main() {
       console.error(`[${tag}] query failed:`, error.message);
       continue;
     }
-    const rows = (data || []) as Row[];
+    const rows = (data || []) as unknown as Row[];
 
     const counts: Record<Bucket, number> = {
       rerouted: 0, no_match: 0, zip_missing: 0,

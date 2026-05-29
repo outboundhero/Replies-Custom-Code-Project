@@ -666,9 +666,51 @@ export default function InboxPage() {
                   )}
                 </div>
                 {detail.qualification_reason && <p className="text-[11px] text-muted-foreground">{detail.qualification_reason}</p>}
-                {detail.suggested_client && <p className="text-[11px]"><span className="text-muted-foreground">Suggested: </span>{detail.suggested_client}</p>}
               </div>
             )}
+
+            {/* City Wide Routing — only for CW* leads */}
+            {detail.client_tag?.toUpperCase().startsWith("CW") && (() => {
+              const sug = (detail.suggested_client as string | null) || "";
+              const lowerSug = sug.toLowerCase();
+              let status: "rerouted" | "kept" | "no_match" | "zip_missing" | "not_evaluated";
+              let badgeClass: string;
+              let statusLabel: string;
+              let detailLine: string;
+              if (lowerSug.startsWith("auto-rerouted")) {
+                status = "rerouted"; badgeClass = "bg-blue-50 text-blue-700"; statusLabel = "Auto-rerouted"; detailLine = sug;
+              } else if (lowerSug.startsWith("routed correctly")) {
+                status = "kept"; badgeClass = "bg-green-50 text-green-700"; statusLabel = "Routed correctly"; detailLine = sug;
+              } else if (lowerSug.startsWith("no city wide") || lowerSug.startsWith("no cw match")) {
+                status = "no_match"; badgeClass = "bg-yellow-50 text-yellow-700"; statusLabel = "No match"; detailLine = sug;
+              } else if (lowerSug.startsWith("zip unknown")) {
+                status = "zip_missing"; badgeClass = "bg-yellow-50 text-yellow-700"; statusLabel = "ZIP unknown"; detailLine = sug;
+              } else {
+                // No router-written message. Two sub-cases:
+                //  - audit present → row predates the CW router deploy
+                //  - no audit → reply category was non-qualifying so qualifyLead never ran
+                status = "not_evaluated";
+                badgeClass = "bg-gray-100 text-gray-600";
+                statusLabel = "Not evaluated";
+                detailLine = (detail.industry_audit || detail.location_audit)
+                  ? "This reply arrived before the CW router was deployed."
+                  : "Reply category does not trigger the router (only Interested / Meeting Request / Follow Up / Unrecognizable are evaluated).";
+              }
+              return (
+                <div className="rounded border bg-white px-4 py-3 space-y-1.5">
+                  <div className="flex gap-2 items-center">
+                    <span className="text-[11px] font-medium text-muted-foreground">City Wide Routing:</span>
+                    <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${badgeClass}`}>{statusLabel}</span>
+                    {detail.zip ? (
+                      <span className="text-[11px] text-muted-foreground">ZIP <span className="font-mono">{detail.zip}</span></span>
+                    ) : status !== "not_evaluated" && (
+                      <span className="text-[11px] text-muted-foreground">no ZIP extracted</span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">{detailLine}</p>
+                </div>
+              );
+            })()}
 
             {/* Category */}
             <div className="flex items-center gap-3 rounded border bg-white px-4 py-3">
