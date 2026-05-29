@@ -685,8 +685,19 @@ export default function InboxPage() {
                 status = "no_match"; badgeClass = "bg-yellow-50 text-yellow-700"; statusLabel = "No match"; detailLine = sug;
               } else if (lowerSug.startsWith("zip unknown")) {
                 status = "zip_missing"; badgeClass = "bg-yellow-50 text-yellow-700"; statusLabel = "ZIP unknown"; detailLine = sug;
+              } else if (detail.zip_source || detail.zip) {
+                // Router DID run (zip data is stamped) but the suggested_client
+                // wasn't written — this is a "kept current tag" result from a
+                // version of the router that didn't write that message yet.
+                // Treat the same as the explicit "Routed correctly" case.
+                status = "kept";
+                badgeClass = "bg-green-50 text-green-700";
+                statusLabel = "Routed correctly";
+                detailLine = detail.zip
+                  ? `ZIP ${detail.zip} is in this client's service area — no swap needed.`
+                  : "Router evaluated this lead and kept the current tag.";
               } else {
-                // No router-written message. Two sub-cases:
+                // No router-written message AND no zip data. Two sub-cases:
                 //  - audit present → row predates the CW router deploy
                 //  - no audit → reply category was non-qualifying so qualifyLead never ran
                 status = "not_evaluated";
