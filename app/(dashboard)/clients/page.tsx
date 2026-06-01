@@ -182,7 +182,7 @@ export default function ClientsPage() {
     const current = clients.find((c) => c.tag === tag);
     if (!newSection || !current) return;
     if (current.section_id === newSectionId) return;
-    if (!confirm(`Move ${tag} from "${current.section_name}" to "${newSection.name}"? Future leads will route to the new section's Airtable base; historical leads stay where they are.`)) return;
+    if (!confirm(`Move ${tag} from "${current.section_name}" to "${newSection.name}"?\n\nCC/BCC recipients and reply template move with the client automatically.\n\nFuture leads will route to the new section's Airtable base. Historical leads stay where they are.`)) return;
 
     // Optimistic update — flip section in-place so the card re-groups
     // immediately, revert on failure.
