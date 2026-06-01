@@ -177,6 +177,40 @@ export default function ClientsPage() {
     }
   }
 
+  async function moveClient(tag: string, newSectionId: number) {
+    const newSection = sections.find((s) => s.id === newSectionId);
+    const current = clients.find((c) => c.tag === tag);
+    if (!newSection || !current) return;
+    if (current.section_id === newSectionId) return;
+    if (!confirm(`Move ${tag} from "${current.section_name}" to "${newSection.name}"? Future leads will route to the new section's Airtable base; historical leads stay where they are.`)) return;
+
+    // Optimistic update — flip section in-place so the card re-groups
+    // immediately, revert on failure.
+    setClients((prev) => prev.map((c) =>
+      c.tag === tag
+        ? { ...c, section_id: newSectionId, section_name: newSection.name, airtable_base_id: newSection.airtable_base_id }
+        : c
+    ));
+
+    try {
+      const res = await fetch("/api/config/clients/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "move", tag, section_id: newSectionId }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Failed to move ${tag}: ${data.error || res.statusText}`);
+        loadClients();
+        return;
+      }
+      toast.success(`${tag} moved to ${newSection.name}`);
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+      loadClients();
+    }
+  }
+
   async function updateInstance(tag: string, instanceKey: string) {
     // Optimistic UI — flip the badge instantly, revert on failure.
     setClients((prev) => prev.map((c) => (c.tag === tag ? { ...c, bison_instance: instanceKey } : c)));
@@ -297,6 +331,26 @@ export default function ClientsPage() {
                         </Badge>
                       )}
                     </div>
+                    {/* Section picker — moving a client updates client_tags
+                        and re-groups it under the new section card. */}
+                    <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+                      <Select
+                        value={String(client.section_id)}
+                        onValueChange={(v) => moveClient(client.tag, Number(v))}
+                      >
+                        <SelectTrigger className="h-7 w-40 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {sections.map((s) => (
+                            <SelectItem key={s.id} value={String(s.id)} className="text-xs">
+                              {s.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
                     {/* Bison instance picker — stops click propagation so
                         opening the menu doesn't toggle the expanded row. */}
                     <div onClick={(e) => e.stopPropagation()} className="shrink-0">

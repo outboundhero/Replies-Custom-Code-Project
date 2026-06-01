@@ -93,6 +93,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
+    // ── move ────────────────────────────────────────────────
+    // Reassign a client tag to a different section. Affects routing of
+    // FUTURE leads only — historical replies stay attached to whatever
+    // Airtable base they were originally created in.
+    if (action === "move") {
+      const { tag, section_id } = body;
+      if (!tag || !section_id) {
+        return NextResponse.json({ error: "tag and section_id required" }, { status: 400 });
+      }
+
+      const result = await db.execute({
+        sql: "UPDATE client_tags SET section_id = ? WHERE tag = ?",
+        args: [section_id, tag],
+      });
+      if (result.rowsAffected === 0) {
+        return NextResponse.json({ error: `Client tag "${tag}" not found` }, { status: 404 });
+      }
+
+      return NextResponse.json({ ok: true });
+    }
+
     // ── delete ──────────────────────────────────────────────
     if (action === "delete") {
       const { tag } = body;
