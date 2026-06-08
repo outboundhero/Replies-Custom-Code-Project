@@ -36,6 +36,20 @@ export interface SyncResult {
   perInstance: InstanceSyncResult[];
 }
 
+/** Bounded-concurrency worker pool: run `fn` over `items` with at most N
+ *  in flight at any time. Returns when every item has been processed. */
+async function parallelForEach<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let idx = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (idx < items.length) {
+        const my = idx++;
+        try { await fn(items[my]); } catch { /* worker swallows; per-item errors logged inside fn */ }
+      }
+    }),
+  );
+}
+
 async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceSyncResult> {
   const errors: string[] = [];
   let campaignsScanned = 0;
@@ -49,7 +63,11 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
     return !name.includes("[nurture]") && c.type !== "nurture";
   });
 
-  for (const campaign of outboundCampaigns) {
+  // Process campaigns in parallel with bounded concurrency. The previous
+  // serial for-loop took ~30s per campaign and timed out the whole
+  // instance after ~6 campaigns on outboundhero / facilityreach.
+  const CONCURRENCY = 6;
+  await parallelForEach(outboundCampaigns, CONCURRENCY, async (campaign) => {
     campaignsScanned++;
     try {
       const leads = await listCampaignLeads(instanceKey, campaign.id, {
@@ -72,7 +90,7 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
       });
 
       candidatesFound += candidates.length;
-      if (candidates.length === 0) continue;
+      if (candidates.length === 0) return;
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
@@ -91,23 +109,34 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
         bison_instance: instanceKey,
       }));
 
+      // Dedupe within the batch — Bison's listCampaignLeads can return the
+      // same (lead_id, campaign_id) twice when pagination overlaps, and
+      // Postgres rejects the entire batch with "ON CONFLICT DO UPDATE
+      // command cannot affect row a second time" if there are duplicates.
+      // Keep the last occurrence (latest sync data).
+      const dedupedByKey = new Map<string, typeof rows[number]>();
+      for (const r of rows) {
+        dedupedByKey.set(`${r.ob_lead_id}:${r.ob_campaign_id}:${r.bison_instance}`, r);
+      }
+      const dedupedRows = Array.from(dedupedByKey.values());
+
       // Unique constraint is (ob_lead_id, ob_campaign_id, bison_instance)
       // — see the Phase-1 SQL. Without bison_instance in the conflict key,
       // two instances issuing the same numeric IDs would overwrite each
       // other.
       const { error } = await supabase
         .from("nurture_sequence_finished")
-        .upsert(rows, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
+        .upsert(dedupedRows, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
 
       if (error) {
         errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
       } else {
-        upserted += rows.length;
+        upserted += dedupedRows.length;
         // Fire-and-forget ESP detection on the freshly-inserted rows.
         // Doesn't block the sync; backfill-esp.ts script picks up any
         // misses on the next pass.
         import("@/lib/email-guard").then(({ lookupEmailHost }) => {
-          for (const r of rows) {
+          for (const r of dedupedRows) {
             if (!r.email) continue;
             lookupEmailHost(r.email).then((host) => {
               if (!host) return;
@@ -126,7 +155,7 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
     } catch (e) {
       errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${(e as Error).message}`);
     }
-  }
+  });
 
   return { instance: instanceKey, campaignsScanned, candidatesFound, upserted, errors };
 }
