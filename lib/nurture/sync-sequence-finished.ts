@@ -15,7 +15,7 @@
  */
 
 import supabase from "@/lib/supabase";
-import { listCampaigns, listCampaignLeads, type OutboundLead } from "@/lib/outboundhero-api";
+import { listCampaigns, listCampaignLeads, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 
@@ -68,6 +68,49 @@ export async function syncOneInstanceExported(instanceKey: BisonInstanceKey): Pr
   );
 }
 
+/**
+ * Sync a single client's campaigns on a specific Bison instance.
+ *
+ * Uses Bison's `search` query param to filter to that client tag's
+ * campaigns only (e.g. JPH: ~10 campaigns instead of outboundhero's
+ * 477). Much smaller per-call work — fits comfortably in the rate
+ * limit without aborts. Useful for:
+ *   - manually backfilling a specific client (curl /api/cron/nurture-sync-client/JPH)
+ *   - per-client cron in the future
+ */
+export async function syncOneClient(instanceKey: BisonInstanceKey, clientTag: string): Promise<InstanceSyncResult> {
+  const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
+
+  // Bison's `search` filter narrows the list server-side. For "JPH" we
+  // get ~10 campaigns instead of 477 — well inside any rate limit.
+  // Server-side status filter still applies so we skip drafts/archived.
+  const matched = await listCampaigns(instanceKey, {
+    statuses: ["active", "completed", "paused", "stopped"],
+    search: `${clientTag}:`,
+  });
+
+  // The search filter is fuzzy — it may match campaigns from other clients
+  // whose names happen to contain the tag string. Tighten to exact prefix
+  // match on the "TAG:" convention we use everywhere.
+  const exactCampaigns = matched.filter((c) => {
+    const name = c.name?.toLowerCase() || "";
+    if (name.includes("[nurture]") || c.type === "nurture") return false;
+    const tag = (extractTagFromCampaignName(c.name) || "").toUpperCase();
+    return tag === clientTag.toUpperCase();
+  });
+
+  const usableCampaigns = exactCampaigns.filter((c) => {
+    const total = c.total_leads ?? 0;
+    if (total === 0) return false;
+    const exhausted = (c.replied ?? 0) + (c.bounced ?? 0);
+    if (exhausted >= total) return false;
+    return true;
+  });
+
+  await processCampaigns(instanceKey, usableCampaigns, state);
+  return { instance: instanceKey, ...state };
+}
+
 async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyncState): Promise<InstanceSyncResult> {
   // `state` is owned by the caller so withTimeout can snapshot live
   // counts if the timer fires before the function returns.
@@ -112,14 +155,27 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
     return at.localeCompare(bt); // never-synced ("" < any timestamp) sort first
   });
 
-  // Process campaigns in parallel with bounded concurrency. We tried
-  // CONCURRENCY=20 and watched 473/477 calls abort at the 8s timeout —
-  // Bison's per-IP rate limiter throttles when too many requests arrive
-  // simultaneously from a single Vercel IP. At 6, individual calls stay
-  // under 2s and the overall work still fits the 270s instance budget
-  // (477 campaigns × 1s / 6 workers ≈ 80s).
+  await processCampaigns(instanceKey, outboundCampaigns, state);
+  return { instance: instanceKey, ...state };
+}
+
+/**
+ * Process a pre-filtered list of campaigns: fetch sequence_finished
+ * leads for each, dedupe, upsert into nurture_sequence_finished.
+ * Mutates `state` for live progress reporting.
+ *
+ * Bounded concurrency at 6 — empirically the sweet spot before Bison's
+ * per-IP rate limiter starts dropping calls (verified by watching
+ * 473/477 aborts at CONCURRENCY=20 on outboundhero).
+ */
+async function processCampaigns(
+  instanceKey: BisonInstanceKey,
+  campaigns: OutboundCampaign[],
+  state: InstanceSyncState,
+): Promise<void> {
+  const errors = state.errors;
   const CONCURRENCY = 6;
-  await parallelForEach(outboundCampaigns, CONCURRENCY, async (campaign) => {
+  await parallelForEach(campaigns, CONCURRENCY, async (campaign) => {
     state.campaignsScanned++;
     try {
       const leads = await listCampaignLeads(instanceKey, campaign.id, {
@@ -208,8 +264,6 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
       errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${(e as Error).message}`);
     }
   });
-
-  return { instance: instanceKey, ...state };
 }
 
 // Per-instance hard cap. Vercel kills the whole route at 5 min
