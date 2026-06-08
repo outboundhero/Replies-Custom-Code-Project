@@ -208,11 +208,16 @@ export async function listCampaigns(
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
   const PER_PAGE = 100;
-  const CONCURRENCY = 6; // matches OB's typical rate-limit headroom
+  // Higher concurrency + tighter per-page timeout so large instances
+  // (outboundhero / facilityreach) complete the page sweep inside the
+  // 3-min instance budget. With outboundhero hanging 45 s per page at
+  // CONCURRENCY=6, the math couldn't fit.
+  const CONCURRENCY = 12;
+  const PAGE_TIMEOUT_MS = 20_000;
 
   // Fetch one page from the upstream API and normalise to OutboundCampaign[].
   async function fetchPage(page: number): Promise<{ rows: OutboundCampaign[]; lastPage: number }> {
-    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers });
+    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers, timeoutMs: PAGE_TIMEOUT_MS });
     if (!res.ok) throw new Error(`listCampaigns(${instanceKey}) page ${page} failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rawRows: Array<Record<string, unknown>> = data?.data || [];
@@ -278,7 +283,9 @@ export async function listCampaignLeads(
   while (true) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
     if (opts.leadCampaignStatus) params.set("filters.lead_campaign_status", opts.leadCampaignStatus);
-    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers });
+    // Tighter timeout (20 s) so a single slow page on facilityreach /
+    // outboundhero doesn't burn the per-campaign budget.
+    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers, timeoutMs: 20_000 });
     if (!res.ok) throw new Error(`listCampaignLeads(${instanceKey}, ${campaignId}) failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rows: OutboundLead[] = data?.data || [];
