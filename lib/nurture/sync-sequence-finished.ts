@@ -61,11 +61,96 @@ export interface InstanceSyncState {
 export async function syncOneInstanceExported(instanceKey: BisonInstanceKey): Promise<InstanceSyncResult> {
   const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
   return withTimeout(
-    syncOneInstance(instanceKey, state),
+    syncInstanceByClients(instanceKey, state),
     INSTANCE_TIMEOUT_MS,
     `instance ${instanceKey}`,
     () => ({ instance: instanceKey, ...state, errors: [...state.errors, `[${instanceKey}] timed out after ${INSTANCE_TIMEOUT_MS / 1000}s — partial progress shown`] }),
   );
+}
+
+/**
+ * Per-instance sync that iterates CLIENTS instead of trying to process
+ * every campaign on the instance at once.
+ *
+ * Why this exists: the old syncOneInstance fetched all ~477 outboundhero
+ * campaigns and ran them through a worker pool. Bison's per-IP rate
+ * limit aborted 99% of those calls, and only a few lucky campaigns at
+ * the top of the array ever got synced — JPH was at the bottom and
+ * stayed empty for days.
+ *
+ * Per-client iteration uses Bison's `search` filter so each call hits
+ * only ~10 campaigns per client. With wall-clock budgeting we sweep
+ * through clients oldest-synced-first, gracefully exiting when budget
+ * is close to spent. Next cron tick picks up where we left off.
+ */
+async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: InstanceSyncState): Promise<InstanceSyncResult> {
+  const startedAt = Date.now();
+  // Leave a few seconds for log persistence + response serialization.
+  const SOFT_BUDGET_MS = INSTANCE_TIMEOUT_MS - 30_000;
+
+  const tags = await listClientTagsForInstance(instanceKey);
+  // Sort oldest-synced first so each tick covers different clients.
+  // Clients never synced have synced_at = epoch and sort first.
+  const lastSyncedByTag = await loadLastSyncedByTag(instanceKey);
+  tags.sort((a, b) => {
+    const at = lastSyncedByTag.get(a) || "";
+    const bt = lastSyncedByTag.get(b) || "";
+    return at.localeCompare(bt);
+  });
+
+  for (const tag of tags) {
+    if (Date.now() - startedAt > SOFT_BUDGET_MS) {
+      state.errors.push(`[${instanceKey}] soft budget hit at ${(Date.now() - startedAt) / 1000}s; remaining clients will sync on next cron tick`);
+      break;
+    }
+    try {
+      const r = await syncOneClient(instanceKey, tag);
+      state.campaignsScanned += r.campaignsScanned;
+      state.candidatesFound += r.candidatesFound;
+      state.upserted += r.upserted;
+      state.errors.push(...r.errors);
+    } catch (e) {
+      state.errors.push(`[${instanceKey}] client ${tag} sync failed: ${(e as Error).message}`);
+    }
+  }
+
+  return { instance: instanceKey, ...state };
+}
+
+/** All client tags that should sync against the given Bison instance.
+ *  Pulls from Turso client_tags (full catalogue) and joins to
+ *  client_instances to map each to its instance. Tags without an
+ *  explicit mapping fall back to DEFAULT_INSTANCE (outboundhero). */
+async function listClientTagsForInstance(instanceKey: BisonInstanceKey): Promise<string[]> {
+  const { default: turso } = await import("@/lib/db");
+  const res = await turso.execute({
+    sql: `SELECT ct.tag, ci.instance_key
+          FROM client_tags ct
+          LEFT JOIN client_instances ci ON ci.client_tag = ct.tag`,
+    args: [],
+  });
+  const out: string[] = [];
+  for (const row of res.rows) {
+    const tag = row.tag as string;
+    const mapped = (row.instance_key as string | null) || "outboundhero";
+    if (mapped === instanceKey) out.push(tag);
+  }
+  return out;
+}
+
+async function loadLastSyncedByTag(instanceKey: BisonInstanceKey): Promise<Map<string, string>> {
+  const { data } = await supabase
+    .from("nurture_sequence_finished")
+    .select("client_tag, synced_at")
+    .eq("bison_instance", instanceKey)
+    .order("synced_at", { ascending: false });
+  const out = new Map<string, string>();
+  for (const r of data || []) {
+    const tag = (r.client_tag as string) || "";
+    if (!tag) continue;
+    if (!out.has(tag)) out.set(tag, r.synced_at as string);
+  }
+  return out;
 }
 
 /**
