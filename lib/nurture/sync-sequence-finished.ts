@@ -91,6 +91,27 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
     return true;
   });
 
+  // Sort by oldest-synced first so the rate-limited slice each run
+  // covers campaigns that haven't been touched recently. Without this,
+  // outboundhero's 477 campaigns get processed in Bison's default order
+  // every tick — small/early campaigns hog every run and bottom-of-list
+  // clients (like JPH) never get reached before the rate limit fires.
+  const { data: lastSynced } = await supabase
+    .from("nurture_sequence_finished")
+    .select("ob_campaign_id, synced_at")
+    .eq("bison_instance", instanceKey)
+    .order("synced_at", { ascending: false });
+  const lastSyncedByCampaign = new Map<number, string>();
+  for (const r of lastSynced || []) {
+    const id = r.ob_campaign_id as number;
+    if (!lastSyncedByCampaign.has(id)) lastSyncedByCampaign.set(id, r.synced_at as string);
+  }
+  outboundCampaigns.sort((a, b) => {
+    const at = lastSyncedByCampaign.get(a.id) || "";
+    const bt = lastSyncedByCampaign.get(b.id) || "";
+    return at.localeCompare(bt); // never-synced ("" < any timestamp) sort first
+  });
+
   // Process campaigns in parallel with bounded concurrency. We tried
   // CONCURRENCY=20 and watched 473/477 calls abort at the 8s timeout —
   // Bison's per-IP rate limiter throttles when too many requests arrive
