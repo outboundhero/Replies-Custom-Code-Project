@@ -19,6 +19,25 @@ function buildHeaders(token: string) {
   };
 }
 
+/**
+ * Wrap fetch with a hard timeout via AbortController.
+ *
+ * Bison endpoints occasionally hang indefinitely (no response, no error).
+ * Without this, a single hung call would consume the entire serverless
+ * function budget and silently kill the cron — exactly what happened to
+ * the nurture sync between 2026-06-02 and 2026-06-08.
+ */
+async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+  const { timeoutMs = 45_000, ...rest } = init;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...rest, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 interface EmailRecipient {
   name: string;
   email_address: string;
@@ -48,7 +67,7 @@ export async function sendReply(
   if (params.ccEmails?.length) payload.cc_emails = params.ccEmails;
   if (params.bccEmails?.length) payload.bcc_emails = params.bccEmails;
 
-  const res = await fetch(`${baseUrl}/api/replies/${params.replyId}/reply`, {
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/${params.replyId}/reply`, {
     method: "POST",
     headers: buildHeaders(token),
     body: JSON.stringify(payload),
@@ -70,7 +89,7 @@ export async function forwardReply(
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetch(`${baseUrl}/api/replies/${params.replyId}/forward?plain_text=true`, {
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/${params.replyId}/forward?plain_text=true`, {
     method: "POST",
     headers: buildHeaders(token),
     body: JSON.stringify({
@@ -99,7 +118,7 @@ export async function sendOneOffReply(
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetch(`${baseUrl}/api/replies/new`, {
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/new`, {
     method: "POST",
     headers: buildHeaders(token),
     body: JSON.stringify({
@@ -193,7 +212,7 @@ export async function listCampaigns(
 
   // Fetch one page from the upstream API and normalise to OutboundCampaign[].
   async function fetchPage(page: number): Promise<{ rows: OutboundCampaign[]; lastPage: number }> {
-    const res = await fetch(`${baseUrl}/api/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers });
+    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers });
     if (!res.ok) throw new Error(`listCampaigns(${instanceKey}) page ${page} failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rawRows: Array<Record<string, unknown>> = data?.data || [];
@@ -259,7 +278,7 @@ export async function listCampaignLeads(
   while (true) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
     if (opts.leadCampaignStatus) params.set("filters.lead_campaign_status", opts.leadCampaignStatus);
-    const res = await fetch(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers });
+    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers });
     if (!res.ok) throw new Error(`listCampaignLeads(${instanceKey}, ${campaignId}) failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rows: OutboundLead[] = data?.data || [];
@@ -303,7 +322,7 @@ export async function attachLeadsToCampaign(
   raw?: unknown;
 }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetch(`${baseUrl}/api/campaigns/${campaignId}/leads/attach-leads`, {
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads/attach-leads`, {
     method: "POST",
     headers: buildHeaders(token),
     body: JSON.stringify({
@@ -384,7 +403,7 @@ export interface OutboundSentEmail {
  */
 export async function getSentEmails(instanceKey: string, leadId: number): Promise<OutboundSentEmail[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetch(`${baseUrl}/api/leads/${leadId}/sent-emails`, { headers: buildHeaders(token) });
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${leadId}/sent-emails`, { headers: buildHeaders(token) });
   if (!res.ok) {
     throw new Error(`getSentEmails(${instanceKey}, ${leadId}) failed: ${res.status} ${await res.text()}`);
   }
@@ -432,7 +451,7 @@ export async function getFirstSentEmail(
 /** Find a single lead by email (search). Returns the first matching lead or null. */
 export async function findLeadByEmail(instanceKey: string, email: string): Promise<OutboundLead | null> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetch(`${baseUrl}/api/leads?search=${encodeURIComponent(email)}&per_page=10`, { headers: buildHeaders(token) });
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads?search=${encodeURIComponent(email)}&per_page=10`, { headers: buildHeaders(token) });
   if (!res.ok) return null;
   const data = await res.json();
   const rows: OutboundLead[] = data?.data || [];

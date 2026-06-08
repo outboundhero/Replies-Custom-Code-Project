@@ -131,12 +131,31 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
   return { instance: instanceKey, campaignsScanned, candidatesFound, upserted, errors };
 }
 
+// Per-instance hard cap. Vercel kills the whole route at 5 min
+// (maxDuration); if one instance hangs (Bison API not responding /
+// network black hole) we want the OTHER instances to still finish and
+// write their upserts before the route-level timeout fires.
+const INSTANCE_TIMEOUT_MS = 3 * 60 * 1000; // 3 min — leaves 2 min headroom
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label}: timed out after ${ms / 1000}s`)), ms);
+    }),
+  ]);
+}
+
 export async function syncSequenceFinished(): Promise<SyncResult> {
   // Fan out across every Bison instance in parallel. allSettled means a
   // single instance being down (bad token, network blip, etc.) only
-  // affects its own result — the others still complete.
+  // affects its own result — the others still complete. The per-instance
+  // timeout above prevents a hanging instance from eating the whole
+  // route-level budget.
   const settled = await Promise.allSettled(
-    BISON_INSTANCES.map((i) => syncOneInstance(i.key)),
+    BISON_INSTANCES.map((i) =>
+      withTimeout(syncOneInstance(i.key), INSTANCE_TIMEOUT_MS, `instance ${i.key}`)
+    ),
   );
 
   const perInstance: InstanceSyncResult[] = [];
