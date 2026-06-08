@@ -295,7 +295,15 @@ async function listCampaignsForStatus(
   return all;
 }
 
-/** List leads in a specific campaign filtered by lead_campaign_status. Paginates through all pages. */
+/**
+ * List leads in a specific campaign filtered by lead_campaign_status.
+ *
+ * Page 1 is fetched first to learn `meta.last_page`. Then pages 2..N are
+ * fetched in parallel with bounded concurrency. This matters for
+ * high-volume clients (e.g. JPNYC has campaigns with 50+ pages of
+ * sequence_finished leads) — serial pagination at ~1s per page would
+ * take 50+ seconds per campaign and bust the per-instance time budget.
+ */
 export async function listCampaignLeads(
   instanceKey: string,
   campaignId: number,
@@ -304,25 +312,47 @@ export async function listCampaignLeads(
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
   const perPage = opts.perPage ?? 100;
-  const all: OutboundLead[] = [];
-  let page = 1;
-  while (true) {
+  const PAGE_TIMEOUT_MS = 12_000;
+  const PAGE_CONCURRENCY = 6;
+
+  function url(page: number) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
     if (opts.leadCampaignStatus) params.set("filters.lead_campaign_status", opts.leadCampaignStatus);
-    // Tight timeout — empty result sets return in <500 ms, healthy
-    // populated pages in ~1 s. Anything past 8 s is a stalled page that
-    // we'd rather abandon than wait on; the next sync tick picks it up.
-    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers, timeoutMs: 8_000 });
-    if (!res.ok) throw new Error(`listCampaignLeads(${instanceKey}, ${campaignId}) failed: ${res.status} ${await res.text()}`);
+    return `${baseUrl}/api/campaigns/${campaignId}/leads?${params}`;
+  }
+
+  async function fetchPage(page: number): Promise<{ rows: OutboundLead[]; lastPage: number }> {
+    const res = await fetchWithTimeout(url(page), { headers, timeoutMs: PAGE_TIMEOUT_MS });
+    if (!res.ok) throw new Error(`listCampaignLeads(${instanceKey}, ${campaignId}) page ${page} failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rows: OutboundLead[] = data?.data || [];
-    if (rows.length === 0) break;
-    all.push(...rows);
-    const lastPage = data?.meta?.last_page ?? page;
-    if (page >= lastPage) break;
-    page++;
+    const lastPage = (data?.meta?.last_page as number | undefined) ?? page;
+    return { rows, lastPage };
   }
-  return all;
+
+  const first = await fetchPage(1);
+  if (first.rows.length === 0 || first.lastPage <= 1) return first.rows;
+
+  // Pages 2..lastPage in parallel with bounded concurrency.
+  const pages: number[] = [];
+  for (let p = 2; p <= first.lastPage; p++) pages.push(p);
+  const results: OutboundLead[][] = new Array(pages.length);
+  let idx = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(PAGE_CONCURRENCY, pages.length) }, async () => {
+      while (idx < pages.length) {
+        const my = idx++;
+        try {
+          const r = await fetchPage(pages[my]);
+          results[my] = r.rows;
+        } catch (e) {
+          console.warn(`[${instanceKey}:${campaignId}] page ${pages[my]} failed:`, (e as Error).message);
+          results[my] = [];
+        }
+      }
+    }),
+  );
+  return first.rows.concat(...results);
 }
 
 /**
