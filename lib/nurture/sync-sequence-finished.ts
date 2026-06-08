@@ -57,16 +57,33 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
   let upserted = 0;
 
   const allCampaigns = await listCampaigns(instanceKey);
+
+  // Pre-filter aggressively. With 1,000+ campaigns on outboundhero, even
+  // parallel lead-fetching can't fit in the 3-min budget unless we skip:
+  //  - Nurture campaigns themselves (we sync FROM outbound only)
+  //  - Drafts / archived / deleted / failed — Bison won't return any
+  //    sequence_finished leads from these
+  //  - Campaigns with 0 total_leads — nothing to fetch
+  //  - Campaigns where every lead already replied or bounced — no
+  //    candidates can possibly remain
+  // What's left should be a few hundred active/paused/completed campaigns.
+  const DEAD_STATUSES = new Set(["draft", "archived", "deleted", "pending deletion", "failed"]);
   const outboundCampaigns = allCampaigns.filter((c) => {
     const name = c.name?.toLowerCase() || "";
-    // Skip nurture campaigns themselves — we only sync FROM the main outbound
-    return !name.includes("[nurture]") && c.type !== "nurture";
+    if (name.includes("[nurture]") || c.type === "nurture") return false;
+    if (DEAD_STATUSES.has((c.status || "").toLowerCase())) return false;
+    const total = c.total_leads ?? 0;
+    if (total === 0) return false;
+    const exhausted = (c.replied ?? 0) + (c.bounced ?? 0);
+    if (exhausted >= total) return false;
+    return true;
   });
 
-  // Process campaigns in parallel with bounded concurrency. The previous
-  // serial for-loop took ~30s per campaign and timed out the whole
-  // instance after ~6 campaigns on outboundhero / facilityreach.
-  const CONCURRENCY = 6;
+  // Process campaigns in parallel with bounded concurrency. Higher cap
+  // because Bison's per-campaign /leads endpoint typically returns
+  // <500ms for empty result sets and we want the empty-set checks to
+  // burn down fast.
+  const CONCURRENCY = 20;
   await parallelForEach(outboundCampaigns, CONCURRENCY, async (campaign) => {
     campaignsScanned++;
     try {
