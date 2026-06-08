@@ -81,16 +81,32 @@ export async function GET(req: NextRequest) {
   // instance, with explicit timing. This tells us whether the hang is
   // in the listCampaigns paginator (the function the sync invokes) or
   // elsewhere — separates "Bison API slow" from "our code path slow".
-  const listProbes: Array<{ instance: string; ok: boolean; ms: number; count?: number; error?: string }> = [];
+  const listProbes: Array<{ instance: string; mode: string; ok: boolean; ms: number; count?: number; error?: string }> = [];
   const onlyInstance = req.nextUrl.searchParams.get("only_list");
   for (const i of BISON_INSTANCES) {
     if (onlyInstance && i.key !== onlyInstance) continue;
-    const start = Date.now();
-    try {
-      const camps = await listCampaigns(i.key);
-      listProbes.push({ instance: i.key, ok: true, ms: Date.now() - start, count: camps.length });
-    } catch (e) {
-      listProbes.push({ instance: i.key, ok: false, ms: Date.now() - start, error: (e as Error).message });
+
+    // 1. listCampaigns with no filter (existing behavior, baseline)
+    {
+      const start = Date.now();
+      try {
+        const camps = await listCampaigns(i.key);
+        listProbes.push({ instance: i.key, mode: "no-filter", ok: true, ms: Date.now() - start, count: camps.length });
+      } catch (e) {
+        listProbes.push({ instance: i.key, mode: "no-filter", ok: false, ms: Date.now() - start, error: (e as Error).message });
+      }
+    }
+
+    // 2. listCampaigns with sync's actual statuses array — the path the
+    //    real sync uses. If this hangs, the bug is in the status fan-out.
+    {
+      const start = Date.now();
+      try {
+        const camps = await listCampaigns(i.key, { statuses: ["active", "completed", "paused", "stopped"] });
+        listProbes.push({ instance: i.key, mode: "statuses=4", ok: true, ms: Date.now() - start, count: camps.length });
+      } catch (e) {
+        listProbes.push({ instance: i.key, mode: "statuses=4", ok: false, ms: Date.now() - start, error: (e as Error).message });
+      }
     }
   }
 
