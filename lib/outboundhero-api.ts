@@ -203,7 +203,26 @@ function pickUuid(row: Record<string, unknown>): string | null {
 
 export async function listCampaigns(
   instanceKey: string,
-  opts?: { nameContains?: string },
+  opts?: { nameContains?: string; statuses?: string[]; search?: string },
+): Promise<OutboundCampaign[]> {
+  // Bison rejects multi-status in one call ("The selected status is
+  // invalid."), so fan out — one status-scoped paginated call per status,
+  // in parallel, then merge + dedupe.
+  if (opts?.statuses && opts.statuses.length > 0) {
+    const perStatus = await Promise.all(
+      opts.statuses.map((s) => listCampaignsForStatus(instanceKey, s, opts))
+    );
+    const byId = new Map<number, OutboundCampaign>();
+    for (const arr of perStatus) for (const c of arr) byId.set(c.id, c);
+    return Array.from(byId.values());
+  }
+  return listCampaignsForStatus(instanceKey, undefined, opts);
+}
+
+async function listCampaignsForStatus(
+  instanceKey: string,
+  status: string | undefined,
+  opts?: { nameContains?: string; search?: string },
 ): Promise<OutboundCampaign[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
@@ -215,9 +234,16 @@ export async function listCampaigns(
   const CONCURRENCY = 12;
   const PAGE_TIMEOUT_MS = 20_000;
 
+  function buildUrl(page: number) {
+    const params = new URLSearchParams({ page: String(page), per_page: String(PER_PAGE) });
+    if (status) params.set("status", status);
+    if (opts?.search) params.set("search", opts.search);
+    return `${baseUrl}/api/campaigns?${params}`;
+  }
+
   // Fetch one page from the upstream API and normalise to OutboundCampaign[].
   async function fetchPage(page: number): Promise<{ rows: OutboundCampaign[]; lastPage: number }> {
-    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns?page=${page}&per_page=${PER_PAGE}`, { headers, timeoutMs: PAGE_TIMEOUT_MS });
+    const res = await fetchWithTimeout(buildUrl(page), { headers, timeoutMs: PAGE_TIMEOUT_MS });
     if (!res.ok) throw new Error(`listCampaigns(${instanceKey}) page ${page} failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rawRows: Array<Record<string, unknown>> = data?.data || [];

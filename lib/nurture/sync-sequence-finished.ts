@@ -56,22 +56,17 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
   let candidatesFound = 0;
   let upserted = 0;
 
-  const allCampaigns = await listCampaigns(instanceKey);
+  // Server-side status filter — Bison returns ONLY these statuses, so
+  // we never page through drafts / archived / failed. On outboundhero
+  // this drops 1,136 total campaigns to ~477 actually-worth-syncing.
+  const allCampaigns = await listCampaigns(instanceKey, {
+    statuses: ["active", "completed", "paused", "stopped"],
+  });
 
-  // Pre-filter aggressively. With 1,000+ campaigns on outboundhero, even
-  // parallel lead-fetching can't fit in the 3-min budget unless we skip:
-  //  - Nurture campaigns themselves (we sync FROM outbound only)
-  //  - Drafts / archived / deleted / failed — Bison won't return any
-  //    sequence_finished leads from these
-  //  - Campaigns with 0 total_leads — nothing to fetch
-  //  - Campaigns where every lead already replied or bounced — no
-  //    candidates can possibly remain
-  // What's left should be a few hundred active/paused/completed campaigns.
-  const DEAD_STATUSES = new Set(["draft", "archived", "deleted", "pending deletion", "failed"]);
+  // Client-side filter for the remaining bits Bison can't filter for us.
   const outboundCampaigns = allCampaigns.filter((c) => {
     const name = c.name?.toLowerCase() || "";
     if (name.includes("[nurture]") || c.type === "nurture") return false;
-    if (DEAD_STATUSES.has((c.status || "").toLowerCase())) return false;
     const total = c.total_leads ?? 0;
     if (total === 0) return false;
     const exhausted = (c.replied ?? 0) + (c.bounced ?? 0);
