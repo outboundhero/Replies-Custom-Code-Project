@@ -104,7 +104,12 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
       break;
     }
     try {
-      const r = await syncOneClient(instanceKey, tag);
+      // Autonomous sync caps at 50 pages per campaign (~750 leads). For
+      // mega-campaigns like JPNYC's 1,021-page Outlook (15k leads), the
+      // most recent 50 pages get refreshed each tick; older leads stay
+      // synced from earlier runs. Manual /api/cron/nurture-sync-client
+      // uses no cap so operators can do a full backfill on demand.
+      const r = await syncOneClient(instanceKey, tag, { maxPagesPerCampaign: 50 });
       state.campaignsScanned += r.campaignsScanned;
       state.candidatesFound += r.candidatesFound;
       state.upserted += r.upserted;
@@ -163,7 +168,11 @@ async function loadLastSyncedByTag(instanceKey: BisonInstanceKey): Promise<Map<s
  *   - manually backfilling a specific client (curl /api/cron/nurture-sync-client/JPH)
  *   - per-client cron in the future
  */
-export async function syncOneClient(instanceKey: BisonInstanceKey, clientTag: string): Promise<InstanceSyncResult> {
+export async function syncOneClient(
+  instanceKey: BisonInstanceKey,
+  clientTag: string,
+  opts: { maxPagesPerCampaign?: number } = {},
+): Promise<InstanceSyncResult> {
   const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
 
   // Bison's `search` filter narrows the list server-side. For "JPH" we
@@ -192,7 +201,7 @@ export async function syncOneClient(instanceKey: BisonInstanceKey, clientTag: st
     return true;
   });
 
-  await processCampaigns(instanceKey, usableCampaigns, state);
+  await processCampaigns(instanceKey, usableCampaigns, state, { maxPagesPerCampaign: opts.maxPagesPerCampaign });
   return { instance: instanceKey, ...state };
 }
 
@@ -257,6 +266,7 @@ async function processCampaigns(
   instanceKey: BisonInstanceKey,
   campaigns: OutboundCampaign[],
   state: InstanceSyncState,
+  opts: { maxPagesPerCampaign?: number } = {},
 ): Promise<void> {
   const errors = state.errors;
   const CONCURRENCY = 6;
@@ -265,6 +275,7 @@ async function processCampaigns(
     try {
       const leads = await listCampaignLeads(instanceKey, campaign.id, {
         leadCampaignStatus: "sequence_finished",
+        maxPages: opts.maxPagesPerCampaign,
       });
 
       const candidates = leads.filter((lead) => {

@@ -307,13 +307,17 @@ async function listCampaignsForStatus(
 export async function listCampaignLeads(
   instanceKey: string,
   campaignId: number,
-  opts: { leadCampaignStatus?: string; perPage?: number } = {},
+  opts: { leadCampaignStatus?: string; perPage?: number; maxPages?: number } = {},
 ): Promise<OutboundLead[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
   const perPage = opts.perPage ?? 100;
   const PAGE_TIMEOUT_MS = 12_000;
   const PAGE_CONCURRENCY = 6;
+  // maxPages cap protects the autonomous per-instance cron from
+  // mega-campaigns (JPNYC has one with 1,021 pages, ~17 min serial /
+  // 3 min parallel). Per-client / manual callers can pass Infinity.
+  const maxPages = opts.maxPages ?? Infinity;
 
   function url(page: number) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
@@ -334,8 +338,9 @@ export async function listCampaignLeads(
   if (first.rows.length === 0 || first.lastPage <= 1) return first.rows;
 
   // Pages 2..lastPage in parallel with bounded concurrency.
+  const effectiveLast = Math.min(first.lastPage, maxPages);
   const pages: number[] = [];
-  for (let p = 2; p <= first.lastPage; p++) pages.push(p);
+  for (let p = 2; p <= effectiveLast; p++) pages.push(p);
   const results: OutboundLead[][] = new Array(pages.length);
   let idx = 0;
   await Promise.all(
