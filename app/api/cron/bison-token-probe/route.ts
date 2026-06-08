@@ -14,8 +14,9 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { BISON_INSTANCES, getInstanceConfig } from "@/lib/bison-instances";
+import { listCampaigns } from "@/lib/outboundhero-api";
 
-export const maxDuration = 30;
+export const maxDuration = 120;
 
 interface ProbeResult {
   instance: string;
@@ -75,5 +76,23 @@ export async function GET(req: NextRequest) {
   }
 
   const results = await Promise.all(BISON_INSTANCES.map((i) => probeOne(i.key)));
-  return NextResponse.json({ results });
+
+  // Also run the EXACT listCampaigns call the sync uses, instance by
+  // instance, with explicit timing. This tells us whether the hang is
+  // in the listCampaigns paginator (the function the sync invokes) or
+  // elsewhere — separates "Bison API slow" from "our code path slow".
+  const listProbes: Array<{ instance: string; ok: boolean; ms: number; count?: number; error?: string }> = [];
+  const onlyInstance = req.nextUrl.searchParams.get("only_list");
+  for (const i of BISON_INSTANCES) {
+    if (onlyInstance && i.key !== onlyInstance) continue;
+    const start = Date.now();
+    try {
+      const camps = await listCampaigns(i.key);
+      listProbes.push({ instance: i.key, ok: true, ms: Date.now() - start, count: camps.length });
+    } catch (e) {
+      listProbes.push({ instance: i.key, ok: false, ms: Date.now() - start, error: (e as Error).message });
+    }
+  }
+
+  return NextResponse.json({ results, listProbes });
 }
