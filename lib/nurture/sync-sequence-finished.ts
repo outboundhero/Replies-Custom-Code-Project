@@ -80,11 +80,13 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
     return true;
   });
 
-  // Process campaigns in parallel with bounded concurrency. Higher cap
-  // because Bison's per-campaign /leads endpoint typically returns
-  // <500ms for empty result sets and we want the empty-set checks to
-  // burn down fast.
-  const CONCURRENCY = 20;
+  // Process campaigns in parallel with bounded concurrency. We tried
+  // CONCURRENCY=20 and watched 473/477 calls abort at the 8s timeout —
+  // Bison's per-IP rate limiter throttles when too many requests arrive
+  // simultaneously from a single Vercel IP. At 6, individual calls stay
+  // under 2s and the overall work still fits the 270s instance budget
+  // (477 campaigns × 1s / 6 workers ≈ 80s).
+  const CONCURRENCY = 6;
   await parallelForEach(outboundCampaigns, CONCURRENCY, async (campaign) => {
     state.campaignsScanned++;
     try {
