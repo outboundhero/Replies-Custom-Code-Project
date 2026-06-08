@@ -50,11 +50,17 @@ async function parallelForEach<T>(items: T[], concurrency: number, fn: (item: T)
   );
 }
 
-async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceSyncResult> {
-  const errors: string[] = [];
-  let campaignsScanned = 0;
-  let candidatesFound = 0;
-  let upserted = 0;
+export interface InstanceSyncState {
+  campaignsScanned: number;
+  candidatesFound: number;
+  upserted: number;
+  errors: string[];
+}
+
+async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyncState): Promise<InstanceSyncResult> {
+  // `state` is owned by the caller so withTimeout can snapshot live
+  // counts if the timer fires before the function returns.
+  const errors = state.errors;
 
   // Server-side status filter — Bison returns ONLY these statuses, so
   // we never page through drafts / archived / failed. On outboundhero
@@ -80,7 +86,7 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
   // burn down fast.
   const CONCURRENCY = 20;
   await parallelForEach(outboundCampaigns, CONCURRENCY, async (campaign) => {
-    campaignsScanned++;
+    state.campaignsScanned++;
     try {
       const leads = await listCampaignLeads(instanceKey, campaign.id, {
         leadCampaignStatus: "sequence_finished",
@@ -101,7 +107,7 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
         return true;
       });
 
-      candidatesFound += candidates.length;
+      state.candidatesFound += candidates.length;
       if (candidates.length === 0) return;
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
@@ -143,7 +149,7 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
       if (error) {
         errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
       } else {
-        upserted += dedupedRows.length;
+        state.upserted += dedupedRows.length;
         // Fire-and-forget ESP detection on the freshly-inserted rows.
         // Doesn't block the sync; backfill-esp.ts script picks up any
         // misses on the next pass.
@@ -169,20 +175,31 @@ async function syncOneInstance(instanceKey: BisonInstanceKey): Promise<InstanceS
     }
   });
 
-  return { instance: instanceKey, campaignsScanned, candidatesFound, upserted, errors };
+  return { instance: instanceKey, ...state };
 }
 
 // Per-instance hard cap. Vercel kills the whole route at 5 min
-// (maxDuration); if one instance hangs (Bison API not responding /
-// network black hole) we want the OTHER instances to still finish and
-// write their upserts before the route-level timeout fires.
-const INSTANCE_TIMEOUT_MS = 3 * 60 * 1000; // 3 min — leaves 2 min headroom
+// (maxDuration). With 477 worth-syncing campaigns on outboundhero at
+// ~1 s each across 20 workers, the inner loop needs ~25 s ideal /
+// 200 s worst case (with timeouts firing). Give each instance most of
+// the route's budget — leave only the seconds needed to log + flush.
+const INSTANCE_TIMEOUT_MS = 4.5 * 60 * 1000; // 270s — leaves 30s headroom inside the 5-min route
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string, onTimeout?: () => T): Promise<T> {
   return Promise.race([
     promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error(`${label}: timed out after ${ms / 1000}s`)), ms);
+    new Promise<T>((resolve, reject) => {
+      setTimeout(() => {
+        if (onTimeout) {
+          // Surface whatever partial progress the worker has accumulated
+          // so the operator can see "made it through 200 of 477" rather
+          // than the misleading "0 campaigns scanned".
+          const partial = onTimeout();
+          resolve(partial);
+        } else {
+          reject(new Error(`${label}: timed out after ${ms / 1000}s`));
+        }
+      }, ms);
     }),
   ]);
 }
@@ -193,10 +210,21 @@ export async function syncSequenceFinished(): Promise<SyncResult> {
   // affects its own result — the others still complete. The per-instance
   // timeout above prevents a hanging instance from eating the whole
   // route-level budget.
+  //
+  // We pre-allocate the state object for each instance OUTSIDE the call
+  // so the withTimeout's onTimeout handler can read whatever partial
+  // progress had been written to it when the timer fires — instead of
+  // misleadingly reporting "0 campaigns scanned".
   const settled = await Promise.allSettled(
-    BISON_INSTANCES.map((i) =>
-      withTimeout(syncOneInstance(i.key), INSTANCE_TIMEOUT_MS, `instance ${i.key}`)
-    ),
+    BISON_INSTANCES.map((i) => {
+      const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
+      return withTimeout(
+        syncOneInstance(i.key, state),
+        INSTANCE_TIMEOUT_MS,
+        `instance ${i.key}`,
+        () => ({ instance: i.key, ...state, errors: [...state.errors, `[${i.key}] timed out after ${INSTANCE_TIMEOUT_MS / 1000}s — partial progress shown`] }),
+      );
+    }),
   );
 
   const perInstance: InstanceSyncResult[] = [];

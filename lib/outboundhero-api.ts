@@ -309,9 +309,10 @@ export async function listCampaignLeads(
   while (true) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
     if (opts.leadCampaignStatus) params.set("filters.lead_campaign_status", opts.leadCampaignStatus);
-    // Tighter timeout (20 s) so a single slow page on facilityreach /
-    // outboundhero doesn't burn the per-campaign budget.
-    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers, timeoutMs: 20_000 });
+    // Tight timeout — empty result sets return in <500 ms, healthy
+    // populated pages in ~1 s. Anything past 8 s is a stalled page that
+    // we'd rather abandon than wait on; the next sync tick picks it up.
+    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads?${params}`, { headers, timeoutMs: 8_000 });
     if (!res.ok) throw new Error(`listCampaignLeads(${instanceKey}, ${campaignId}) failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const rows: OutboundLead[] = data?.data || [];
