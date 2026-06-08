@@ -57,6 +57,17 @@ export interface InstanceSyncState {
   errors: string[];
 }
 
+/** Public wrapper for per-instance cron routes — handles state init + timeout. */
+export async function syncOneInstanceExported(instanceKey: BisonInstanceKey): Promise<InstanceSyncResult> {
+  const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
+  return withTimeout(
+    syncOneInstance(instanceKey, state),
+    INSTANCE_TIMEOUT_MS,
+    `instance ${instanceKey}`,
+    () => ({ instance: instanceKey, ...state, errors: [...state.errors, `[${instanceKey}] timed out after ${INSTANCE_TIMEOUT_MS / 1000}s — partial progress shown`] }),
+  );
+}
+
 async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyncState): Promise<InstanceSyncResult> {
   // `state` is owned by the caller so withTimeout can snapshot live
   // counts if the timer fires before the function returns.
