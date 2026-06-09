@@ -599,9 +599,17 @@ export async function GET(req: NextRequest) {
     // Trim to page size in case multiple sources contributed.
     const paged = espFiltered.slice(0, limit);
 
+    // hasMore signal: if we returned a full page, the caller should
+    // assume there's at least one more page and keep paginating.
+    // Previously we used `espFiltered.length === limit` which silently
+    // dropped everything beyond the first page when the filtered set
+    // exceeded the limit (JPH has 1,302 eligible → first page returned
+    // 1000, espFiltered.length=1302 !== 1000 → hasMore=false → caller
+    // stopped → 302 leads invisible). `paged.length === limit` matches
+    // the standard pagination contract.
     return NextResponse.json({
       items: paged,
-      page: { limit, offset, returned: paged.length, hasMore: espFiltered.length === limit },
+      page: { limit, offset, returned: paged.length, hasMore: paged.length === limit },
     });
   } catch (error) {
     console.error("[api/nurture] GET failed:", error);
