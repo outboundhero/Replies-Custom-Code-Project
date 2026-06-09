@@ -123,6 +123,58 @@ export function isCanonicalNurtureCampaign(name: string): boolean {
 }
 
 /**
+ * Bison's built-in mailbox-provider tags. These are `default: true`
+ * system tags emitted on every lead. Source of truth verified via
+ * GET /api/tags on outboundhero (2026-06-10) — 7 tags total. Same
+ * tag names appear across every Bison workspace; only the numeric IDs
+ * vary per workspace, so we match by NAME (case-insensitive exact).
+ *
+ * Three OTHER default tags exist that are NOT ESP signals — Interested,
+ * Meeting Booked, Automated Reply. The allowlist below specifically
+ * excludes them so they can't be mistaken for an ESP.
+ *
+ * If Bison ever adds a new ESP tag (e.g. Yandex), the lead falls
+ * through to "Custom Mail Server" → google bucket via Bison itself,
+ * so no code change is strictly required — but adding the name here
+ * lets us store the precise value.
+ */
+const BISON_ESP_TAG_NAMES = new Set<string>([
+  "google",
+  "outlook",
+  "zoho",
+  "custom mail server",
+  "proofpoint",
+  "mimecast",
+  "barracuda",
+]);
+
+/**
+ * Pick the ESP tag from a lead's possibly-multi-tag array.
+ *
+ * Returns the first tag whose name matches a known Bison ESP, or null
+ * if the lead has no ESP tag at all (rare — Bison stamps every lead
+ * with one of the 7 default ESP tags). Operator-added segmentation
+ * tags like "Hot Lead" or "California List" are correctly ignored.
+ *
+ * For multi-ESP edge cases (e.g. a lead tagged both `Outlook` AND
+ * `Proofpoint` — Microsoft tenant behind a Proofpoint SEG), the first
+ * match wins. With Bison's tag emission order, that's typically the
+ * mailbox provider (Outlook), so the lead routes to the Outlook
+ * nurture campaign — same precedence rule as bucketEsp().
+ */
+export function pickEspFromTags(
+  tags: Array<{ id?: number; name?: string; default?: boolean }> | null | undefined,
+): string | null {
+  if (!tags || tags.length === 0) return null;
+  for (const t of tags) {
+    const name = (t.name || "").trim();
+    if (!name) continue;
+    if (BISON_ESP_TAG_NAMES.has(name.toLowerCase())) return name;
+  }
+  return null;
+}
+
+/**
  * Match a campaign name to one of the three ESP buckets based on naming
  * convention. Returns null when the campaign isn't ESP-tagged.
  *

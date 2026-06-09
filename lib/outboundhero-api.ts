@@ -164,6 +164,18 @@ export interface OutboundLead {
   company: string | null;
   status: string;
   custom_variables?: Array<{ name: string; value: string }>;
+  /**
+   * Tags attached to the lead in Bison. Includes Bison's built-in
+   * mailbox-provider tags (Outlook, Google, Custom Mail Server,
+   * Proofpoint, Mimecast, Barracuda, Zoho — all `default: true`)
+   * alongside operator-added segmentation tags. `pickEspFromTags()`
+   * in `lib/nurture/esp.ts` filters down to the ESP one.
+   */
+  tags?: Array<{
+    id: number;
+    name: string;
+    default?: boolean;
+  }>;
   lead_campaign_data?: {
     status?: string;
     emails_sent?: number;

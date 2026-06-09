@@ -1,5 +1,6 @@
 import { extractTagFromCampaignName, resolveSection } from "./tag-resolver";
 import { extractCustomVars } from "./custom-vars-extractor";
+import { pickEspFromTags } from "@/lib/nurture/esp";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { shouldFilter } from "./bounce-filter";
@@ -336,6 +337,10 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     city: String(customVars.city || ""),
     state: String(customVars.state || ""),
     google_maps_url: String(customVars.google_maps_url || ""),
+    // ESP from Bison's own tag set. If the webhook payload includes
+    // lead.tags (typical case) we get the routing bucket inline; if it
+    // doesn't, the backfill script picks the row up later.
+    esp: pickEspFromTags((lead as { tags?: Array<{ id: number; name: string }> }).tags),
     lead_category: getLeadCategory(aiCategory),
     ai_categorized_lead_category: aiCategory,
     reply_status: replyStatus,

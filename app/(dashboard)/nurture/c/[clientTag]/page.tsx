@@ -564,22 +564,45 @@ export default function NurturePage() {
       // (whatever happened to also be eligible+safe), making rollback
       // unusable at scale.
       const { status: viewStatus, safety: viewSafety } = viewToFilters(view);
-      const p = new URLSearchParams();
-      p.set("client_tag", filters.client_tag);
-      p.set("status", viewStatus);
-      p.set("safety", viewSafety);
-      p.set("limit", "1000");
-      if (filters.source && filters.source !== "all") p.set("source", filters.source);
-      if (filters.esp) p.set("esp", filters.esp);
 
-      const res = await fetch(`/api/nurture?${p}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        toast.error(body.error || `Bulk select failed (${res.status})`);
-        return;
+      // Paginate /api/nurture until hasMore=false (or we hit the sanity
+      // ceiling). Old behavior: one call with limit=1000 — any client
+      // with >1000 eligible leads was silently truncated (JPH has 2k+,
+      // JPNYC has 2.1k+). Now we stream pages of 1000 and the operator
+      // sees the real count.
+      const PAGE_SIZE = 1000;
+      const SANITY_CEILING = 10000;
+      const fetched: NurtureItem[] = [];
+      let hasMore = true;
+      let pageNum = 0;
+      while (hasMore && fetched.length < SANITY_CEILING) {
+        const p = new URLSearchParams();
+        p.set("client_tag", filters.client_tag);
+        p.set("status", viewStatus);
+        p.set("safety", viewSafety);
+        p.set("limit", String(PAGE_SIZE));
+        p.set("offset", String(fetched.length));
+        if (filters.source && filters.source !== "all") p.set("source", filters.source);
+        if (filters.esp) p.set("esp", filters.esp);
+
+        const res = await fetch(`/api/nurture?${p}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          toast.error(body.error || `Bulk select failed (${res.status})`);
+          return;
+        }
+        const data = await res.json() as { items: NurtureItem[]; page?: { hasMore?: boolean } };
+        const items = data.items || [];
+        fetched.push(...items);
+        hasMore = !!data.page?.hasMore;
+        pageNum++;
+        // Surface mid-flight progress for big pulls so the operator
+        // knows we're still working.
+        if (hasMore && pageNum > 1) {
+          toast.loading(`Loading ${fetched.length.toLocaleString()}+ leads…`, { id: "bulk-select-progress" });
+        }
       }
-      const data = await res.json() as { items: NurtureItem[]; page?: { hasMore?: boolean } };
-      const fetched = data.items || [];
+      toast.dismiss("bulk-select-progress");
 
       // Replace the visible items with the selected set so the user can
       // SEE what they just selected (not just trust the count).
@@ -618,10 +641,10 @@ export default function NurturePage() {
 
       const espLabel = filters.esp ? ` ${ESP_LABEL[filters.esp]}` : "";
       const noun = `for ${filters.client_tag}${espLabel}`;
-      const truncated = fetched.length === 1000;
+      const hitCeiling = fetched.length >= 10000;
       toast.success(
-        truncated
-          ? `Selected ${fetched.length.toLocaleString()} leads ${noun} (capped at 1000 — push these first, then re-run)`
+        hitCeiling
+          ? `Selected ${fetched.length.toLocaleString()} leads ${noun} (capped at 10,000 — refine filters and re-run for the rest)`
           : `Selected ${fetched.length.toLocaleString()} leads ${noun}`
       );
     } catch (e) {

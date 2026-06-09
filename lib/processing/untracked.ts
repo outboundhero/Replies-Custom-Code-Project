@@ -269,21 +269,12 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     }
     // Invalidate inbox cache so the next page load sees the new row.
     bumpCacheVersion();
-    // Fire-and-forget ESP detection — same pattern as tracked.ts.
-    if (reply.from_email_address) {
-      import("@/lib/email-guard").then(({ lookupEmailHost }) =>
-        lookupEmailHost(reply.from_email_address).then((host) => {
-          if (!host) return;
-          supabase.from("replies")
-            .update({ esp: host })
-            .eq("reply_id", reply.id)
-            .eq("campaign_id", 0)
-            .then(({ error: espErr }) => {
-              if (espErr) console.error("[untracked] esp update failed:", espErr.message);
-            });
-        })
-      ).catch((e) => console.error("[untracked] esp detect failed:", e));
-    }
+    // ESP intentionally not set here. Untracked replies have no `lead`
+    // object on the webhook payload — only the reply sender email —
+    // so we can't extract a Bison tag inline. The
+    // scripts/backfill-esp-from-bison.ts script picks these up by
+    // doing one findLeadByEmail per row (whichever Bison instance
+    // recognises the email returns the tag set).
   });
 
   // 8. Send to master Clay table (all sections) — only for qualified replies

@@ -18,6 +18,7 @@ import supabase from "@/lib/supabase";
 import { listCampaigns, listCampaignLeads, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
+import { pickEspFromTags } from "@/lib/nurture/esp";
 
 interface InstanceSyncResult {
   instance: BisonInstanceKey;
@@ -334,6 +335,10 @@ async function processCampaigns(
         sequence_finished_at: lead.updated_at,
         synced_at: new Date().toISOString(),
         bison_instance: instanceKey,
+        // Pick the ESP straight from Bison's own tag list. Replaces
+        // the fire-and-forget EmailGuard chain that used to run below
+        // and frequently lost results to the Lambda dying mid-flight.
+        esp: pickEspFromTags(lead.tags),
       }));
 
       // Dedupe within the batch — Bison's listCampaignLeads can return the
@@ -359,26 +364,11 @@ async function processCampaigns(
         errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
       } else {
         state.upserted += dedupedRows.length;
-        // Fire-and-forget ESP detection on the freshly-inserted rows.
-        // Doesn't block the sync; backfill-esp.ts script picks up any
-        // misses on the next pass.
-        import("@/lib/email-guard").then(({ lookupEmailHost }) => {
-          for (const r of dedupedRows) {
-            if (!r.email) continue;
-            lookupEmailHost(r.email).then((host) => {
-              if (!host) return;
-              supabase.from("nurture_sequence_finished")
-                .update({ esp: host })
-                .eq("ob_lead_id", r.ob_lead_id)
-                .eq("ob_campaign_id", r.ob_campaign_id)
-                .eq("bison_instance", instanceKey)
-                .then(({ error: espErr }) => {
-                  if (espErr) console.error("[sync-sequence-finished] esp update failed:", espErr.message);
-                });
-            }).catch((e) => console.error("[sync-sequence-finished] esp lookup failed:", e));
-          }
-        });
       }
+      // ESP populated inline above from lead.tags — no more fire-and-
+      // forget EmailGuard chain. Bison's `default: true` tags are the
+      // canonical mailbox-provider signal, free, and never lost to
+      // Lambda timeouts.
     } catch (e) {
       errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${(e as Error).message}`);
     }
