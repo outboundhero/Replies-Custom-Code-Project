@@ -33,9 +33,11 @@
  */
 import { config } from "dotenv";
 config({ path: ".env.local" });
+// Anything that touches lib/db (which initializes Turso at module-load
+// using process.env.TURSO_DATABASE_URL) must be dynamic-imported AFTER
+// dotenv has populated env. lib/supabase is fine — it uses a lazy proxy
+// — and lib/nurture/esp has no env deps.
 import supabase from "../lib/supabase";
-import { resolveInstanceForClient } from "../lib/bison-instances";
-import { findLeadByEmail } from "../lib/outboundhero-api";
 import { pickEspFromTags } from "../lib/nurture/esp";
 
 const args = process.argv.slice(2);
@@ -68,15 +70,27 @@ interface Job {
 
 const espCache = new Map<string, string | null>(); // email → tag name or null
 
+// Lazy holders for the Bison helpers (loaded after dotenv).
+let _resolveInstanceForClient: ((tag: string) => Promise<string>) | null = null;
+let _findLeadByEmail: ((instance: string, email: string) => Promise<{ tags?: Array<{ id?: number; name?: string; default?: boolean }> } | null>) | null = null;
+async function loadBisonHelpers() {
+  if (_resolveInstanceForClient && _findLeadByEmail) return;
+  const bisonInstances = await import("../lib/bison-instances");
+  const bisonApi = await import("../lib/outboundhero-api");
+  _resolveInstanceForClient = bisonInstances.resolveInstanceForClient as typeof _resolveInstanceForClient;
+  _findLeadByEmail = bisonApi.findLeadByEmail as typeof _findLeadByEmail;
+}
+
 async function lookupEsp(email: string, clientTag: string | null): Promise<string | null> {
   const cached = espCache.get(email);
   if (cached !== undefined) return cached;
+  await loadBisonHelpers();
   let instance: string = "outboundhero";
   if (clientTag) {
-    try { instance = await resolveInstanceForClient(clientTag); } catch { /* default */ }
+    try { instance = await _resolveInstanceForClient!(clientTag); } catch { /* default */ }
   }
   try {
-    const lead = await findLeadByEmail(instance, email);
+    const lead = await _findLeadByEmail!(instance, email);
     const esp = pickEspFromTags(lead?.tags);
     espCache.set(email, esp);
     return esp;
