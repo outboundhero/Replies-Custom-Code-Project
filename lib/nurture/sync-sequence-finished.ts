@@ -98,6 +98,23 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
     return at.localeCompare(bt);
   });
 
+  // ── Cache the instance's full campaign list ONCE per tick. ──
+  // Before this, each syncOneClient call independently fetched the
+  // campaign list via Bison's search filter (4 status filters × 12
+  // concurrent page workers ≈ 48 parallel HTTP calls per client).
+  // Across 40 clients that meant ~2000 parallel calls per tick and
+  // Bison's per-IP rate limiter dropped most of them as "fetch failed".
+  // Now we list once for the whole instance, filter per-client in JS.
+  let allCampaigns: OutboundCampaign[] = [];
+  try {
+    allCampaigns = await listCampaigns(instanceKey, {
+      statuses: ["active", "completed", "paused", "stopped"],
+    });
+  } catch (e) {
+    state.errors.push(`[${instanceKey}] listCampaigns failed (whole instance skipped): ${(e as Error).message}`);
+    return { instance: instanceKey, ...state };
+  }
+
   for (const tag of tags) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) {
       state.errors.push(`[${instanceKey}] soft budget hit at ${(Date.now() - startedAt) / 1000}s; remaining clients will sync on next cron tick`);
@@ -109,7 +126,10 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
       // most recent 50 pages get refreshed each tick; older leads stay
       // synced from earlier runs. Manual /api/cron/nurture-sync-client
       // uses no cap so operators can do a full backfill on demand.
-      const r = await syncOneClient(instanceKey, tag, { maxPagesPerCampaign: 50 });
+      const r = await syncOneClient(instanceKey, tag, {
+        maxPagesPerCampaign: 50,
+        preloadedCampaigns: allCampaigns,
+      });
       state.campaignsScanned += r.campaignsScanned;
       state.candidatesFound += r.candidatesFound;
       state.upserted += r.upserted;
@@ -171,17 +191,20 @@ async function loadLastSyncedByTag(instanceKey: BisonInstanceKey): Promise<Map<s
 export async function syncOneClient(
   instanceKey: BisonInstanceKey,
   clientTag: string,
-  opts: { maxPagesPerCampaign?: number } = {},
+  opts: { maxPagesPerCampaign?: number; preloadedCampaigns?: OutboundCampaign[] } = {},
 ): Promise<InstanceSyncResult> {
   const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
 
-  // Bison's `search` filter narrows the list server-side. For "JPH" we
-  // get ~10 campaigns instead of 477 — well inside any rate limit.
-  // Server-side status filter still applies so we skip drafts/archived.
-  const matched = await listCampaigns(instanceKey, {
-    statuses: ["active", "completed", "paused", "stopped"],
-    search: `${clientTag}:`,
-  });
+  // If the caller already fetched the full instance campaign list, use
+  // it directly — avoids hammering Bison's per-IP rate limit when the
+  // per-instance cron iterates every client. Otherwise fall back to a
+  // search-filtered fetch for ad-hoc/manual use.
+  const matched = opts.preloadedCampaigns
+    ? opts.preloadedCampaigns
+    : await listCampaigns(instanceKey, {
+        statuses: ["active", "completed", "paused", "stopped"],
+        search: `${clientTag}:`,
+      });
 
   // The search filter is fuzzy — it may match campaigns from other clients
   // whose names happen to contain the tag string. Tighten to exact prefix
