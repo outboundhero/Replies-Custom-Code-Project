@@ -12,6 +12,7 @@ import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, 
 import { toast } from "sonner";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
+import { ESP_LABEL, detectCampaignEsp, isCanonicalNurtureCampaign, type Esp } from "@/lib/nurture/esp";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -42,7 +43,7 @@ interface NurtureItem {
   added_at: string | null;
   skipped: boolean;
   esp_host: string | null;          // raw "Outlook" / "Gmail" / "Office 365" / null when un-backfilled
-  esp_bucket: "outlook" | "other";  // routing bucket
+  esp_bucket: Esp;  // routing bucket — "google" | "outlook" | "segs"
   reply_id?: number;
   ai_category?: string | null;
   reply_text?: string | null;
@@ -160,7 +161,7 @@ export default function NurturePage() {
   // filtered view). Set by bulkSelectMatching, cleared by Clear selection.
   const [selectionScope, setSelectionScope] = useState<{
     clientTag: string;
-    esp?: "outlook" | "other";
+    esp?: Esp;
     source?: string;
   } | null>(null);
   const [pushTargetCampaignId, setPushTargetCampaignId] = useState<string>("");
@@ -380,9 +381,9 @@ export default function NurturePage() {
   // route to the matching campaign.
   const groupedItems = useMemo(() => {
     if (!groupByClient) return null;
-    type Sub = { esp: "outlook" | "other"; items: NurtureItem[] };
+    type Sub = { esp: Esp; items: NurtureItem[] };
     type Group = { client: string; subs: Sub[] };
-    const groups = new Map<string, Map<"outlook" | "other", NurtureItem[]>>();
+    const groups = new Map<string, Map<Esp, NurtureItem[]>>();
     for (const it of visibleItems) {
       const client = it.client_tag || "(no client)";
       if (!groups.has(client)) groups.set(client, new Map());
@@ -392,11 +393,13 @@ export default function NurturePage() {
       subMap.get(esp)!.push(it);
     }
     const out: Group[] = [];
+    // Show buckets in fixed order: Outlook (smallest), SEGs, Google (catch-all).
+    const ORDER: Esp[] = ["outlook", "segs", "google"];
     for (const [client, subMap] of groups) {
       const subs: Sub[] = [];
-      // Outlook first (smaller, distinct), then Gmail+Others
-      if (subMap.has("outlook")) subs.push({ esp: "outlook", items: subMap.get("outlook")! });
-      if (subMap.has("other"))   subs.push({ esp: "other",   items: subMap.get("other")! });
+      for (const esp of ORDER) {
+        if (subMap.has(esp)) subs.push({ esp, items: subMap.get(esp)! });
+      }
       out.push({ client, subs });
     }
     return out.sort((a, b) => a.client.localeCompare(b.client));
@@ -492,7 +495,7 @@ export default function NurturePage() {
    * "AC Outlook · 47 selected" and provide a clean "Clear selection"
    * that reverts to the normal filtered view.
    */
-  async function bulkSelectMatching(filters: { client_tag?: string; source?: string; esp?: "outlook" | "other" }) {
+  async function bulkSelectMatching(filters: { client_tag?: string; source?: string; esp?: Esp }) {
     if (!filters.client_tag) {
       toast.error("Pick a Client filter first — nurture campaigns are per-client, so the bulk select needs to be scoped to one client at a time.");
       return;
@@ -540,20 +543,25 @@ export default function NurturePage() {
       ])));
 
       // Auto-pick the matching nurture campaign for this (client, ESP).
+      // Per client convention there is exactly one canonical nurture
+      // campaign per ESP per client — its name ends in "(Cleaning
+      // Client)" — and older legacy variants like "(Nurture) (2)" may
+      // also still exist on Bison. We restrict the auto-pick to the
+      // canonical variant so legacy campaigns never get accidentally
+      // chosen. See isCanonicalNurtureCampaign().
       if (filters.esp) {
-        const espNeedle = filters.esp === "outlook" ? /\boutlook\b/i : /\bgmail\b/i;
         const matches = campaigns.filter((c) => {
           const tagMatches =
             (c.client_tag && c.client_tag === filters.client_tag) ||
             new RegExp(`\\b${filters.client_tag}\\b`, "i").test(c.name);
-          return tagMatches && espNeedle.test(c.name);
+          return tagMatches && isCanonicalNurtureCampaign(c.name) && detectCampaignEsp(c.name) === filters.esp;
         });
         if (matches.length === 1) {
           setPushTargetCampaignId(String(matches[0].id));
         }
       }
 
-      const espLabel = filters.esp ? ` ${filters.esp === "outlook" ? "Outlook" : "Gmail+Others"}` : "";
+      const espLabel = filters.esp ? ` ${ESP_LABEL[filters.esp]}` : "";
       const noun = `for ${filters.client_tag}${espLabel}`;
       const truncated = fetched.length === 1000;
       toast.success(
@@ -729,6 +737,141 @@ export default function NurturePage() {
       toast.error((e as Error).message);
     }
     setSyncing(false);
+  }
+
+  /**
+   * Auto-route + fan-out push.
+   *
+   * Partitions the current selection by ESP bucket (google / outlook /
+   * segs). For each non-empty bucket, finds the matching client nurture
+   * campaign by name (detectCampaignEsp) and fires a single push-to-
+   * nurture call. The N calls run in parallel and we aggregate the
+   * results into one summary toast.
+   *
+   * Refuses when:
+   *   - selection spans multiple client_tags (campaigns are per-client)
+   *   - any bucket has no matching campaign in the client's campaign set
+   *
+   * Otherwise the operator clicks ONE button and the system handles
+   * routing — exactly what "automate the nurture process" means.
+   */
+  async function pushSelectedAutoRoute() {
+    if (selected.size === 0) return;
+    setPushing(true);
+    try {
+      // Pull the full row for every selected id so we can read esp_bucket
+      // + client_tag. Selection-mode bulkSelectMatching already loaded
+      // these into items; otherwise we still have them in items[] from
+      // the current page.
+      const itemMap = new Map(items.map((i) => [i.id, i]));
+      const refs: Array<{ id: string; ob_lead_id?: number; client_tag: string | null; esp: Esp }> = [];
+      for (const id of selected) {
+        const it = itemMap.get(id);
+        if (!it) continue;
+        const meta = selectedMeta.get(id);
+        refs.push({
+          id,
+          ob_lead_id: meta?.ob_lead_id ?? it.ob_lead_id,
+          client_tag: it.client_tag,
+          esp: it.esp_bucket || "google",
+        });
+      }
+      if (refs.length === 0) {
+        toast.error("Selection has no resolvable rows — refresh and try again");
+        return;
+      }
+
+      // Refuse cross-client selections — nurture campaigns are per-client.
+      const distinctClients = new Set(refs.map((r) => r.client_tag).filter(Boolean));
+      if (distinctClients.size > 1) {
+        toast.error(`Selection spans ${distinctClients.size} clients — scope to one client first (campaigns are per-client).`);
+        return;
+      }
+      const clientTag = refs[0]?.client_tag;
+      if (!clientTag) {
+        toast.error("Selection has no client_tag — can't auto-route");
+        return;
+      }
+
+      // Partition selection by ESP bucket.
+      const byBucket = new Map<Esp, typeof refs>();
+      for (const r of refs) {
+        if (!byBucket.has(r.esp)) byBucket.set(r.esp, []);
+        byBucket.get(r.esp)!.push(r);
+      }
+
+      // Look up the matching CANONICAL campaign per bucket — i.e. the
+      // one whose name ends in "(Cleaning Client)". Per the client
+      // (confirmed in chat): "There will be a outlook, google, and segs
+      // for each client" and "It's only the ones where it reads
+      // (Nurture) (Cleaning Client)". Legacy variants like
+      // "JPNNJ: Outlook (Nurture) (2)" are intentionally ignored so
+      // auto-route can't pick them by mistake.
+      const plan: Array<{ esp: Esp; campaign: NurtureCampaign; items: typeof refs }> = [];
+      const planErrors: string[] = [];
+      for (const [esp, bucketRefs] of byBucket) {
+        const matches = campaigns.filter((c) => {
+          const tagMatches =
+            (c.client_tag && c.client_tag === clientTag) ||
+            new RegExp(`\\b${clientTag}\\b`, "i").test(c.name);
+          return tagMatches && isCanonicalNurtureCampaign(c.name) && detectCampaignEsp(c.name) === esp;
+        });
+        if (matches.length === 0) {
+          planErrors.push(`${ESP_LABEL[esp]}: no canonical nurture campaign for ${clientTag} — looked for a campaign named like "${clientTag}: ${ESP_LABEL[esp]} [Nurture] (Cleaning Client)"`);
+        } else if (matches.length > 1) {
+          planErrors.push(`${ESP_LABEL[esp]}: ${matches.length} canonical candidates — rename one so only one matches: ${matches.map((m) => `"${m.name}"`).join(", ")}`);
+        } else {
+          plan.push({ esp, campaign: matches[0], items: bucketRefs });
+        }
+      }
+      if (planErrors.length > 0) {
+        toast.error("Auto-route can't run yet:\n" + planErrors.join("\n"));
+        return;
+      }
+
+      // Fire all bucket pushes in parallel.
+      const results = await Promise.all(plan.map(async ({ esp, campaign, items: bucketItems }) => {
+        try {
+          const res = await fetch("/api/nurture/mutate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "push-to-nurture",
+              nurtureCampaignId: campaign.id,
+              bisonInstance: campaign.bison_instance,
+              items: bucketItems.map((i) => ({ id: i.id, ob_lead_id: i.ob_lead_id })),
+            }),
+          });
+          const data = await res.json();
+          return { esp, campaign, requested: bucketItems.length, ok: res.ok && data.ok, data };
+        } catch (e) {
+          return { esp, campaign, requested: bucketItems.length, ok: false, data: { error: (e as Error).message } };
+        }
+      }));
+
+      // Summarise per-bucket — single toast lists each.
+      const lines = results.map((r) => {
+        const attached = r.data.attached ?? 0;
+        const status = r.ok ? "✓" : "✗";
+        return `${status} ${ESP_LABEL[r.esp]}: ${attached}/${r.requested} → ${r.campaign.name}`;
+      });
+      const allOk = results.every((r) => r.ok);
+      const totalAttached = results.reduce((s, r) => s + (r.data.attached ?? 0), 0);
+      const totalReq = results.reduce((s, r) => s + r.requested, 0);
+      if (allOk) {
+        toast.success(`Added ${totalAttached}/${totalReq} across ${results.length} campaigns:\n${lines.join("\n")}`);
+        setSelected(new Set());
+        setSelectedMeta(new Map());
+        setPushTargetCampaignId("");
+        setSelectionScope(null);
+      } else {
+        toast.warning(`Partial push — ${totalAttached}/${totalReq} attached:\n${lines.join("\n")}`);
+      }
+      await Promise.all([loadPage(true, false), loadCounts()]);
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+    setPushing(false);
   }
 
   async function pushSelected() {
@@ -1035,8 +1178,8 @@ export default function NurturePage() {
             <span className="font-semibold">Selection view active:</span>{" "}
             <span className="text-foreground">{selectionScope.clientTag}</span>
             {selectionScope.esp && (
-              <span> · <span className={selectionScope.esp === "outlook" ? "text-sky-700" : "text-violet-700"}>
-                {selectionScope.esp === "outlook" ? "Outlook" : "Gmail + Others"}
+              <span> · <span className={ESP_TEXT_COLOR[selectionScope.esp]}>
+                {ESP_LABEL[selectionScope.esp]}
               </span></span>
             )}
             {selectionScope.source && <span> · {selectionScope.source}</span>}
@@ -1069,7 +1212,7 @@ export default function NurturePage() {
                   {selectionScope && (
                     <span className="text-xs ml-1.5">
                       ({selectionScope.clientTag}
-                      {selectionScope.esp && ` · ${selectionScope.esp === "outlook" ? "Outlook" : "Gmail+Others"}`})
+                      {selectionScope.esp && ` · ${ESP_LABEL[selectionScope.esp]}`})
                     </span>
                   )}
                 </span>
@@ -1083,18 +1226,36 @@ export default function NurturePage() {
               )}
             </span>
           </div>
+          {/* Bulk select: one button for the full client, then a per-ESP
+              row so the operator can grab a single bucket and the
+              campaign auto-picks itself. */}
           <button
             onClick={() => bulkSelectMatching({ client_tag: clientFilter || undefined, source: sourceFilter })}
             disabled={bulkSelecting || !clientFilter}
             className="text-xs text-primary hover:underline disabled:opacity-50 disabled:no-underline disabled:cursor-not-allowed"
             title={
               clientFilter
-                ? `Select every pushable ${clientFilter} lead across the whole dataset (capped at 1000)`
-                : "Pick a Client filter (or use Group by Client and click 'Select all <tag>' on a group header) — nurture campaigns are per-client, so bulk select must be scoped to one client at a time."
+                ? `Select every pushable ${clientFilter} lead across the whole dataset (capped at 1000). Use Auto-route to push all 3 ESP buckets in one click.`
+                : "Pick a Client filter first — nurture campaigns are per-client."
             }
           >
             {bulkSelecting ? "Selecting…" : clientFilter ? `Select all for ${clientFilter}` : "Select all (pick a client first)"}
           </button>
+          {clientFilter && (
+            <div className="flex items-center gap-1.5">
+              {(["google", "outlook", "segs"] as Esp[]).map((esp) => (
+                <button
+                  key={esp}
+                  onClick={() => bulkSelectMatching({ client_tag: clientFilter, source: sourceFilter, esp })}
+                  disabled={bulkSelecting}
+                  className={`text-xs px-1.5 py-0.5 rounded border hover:bg-muted/50 disabled:opacity-50 disabled:cursor-not-allowed ${ESP_PILL_CLASSES[esp]}`}
+                  title={`Select all ${ESP_LABEL[esp]} leads for ${clientFilter} and auto-pick the matching campaign in the dropdown.`}
+                >
+                  {ESP_LABEL[esp]}
+                </button>
+              ))}
+            </div>
+          )}
           {filteredCampaigns.length === 0 ? (
             // Radix Select can fail to open when SelectContent has zero
             // SelectItems. Render a static, non-Select placeholder instead
@@ -1130,8 +1291,19 @@ export default function NurturePage() {
             onClick={pushSelected}
             disabled={pushing || !pushTargetCampaignId || selected.size === 0}
             className="h-9"
+            title="Send the entire selection to the single campaign chosen in the dropdown."
           >
             {pushing ? "Pushing…" : `Add to nurture${selected.size > 0 ? ` (${selected.size})` : ""}`}
+          </Button>
+          <Button
+            size="sm"
+            variant="default"
+            onClick={pushSelectedAutoRoute}
+            disabled={pushing || selected.size === 0}
+            className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
+            title="Split the selection by email provider (Google / Outlook / SEGs) and push each bucket to its matching nurture campaign automatically."
+          >
+            {pushing ? "Pushing…" : `Auto-route${selected.size > 0 ? ` (${selected.size})` : ""}`}
           </Button>
           <Button
             size="sm"
@@ -1253,8 +1425,8 @@ export default function NurturePage() {
                           const subSelectable = sub.items.filter(isSelectable);
                           const subKey = `${client}__${sub.esp}`;
                           const subCollapsed = collapsedGroups.has(subKey);
-                          const espLabel = sub.esp === "outlook" ? "Outlook" : "Gmail + Others";
-                          const espDot = sub.esp === "outlook" ? "bg-sky-500" : "bg-violet-500";
+                          const espLabel = ESP_LABEL[sub.esp];
+                          const espDot = ESP_DOT_COLOR[sub.esp];
                           return (
                             <Fragment key={subKey}>
                               <TableRow
@@ -1791,7 +1963,32 @@ function LeadRow({
   );
 }
 
-function EspPill({ host, bucket }: { host: string | null; bucket: "outlook" | "other" }) {
+// Tailwind color tokens per ESP bucket. Kept in module scope so it can
+// be reused across UI components (banner badges, group headers, pills,
+// donut chart) — there's no good way to extract these via Tailwind
+// runtime helpers.
+const ESP_PILL_CLASSES: Record<Esp, string> = {
+  google:  "bg-violet-50 text-violet-700 border-violet-200",
+  outlook: "bg-sky-50 text-sky-700 border-sky-200",
+  segs:    "bg-amber-50 text-amber-700 border-amber-200",
+};
+const ESP_DOT_COLOR: Record<Esp, string> = {
+  google:  "bg-violet-500",
+  outlook: "bg-sky-500",
+  segs:    "bg-amber-500",
+};
+const ESP_TEXT_COLOR: Record<Esp, string> = {
+  google:  "text-violet-700",
+  outlook: "text-sky-700",
+  segs:    "text-amber-700",
+};
+const ESP_CHART_HEX: Record<Esp, string> = {
+  google:  "#8b5cf6",
+  outlook: "#0ea5e9",
+  segs:    "#f59e0b",
+};
+
+function EspPill({ host, bucket }: { host: string | null; bucket: Esp }) {
   const cls = "text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap";
   if (!host) {
     // Backfill hasn't reached this row yet — show a muted placeholder so
@@ -1805,15 +2002,8 @@ function EspPill({ host, bucket }: { host: string | null; bucket: "outlook" | "o
       </span>
     );
   }
-  if (bucket === "outlook") {
-    return (
-      <span className={`${cls} bg-sky-50 text-sky-700 border-sky-200`} title={`EmailGuard: ${host}`}>
-        {host}
-      </span>
-    );
-  }
   return (
-    <span className={`${cls} bg-violet-50 text-violet-700 border-violet-200`} title={`EmailGuard: ${host}`}>
+    <span className={`${cls} ${ESP_PILL_CLASSES[bucket]}`} title={`EmailGuard: ${host}`}>
       {host}
     </span>
   );
@@ -1955,7 +2145,6 @@ const SOURCE_DISPLAY: Record<string, { label: string; color: string }> = {
   other:              { label: "Other",              color: "#9ca3af" },
 };
 
-const ESP_COLORS = { outlook: "#0ea5e9", other: "#8b5cf6" };
 
 function ClientInsights({
   items, counts, clientTag, campaigns,
@@ -1978,14 +2167,16 @@ function ClientInsights({
 
   // ── ESP routing breakdown (donut) ──
   const espData = useMemo(() => {
-    const map = new Map<string, number>();
+    const map = new Map<Esp, number>();
     for (const it of items) {
-      const b = it.esp_bucket || "other";
+      const b: Esp = it.esp_bucket || "google";
       map.set(b, (map.get(b) || 0) + 1);
     }
+    const ORDER: Esp[] = ["outlook", "segs", "google"];
     const out: { name: string; value: number; color: string }[] = [];
-    if (map.get("outlook")) out.push({ name: "Outlook", value: map.get("outlook")!, color: ESP_COLORS.outlook });
-    if (map.get("other"))   out.push({ name: "Gmail + Others", value: map.get("other")!, color: ESP_COLORS.other });
+    for (const b of ORDER) {
+      if (map.get(b)) out.push({ name: ESP_LABEL[b], value: map.get(b)!, color: ESP_CHART_HEX[b] });
+    }
     return out;
   }, [items]);
 

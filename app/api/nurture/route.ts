@@ -21,7 +21,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
-import { effectiveEsp } from "@/lib/nurture/esp";
+import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
 
 // Allow longer timeout — large legacy table can make page queries slow.
 export const maxDuration = 60;
@@ -176,7 +176,7 @@ interface NurtureItem {
   added_at: string | null;
   skipped: boolean;
   esp_host: string | null;          // raw EmailGuard string ("Outlook", "Gmail", "Office 365", etc.)
-  esp_bucket: "outlook" | "other";  // routing bucket derived from esp_host (or fallback heuristic on email)
+  esp_bucket: Esp;  // routing bucket derived from esp_host (or fallback heuristic on email)
   reply_id?: number;
   ai_category?: string | null;
   reply_text?: string | null;
