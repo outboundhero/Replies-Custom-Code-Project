@@ -18,7 +18,6 @@ import supabase from "@/lib/supabase";
 import { listCampaigns, listCampaignLeads, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
-import { pickEspFromTags } from "@/lib/nurture/esp";
 
 interface InstanceSyncResult {
   instance: BisonInstanceKey;
@@ -322,24 +321,29 @@ async function processCampaigns(
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
-      const rows = candidates.map((lead: OutboundLead) => ({
-        ob_lead_id: lead.id,
-        ob_campaign_id: campaign.id,
-        campaign_name: campaign.name,
-        client_tag: clientTag,
-        email: lead.email,
-        first_name: lead.first_name,
-        last_name: lead.last_name,
-        company: lead.company,
-        custom_variables: lead.custom_variables || [],
-        sequence_finished_at: lead.updated_at,
-        synced_at: new Date().toISOString(),
-        bison_instance: instanceKey,
-        // Pick the ESP straight from Bison's own tag list. Replaces
-        // the fire-and-forget EmailGuard chain that used to run below
-        // and frequently lost results to the Lambda dying mid-flight.
-        esp: pickEspFromTags(lead.tags),
-      }));
+      const rows = candidates.map((lead: OutboundLead) => {
+        // Bison's /api/campaigns/{id}/leads endpoint does NOT include
+        // the lead's `tags` array — only /api/leads?search= does. So
+        // pickEspFromTags(lead.tags) is always null here, and putting
+        // it in the upsert payload would OVERWRITE good backfilled
+        // ESP values with null on every sync. The backfill cron is
+        // the canonical ESP source for sequence_finished rows; we
+        // just don't touch the column from the sync.
+        return {
+          ob_lead_id: lead.id,
+          ob_campaign_id: campaign.id,
+          campaign_name: campaign.name,
+          client_tag: clientTag,
+          email: lead.email,
+          first_name: lead.first_name,
+          last_name: lead.last_name,
+          company: lead.company,
+          custom_variables: lead.custom_variables || [],
+          sequence_finished_at: lead.updated_at,
+          synced_at: new Date().toISOString(),
+          bison_instance: instanceKey,
+        };
+      });
 
       // Dedupe within the batch — Bison's listCampaignLeads can return the
       // same (lead_id, campaign_id) twice when pagination overlaps, and
