@@ -52,10 +52,17 @@ export async function GET(req: NextRequest) {
     // request, so it's fine. Result: tile counts may overcount by a few
     // percent (a handful of newsletter senders), which is fine for a header
     // tile. The list itself is always accurate.
+    // Per-client view: use "exact" so the tile matches the hub's RPC
+    // aggregate. The whole-table view (no clientTag) stays on "estimated"
+    // because exact counts on 394k legacy + 11M reply rows would blow
+    // the Supabase statement-timeout budget. The client_tag-filtered
+    // counts are fast under the existing tag indexes.
+    const countMode: "exact" | "estimated" = clientTag ? "exact" : "estimated";
+
     const baseReplies = () => {
       let q = supabase
         .from("replies")
-        .select("id", { count: "estimated", head: true })
+        .select("id", { count: countMode, head: true })
         .not("reply_we_got", "is", null)
         .neq("reply_we_got", "")
         .not("reply_time", "is", null)
@@ -68,7 +75,7 @@ export async function GET(req: NextRequest) {
     };
 
     const baseSeq = () => {
-      let q = supabase.from("nurture_sequence_finished").select("id", { count: "estimated", head: true });
+      let q = supabase.from("nurture_sequence_finished").select("id", { count: countMode, head: true });
       if (clientTag) q = q.eq("client_tag", clientTag);
       return q;
     };
@@ -76,7 +83,7 @@ export async function GET(req: NextRequest) {
     const baseLegacy = () => {
       let q = supabase
         .from("nurture_legacy_leads")
-        .select("id", { count: "estimated", head: true })
+        .select("id", { count: countMode, head: true })
         .neq("client_tag", "N/A")
         .or(
           `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
