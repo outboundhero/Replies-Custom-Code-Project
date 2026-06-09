@@ -166,6 +166,61 @@ export default function NurturePage() {
   } | null>(null);
   const [pushTargetCampaignId, setPushTargetCampaignId] = useState<string>("");
   const [pushing, setPushing] = useState(false);
+  // Per-client auto-nurture state. Loaded once for the current
+  // clientFilter via /api/config/clients/[tag]. Flipped automatically
+  // after a successful Auto-route push (the operator clicks ONE button
+  // and from then on the cron keeps the funnel flowing).
+  const [autoNurture, setAutoNurture] = useState<{
+    enabled: boolean;
+    enabled_at: string | null;
+    last_run_at: string | null;
+  } | null>(null);
+  const [autoNurtureToggling, setAutoNurtureToggling] = useState(false);
+
+  // Helper to flip the auto-nurture flag. Used both by the Stop button
+  // and implicitly after a successful Auto-route push.
+  const setAutoNurtureEnabled = useCallback(async (clientTag: string, enabled: boolean) => {
+    setAutoNurtureToggling(true);
+    try {
+      const res = await fetch("/api/clients/auto-nurture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientTag, enabled }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        toast.error(body.error || `Failed to ${enabled ? "enable" : "disable"} auto-push (${res.status})`);
+        return;
+      }
+      setAutoNurture((prev) => ({
+        enabled,
+        enabled_at: enabled ? (prev?.enabled_at || new Date().toISOString()) : (prev?.enabled_at ?? null),
+        last_run_at: prev?.last_run_at ?? null,
+      }));
+      if (enabled) toast.success(`Auto-push enabled for ${clientTag} — eligible leads will be pushed every 2h.`);
+      else toast.success(`Auto-push disabled for ${clientTag}.`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setAutoNurtureToggling(false);
+    }
+  }, []);
+
+  // Fetch the current auto-nurture state when the client filter changes.
+  useEffect(() => {
+    if (!clientFilter) { setAutoNurture(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/config/clients/${encodeURIComponent(clientFilter)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setAutoNurture(data.auto_nurture || null);
+      } catch { /* non-critical */ }
+    })();
+    return () => { cancelled = true; };
+  }, [clientFilter]);
   const [classifying, setClassifying] = useState(false);
   const [reclassifying, setReclassifying] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -864,6 +919,13 @@ export default function NurturePage() {
         setSelectedMeta(new Map());
         setPushTargetCampaignId("");
         setSelectionScope(null);
+        // Enable auto-push for this client so subsequent eligible leads
+        // are pushed by the cron without operator action. Only flip on
+        // success and only if it isn't already enabled — silent no-op
+        // otherwise.
+        if (!autoNurture?.enabled) {
+          await setAutoNurtureEnabled(clientTag, true);
+        }
       } else {
         toast.warning(`Partial push — ${totalAttached}/${totalReq} attached:\n${lines.join("\n")}`);
       }
@@ -1190,6 +1252,32 @@ export default function NurturePage() {
             className="text-xs text-primary hover:underline shrink-0"
           >
             ← Back to all leads
+          </button>
+        </div>
+      )}
+
+      {/* ── Auto-push status banner (only shown when enabled) ── */}
+      {clientFilter && autoNurture?.enabled && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-sm text-emerald-900">
+            <span className="font-semibold">Auto-push is ON</span> for <span className="font-mono">{clientFilter}</span>.
+            <span className="text-emerald-800">
+              {" "}Every 2 hours the cron pushes newly-eligible Ready leads into the
+              {" "}3 canonical Bison nurture campaigns (Google / Outlook / SEGs).
+            </span>
+            {autoNurture.last_run_at && (
+              <span className="text-xs text-emerald-700/80 block mt-0.5">
+                Last run: {new Date(autoNurture.last_run_at).toLocaleString()}
+              </span>
+            )}
+          </div>
+          <button
+            onClick={() => setAutoNurtureEnabled(clientFilter, false)}
+            disabled={autoNurtureToggling}
+            className="text-xs text-emerald-800 hover:underline disabled:opacity-50 shrink-0"
+            title="Stop the cron from pushing more leads automatically. The leads already pushed stay pushed."
+          >
+            {autoNurtureToggling ? "Saving…" : "Stop auto-push"}
           </button>
         </div>
       )}

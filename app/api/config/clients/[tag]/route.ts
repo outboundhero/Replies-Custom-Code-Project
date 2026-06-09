@@ -51,6 +51,9 @@ export async function GET(
             cc.bcc_name_1, cc.bcc_email_1,
             cc.bcc_name_2, cc.bcc_email_2,
             cc.reply_template,
+            cc.auto_nurture_enabled,
+            cc.auto_nurture_enabled_at,
+            cc.auto_nurture_last_run_at,
             cc.updated_at
           FROM client_tags ct
           JOIN sections s ON ct.section_id = s.id
@@ -95,6 +98,11 @@ export async function GET(
     cc,
     bcc,
     reply_template: row.reply_template || null,
+    auto_nurture: {
+      enabled: Number(row.auto_nurture_enabled || 0) === 1,
+      enabled_at: row.auto_nurture_enabled_at || null,
+      last_run_at: row.auto_nurture_last_run_at || null,
+    },
     updated_at: row.updated_at || null,
   });
 }
