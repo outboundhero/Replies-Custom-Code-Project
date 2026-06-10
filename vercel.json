@@ -32,6 +32,10 @@
     {
       "path": "/api/cron/nurture-auto-push",
       "schedule": "0 1-23/2 * * *"
+    },
+    {
+      "path": "/api/cron/backfill-esp-from-bison",
+      "schedule": "30 * * * *"
     }
   ]
 }

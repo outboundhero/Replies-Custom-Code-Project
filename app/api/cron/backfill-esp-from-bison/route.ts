@@ -24,12 +24,14 @@ import { pickEspFromTags } from "@/lib/nurture/esp";
 export const maxDuration = 300;
 
 const NURTURE_DAYS = 45;
-// PER_CALL_CAP × per-call Bison time / CONCURRENCY must stay under
-// Vercel's 5-min route budget. At CONCURRENCY=20 a 400-job call costs
-// ~80 s even with 2-3 s/call Bison latency — leaves lots of headroom
-// AND quadruples per-call throughput vs the prior 5-worker version.
+// CONCURRENCY=20 with 5 parallel callers (100 simultaneous Bison calls)
+// got us through Tier 1 fast but eventually saturated Bison's rate
+// limiter — even the UI's /api/nurture calls started timing out.
+// Dropping to 10 keeps the steady-state cron well clear of contention
+// with operator traffic. Manual one-shot drains can bump this via a
+// query param if needed.
 const PER_CALL_CAP = 400;
-const CONCURRENCY = 20;
+const CONCURRENCY = 10;
 
 const EXCLUDED_AI_CATEGORIES = [
   "Interested", "Meeting Request", "Meeting Set", "Do Not Contact",
