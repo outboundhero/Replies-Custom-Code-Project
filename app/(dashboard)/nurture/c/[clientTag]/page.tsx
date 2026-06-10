@@ -120,6 +120,15 @@ export default function NurturePage() {
   const [view, setView] = useState<View>("actionable");
   const [items, setItems] = useState<NurtureItem[]>([]);
   const [counts, setCounts] = useState<Counts | null>(null);
+  // The "Ready to nurture" tile is driven by the actual drained actionable
+  // list (the server now returns the full deduped + noise-filtered
+  // eligible+safe set for this client in one shot), NOT by
+  // /api/nurture/counts. The counts endpoint sums raw per-source rows with
+  // no cross-source dedupe and no noise filtering, so it over-reports (it
+  // read 2,427 while the real deduped set is ~2,100). Driving the tile from
+  // the list keeps tile === table === "Select all". Falls back to
+  // counts.eligibleSafe only until the actionable list first loads.
+  const [readyFromList, setReadyFromList] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<NurtureCampaign[]>([]);
   // Canonical client list from Turso (client_tags table). Populates the
   // filter dropdown with EVERY client, not just the ones that happen to be
@@ -297,6 +306,15 @@ export default function NurturePage() {
         setHasMore(false); // we always drain to the end now
         setOffset(cursor);
         setFetchError(null);
+
+        // Keep the "Ready to nurture" tile in lockstep with what the table
+        // actually loaded. In the unfiltered actionable view the drained set
+        // IS the full eligible+safe population, so its length is the true
+        // Ready count. A source filter or the Waiting/Added view would be a
+        // subset, so don't trust those for the tile.
+        if (!append && view === "actionable" && sourceFilter === "all") {
+          setReadyFromList(accumulated.length);
+        }
       } catch (e) {
         setFetchError((e as Error).message);
       }
@@ -1167,7 +1185,7 @@ export default function NurturePage() {
         <StatTile
           label="Ready to nurture"
           sublabel="Eligible & safe — push these"
-          value={counts?.eligibleSafe}
+          value={readyFromList ?? counts?.eligibleSafe}
           accent="text-emerald-700"
           active={view === "actionable"}
           activeBorder="border-emerald-500"

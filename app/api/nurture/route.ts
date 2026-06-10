@@ -237,6 +237,47 @@ export async function GET(req: NextRequest) {
     const now = new Date();
     const cutoffIso = new Date(now.getTime() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
+    // PostgREST caps every request at ~1000 rows (Supabase's default
+    // db-max-rows). The historical per-source over-fetch (e.g.
+    // repliesFetch = limit*2 = 4000) was therefore silently truncated to
+    // 1000, so a 2000-row page could never fill, returned < limit, and the
+    // caller's `hasMore = returned === limit` check reported "done" after a
+    // single page — the table showed 1,303 when the real eligible+safe set
+    // is ~2,100. When the query is scoped to ONE client (always true on the
+    // per-client nurture page) we instead DRAIN every matching row in
+    // 1000-row chunks and dedupe the whole set in one pass, so the table,
+    // the "Ready" tile, and "Select all" all see the same complete set.
+    const DRAIN_CHUNK = 1000;       // PostgREST max-rows per request
+    const RAW_DRAIN_CAP = 25000;    // ceiling on raw rows scanned per source
+    const DISTINCT_CAP = 10000;     // ceiling on deduped rows returned (matches client ABSOLUTE_CAP)
+    const drainMode = !!clientTag;
+    const itemCap = drainMode ? DISTINCT_CAP : limit;
+    const legacyCap = drainMode ? DISTINCT_CAP : limit * 3;
+
+    // Fetch one source. In drain mode (single client) we keep pulling
+    // 1000-row chunks until the source is exhausted or we hit RAW_DRAIN_CAP;
+    // otherwise we fall back to the legacy single-window fetch.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fetchRows = async (makeQuery: () => any, legacyWindow: number): Promise<any[]> => {
+      if (!drainMode) {
+        const { data, error } = await makeQuery().range(offset, offset + legacyWindow - 1);
+        if (error) throw new Error(error.message);
+        return data || [];
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const all: any[] = [];
+      let start = offset;
+      while (all.length < RAW_DRAIN_CAP) {
+        const { data, error } = await makeQuery().range(start, start + DRAIN_CHUNK - 1);
+        if (error) throw new Error(error.message);
+        const batch = data || [];
+        all.push(...batch);
+        if (batch.length < DRAIN_CHUNK) break; // source exhausted
+        start += DRAIN_CHUNK;
+      }
+      return all;
+    };
+
     // Decide which sources to query.
     // sequence_finished only includes the seq table; soft_negative / out_of_office
     // restrict the replies-bucket filter; "all" hits both tables.
@@ -253,71 +294,73 @@ export async function GET(req: NextRequest) {
       // Otherwise honour the user-requested sort column + direction.
       const orderByAddedDesc = statusFilter === "added" && sortKey === "eligibility";
 
-      let q = supabase
-        .from("replies")
-        .select(
-          "id, reply_id, client_tag, bison_instance, lead_email, first_name, last_name, company_name, address, city, state, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
-        )
-        .not("reply_we_got", "is", null)
-        .neq("reply_we_got", "")
-        .not("reply_time", "is", null)
-        // Exclude AI-categorized hard blocks (DNC, Wrong Person, etc.) so they
-        // never reach the nurture queue, even if unclassified by the safety
-        // classifier yet.
-        .or(
-          `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
-        );
+      const makeRepliesQuery = () => {
+        let q = supabase
+          .from("replies")
+          .select(
+            "id, reply_id, client_tag, bison_instance, lead_email, first_name, last_name, company_name, address, city, state, ai_categorized_lead_category, reply_we_got, reply_time, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp"
+          )
+          .not("reply_we_got", "is", null)
+          .neq("reply_we_got", "")
+          .not("reply_time", "is", null)
+          // Exclude AI-categorized hard blocks (DNC, Wrong Person, etc.) so they
+          // never reach the nurture queue, even if unclassified by the safety
+          // classifier yet.
+          .or(
+            `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+          );
 
-      // Drop rows with no real client tag — can't route them. Noise-sender
-      // filtering happens JS-side in the dedupe loop below — pushing 30+
-      // NOT ILIKE clauses into SQL was hitting Supabase's statement timeout
-      // on the 390k-row legacy table.
-      q = applyClientTagFilter(q);
+        // Drop rows with no real client tag — can't route them. Noise-sender
+        // filtering happens JS-side in the dedupe loop below — pushing 30+
+        // NOT ILIKE clauses into SQL was hitting Supabase's statement timeout
+        // on the 390k-row legacy table.
+        q = applyClientTagFilter(q);
 
-      q = orderByAddedDesc
-        ? q.order("nurture_added_at", { ascending: false })
-        : q.order(SORT_COLUMN[sortKey].replies, { ascending: sortAsc, nullsFirst: false });
+        q = orderByAddedDesc
+          ? q.order("nurture_added_at", { ascending: false })
+          : q.order(SORT_COLUMN[sortKey].replies, { ascending: sortAsc, nullsFirst: false });
 
-      if (clientTag) q = q.eq("client_tag", clientTag);
+        if (clientTag) q = q.eq("client_tag", clientTag);
 
-      // bucket source filter
-      if (sourceParam === "soft_negative") q = q.eq("nurture_bucket", "soft_negative");
-      else if (sourceParam === "out_of_office") q = q.eq("nurture_bucket", "out_of_office");
+        // bucket source filter
+        if (sourceParam === "soft_negative") q = q.eq("nurture_bucket", "soft_negative");
+        else if (sourceParam === "out_of_office") q = q.eq("nurture_bucket", "out_of_office");
 
-      // status filter
-      if (statusFilter === "added") {
-        q = q.not("nurture_added_at", "is", null);
-      } else if (statusFilter === "skipped") {
-        q = q.eq("nurture_skipped", true);
-      } else if (statusFilter === "eligible") {
-        q = q
-          .lte("reply_time", cutoffIso)
-          .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
-      } else if (statusFilter === "waiting") {
-        q = q
-          .gt("reply_time", cutoffIso)
-          .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
-      }
+        // status filter
+        if (statusFilter === "added") {
+          q = q.not("nurture_added_at", "is", null);
+        } else if (statusFilter === "skipped") {
+          q = q.eq("nurture_skipped", true);
+        } else if (statusFilter === "eligible") {
+          q = q
+            .lte("reply_time", cutoffIso)
+            .is("nurture_added_at", null)
+            .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+        } else if (statusFilter === "waiting") {
+          q = q
+            .gt("reply_time", cutoffIso)
+            .is("nurture_added_at", null)
+            .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+        }
 
-      // safety filter
-      if (safetyFilter === "unclassified") {
-        q = q.is("nurture_safety", null);
-      } else if (safetyFilter === "safe" || safetyFilter === "unsafe" || safetyFilter === "unknown") {
-        q = q.eq("nurture_safety", safetyFilter);
-      }
+        // safety filter
+        if (safetyFilter === "unclassified") {
+          q = q.is("nurture_safety", null);
+        } else if (safetyFilter === "safe" || safetyFilter === "unsafe" || safetyFilter === "unknown") {
+          q = q.eq("nurture_safety", safetyFilter);
+        }
+        return q;
+      };
 
       // Fetch 2x the requested limit so we can dedupe by email and still
       // hand back close to `limit` distinct leads on the page. When an
       // ESP filter is active we over-fetch much more aggressively because
       // Outlook is rare (~5-10% of B2B addresses) and the bucket check
       // happens in JS (it spans multiple stored host strings: Outlook,
-      // Office 365, Hotmail, Exchange, Microsoft).
+      // Office 365, Hotmail, Exchange, Microsoft). In drain mode fetchRows
+      // ignores this window and pulls the whole client instead.
       const repliesFetch = espFilter ? Math.min(2000, limit * 20) : limit * 2;
-      q = q.range(offset, offset + repliesFetch - 1);
-      const { data: rows, error } = await q;
-      if (error) throw new Error(error.message);
+      const rows = await fetchRows(makeRepliesQuery, repliesFetch);
 
       // Dedupe by (lead_email, client_tag) — same person under the same
       // client tag collapses to one entry. The query is ordered by reply_time
@@ -373,47 +416,49 @@ export async function GET(req: NextRequest) {
           nurture_safety_reason: r.nurture_safety_reason,
           nurture_classified_at: r.nurture_classified_at,
         });
-        if (items.length >= limit) break;
+        if (items.length >= itemCap) break;
       }
     }
 
     // ── Sequence-finished candidates ──
     if (wantSeq) {
       const seqOrderByAddedDesc = statusFilter === "added" && sortKey === "eligibility";
-      let q = supabase
-        .from("nurture_sequence_finished")
-        .select(
-          "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, bison_instance, email, first_name, last_name, company, sequence_finished_at, added_at, skipped, esp"
-        );
+      const makeSeqQuery = () => {
+        let q = supabase
+          .from("nurture_sequence_finished")
+          .select(
+            "id, ob_lead_id, ob_campaign_id, campaign_name, client_tag, bison_instance, email, first_name, last_name, company, sequence_finished_at, added_at, skipped, esp"
+          );
 
-      q = seqOrderByAddedDesc
-        ? q.order("added_at", { ascending: false })
-        : q.order(SORT_COLUMN[sortKey].seq, { ascending: sortAsc, nullsFirst: false });
+        q = seqOrderByAddedDesc
+          ? q.order("added_at", { ascending: false })
+          : q.order(SORT_COLUMN[sortKey].seq, { ascending: sortAsc, nullsFirst: false });
 
-      if (clientTag) q = q.eq("client_tag", clientTag);
+        if (clientTag) q = q.eq("client_tag", clientTag);
 
-      if (statusFilter === "added") {
-        q = q.not("added_at", "is", null);
-      } else if (statusFilter === "skipped") {
-        q = q.eq("skipped", true);
-      } else if (statusFilter === "eligible") {
-        q = q
-          .lte("sequence_finished_at", cutoffIso)
-          .is("added_at", null)
-          .or("skipped.is.null,skipped.eq.false");
-      } else if (statusFilter === "waiting") {
-        q = q
-          .gt("sequence_finished_at", cutoffIso)
-          .is("added_at", null)
-          .or("skipped.is.null,skipped.eq.false");
-      }
+        if (statusFilter === "added") {
+          q = q.not("added_at", "is", null);
+        } else if (statusFilter === "skipped") {
+          q = q.eq("skipped", true);
+        } else if (statusFilter === "eligible") {
+          q = q
+            .lte("sequence_finished_at", cutoffIso)
+            .is("added_at", null)
+            .or("skipped.is.null,skipped.eq.false");
+        } else if (statusFilter === "waiting") {
+          q = q
+            .gt("sequence_finished_at", cutoffIso)
+            .is("added_at", null)
+            .or("skipped.is.null,skipped.eq.false");
+        }
+        return q;
+      };
 
       const seqFetch = espFilter ? Math.min(2000, limit * 20) : limit;
-      q = q.range(offset, offset + seqFetch - 1);
-      const { data: seqRows, error } = await q;
-      if (error) throw new Error(error.message);
+      const seqRows = await fetchRows(makeSeqQuery, seqFetch);
 
       for (const r of seqRows || []) {
+        if (items.length >= itemCap) break;
         const triggerAt = new Date(r.sequence_finished_at);
         const eligibleAt = new Date(triggerAt.getTime() + NURTURE_DAYS * 24 * 60 * 60 * 1000);
         const daysLeft = daysBetween(eligibleAt, now);
@@ -449,56 +494,57 @@ export async function GET(req: NextRequest) {
     // ── Legacy Airtable candidates (historical replies imported from Airtable) ──
     if (wantLegacy) {
       const legacyOrderByAddedDesc = statusFilter === "added" && sortKey === "eligibility";
-      let q = supabase
-        .from("nurture_legacy_leads")
-        .select(
-          "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp, raw_fields"
+      const makeLegacyQuery = () => {
+        let q = supabase
+          .from("nurture_legacy_leads")
+          .select(
+            "id, airtable_record_id, lead_email, first_name, last_name, company, client_tag, reply_text, reply_at, original_ai_category, nurture_safety, nurture_bucket, nurture_safety_reason, nurture_classified_at, nurture_added_at, nurture_skipped, esp, raw_fields"
+          );
+
+        q = legacyOrderByAddedDesc
+          ? q.order("nurture_added_at", { ascending: false })
+          : q.order(SORT_COLUMN[sortKey].legacy, { ascending: sortAsc, nullsFirst: false });
+
+        // Same hard-block AI-category filter as the replies query
+        q = q.or(
+          `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
         );
 
-      q = legacyOrderByAddedDesc
-        ? q.order("nurture_added_at", { ascending: false })
-        : q.order(SORT_COLUMN[sortKey].legacy, { ascending: sortAsc, nullsFirst: false });
+        // Noise-sender filtering happens JS-side in the dedupe loop below
+        // (see comment on the replies query). Same client-tag filter as
+        // replies — drop N/A.
+        q = q.neq("client_tag", "N/A");
 
-      // Same hard-block AI-category filter as the replies query
-      q = q.or(
-        `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
-      );
+        if (clientTag) q = q.eq("client_tag", clientTag);
 
-      // Noise-sender filtering happens JS-side in the dedupe loop below
-      // (see comment on the replies query). Same client-tag filter as
-      // replies — drop N/A.
-      q = q.neq("client_tag", "N/A");
+        if (statusFilter === "added") {
+          q = q.not("nurture_added_at", "is", null);
+        } else if (statusFilter === "skipped") {
+          q = q.eq("nurture_skipped", true);
+        } else if (statusFilter === "eligible") {
+          q = q
+            .lte("reply_at", cutoffIso)
+            .is("nurture_added_at", null)
+            .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+        } else if (statusFilter === "waiting") {
+          q = q
+            .gt("reply_at", cutoffIso)
+            .is("nurture_added_at", null)
+            .or("nurture_skipped.is.null,nurture_skipped.eq.false");
+        }
 
-      if (clientTag) q = q.eq("client_tag", clientTag);
-
-      if (statusFilter === "added") {
-        q = q.not("nurture_added_at", "is", null);
-      } else if (statusFilter === "skipped") {
-        q = q.eq("nurture_skipped", true);
-      } else if (statusFilter === "eligible") {
-        q = q
-          .lte("reply_at", cutoffIso)
-          .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
-      } else if (statusFilter === "waiting") {
-        q = q
-          .gt("reply_at", cutoffIso)
-          .is("nurture_added_at", null)
-          .or("nurture_skipped.is.null,nurture_skipped.eq.false");
-      }
-
-      // Safety filter — same semantics as replies
-      if (safetyFilter === "unclassified") {
-        q = q.is("nurture_safety", null);
-      } else if (safetyFilter === "safe" || safetyFilter === "unsafe" || safetyFilter === "unknown") {
-        q = q.eq("nurture_safety", safetyFilter);
-      }
+        // Safety filter — same semantics as replies
+        if (safetyFilter === "unclassified") {
+          q = q.is("nurture_safety", null);
+        } else if (safetyFilter === "safe" || safetyFilter === "unsafe" || safetyFilter === "unknown") {
+          q = q.eq("nurture_safety", safetyFilter);
+        }
+        return q;
+      };
 
       // Fetch 2x for dedupe headroom; over-fetch for ESP filter same as replies.
       const legacyFetch = espFilter ? Math.min(2000, limit * 20) : limit * 2;
-      q = q.range(offset, offset + legacyFetch - 1);
-      const { data: legacyRows, error } = await q;
-      if (error) throw new Error(error.message);
+      const legacyRows = await fetchRows(makeLegacyQuery, legacyFetch);
 
       // Cross-source dedupe: skip any (email, client_tag) already seen in
       // `replies` above. Recent replies always win — they're more authoritative.
@@ -562,7 +608,7 @@ export async function GET(req: NextRequest) {
           nurture_safety_reason: r.nurture_safety_reason,
           nurture_classified_at: r.nurture_classified_at,
         });
-        if (items.length >= limit * 3) break;
+        if (items.length >= legacyCap) break;
       }
     }
 
@@ -596,20 +642,24 @@ export async function GET(req: NextRequest) {
       ? items.filter((i) => i.esp_bucket === espFilter)
       : items;
 
-    // Trim to page size in case multiple sources contributed.
-    const paged = espFiltered.slice(0, limit);
+    // Trim to the page/drain ceiling in case multiple sources contributed.
+    // In drain mode we return the WHOLE deduped client set (up to
+    // DISTINCT_CAP) in one response; otherwise we trim to the request limit.
+    const paged = espFiltered.slice(0, drainMode ? DISTINCT_CAP : limit);
 
-    // hasMore signal: if we returned a full page, the caller should
-    // assume there's at least one more page and keep paginating.
-    // Previously we used `espFiltered.length === limit` which silently
-    // dropped everything beyond the first page when the filtered set
-    // exceeded the limit (JPH has 1,302 eligible → first page returned
-    // 1000, espFiltered.length=1302 !== 1000 → hasMore=false → caller
-    // stopped → 302 leads invisible). `paged.length === limit` matches
-    // the standard pagination contract.
+    // hasMore signal:
+    //   - drain mode: we drained the entire client in one shot, so there is
+    //     never a next page (a client past DISTINCT_CAP is truncated, same
+    //     ceiling the client used to enforce itself). hasMore=false.
+    //   - legacy paged mode: a full page implies there may be more. We can't
+    //     use `espFiltered.length === limit` (dedupe/noise/merge can shrink a
+    //     page below `limit` even when more rows exist downstream — that's the
+    //     bug that made the table stop at 1,303), so `paged.length === limit`
+    //     matches the standard pagination contract.
+    const hasMore = drainMode ? false : paged.length === limit;
     return NextResponse.json({
       items: paged,
-      page: { limit, offset, returned: paged.length, hasMore: paged.length === limit },
+      page: { limit, offset, returned: paged.length, hasMore },
     });
   } catch (error) {
     console.error("[api/nurture] GET failed:", error);
