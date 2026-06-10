@@ -61,12 +61,19 @@ export async function runAutoPushForClient(clientTag: string): Promise<AutoPushR
   const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0 };
 
   // 1. Pull eligible sequence_finished candidates.
+  // ESP guard: only route leads whose mailbox provider is CONFIRMED from
+  // Bison's tags (esp column populated by the backfill cron). Rows with
+  // esp IS NULL would fall through effectiveEsp()'s consumer-domain
+  // heuristic to the Google catch-all — dumping custom-domain Outlook/SEG
+  // mailboxes into the Google nurture campaign. Hold them back until the
+  // hourly ESP backfill stamps them; they become routable automatically.
   const { data: seqRows, error: seqErr } = await supabase
     .from("nurture_sequence_finished")
     .select("id, ob_lead_id, email, esp, sequence_finished_at, added_at, skipped")
     .eq("client_tag", clientTag)
     .is("added_at", null)
     .not("skipped", "is", true)
+    .not("esp", "is", null)
     .lte("sequence_finished_at", cutoffIso)
     .order("sequence_finished_at", { ascending: true })
     .limit(PER_CLIENT_CAP);
@@ -86,6 +93,7 @@ export async function runAutoPushForClient(clientTag: string): Promise<AutoPushR
       .eq("nurture_safety", "safe")
       .is("nurture_added_at", null)
       .not("nurture_skipped", "is", true)
+      .not("esp", "is", null) // confirmed-ESP only — see seq query above
       .not("reply_we_got", "is", null).neq("reply_we_got", "")
       .not("reply_time", "is", null)
       .lte("reply_time", cutoffIso)

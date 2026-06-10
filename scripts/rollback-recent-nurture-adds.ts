@@ -89,7 +89,10 @@ async function inspect(
 async function main() {
   const replies = await inspect("replies", "nurture_added_at", "nurture_campaign_id", "lead_email");
   const legacy = await inspect("nurture_legacy_leads", "nurture_added_at", "nurture_campaign_id", "lead_email");
-  const seq = await inspect("nurture_sequence_finished", "added_at", "nurture_campaign_id", "lead_email");
+  // nurture_sequence_finished stores the address in `email`, NOT `lead_email`
+  // — passing the wrong column made this select fail silently and return 0,
+  // so seq leads (the bulk of the pool) were never rolled back.
+  const seq = await inspect("nurture_sequence_finished", "added_at", "nurture_campaign_id", "email");
 
   console.log(`Found:`);
   console.log(`  replies:                  ${replies.length}`);

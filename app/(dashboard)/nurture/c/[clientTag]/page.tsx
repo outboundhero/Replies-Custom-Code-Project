@@ -861,9 +861,16 @@ export default function NurturePage() {
       // the current page.
       const itemMap = new Map(items.map((i) => [i.id, i]));
       const refs: Array<{ id: string; ob_lead_id?: number; client_tag: string | null; esp: Esp }> = [];
+      // Leads whose mailbox provider isn't confirmed yet (no esp_host from
+      // Bison's tags). effectiveEsp() falls these back to the Google
+      // catch-all, which dumped custom-domain Outlook/SEG mailboxes into the
+      // Google campaign — the misrouting we hit. Hold them back; they route
+      // correctly once the hourly ESP backfill stamps esp_host.
+      let heldBackNoEsp = 0;
       for (const id of selected) {
         const it = itemMap.get(id);
         if (!it) continue;
+        if (!it.esp_host) { heldBackNoEsp++; continue; }
         const meta = selectedMeta.get(id);
         refs.push({
           id,
@@ -873,8 +880,17 @@ export default function NurturePage() {
         });
       }
       if (refs.length === 0) {
-        toast.error("Selection has no resolvable rows — refresh and try again");
+        toast.error(
+          heldBackNoEsp > 0
+            ? `None of the ${heldBackNoEsp.toLocaleString()} selected leads have a confirmed ESP yet — the hourly ESP backfill hasn't reached them. Wait for it to catch up (it stamps ~400/run), then re-route.`
+            : "Selection has no resolvable rows — refresh and try again",
+        );
         return;
+      }
+      if (heldBackNoEsp > 0) {
+        toast.info(
+          `Holding back ${heldBackNoEsp.toLocaleString()} lead${heldBackNoEsp === 1 ? "" : "s"} with no confirmed ESP yet — routing the ${refs.length.toLocaleString()} that do. The rest become routable as the ESP backfill fills them in.`,
+        );
       }
 
       // Refuse cross-client selections — nurture campaigns are per-client.
