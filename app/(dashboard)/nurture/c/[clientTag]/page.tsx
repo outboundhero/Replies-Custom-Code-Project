@@ -986,7 +986,11 @@ export default function NurturePage() {
       } else {
         toast.warning(`Partial push — ${totalAttached}/${totalReq} attached:\n${lines.join("\n")}`);
       }
-      await Promise.all([loadPage(true, false), loadCounts()]);
+      // Free the button the moment the attach calls return — the toast
+      // already reports the result. Refreshing the table re-drains the full
+      // client set (~2k rows) which is slow and NOT something the operator
+      // needs to wait on, so fire it in the background.
+      void Promise.all([loadPage(true, false), loadCounts()]);
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -1077,7 +1081,8 @@ export default function NurturePage() {
         });
       }
       if (data.failures?.length) console.warn("Push failures:", data.failures);
-      await Promise.all([loadPage(true, false), loadCounts()]);
+      // Background the table re-drain — the result modal/toast already fired.
+      void Promise.all([loadPage(true, false), loadCounts()]);
     } catch (e) {
       toast.error((e as Error).message);
     }

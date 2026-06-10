@@ -151,27 +151,39 @@ const BISON_ESP_TAG_NAMES = new Set<string>([
 /**
  * Pick the ESP tag from a lead's possibly-multi-tag array.
  *
- * Returns the first tag whose name matches a known Bison ESP, or null
- * if the lead has no ESP tag at all (rare — Bison stamps every lead
- * with one of the 7 default ESP tags). Operator-added segmentation
+ * Returns the matching Bison ESP tag with the HIGHEST routing precedence,
+ * or null if the lead has no ESP tag at all (rare — Bison stamps every
+ * lead with one of the 7 default ESP tags). Operator-added segmentation
  * tags like "Hot Lead" or "California List" are correctly ignored.
  *
- * For multi-ESP edge cases (e.g. a lead tagged both `Outlook` AND
- * `Proofpoint` — Microsoft tenant behind a Proofpoint SEG), the first
- * match wins. With Bison's tag emission order, that's typically the
- * mailbox provider (Outlook), so the lead routes to the Outlook
- * nurture campaign — same precedence rule as bucketEsp().
+ * Multi-ESP leads (e.g. a Microsoft tenant behind a Proofpoint/Mimecast
+ * gateway, tagged BOTH `Outlook` AND `Proofpoint`) MUST resolve to the
+ * mailbox provider, not the gateway. The old version returned the first
+ * tag in Bison's array order — and that order is NOT stable, so some
+ * Outlook-behind-a-SEG leads got stored as the SEG tag and leaked into
+ * the SEGs nurture campaign. We now apply the same precedence bucketEsp()
+ * uses — Outlook (the actual mailbox) > SEG gateway > everything else —
+ * so routing matches the lead's true mailbox and Bison's primary tag.
  */
 export function pickEspFromTags(
   tags: Array<{ id?: number; name?: string; default?: boolean }> | null | undefined,
 ): string | null {
   if (!tags || tags.length === 0) return null;
+  const matches: string[] = [];
   for (const t of tags) {
     const name = (t.name || "").trim();
     if (!name) continue;
-    if (BISON_ESP_TAG_NAMES.has(name.toLowerCase())) return name;
+    if (BISON_ESP_TAG_NAMES.has(name.toLowerCase())) matches.push(name);
   }
-  return null;
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+  // Rank by routing bucket: outlook (0) wins over segs (1) wins over the
+  // google catch-all (2). Stable for ties (first-seen of the same rank).
+  const rank = (name: string): number => {
+    const b = bucketEsp(name);
+    return b === "outlook" ? 0 : b === "segs" ? 1 : 2;
+  };
+  return matches.reduce((best, cur) => (rank(cur) < rank(best) ? cur : best));
 }
 
 /**
