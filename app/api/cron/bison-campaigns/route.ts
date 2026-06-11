@@ -63,7 +63,7 @@ export async function GET(req: NextRequest) {
     const cid = Number(campaignParam);
     const maxPages = Math.min(60, Number(req.nextUrl.searchParams.get("maxPages") || 5));
     let total = 0, page = 1, lastPage = 1;
-    const sample: Array<{ email: string; status: string; replies: number }> = [];
+    const sample: Array<{ email: string; status: string; replies: number; campaignStatus: string | null }> = [];
     while (page <= maxPages) {
       const url = `${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}&filters.lead_campaign_status=${encodeURIComponent(status)}`;
       const res = await fetch(url, { headers });
@@ -73,7 +73,7 @@ export async function GET(req: NextRequest) {
       lastPage = d?.meta?.last_page ?? page;
       total += rows.length;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const r of rows as any[]) if (sample.length < 5) sample.push({ email: r.email, status: r.status, replies: r.overall_stats?.replies ?? 0 });
+      for (const r of rows as any[]) if (sample.length < 6) sample.push({ email: r.email, status: r.status, replies: r.overall_stats?.replies ?? 0, campaignStatus: (Array.isArray(r.lead_campaign_data) ? null : r.lead_campaign_data?.status) ?? r.lead_campaign_status ?? null });
       if (rows.length === 0 || page >= lastPage) break;
       page++;
     }
