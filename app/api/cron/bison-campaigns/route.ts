@@ -23,11 +23,41 @@ export async function GET(req: NextRequest) {
   const instance = req.nextUrl.searchParams.get("instance") || "outboundhero";
   const q = req.nextUrl.searchParams.get("q") || "";
   const status = req.nextUrl.searchParams.get("status") || "sequence_finished";
+  const campaignParam = req.nextUrl.searchParams.get("campaign");
 
   let baseUrl: string, token: string;
   try { ({ baseUrl, token } = getInstanceConfig(instance)); }
   catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
   const headers = { Accept: "application/json", Authorization: `Bearer ${token}` };
+
+  // Single-campaign mode: page through the filtered leads and report the REAL
+  // count (from data[], since meta.total is the unfiltered campaign total) plus
+  // a sample, so we can confirm the lead_campaign_status filter actually works.
+  if (campaignParam) {
+    const cid = Number(campaignParam);
+    const maxPages = Math.min(60, Number(req.nextUrl.searchParams.get("maxPages") || 5));
+    let total = 0, page = 1, lastPage = 1;
+    const sample: Array<{ email: string; status: string; replies: number }> = [];
+    while (page <= maxPages) {
+      const url = `${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}&filters.lead_campaign_status=${encodeURIComponent(status)}`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) return NextResponse.json({ error: `HTTP ${res.status}`, body: (await res.text()).slice(0, 200) }, { status: 502 });
+      const d = await res.json();
+      const rows = d?.data || [];
+      lastPage = d?.meta?.last_page ?? page;
+      total += rows.length;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const r of rows as any[]) if (sample.length < 5) sample.push({ email: r.email, status: r.status, replies: r.overall_stats?.replies ?? 0 });
+      if (rows.length === 0 || page >= lastPage) break;
+      page++;
+    }
+    return NextResponse.json({
+      instance, campaign: cid, statusFilter: status,
+      pagesScanned: page, lastPage, leadsMatched_inScannedPages: total,
+      note: lastPage > maxPages ? `capped at ${maxPages} pages; total filtered ≈ lastPage(${lastPage})×100` : "all pages scanned",
+      sample,
+    });
+  }
 
   let campaigns;
   try {
