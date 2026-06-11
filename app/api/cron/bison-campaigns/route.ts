@@ -30,6 +30,32 @@ export async function GET(req: NextRequest) {
   catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
   const headers = { Accept: "application/json", Authorization: `Bearer ${token}` };
 
+  // Syntax-probe mode: try several filter param formats against ONE campaign
+  // and report lastPage for each. The format whose lastPage collapses (vs the
+  // no-filter baseline) is the one Bison actually honors.
+  const probeCampaign = req.nextUrl.searchParams.get("probe");
+  if (probeCampaign) {
+    const cid = Number(probeCampaign);
+    const val = req.nextUrl.searchParams.get("status") || "bounced";
+    const variants: Record<string, string> = {
+      "no_filter": `per_page=100&page=1`,
+      "filters.lead_campaign_status": `per_page=100&page=1&filters.lead_campaign_status=${val}`,
+      "filter[lead_campaign_status]": `per_page=100&page=1&filter[lead_campaign_status]=${val}`,
+      "lead_campaign_status": `per_page=100&page=1&lead_campaign_status=${val}`,
+      "filters[lead_campaign_status]": `per_page=100&page=1&filters[lead_campaign_status]=${val}`,
+      "status": `per_page=100&page=1&status=${val}`,
+    };
+    const out: Record<string, unknown> = {};
+    for (const [name, qs] of Object.entries(variants)) {
+      try {
+        const res = await fetch(`${baseUrl}/api/campaigns/${cid}/leads?${qs}`, { headers });
+        const d = res.ok ? await res.json() : null;
+        out[name] = res.ok ? { lastPage: d?.meta?.last_page, total: d?.meta?.total, returned: (d?.data || []).length } : `HTTP ${res.status}`;
+      } catch (e) { out[name] = `err ${(e as Error).message.slice(0, 30)}`; }
+    }
+    return NextResponse.json({ campaign: cid, value: val, variants: out });
+  }
+
   // Single-campaign mode: page through the filtered leads and report the REAL
   // count (from data[], since meta.total is the unfiltered campaign total) plus
   // a sample, so we can confirm the lead_campaign_status filter actually works.
