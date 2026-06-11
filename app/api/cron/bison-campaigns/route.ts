@@ -61,6 +61,12 @@ export async function GET(req: NextRequest) {
   // a sample, so we can confirm the lead_campaign_status filter actually works.
   if (campaignParam) {
     const cid = Number(campaignParam);
+    // raw=1 → return the full first lead object so we can see every field.
+    if (req.nextUrl.searchParams.get("raw") === "1") {
+      const res = await fetch(`${baseUrl}/api/campaigns/${cid}/leads?per_page=2&page=1`, { headers });
+      const d = res.ok ? await res.json() : { error: res.status };
+      return NextResponse.json({ campaign: cid, metaKeys: Object.keys(d?.meta || {}), firstLead: (d?.data || [])[0] ?? null });
+    }
     const maxPages = Math.min(60, Number(req.nextUrl.searchParams.get("maxPages") || 5));
     let total = 0, page = 1, lastPage = 1;
     const sample: Array<{ email: string; status: string; replies: number; campaignStatus: string | null }> = [];
