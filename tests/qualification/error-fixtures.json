@@ -1,0 +1,49 @@
+[
+  { "id": "ind-bakery", "category": "industry", "note": "bake shop misread as restaurant",
+    "input": { "companyName": "Sweet Maple Bake Shop", "exclusionIndustries": "restaurants" },
+    "expected": { "industry": "Passed" } },
+
+  { "id": "ind-comedy-club", "category": "industry", "note": "comedy club misread as restaurant",
+    "input": { "companyName": "The Comedy Store", "website": "thecomedystore.com", "exclusionIndustries": "restaurants" },
+    "expected": { "industry": "Passed" } },
+
+  { "id": "ind-wedding-venue", "category": "industry", "note": "wedding venue misread as farm",
+    "input": { "companyName": "Stonebridge Wedding & Event Venue", "exclusionIndustries": "farms, agriculture" },
+    "expected": { "industry": "Passed" } },
+
+  { "id": "ind-granite", "category": "industry", "note": "granite/countertop co misread as cleaning company",
+    "input": { "companyName": "Premier Granite & Countertops", "exclusionIndustries": "cleaning companies, janitorial services" },
+    "expected": { "industry": "Passed" } },
+
+  { "id": "ind-church", "category": "industry", "note": "church (wesleychapel.org) — not a restaurant",
+    "input": { "companyName": "Wesley Chapel United Methodist Church", "website": "wesleychapel.org", "leadEmail": "pastortony@wesleychapel.org", "exclusionIndustries": "restaurants" },
+    "expected": { "industry": "Passed" } },
+
+  { "id": "ind-commercial-realestate", "category": "industry", "note": "real estate defaults to commercial",
+    "input": { "companyName": "Cushman & Wakefield Commercial Real Estate", "exclusionIndustries": "residential real estate, homes" },
+    "expected": { "industry": "Passed" } },
+
+  { "id": "ind-restaurant-control", "category": "industry", "note": "CONTROL: a real restaurant must FAIL",
+    "input": { "companyName": "Olive Garden Italian Restaurant", "exclusionIndustries": "restaurants" },
+    "expected": { "industry": "Failed" } },
+
+  { "id": "loc-belmont-nc", "category": "location", "note": "Belmont NC is ~12mi from Charlotte (was flagged 150)",
+    "input": { "city": "Belmont", "state": "NC", "inclusionLocations": "Charlotte metro area", "hqAnchor": "Charlotte, NC 28202" },
+    "expected": { "location": "Passed" } },
+
+  { "id": "loc-lafayette-co", "category": "location", "note": "Lafayette CO ~30min from Denver — in metro",
+    "input": { "city": "Lafayette", "state": "CO", "inclusionLocations": "Denver metro area", "hqAnchor": "Denver, CO" },
+    "expected": { "location": "Passed" } },
+
+  { "id": "loc-same-city", "category": "location", "note": "lead in same city as client office",
+    "input": { "city": "Charlotte", "state": "NC", "inclusionLocations": "Charlotte NC", "hqAnchor": "Charlotte, NC 28202" },
+    "expected": { "location": "Passed" } },
+
+  { "id": "loc-out-of-area-church", "category": "location", "note": "Floyds Knobs IN vs Dallas TX — far, must FAIL",
+    "input": { "city": "Floyds Knobs", "state": "IN", "address": "2100 Highway 150", "inclusionLocations": "Dallas-Fort Worth, TX", "hqAnchor": "Dallas, TX" },
+    "expected": { "location": "Failed" } },
+
+  { "id": "loc-far-control", "category": "location", "note": "CONTROL: cross-country must FAIL",
+    "input": { "city": "Miami", "state": "FL", "inclusionLocations": "Seattle WA metro", "hqAnchor": "Seattle, WA" },
+    "expected": { "location": "Failed" } }
+]

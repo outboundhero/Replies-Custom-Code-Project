@@ -1,30 +1,43 @@
 /**
- * GPT-based location audit: checks if a lead is within ~20 miles / ~20 minutes of a client's service area.
- * Uses enriched data (verified address/zip from web research) for higher accuracy.
+ * Location audit — Gemini 2.5 Flash + Google Search grounding.
+ *
+ * Replaces the old gpt-4o-mini single-shot (which hallucinated distances on
+ * lesser-known towns — e.g. flagged Belmont NC as 150 mi from Charlotte when
+ * it's 12). Grounding lets the model look up the REAL driving distance and
+ * disambiguate same-named towns (Belmont NC vs Belmont CA).
+ *
+ * Measures FROM the client's office anchor (hq_anchor) when available, and
+ * also accepts the broader free-form service area (inclusion_locations).
+ * ~20 mile / ~20 minute threshold, generous (default to Passed when in range).
  */
+
+import { geminiJSON } from "@/lib/gemini";
 
 interface LocationAuditResult {
   result: "Passed" | "Failed";
   reason: string;
 }
 
-const SYSTEM_PROMPT = `You are a geographic proximity assistant. Given a lead's location and a client's service area, determine if the lead is within approximately 20 miles or 20 minutes driving distance of the client's service area.
+const SYSTEM_PROMPT = `You are a geographic proximity auditor for a B2B commercial-services company. Decide if a LEAD is close enough to a CLIENT's service area to be worth pursuing.
 
-CRITICAL RULES:
-- READ THE ENTIRE SERVICE AREA LIST CAREFULLY. The list may span MULTIPLE states/regions. Check ALL of them, not just the first section.
-- If a city and state are provided, that is ALWAYS enough information to determine proximity. NEVER say "too vague" or "cannot determine" when city + state are available.
-- If the service area lists zip codes, check if the lead's city/zip is within ~20 miles of those zip codes.
-- If the service area lists cities or counties, check if the lead's city is within ~20 miles of those areas.
-- If the service area lists entire states (e.g. just "Kentucky" or "Texas" as a header), any location within that state counts as within the service area.
-- Use your knowledge of US geography, zip codes, city locations, and driving distances.
-- Be GENEROUS — if there's any reasonable chance the lead is within range, pass them. Err on the side of passing rather than failing.
-- Only fail if the lead is clearly and obviously outside the 20-mile / 20-minute radius of ALL listed service areas.
+You are given:
+1. LEAD LOCATION — raw, possibly partial (city/state/address/zip from the lead's own reply or CRM).
+2. CLIENT OFFICE ANCHOR — the client's office as "City, State" or a ZIP. This is the precise point to measure distance FROM. May be blank.
+3. CLIENT SERVICE AREA — a broader free-form description (zips, counties, cities, or whole states). May span MULTIPLE regions — read all of it.
+
+USE GOOGLE SEARCH to:
+- Resolve the lead's location to a real place. Disambiguate same-named towns using any state given (e.g. "Belmont, NC" is near Charlotte NC, NOT Belmont CA).
+- Look up the actual DRIVING distance/time between the lead and the client office anchor.
+
+PASS if ANY of these is true:
+- The lead is within ~20 miles OR ~20 minutes driving of the client office anchor.
+- The lead's city/zip/county/state is contained in the client service area list (e.g. service area lists the lead's state or a county/zip that contains the lead).
+Be GENEROUS — if there's any reasonable chance the lead is in range, PASS. A lead in the SAME city as the client passes. Never fail for "too vague" when a city + state are present.
+
+FAIL only if the lead is clearly and obviously OUTSIDE all listed service areas AND more than ~20 miles / ~20 minutes from the office anchor.
 
 Respond with JSON only, no other text:
-{"result": "Passed" | "Failed", "reason": "one sentence explanation with approximate distance"}
-
-- "Passed" = lead is within approximately 20 miles / 20 minutes of ANY part of the service area
-- "Failed" = lead is clearly outside ALL parts of the service area (more than 20 miles away from every listed location)`;
+{"result":"Passed"|"Failed","leadResolved":"City, ST","miles":number_or_null,"reason":"one sentence stating the resolved locations and approximate distance"}`;
 
 export async function auditLocation(
   city: string | null,
@@ -33,48 +46,37 @@ export async function auditLocation(
   zip: string | null,
   inclusionLocations: string,
   confidence: string,
+  hqAnchor: string | null = null,
 ): Promise<LocationAuditResult> {
-  if (!inclusionLocations?.trim()) {
-    return { result: "Passed", reason: "No inclusion locations defined — all locations accepted" };
+  // No service-area constraint AND no anchor → nothing to measure against.
+  if (!inclusionLocations?.trim() && !hqAnchor?.trim()) {
+    return { result: "Passed", reason: "No service area or office anchor defined — all locations accepted" };
   }
 
-  const locationParts = [address, city, state, zip ? `ZIP: ${zip}` : null].filter(Boolean).join(", ");
-  if (!locationParts) {
+  const leadLocation = [address, city, state, zip ? `ZIP: ${zip}` : null].filter(Boolean).join(", ");
+  if (!leadLocation) {
     return { result: "Failed", reason: "No location data available for this lead" };
   }
 
-  const userMessage = `Lead location: "${locationParts}"\nData confidence: ${confidence}\nClient service area: "${inclusionLocations}"`;
+  const userMessage = [
+    `LEAD LOCATION: "${leadLocation}"`,
+    `LEAD DATA CONFIDENCE: ${confidence}`,
+    `CLIENT OFFICE ANCHOR: "${hqAnchor?.trim() || "(not provided)"}"`,
+    `CLIENT SERVICE AREA: "${inclusionLocations?.trim() || "(not provided)"}"`,
+  ].join("\n");
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0,
-        max_tokens: 200,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage },
-        ],
-      }),
+    const parsed = await geminiJSON<{ result?: string; reason?: string; leadResolved?: string; miles?: number | null }>({
+      system: SYSTEM_PROMPT,
+      user: userMessage,
+      withSearch: true,
+      maxTokens: 2048,
     });
-
-    if (!response.ok) {
-      return { result: "Failed", reason: "Location audit API error" };
-    }
-
-    const data = await response.json();
-    const raw = data?.choices?.[0]?.message?.content || "";
-    const parsed = JSON.parse(raw) as { result: string; reason: string };
-
     const result = parsed.result?.toLowerCase() === "passed" ? "Passed" : "Failed";
     return { result, reason: parsed.reason || "No reason provided" };
-  } catch {
-    return { result: "Failed", reason: "Location audit failed" };
+  } catch (e) {
+    // On a Gemini failure, default to Failed (conservative — same as the old
+    // behavior) so an out-of-area lead is never silently passed.
+    return { result: "Failed", reason: `Location audit error (${(e as Error).message.slice(0, 80)})` };
   }
 }

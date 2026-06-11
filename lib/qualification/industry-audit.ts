@@ -9,6 +9,8 @@
  * 3. PER-CLIENT: Client-specific exclusion/inclusion rules (GPT-based)
  */
 
+import { geminiJSON } from "@/lib/gemini";
+
 interface IndustryAuditResult {
   result: "Passed" | "Failed" | "Residential";
   reason: string;
@@ -115,27 +117,28 @@ function checkReplyForResidential(replyText: string): { result: "Residential" | 
   return null;
 }
 
-const SYSTEM_PROMPT = `You are a business classification assistant. Given a company's verified details and industry rules, determine if the company passes or fails the industry check.
+const SYSTEM_PROMPT = `You are a business-classification auditor for a commercial cleaning / B2B services company. Given a company and a client's industry rules, determine if the company operates in an excluded industry.
 
-CRITICAL: These rules are ALWAYS an EXCLUSION LIST unless the text EXPLICITLY contains phrases like "we only want to work with", "only accept", or "we only want". A simple list of industries (e.g. "back of house kitchen cleaning") is ALWAYS an exclusion — it means EXCLUDE those industries, not "only accept" them.
+USE GOOGLE SEARCH to determine the company's REAL industry whenever the provided industry is missing, generic, or unclear — look up the company name and/or its website domain on the web before deciding.
 
-How to evaluate:
-- DEFAULT (exclusion): The rules list industries/keywords to EXCLUDE. → FAIL only if the company clearly operates in one of those specific excluded industries. PASS otherwise.
-- ONLY if the text explicitly says "we only want" or "only accept": Treat as inclusion-only. → FAIL if the company is NOT in the specified industry.
+RULES INTERPRETATION:
+- These rules are ALWAYS an EXCLUSION LIST unless the text EXPLICITLY says "we only want to work with", "only accept", or "we only want". A bare list of industries is an EXCLUSION (exclude those), never "only accept".
+- DEFAULT (exclusion): FAIL only if the company clearly operates in one of the excluded industries. PASS otherwise. When in doubt, PASS.
+- ONLY if the text explicitly says "we only want"/"only accept": treat as inclusion-only → FAIL if the company is NOT in the specified industry.
 
-IMPORTANT RULES:
-- IGNORE any mention of "residential" in the rules — residential checks are handled separately. Do NOT fail a company for being residential.
-- IGNORE any mention of "house cleaning" or "home cleaning" in the rules — these are handled separately.
-- Only fail if the company's ACTUAL industry matches the excluded industries. A restaurant is NOT "residential" just because the exclusion list mentions residential.
-- When in doubt, return "Passed".
+DISAMBIGUATION — do NOT over-fail these common mistakes (each backed by a real error):
+- A BAKERY / bake shop / patisserie / cafe / coffee shop is NOT a "restaurant" unless the rules explicitly exclude bakeries or cafes.
+- An entertainment or event VENUE (comedy club, theater, music venue, wedding venue, banquet/event hall) is NOT a "restaurant" even if it serves food — only sit-down dining establishments count as restaurants.
+- REAL ESTATE defaults to COMMERCIAL real estate (not excluded) unless the company clearly does RESIDENTIAL real estate / homes / houses.
+- A company that merely has a kitchen, sells food as a side, or supplies an industry is NOT automatically in that industry — judge by its PRIMARY business.
 
-You are given enriched data that may include a verified industry from web research. Trust this data.
+IGNORE in the rules (handled separately — never fail for these here):
+- "residential", "house cleaning", "home cleaning".
+
+Only fail on the company's ACTUAL primary industry matching a specific excluded industry.
 
 Respond with JSON only, no other text:
-{"result": "Passed" | "Failed", "reason": "one sentence explanation"}
-
-- "Passed" = company does NOT operate in any excluded industry
-- "Failed" = company clearly operates in an excluded industry
+{"result": "Passed" | "Failed", "industry": "the company's verified primary industry", "reason": "one sentence explanation"}
 
 If there are no industry rules listed, return "Passed".`;
 
@@ -198,45 +201,27 @@ export async function auditIndustry(
   const userParts = [
     `Company: "${companyName}"`,
     website ? `Website: "${website}"` : null,
-    industry ? `Verified industry: "${industry}"` : null,
+    leadEmail ? `Lead email (domain hints at the company): "${leadEmail}"` : null,
+    industry ? `Provided industry (may be empty/unreliable): "${industry}"` : null,
     `Data confidence: ${confidence} | Sources: ${dataSources}`,
-    `\nIndustry rules: "${cleanedExclusions}"`,
+    `\nIndustry rules (EXCLUSION list): "${cleanedExclusions}"`,
   ].filter(Boolean).join("\n");
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0,
-        max_tokens: 200,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userParts },
-        ],
-      }),
+    const parsed = await geminiJSON<{ result?: string; reason?: string; industry?: string }>({
+      system: SYSTEM_PROMPT,
+      user: userParts,
+      withSearch: true,
+      maxTokens: 2048,
     });
-
-    if (!response.ok) {
-      return { result: "Passed", reason: "Industry audit API error — defaulting to Passed" };
-    }
-
-    const data = await response.json();
-    const raw = data?.choices?.[0]?.message?.content || "";
-    const parsed = JSON.parse(raw) as { result: string; reason: string };
-
     const result = parsed.result?.toLowerCase() === "failed" ? "Failed" : "Passed";
-
     return {
       result,
-      reason: parsed.reason || "No reason provided",
+      reason: parsed.reason || (parsed.industry ? `Verified industry: ${parsed.industry}` : "No reason provided"),
     };
   } catch {
+    // Default to Passed on a Gemini failure (conservative — don't drop a
+    // potentially-good lead because of a transient API error).
     return { result: "Passed", reason: "Industry audit failed — defaulting to Passed" };
   }
 }

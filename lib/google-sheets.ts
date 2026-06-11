@@ -25,6 +25,16 @@ function findColumnIndex(headers: string[], ...names: string[]): number {
   return -1;
 }
 
+/** Like findColumnIndex but matches when the header STARTS WITH the prefix —
+ *  needed for the long multi-line headers (e.g. "Company Address\nPlease…"). */
+function findColumnStartsWith(headers: string[], ...prefixes: string[]): number {
+  for (const p of prefixes) {
+    const idx = headers.findIndex((h) => h.toLowerCase().trim().startsWith(p.toLowerCase().trim()));
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
 export interface ClientTrackerRow {
   clientAbbreviation: string;
   status: string;
@@ -66,6 +76,10 @@ export interface OnboardingFormRow {
   clientAbbreviation: string;
   exclusionIndustries: string;
   inclusionLocations: string;
+  /** Client's office anchor — Column G "Client Office ({City, State} or {ZIP})",
+   *  falling back to Column F "Company Address" when G is blank. Used by the
+   *  location audit as the precise point to measure lead distance FROM. */
+  hqAnchor: string;
 }
 
 export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
@@ -93,6 +107,11 @@ export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
     "Inclusion locations (make sure to include zip codes, counties, or cities + states):",
     "Inclusion locations",
   );
+  // hq_anchor: Column G "Client Office ({City, State} or {ZIP})" (exact),
+  // with Column F "Company Address…" as fallback.
+  const hqIdx = findColumnIndex(headers, "Client Office ({City, State} or {ZIP})");
+  const hqIdxLoose = hqIdx !== -1 ? hqIdx : findColumnStartsWith(headers, "Client Office");
+  const addressIdx = findColumnStartsWith(headers, "Company Address");
 
   if (abbrIdx === -1) {
     throw new Error(`Onboarding Form: missing Client Abbreviation column`);
@@ -102,10 +121,13 @@ export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
   for (let i = 1; i < rows.length; i++) {
     const abbr = rows[i][abbrIdx]?.toString()?.trim();
     if (abbr) {
+      const hq = hqIdxLoose !== -1 ? (rows[i][hqIdxLoose]?.toString()?.trim() || "") : "";
+      const addr = addressIdx !== -1 ? (rows[i][addressIdx]?.toString()?.trim() || "") : "";
       results.push({
         clientAbbreviation: abbr,
         exclusionIndustries: exclusionIdx !== -1 ? (rows[i][exclusionIdx]?.toString()?.trim() || "") : "",
         inclusionLocations: inclusionIdx !== -1 ? (rows[i][inclusionIdx]?.toString()?.trim() || "") : "",
+        hqAnchor: hq || addr,
       });
     }
   }

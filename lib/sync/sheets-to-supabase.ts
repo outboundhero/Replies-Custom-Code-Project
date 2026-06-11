@@ -54,7 +54,7 @@ export async function syncAll(): Promise<SyncResult> {
   // 2. Sync qualification rules — split combined abbreviations, last row wins per tag
   //    Skip clients with manual overrides (their rules are managed directly in Supabase)
   const formRows = await fetchOnboardingForm();
-  const qualMap = new Map<string, { client_abbreviation: string; exclusion_industries: string; inclusion_locations: string; synced_at: string }>();
+  const qualMap = new Map<string, { client_abbreviation: string; exclusion_industries: string; inclusion_locations: string; hq_anchor: string; synced_at: string }>();
   for (const r of formRows) {
     const tags = splitAbbreviations(r.clientAbbreviation);
     for (const tag of tags) {
@@ -63,6 +63,7 @@ export async function syncAll(): Promise<SyncResult> {
         client_abbreviation: tag,
         exclusion_industries: r.exclusionIndustries,
         inclusion_locations: r.inclusionLocations,
+        hq_anchor: r.hqAnchor,
         synced_at: now,
       });
     }
