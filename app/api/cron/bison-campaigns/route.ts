@@ -68,27 +68,30 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ campaign: cid, metaKeys: Object.keys(d?.meta || {}), firstLead: (d?.data || [])[0] ?? null });
     }
     const maxPages = Math.min(60, Number(req.nextUrl.searchParams.get("maxPages") || 5));
-    let total = 0, page = 1, lastPage = 1;
-    const sample: Array<{ email: string; status: string; replies: number; campaignStatus: string | null }> = [];
-    while (page <= maxPages) {
-      const url = `${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}&filters.lead_campaign_status=${encodeURIComponent(status)}`;
-      const res = await fetch(url, { headers });
+    const startPage = Math.max(1, Number(req.nextUrl.searchParams.get("startPage") || 1));
+    const endPage = startPage + maxPages - 1;
+    // Tally each lead's REAL campaign status (lead_campaign_data[].status for
+    // this campaign) across the scanned pages — the filter is ignored, so we
+    // read it client-side.
+    const tally: Record<string, number> = {};
+    let total = 0, page = startPage, lastPage = 1;
+    while (page <= endPage) {
+      const res = await fetch(`${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}`, { headers });
       if (!res.ok) return NextResponse.json({ error: `HTTP ${res.status}`, body: (await res.text()).slice(0, 200) }, { status: 502 });
       const d = await res.json();
       const rows = d?.data || [];
       lastPage = d?.meta?.last_page ?? page;
       total += rows.length;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      for (const r of rows as any[]) if (sample.length < 6) sample.push({ email: r.email, status: r.status, replies: r.overall_stats?.replies ?? 0, campaignStatus: (Array.isArray(r.lead_campaign_data) ? null : r.lead_campaign_data?.status) ?? r.lead_campaign_status ?? null });
+      for (const r of rows as any[]) {
+        const lcd = Array.isArray(r.lead_campaign_data) ? r.lead_campaign_data.find((x: { campaign_id: number }) => x.campaign_id === cid) : r.lead_campaign_data;
+        const st = lcd?.status || "(none)";
+        tally[st] = (tally[st] || 0) + 1;
+      }
       if (rows.length === 0 || page >= lastPage) break;
       page++;
     }
-    return NextResponse.json({
-      instance, campaign: cid, statusFilter: status,
-      pagesScanned: page, lastPage, leadsMatched_inScannedPages: total,
-      note: lastPage > maxPages ? `capped at ${maxPages} pages; total filtered ≈ lastPage(${lastPage})×100` : "all pages scanned",
-      sample,
-    });
+    return NextResponse.json({ instance, campaign: cid, startPage, pagesScanned: page - startPage, lastPage, leadsScanned: total, campaignStatusTally: tally });
   }
 
   let campaigns;
