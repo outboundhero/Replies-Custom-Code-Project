@@ -73,10 +73,13 @@ export async function GET(req: NextRequest) {
     // Tally each lead's REAL campaign status (lead_campaign_data[].status for
     // this campaign) across the scanned pages — the filter is ignored, so we
     // read it client-side.
+    // useFilter=1 → apply the array-notation filter the support team suggested.
+    const useFilter = req.nextUrl.searchParams.get("useFilter") === "1";
+    const filterQS = useFilter ? `&filter[lead_campaign_status]=${status}` : "";
     const tally: Record<string, number> = {};
     let total = 0, page = startPage, lastPage = 1;
     while (page <= endPage) {
-      const res = await fetch(`${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}`, { headers });
+      const res = await fetch(`${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}${filterQS}`, { headers });
       if (!res.ok) return NextResponse.json({ error: `HTTP ${res.status}`, body: (await res.text()).slice(0, 200) }, { status: 502 });
       const d = await res.json();
       const rows = d?.data || [];
@@ -91,7 +94,7 @@ export async function GET(req: NextRequest) {
       if (rows.length === 0 || page >= lastPage) break;
       page++;
     }
-    return NextResponse.json({ instance, campaign: cid, startPage, pagesScanned: page - startPage, lastPage, leadsScanned: total, campaignStatusTally: tally });
+    return NextResponse.json({ instance, campaign: cid, startPage, useFilter, statusFilter: useFilter ? status : null, pagesScanned: page - startPage, lastPage, leadsScanned: total, campaignStatusTally: tally });
   }
 
   let campaigns;
