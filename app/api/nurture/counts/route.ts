@@ -45,33 +45,12 @@ export async function GET(req: NextRequest) {
     const clientTag = req.nextUrl.searchParams.get("client_tag");
     const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-    // Per-client tiles are ALWAYS computed live (operators act on these numbers
-    // the instant they push leads — a stale cache would mislead). To keep live
-    // fast, use a single-client SQL function that scans replies+seq+legacy once
-    // each (via the client_tag indexes) and returns every bucket in ONE round
-    // trip — instead of firing 14 separate exact-count queries. Falls through
-    // to the 14-query path if the function isn't installed yet.
-    if (clientTag) {
-      const { data: rpcRows, error: rpcErr } = await supabase.rpc("nurture_client_counts", {
-        p_tag: clientTag,
-        p_cutoff: cutoffIso,
-      });
-      if (!rpcErr && Array.isArray(rpcRows) && rpcRows[0]) {
-        const r = rpcRows[0] as { total: number; eligible: number; eligible_safe: number; waiting: number; added: number };
-        return NextResponse.json(
-          {
-            total: Number(r.total) || 0,
-            eligible: Number(r.eligible) || 0,
-            eligibleSafe: Number(r.eligible_safe) || 0,
-            waiting: Number(r.waiting) || 0,
-            added: Number(r.added) || 0,
-            source: "rpc",
-          },
-          { headers: { "Cache-Control": "no-store" } },
-        );
-      }
-      // rpcErr (e.g. function not installed) → fall through to live 14-query path.
-    }
+    // Per-client tiles are ALWAYS computed LIVE (operators act on these numbers
+    // the instant they push leads — a stale cache would mislead). The 14 exact
+    // COUNTs below run in parallel and, with the client_tag indexes + fresh
+    // ANALYZE, complete in ~1.6s for the largest client and far less for most.
+    // (A single-client UNION-ALL RPC was tried and is SLOWER here — it scans
+    // every client row + evaluates CASEs, whereas separate COUNTs use indexes.)
 
     // NOTE: counts intentionally omit the noise-sender ILIKE patterns. With
     // 30+ patterns × 394K legacy rows, those scans hit Supabase's statement
