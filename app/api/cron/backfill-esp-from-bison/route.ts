@@ -61,6 +61,26 @@ export async function GET(req: NextRequest) {
   const dryRun = req.nextUrl.searchParams.get("dry") === "1";
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
+  // One-shot maintenance: null the esp on sequence_finished rows currently
+  // stored as the catch-all "google" for a SINGLE client, so the tag-based
+  // backfill re-evaluates them (splitting out SEG gateways that hide in the
+  // Google source campaign). REQUIRES a client filter — we never reset
+  // globally, which would wipe correct tag-derived classifications for every
+  // other client and force a massive re-lookup.
+  if (req.nextUrl.searchParams.get("resetGoogleEsp") === "1") {
+    if (!clientFilter) {
+      return NextResponse.json({ error: "resetGoogleEsp requires &client=TAG" }, { status: 400 });
+    }
+    const { data, error } = await supabase
+      .from("nurture_sequence_finished")
+      .update({ esp: null })
+      .eq("client_tag", clientFilter)
+      .eq("esp", "google")
+      .select("id");
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, action: "resetGoogleEsp", client: clientFilter, reset: data?.length ?? 0 });
+  }
+
   let jobs: Job[] = [];
   if (tier === 1) jobs = await fetchTier1(cutoffIso, clientFilter);
   else if (tier === 2) jobs = await fetchTier2(cutoffIso, clientFilter);

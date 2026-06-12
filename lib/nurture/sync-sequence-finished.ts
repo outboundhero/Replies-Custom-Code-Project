@@ -331,16 +331,19 @@ async function processCampaigns(
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
-      // The SOURCE campaign name encodes the ESP — leads were segmented
-      // into "TAG: Outlook / Google / SEGs (Cleaning Client)" by the same
-      // mailbox-provider detection at outbound time. So we can set the ESP
-      // directly from the campaign name with ZERO per-email Bison lookups
-      // (the /campaigns/{id}/leads endpoint omits the `tags` array, which
-      // is why the slow per-email backfill cron existed). We store the
-      // canonical bucket string; bucketEsp() round-trips it. When the name
-      // isn't ESP-tagged (null), we leave esp untouched so we don't clobber
-      // a precise backfilled value with null.
+      // ESP from the SOURCE campaign name — but ONLY for the segments where
+      // the campaign placement IS the mailbox provider:
+      //   • Outlook source → "outlook" directly (an Office365 mailbox behind
+      //     a SEG gateway is still routed as Outlook — mailbox wins).
+      //   • SEGs source (where a client segmented one) → "segs" directly.
+      // The GOOGLE / "Gmail + Others" catch-all is a MIX of true Gmail/custom
+      // domains AND SEG-gateway recipients (Mimecast/Proofpoint/Barracuda)
+      // that were never broken into a separate SEGs send. The campaign name
+      // can't tell those apart, so we leave esp NULL and let the tag-based
+      // backfill split google vs segs per-lead. (The /campaigns/{id}/leads
+      // endpoint omits the `tags` array, which is why the backfill exists.)
       const campaignEsp = detectCampaignEsp(campaign.name);
+      const directEsp = campaignEsp === "outlook" || campaignEsp === "segs" ? campaignEsp : null;
 
       const rows = candidates.map((lead: OutboundLead) => {
         const base = {
@@ -357,9 +360,10 @@ async function processCampaigns(
           synced_at: new Date().toISOString(),
           bison_instance: instanceKey,
         };
-        // Only include esp when the campaign name resolves one, so a
-        // non-ESP-named campaign never overwrites a good value with null.
-        return campaignEsp ? { ...base, esp: campaignEsp } : base;
+        // Set esp only for the precise Outlook/SEGs segments. Google-segment
+        // leads are OMITTED (not set to null) so a re-sync never clobbers a
+        // value the tag backfill already resolved.
+        return directEsp ? { ...base, esp: directEsp } : base;
       });
 
       // Dedupe within the batch — Bison's listCampaignLeads can return the
