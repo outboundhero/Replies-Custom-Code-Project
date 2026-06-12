@@ -50,7 +50,13 @@ const SEG_HOST_KEYWORDS = [
  */
 export function bucketEsp(rawHost: string | null | undefined): Esp {
   if (!rawHost) return "google";
-  const lower = rawHost.toLowerCase();
+  const lower = rawHost.toLowerCase().trim();
+  // Canonical bucket strings round-trip to themselves. The sync stores the
+  // ESP derived from the source campaign name (detectCampaignEsp) as one
+  // of these three values; without this short-circuit, "segs" would fall
+  // through to the catch-all and mis-route to google (the SEG keyword list
+  // below only matches gateway vendor names like mimecast/proofpoint).
+  if (lower === "google" || lower === "outlook" || lower === "segs") return lower as Esp;
   for (const kw of OUTLOOK_HOST_KEYWORDS) {
     if (lower.includes(kw)) return "outlook";
   }

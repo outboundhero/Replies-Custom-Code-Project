@@ -17,6 +17,7 @@
 import supabase from "@/lib/supabase";
 import { listCampaigns, listCampaignLeads, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
+import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 
 interface InstanceSyncResult {
@@ -330,15 +331,19 @@ async function processCampaigns(
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
+      // The SOURCE campaign name encodes the ESP — leads were segmented
+      // into "TAG: Outlook / Google / SEGs (Cleaning Client)" by the same
+      // mailbox-provider detection at outbound time. So we can set the ESP
+      // directly from the campaign name with ZERO per-email Bison lookups
+      // (the /campaigns/{id}/leads endpoint omits the `tags` array, which
+      // is why the slow per-email backfill cron existed). We store the
+      // canonical bucket string; bucketEsp() round-trips it. When the name
+      // isn't ESP-tagged (null), we leave esp untouched so we don't clobber
+      // a precise backfilled value with null.
+      const campaignEsp = detectCampaignEsp(campaign.name);
+
       const rows = candidates.map((lead: OutboundLead) => {
-        // Bison's /api/campaigns/{id}/leads endpoint does NOT include
-        // the lead's `tags` array — only /api/leads?search= does. So
-        // pickEspFromTags(lead.tags) is always null here, and putting
-        // it in the upsert payload would OVERWRITE good backfilled
-        // ESP values with null on every sync. The backfill cron is
-        // the canonical ESP source for sequence_finished rows; we
-        // just don't touch the column from the sync.
-        return {
+        const base = {
           ob_lead_id: lead.id,
           ob_campaign_id: campaign.id,
           campaign_name: campaign.name,
@@ -352,6 +357,9 @@ async function processCampaigns(
           synced_at: new Date().toISOString(),
           bison_instance: instanceKey,
         };
+        // Only include esp when the campaign name resolves one, so a
+        // non-ESP-named campaign never overwrites a good value with null.
+        return campaignEsp ? { ...base, esp: campaignEsp } : base;
       });
 
       // Dedupe within the batch — Bison's listCampaignLeads can return the
