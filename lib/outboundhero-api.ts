@@ -333,8 +333,15 @@ export async function listCampaignLeads(
 
   function url(page: number) {
     const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
-    if (opts.leadCampaignStatus) params.set("filters.lead_campaign_status", opts.leadCampaignStatus);
-    return `${baseUrl}/api/campaigns/${campaignId}/leads?${params}`;
+    // The ONLY filter form Bison honors is `filters[lead_campaign_status]`
+    // (plural + brackets). `filters.lead_campaign_status` (dot) and
+    // `filter[...]` (singular) are silently ignored — Bison returns the
+    // full unfiltered set, so the sync would page the newest in_sequence
+    // leads and find ~0 finished. Append the brackets RAW (URLSearchParams
+    // percent-encodes them) to match the verified-working request exactly.
+    let qs = params.toString();
+    if (opts.leadCampaignStatus) qs += `&filters[lead_campaign_status]=${opts.leadCampaignStatus}`;
+    return `${baseUrl}/api/campaigns/${campaignId}/leads?${qs}`;
   }
 
   async function fetchPage(page: number): Promise<{ rows: OutboundLead[]; lastPage: number }> {

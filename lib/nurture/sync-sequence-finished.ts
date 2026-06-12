@@ -302,16 +302,25 @@ async function processCampaigns(
       });
 
       const candidates = leads.filter((lead) => {
-        // Exclude bounced leads
+        // Bison already filtered to lead_campaign_status=sequence_finished
+        // server-side (filters[lead_campaign_status]), so every lead here
+        // is finished. We still drop bounced / replied leads.
         if (lead.status === "bounced") return false;
-        // Exclude leads who replied
         const replies = lead.overall_stats?.replies ?? 0;
         if (replies > 0) return false;
-        // Also check campaign-specific replies if available
+        // lead_campaign_data is an ARRAY of per-campaign rows. Find this
+        // campaign's row and double-check status/replies for this campaign
+        // specifically (a lead can be finished in one campaign, replied in
+        // another).
         const campData = lead.lead_campaign_data;
-        if (campData && !Array.isArray(campData)) {
-          if ((campData.replies ?? 0) > 0) return false;
-          if (campData.status === "bounced") return false;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const row = Array.isArray(campData) ? (campData as any[]).find((x) => x.campaign_id === campaign.id) : campData;
+        if (row) {
+          if ((row.replies ?? 0) > 0) return false;
+          if (row.status === "bounced") return false;
+          // If Bison ever returns a non-finished lead despite the filter,
+          // drop it — we only want sequence_finished.
+          if (row.status && row.status !== "sequence_finished") return false;
         }
         return true;
       });
