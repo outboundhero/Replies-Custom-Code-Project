@@ -125,7 +125,13 @@ export const ESP_LABEL: Record<Esp, string> = {
  * campaign via the manual dropdown if they need to.
  */
 export function isCanonicalNurtureCampaign(name: string): boolean {
-  return /\(cleaning client\)/i.test(name);
+  // Must be BOTH a [Nurture] campaign AND carry the "(Cleaning Client)" marker.
+  // Requiring only "(Cleaning Client)" was too loose — it also matched the
+  // SOURCE campaigns (e.g. "SBCC: Outlook (Cleaning Client)") and legacy
+  // parenthetical "(Nurture)" variants, so auto-route could target the wrong
+  // campaign. The canonical nurture campaigns are named exactly like
+  // "JPNNJ: Outlook [Nurture] (Cleaning Client)".
+  return /\[nurture\]/i.test(name) && /\(cleaning client\)/i.test(name);
 }
 
 /**

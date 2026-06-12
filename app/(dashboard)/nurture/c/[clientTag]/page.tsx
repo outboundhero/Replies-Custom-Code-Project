@@ -420,12 +420,16 @@ export default function NurturePage() {
   //       3. tag appears as a whole word ANYWHERE in the campaign name —
   //          covers naming patterns like "[Nurture] AC Cooldown".
   const filteredCampaigns = useMemo(() => {
+    // Only ever surface the canonical "[Nurture] (Cleaning Client)" campaigns.
+    // Legacy/source/parenthetical-(Nurture) variants are hidden from the
+    // dropdown — and auto-route targets this same set (isCanonicalNurtureCampaign).
+    const canonical = campaigns.filter((c) => isCanonicalNurtureCampaign(c.name));
     const tagsToMatch =
       selectedClientTags.length > 0 ? selectedClientTags
       : clientFilter ? [clientFilter]
       : null;
-    if (!tagsToMatch) return campaigns;
-    return campaigns.filter((c) => {
+    if (!tagsToMatch) return canonical;
+    return canonical.filter((c) => {
       if (c.client_tag && tagsToMatch.includes(c.client_tag)) return true;
       const prefix = c.name.match(/^\s*([A-Za-z0-9&_]+)\s*[-–—:|/]/);
       if (prefix && tagsToMatch.some((t) => t.toLowerCase() === prefix[1].toLowerCase())) return true;
@@ -2367,10 +2371,12 @@ function ClientInsights({
   }, [items]);
 
   // ── Campaigns for this client (filtered from the global list) ──
+  // Only the canonical "[Nurture] (Cleaning Client)" campaigns — legacy/source
+  // variants are hidden everywhere on this page.
   const clientCampaigns = useMemo(() => {
     const re = new RegExp(`\\b${clientTag}\\b`, "i");
     return campaigns
-      .filter((c) => (c.client_tag && c.client_tag.toUpperCase() === clientTag.toUpperCase()) || re.test(c.name))
+      .filter((c) => isCanonicalNurtureCampaign(c.name) && ((c.client_tag && c.client_tag.toUpperCase() === clientTag.toUpperCase()) || re.test(c.name)))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [campaigns, clientTag]);
 
