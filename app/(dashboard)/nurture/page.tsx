@@ -16,7 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowRight, Search, RefreshCw } from "lucide-react";
+import { ArrowRight, Search, RefreshCw, Zap } from "lucide-react";
 
 interface OverallCounts {
   total: number;
@@ -40,6 +40,7 @@ type SortKey = "ready" | "waiting" | "added" | "tag";
 export default function NurtureHub() {
   const [counts, setCounts] = useState<OverallCounts | null>(null);
   const [allTags, setAllTags] = useState<string[] | null>(null);
+  const [autoTags, setAutoTags] = useState<Set<string>>(new Set());
   const [summaryByTag, setSummaryByTag] = useState<Map<string, ClientSummary>>(new Map());
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -62,6 +63,13 @@ export default function NurtureHub() {
           new Set(rows.map((r: { tag?: string }) => r.tag).filter(Boolean))
         ).sort() as string[];
         setAllTags(tags);
+        // Track which clients have auto-route (auto-nurture) enabled so the
+        // cards can show a badge.
+        const auto = new Set<string>();
+        for (const r of rows as Array<{ tag?: string; auto_nurture_enabled?: number | null }>) {
+          if (r.tag && Number(r.auto_nurture_enabled) === 1) auto.add(r.tag);
+        }
+        setAutoTags(auto);
       })
       .catch(() => setAllTags([]));
   }, []);
@@ -212,7 +220,7 @@ export default function NurtureHub() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {filtered.map((c) => (
-            <ClientCard key={c.clientTag} c={c} />
+            <ClientCard key={c.clientTag} c={c} autoOn={autoTags.has(c.clientTag)} />
           ))}
         </div>
       )}
@@ -236,17 +244,24 @@ function Tile({
   );
 }
 
-function ClientCard({ c }: { c: ClientSummary & { hasCounts: boolean } }) {
+function ClientCard({ c, autoOn }: { c: ClientSummary & { hasCounts: boolean }; autoOn?: boolean }) {
   const total = c.ready + c.waiting + c.added;
   const seg = (n: number) => (total === 0 ? 0 : (n / total) * 100);
 
   return (
     <Link
       href={`/nurture/c/${encodeURIComponent(c.clientTag)}`}
-      className="rounded-lg border bg-card hover:bg-muted/20 hover:border-emerald-300 hover:shadow-sm transition-all p-4 group"
+      className={`rounded-lg border bg-card hover:bg-muted/20 hover:shadow-sm transition-all p-4 group ${autoOn ? "border-emerald-400/70 ring-1 ring-emerald-200" : "hover:border-emerald-300"}`}
     >
       <div className="flex items-start justify-between gap-3 mb-3">
-        <span className="font-mono font-semibold text-base">{c.clientTag}</span>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="font-mono font-semibold text-base">{c.clientTag}</span>
+          {autoOn && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-medium px-1.5 py-0.5 leading-none" title="Auto-route is ON — eligible leads push to nurture campaigns automatically">
+              <Zap className="size-2.5" /> Auto
+            </span>
+          )}
+        </div>
         <ArrowRight className="size-4 text-muted-foreground group-hover:text-emerald-700 group-hover:translate-x-0.5 transition-transform" />
       </div>
 

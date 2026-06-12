@@ -30,6 +30,7 @@ export async function GET() {
         cc.bcc_name_1, cc.bcc_email_1,
         cc.bcc_name_2, cc.bcc_email_2,
         cc.reply_template,
+        cc.auto_nurture_enabled,
         cc.updated_at
       FROM client_tags ct
       JOIN sections s ON ct.section_id = s.id
