@@ -324,10 +324,14 @@ export default function NurturePage() {
     [view, clientFilter, sourceFilter, offset, sortKey, sortDir]
   );
 
-  const loadCounts = useCallback(async () => {
+  const loadCounts = useCallback(async (fresh = false) => {
     try {
       const p = new URLSearchParams();
       if (clientFilter) p.set("client_tag", clientFilter);
+      // Initial load reads the precomputed cache (instant). After a mutation
+      // the caller passes fresh=true to force a live recompute so the tiles
+      // reflect the action immediately.
+      if (fresh) p.set("fresh", "1");
       const res = await fetch(`/api/nurture/counts?${p}`);
       if (!res.ok) {
         const body = await res.text().catch(() => "");
@@ -779,7 +783,7 @@ export default function NurturePage() {
         setClassifyProgress((p) => ({ ...p, status: "done" }));
         toast.info(`Stopped — classified ${totalClassified.toLocaleString()} rows in ${batches} batch${batches === 1 ? "" : "es"}`);
       }
-      await Promise.all([loadPage(true, false), loadCounts()]);
+      await Promise.all([loadPage(true, false), loadCounts(true)]);
     } catch (e) {
       setClassifyProgress((p) => ({ ...p, status: "error", error: (e as Error).message }));
       toast.error((e as Error).message);
@@ -810,7 +814,7 @@ export default function NurturePage() {
       const data = await res.json();
       if (res.ok) toast.success(`Re-classified ${data.reclassified} • ${data.flippedToUnsafe} flipped to unsafe`);
       else toast.error(data.error || "Re-classify failed");
-      await Promise.all([loadPage(true, false), loadCounts()]);
+      await Promise.all([loadPage(true, false), loadCounts(true)]);
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -828,7 +832,7 @@ export default function NurturePage() {
       } else {
         toast.error(data.error || "Sync failed");
       }
-      await Promise.all([loadPage(true, false), loadCounts()]);
+      await Promise.all([loadPage(true, false), loadCounts(true)]);
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -990,7 +994,7 @@ export default function NurturePage() {
       // already reports the result. Refreshing the table re-drains the full
       // client set (~2k rows) which is slow and NOT something the operator
       // needs to wait on, so fire it in the background.
-      void Promise.all([loadPage(true, false), loadCounts()]);
+      void Promise.all([loadPage(true, false), loadCounts(true)]);
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -1082,7 +1086,7 @@ export default function NurturePage() {
       }
       if (data.failures?.length) console.warn("Push failures:", data.failures);
       // Background the table re-drain — the result modal/toast already fired.
-      void Promise.all([loadPage(true, false), loadCounts()]);
+      void Promise.all([loadPage(true, false), loadCounts(true)]);
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -1105,7 +1109,7 @@ export default function NurturePage() {
       setSelectedMeta(new Map());
       setPushTargetCampaignId("");
       setSelectionScope(null);
-      await Promise.all([loadPage(true, false), loadCounts()]);
+      await Promise.all([loadPage(true, false), loadCounts(true)]);
     } else toast.error(data.error);
   }
 
@@ -1129,7 +1133,7 @@ export default function NurturePage() {
         setSelected(new Set());
         setSelectedMeta(new Map());
         setSelectionScope(null);
-        await Promise.all([loadPage(true, false), loadCounts()]);
+        await Promise.all([loadPage(true, false), loadCounts(true)]);
       } else {
         toast.error(data.error || "Rollback failed");
       }
@@ -1723,7 +1727,7 @@ export default function NurturePage() {
                         toast.success("Skipped");
                         setDetailItem(null);
                         loadPage(true, false);
-                        loadCounts();
+                        loadCounts(true);
                       } else {
                         toast.error("Skip failed");
                       }
