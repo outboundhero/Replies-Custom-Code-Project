@@ -27,7 +27,7 @@ function buildHeaders(token: string) {
  * function budget and silently kill the cron — exactly what happened to
  * the nurture sync between 2026-06-02 and 2026-06-08.
  */
-async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+async function fetchOnce(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
   const { timeoutMs = 45_000, ...rest } = init;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -36,6 +36,48 @@ async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: n
   } finally {
     clearTimeout(t);
   }
+}
+
+/**
+ * Like fetchOnce but transparently retries Bison's 429 ("Too Many Attempts")
+ * and 503 with exponential backoff (honouring Retry-After when present). Bison
+ * rate-limits aggressively under concurrency; without this, paginated pulls
+ * silently drop pages and undercount. Up to 6 attempts: ~1s,2s,4s,8s,16s.
+ */
+async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+  const MAX_RETRIES = 6;
+  let attempt = 0;
+  for (;;) {
+    let res: Response;
+    try {
+      res = await fetchOnce(url, init);
+    } catch (e) {
+      // Network/abort errors are also worth a couple of retries.
+      if (attempt >= 2) throw e;
+      await sleep(backoffMs(attempt));
+      attempt++;
+      continue;
+    }
+    if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : backoffMs(attempt);
+      await sleep(waitMs);
+      attempt++;
+      continue;
+    }
+    return res;
+  }
+}
+
+function backoffMs(attempt: number): number {
+  // 1s, 2s, 4s, 8s, 16s, capped at 20s. Small fixed jitter by attempt parity
+  // (Math.random is unavailable in some runtimes here).
+  const base = Math.min(20_000, 1000 * 2 ** attempt);
+  return base + (attempt % 2 === 0 ? 250 : 500);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 interface EmailRecipient {
@@ -325,7 +367,10 @@ export async function listCampaignLeads(
   const headers = buildHeaders(token);
   const perPage = opts.perPage ?? 100;
   const PAGE_TIMEOUT_MS = 12_000;
-  const PAGE_CONCURRENCY = 6;
+  // Bison rate-limits the campaign-leads endpoint under concurrency. 3 keeps
+  // us mostly clear; the 429 retry/backoff in fetchWithTimeout covers the rest
+  // so pages are never silently dropped.
+  const PAGE_CONCURRENCY = 3;
   // maxPages cap protects the autonomous per-instance cron from
   // mega-campaigns (JPNYC has one with 1,021 pages, ~17 min serial /
   // 3 min parallel). Per-client / manual callers can pass Infinity.
