@@ -1240,6 +1240,11 @@ export default function NurturePage() {
         />
       </div>
 
+      {/* ── Nurture pipeline status (orientation for anyone opening the page) ── */}
+      {clientFilter && (
+        <NurturePipeline clientTag={clientFilter} counts={counts} campaigns={filteredCampaigns} readyCount={readyFromList} />
+      )}
+
       {/* ── Classify progress banner (visible while classify-loop is active) ── */}
       {classifyProgress.status !== "idle" && (
         <ClassifyProgressBanner
@@ -1993,6 +1998,95 @@ function PushResultDialog({
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// Campaign-status → badge classes (full strings so Tailwind doesn't purge them).
+const CAMPAIGN_STATUS_BADGE: Record<string, string> = {
+  active: "bg-emerald-100 text-emerald-700",
+  paused: "bg-amber-100 text-amber-700",
+  draft: "bg-slate-100 text-slate-600",
+  archived: "bg-rose-100 text-rose-600",
+  completed: "bg-slate-100 text-slate-500",
+};
+
+/**
+ * Pipeline status panel — gives anyone opening a client's nurture page an
+ * at-a-glance "what's been done" view: Synced → Ready → Routed → Sending,
+ * plus the live status of each of the 3 canonical ESP campaigns (so archived/
+ * not-set-up campaigns are visible).
+ */
+function NurturePipeline({
+  clientTag, counts, campaigns, readyCount,
+}: {
+  clientTag: string;
+  counts: Counts | null;
+  campaigns: NurtureCampaign[];
+  readyCount: number | null;
+}) {
+  const byEsp = useMemo(() => {
+    const rank = (s: string) => (s === "active" ? 0 : s === "paused" ? 1 : s === "draft" ? 2 : s === "archived" ? 4 : 3);
+    const m: Partial<Record<Esp, NurtureCampaign>> = {};
+    for (const c of campaigns) {
+      const esp = detectCampaignEsp(c.name);
+      if (!esp) continue;
+      const cur = m[esp];
+      if (!cur || rank(c.status) < rank(cur.status)) m[esp] = c; // prefer routable status
+    }
+    return m;
+  }, [campaigns]);
+
+  const total = counts?.total ?? 0;
+  const ready = readyCount ?? counts?.eligibleSafe ?? 0;
+  const added = counts?.added ?? 0;
+  const waiting = counts?.waiting ?? 0;
+  const anyActive = (["google", "outlook", "segs"] as Esp[]).some((e) => byEsp[e]?.status === "active");
+
+  const stages: Array<{ n: number; label: string; value: number | string; hint: string; lit: boolean }> = [
+    { n: 1, label: "Synced", value: total, hint: "pulled from Bison", lit: total > 0 },
+    { n: 2, label: "Ready", value: ready, hint: "eligible + ESP-resolved", lit: ready > 0 },
+    { n: 3, label: "Routed", value: added, hint: "added to campaigns", lit: added > 0 },
+    { n: 4, label: "Sending", value: anyActive ? "Active" : "Not yet", hint: "campaign status", lit: anyActive },
+  ];
+
+  return (
+    <div className="rounded-lg border bg-card p-4 space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <p className="text-sm font-semibold">Nurture pipeline — <span className="font-mono">{clientTag}</span></p>
+        <span className="text-xs text-muted-foreground">{waiting.toLocaleString()} still in cooldown (Waiting)</span>
+      </div>
+      <div className="flex items-stretch gap-1.5">
+        {stages.map((st, i) => (
+          <Fragment key={st.label}>
+            <div className="flex-1 rounded-md border bg-muted/10 px-3 py-2">
+              <div className="flex items-center gap-1.5">
+                <span className={`size-1.5 rounded-full ${st.lit ? "bg-emerald-500" : "bg-muted-foreground/30"}`} />
+                <span className="text-[11px] font-medium text-muted-foreground">{st.n}. {st.label}</span>
+              </div>
+              <p className="text-lg font-semibold tabular-nums mt-0.5">{typeof st.value === "number" ? st.value.toLocaleString() : st.value}</p>
+              <p className="text-[10px] text-muted-foreground">{st.hint}</p>
+            </div>
+            {i < stages.length - 1 && <ChevronRight className="size-4 text-muted-foreground/50 self-center shrink-0" />}
+          </Fragment>
+        ))}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {(["outlook", "google", "segs"] as Esp[]).map((esp) => {
+          const c = byEsp[esp];
+          return (
+            <div key={esp} className="rounded-md border px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{ESP_LABEL[esp]} campaign</p>
+              {c ? (
+                <div className="flex items-center justify-between gap-2 mt-1">
+                  <span className="text-sm font-semibold tabular-nums" title={c.name}>{(c.total_leads ?? 0).toLocaleString()} leads</span>
+                  <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
+                </div>
+              ) : <p className="text-xs text-rose-600 mt-1">not set up</p>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
