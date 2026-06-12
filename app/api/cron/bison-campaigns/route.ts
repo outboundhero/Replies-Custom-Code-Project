@@ -77,7 +77,9 @@ export async function GET(req: NextRequest) {
     const useFilter = req.nextUrl.searchParams.get("useFilter") === "1";
     const filterQS = useFilter ? `&filter[lead_campaign_status]=${status}` : "";
     const tally: Record<string, number> = {};
+    const firstIds: number[] = [];
     let total = 0, page = startPage, lastPage = 1;
+    const urlSent = `${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${startPage}${filterQS}`.replace(token, "");
     while (page <= endPage) {
       const res = await fetch(`${baseUrl}/api/campaigns/${cid}/leads?per_page=100&page=${page}${filterQS}`, { headers });
       if (!res.ok) return NextResponse.json({ error: `HTTP ${res.status}`, body: (await res.text()).slice(0, 200) }, { status: 502 });
@@ -87,6 +89,7 @@ export async function GET(req: NextRequest) {
       total += rows.length;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const r of rows as any[]) {
+        if (firstIds.length < 3) firstIds.push(r.id);
         const lcd = Array.isArray(r.lead_campaign_data) ? r.lead_campaign_data.find((x: { campaign_id: number }) => x.campaign_id === cid) : r.lead_campaign_data;
         const st = lcd?.status || "(none)";
         tally[st] = (tally[st] || 0) + 1;
@@ -94,7 +97,7 @@ export async function GET(req: NextRequest) {
       if (rows.length === 0 || page >= lastPage) break;
       page++;
     }
-    return NextResponse.json({ instance, campaign: cid, startPage, useFilter, statusFilter: useFilter ? status : null, pagesScanned: page - startPage, lastPage, leadsScanned: total, campaignStatusTally: tally });
+    return NextResponse.json({ instance, campaign: cid, startPage, useFilter, statusFilter: useFilter ? status : null, urlSent, firstLeadIds: firstIds, pagesScanned: page - startPage, lastPage, leadsScanned: total, campaignStatusTally: tally });
   }
 
   let campaigns;
