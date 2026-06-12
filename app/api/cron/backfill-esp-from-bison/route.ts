@@ -19,7 +19,7 @@ import { NextRequest, NextResponse } from "next/server";
 import supabase from "@/lib/supabase";
 import { resolveInstanceForClient } from "@/lib/bison-instances";
 import { findLeadByEmail } from "@/lib/outboundhero-api";
-import { pickEspFromTags } from "@/lib/nurture/esp";
+import { pickEspFromTags, bucketEsp } from "@/lib/nurture/esp";
 
 export const maxDuration = 300;
 
@@ -114,6 +114,9 @@ export async function GET(req: NextRequest) {
   }
 
   let filled = 0, skipped = 0;
+  // Tally the routing BUCKET each filled lead resolves to, so we can see how
+  // many SEG-gateway leads got split out of the Google catch-all.
+  const bucketTally: Record<string, number> = { google: 0, outlook: 0, segs: 0 };
   let idx = 0;
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, async () => {
@@ -121,6 +124,7 @@ export async function GET(req: NextRequest) {
         const j = jobs[idx++];
         const esp = await lookupEsp(j.email, j.clientTag);
         if (!esp) { skipped++; continue; }
+        bucketTally[bucketEsp(esp)]++;
         if (dryRun) { filled++; continue; }
         const table = j.source === "seq" ? "nurture_sequence_finished"
                     : j.source === "reply" ? "replies"
@@ -133,7 +137,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     ok: true, tier, clientFilter, dryRun,
-    jobs: jobs.length, filled, skipped,
+    jobs: jobs.length, filled, skipped, bucketTally,
     hint: filled === PER_CALL_CAP ? `Hit per-call cap (${PER_CALL_CAP}). Hit this URL again to continue.` : "Done with available rows at this tier.",
   });
 }
