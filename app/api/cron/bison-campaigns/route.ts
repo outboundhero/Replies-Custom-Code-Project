@@ -75,7 +75,8 @@ export async function GET(req: NextRequest) {
     // read it client-side.
     // useFilter=1 → apply the array-notation filter the support team suggested.
     const useFilter = req.nextUrl.searchParams.get("useFilter") === "1";
-    const filterQS = useFilter ? `&filter[lead_campaign_status]=${status}` : "";
+    // CORRECT form: filters[lead_campaign_status] (plural + brackets).
+    const filterQS = useFilter ? `&filters[lead_campaign_status]=${status}` : "";
     const tally: Record<string, number> = {};
     const firstIds: number[] = [];
     let total = 0, page = startPage, lastPage = 1;
