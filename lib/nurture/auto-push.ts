@@ -135,7 +135,10 @@ export async function runAutoPushForClient(clientTag: string): Promise<AutoPushR
   const instanceKey = await resolveInstanceForClient(clientTag);
   let allCampaigns;
   try {
-    allCampaigns = await listCampaigns(instanceKey, { search: `${clientTag}:`, statuses: ["active", "paused"] });
+    // Include draft — the canonical nurture campaigns are often created in
+    // draft and only resumed once leads are attached. We attach to draft/
+    // active/paused; the resume step activates them.
+    allCampaigns = await listCampaigns(instanceKey, { search: `${clientTag}:`, statuses: ["draft", "active", "paused"] });
   } catch (e) {
     result.error = `listCampaigns failed: ${(e as Error).message}`;
     return result;

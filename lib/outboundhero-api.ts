@@ -512,6 +512,28 @@ export async function attachLeadsToCampaign(
 }
 
 /**
+ * Resume (activate) a campaign so it starts/continues sending.
+ *   PATCH /api/campaigns/{id}/resume
+ * Used after attaching nurture leads to a draft/paused campaign. Idempotent
+ * on Bison's side — resuming an already-active campaign is a no-op.
+ */
+export async function resumeCampaign(
+  instanceKey: string,
+  campaignId: number,
+): Promise<{ ok: boolean; status?: number; error?: string; raw?: unknown }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/resume`, {
+    method: "PATCH",
+    headers: buildHeaders(token),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    return { ok: false, status: res.status, error: `${res.status}: ${JSON.stringify(body)}`, raw: body };
+  }
+  return { ok: true, status: res.status, raw: body };
+}
+
+/**
  * Sent-email record returned by GET /leads/{leadId}/sent-emails.
  * Only the fields we currently consume are typed — the upstream payload is
  * much larger.
