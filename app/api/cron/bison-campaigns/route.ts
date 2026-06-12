@@ -113,7 +113,10 @@ export async function GET(req: NextRequest) {
   for (const c of campaigns.slice(0, 25)) {
     let statusCount: number | string = "?";
     try {
-      const url = `${baseUrl}/api/campaigns/${c.id}/leads?per_page=1&page=1&filters.lead_campaign_status=${encodeURIComponent(status)}`;
+      // Correct filter form: filters[lead_campaign_status] (plural+brackets).
+      // With the filter applied, meta.total = the filtered count, so one
+      // call yields the exact sequence_finished count for the campaign.
+      const url = `${baseUrl}/api/campaigns/${c.id}/leads?per_page=1&page=1&filters[lead_campaign_status]=${status}`;
       const res = await fetch(url, { headers });
       if (res.ok) {
         const d = await res.json();
