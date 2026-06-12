@@ -86,6 +86,21 @@ export default function NurtureHub() {
   }
   useEffect(() => { loadSummary(false); }, []);
 
+  // Top tiles: prefer the EXACT per-client RPC summed across all clients
+  // (consistent with the cards). Until that lands, fall back to the fast
+  // whole-table estimate so the tiles aren't blank on cold load. The estimate
+  // drifts ~10% (Postgres planner stats) — notably it overcounts "Added" — so
+  // the exact sum is the source of truth once available.
+  const tileTotals = useMemo(() => {
+    if (summaryByTag.size > 0) {
+      let ready = 0, waiting = 0, added = 0;
+      for (const s of summaryByTag.values()) { ready += s.ready; waiting += s.waiting; added += s.added; }
+      return { ready, waiting, added, exact: true };
+    }
+    if (counts) return { ready: counts.eligibleSafe, waiting: counts.waiting, added: counts.added, exact: false };
+    return null;
+  }, [summaryByTag, counts]);
+
   // Merge: every client tag has a card. Counts come from the map if loaded.
   const cards = useMemo<Array<ClientSummary & { hasCounts: boolean }>>(() => {
     const tags = allTags ?? [];
@@ -136,9 +151,9 @@ export default function NurtureHub() {
       {/* Overall tiles — Eligible bucket dropped per workflow update;
           every safe + eligible lead lives under "Ready". */}
       <div className="grid grid-cols-3 gap-3">
-        <Tile label="Ready to nurture" sublabel="Eligible & safe — push these" value={counts?.eligibleSafe} accent="text-emerald-700" loading={!counts} />
-        <Tile label="Waiting" sublabel="Cooldown still ticking" value={counts?.waiting} accent="text-amber-700" loading={!counts} />
-        <Tile label="Added" sublabel="Already pushed to a campaign" value={counts?.added} accent="text-violet-700" loading={!counts} />
+        <Tile label="Ready to nurture" sublabel="Eligible & safe — push these" value={tileTotals?.ready} accent="text-emerald-700" loading={!tileTotals} />
+        <Tile label="Waiting" sublabel="Cooldown still ticking" value={tileTotals?.waiting} accent="text-amber-700" loading={!tileTotals} />
+        <Tile label="Added" sublabel="Already pushed to a campaign" value={tileTotals?.added} accent="text-violet-700" loading={!tileTotals} />
       </div>
 
       {/* Loading / error banner for the slow summary fetch */}

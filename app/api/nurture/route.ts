@@ -264,16 +264,33 @@ export async function GET(req: NextRequest) {
         if (error) throw new Error(error.message);
         return data || [];
       }
+      // Drain in PARALLEL waves instead of one chunk at a time. A big client
+      // (e.g. SBCC ~22k seq rows) was 22 sequential round-trips inside a single
+      // request — the dominant cost of the per-client page load. We fire WAVE
+      // chunk-fetches at once; for 22k rows that's ~4 waves instead of 22.
+      // Stable ordering (every query carries an `id` tiebreaker) means the
+      // disjoint ranges never drop or duplicate rows at chunk boundaries.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const all: any[] = [];
       let start = offset;
+      const WAVE = 6;
       while (all.length < RAW_DRAIN_CAP) {
-        const { data, error } = await makeQuery().range(start, start + DRAIN_CHUNK - 1);
-        if (error) throw new Error(error.message);
-        const batch = data || [];
-        all.push(...batch);
-        if (batch.length < DRAIN_CHUNK) break; // source exhausted
-        start += DRAIN_CHUNK;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const reqs: Promise<any>[] = [];
+        for (let k = 0; k < WAVE; k++) {
+          const s = start + k * DRAIN_CHUNK;
+          reqs.push(makeQuery().range(s, s + DRAIN_CHUNK - 1));
+        }
+        const results = await Promise.all(reqs);
+        let exhausted = false;
+        for (const { data, error } of results) {
+          if (error) throw new Error(error.message);
+          const batch = data || [];
+          all.push(...batch);
+          if (batch.length < DRAIN_CHUNK) exhausted = true; // this range hit the end
+        }
+        start += WAVE * DRAIN_CHUNK;
+        if (exhausted) break; // some range in this wave was short → source drained
       }
       return all;
     };
@@ -319,6 +336,9 @@ export async function GET(req: NextRequest) {
         q = orderByAddedDesc
           ? q.order("nurture_added_at", { ascending: false })
           : q.order(SORT_COLUMN[sortKey].replies, { ascending: sortAsc, nullsFirst: false });
+        // Stable tiebreaker so parallel-wave range fetches never drop/dupe
+        // rows at chunk boundaries when the primary sort value ties.
+        q = q.order("id", { ascending: true });
 
         if (clientTag) q = q.eq("client_tag", clientTag);
 
@@ -433,6 +453,7 @@ export async function GET(req: NextRequest) {
         q = seqOrderByAddedDesc
           ? q.order("added_at", { ascending: false })
           : q.order(SORT_COLUMN[sortKey].seq, { ascending: sortAsc, nullsFirst: false });
+        q = q.order("id", { ascending: true }); // stable tiebreaker for parallel drain
 
         if (clientTag) q = q.eq("client_tag", clientTag);
 
@@ -504,6 +525,7 @@ export async function GET(req: NextRequest) {
         q = legacyOrderByAddedDesc
           ? q.order("nurture_added_at", { ascending: false })
           : q.order(SORT_COLUMN[sortKey].legacy, { ascending: sortAsc, nullsFirst: false });
+        q = q.order("id", { ascending: true }); // stable tiebreaker for parallel drain
 
         // Same hard-block AI-category filter as the replies query
         q = q.or(
