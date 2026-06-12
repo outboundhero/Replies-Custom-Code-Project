@@ -118,6 +118,30 @@ export async function GET(req: Request) {
   try {
     const cutoffIso = new Date(now - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
+    // Fast path: read the precomputed cache table (refreshed by the
+    // refresh-nurture-summary cron). This is a sub-100ms indexed read vs the
+    // ~8s live RPC, and — unlike the in-process cache — it's shared across all
+    // serverless instances. Skip it on ?fresh=1 (force live recompute).
+    if (!fresh) {
+      const { data: cached, error: cacheErr } = await supabase
+        .from("nurture_summary_cache")
+        .select("client_tag, ready, eligible, waiting, added");
+      if (!cacheErr && cached && cached.length > 0) {
+        const out: ClientSummary[] = cached.map((r) => ({
+          clientTag: r.client_tag as string,
+          ready: Number(r.ready) || 0,
+          eligible: Number(r.eligible) || 0,
+          waiting: Number(r.waiting) || 0,
+          added: Number(r.added) || 0,
+          total: (Number(r.ready) || 0) + (Number(r.waiting) || 0) + (Number(r.added) || 0),
+        }));
+        cache = { ts: now, data: out };
+        return NextResponse.json({ clients: out, cached: true, source: "table" });
+      }
+      // Table missing/empty (not installed yet, or cron hasn't run) → fall
+      // through to the live RPC so the hub still works.
+    }
+
     const { data, error } = await supabase.rpc("nurture_clients_summary", { cutoff: cutoffIso });
     if (error) {
       const msg = error.message || "";
