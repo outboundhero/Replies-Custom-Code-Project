@@ -21,6 +21,35 @@ import { requireAuth } from "@/lib/auth";
 import { listCampaigns } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES, resolveInstanceForClient, type BisonInstanceKey } from "@/lib/bison-instances";
+import db from "@/lib/db";
+
+/**
+ * Fast path: read the shared nurture_campaigns_cache table (refreshed every
+ * ~10 min by /api/cron/refresh-nurture-campaigns). Sub-100ms and consistent
+ * across serverless instances — vs the live Bison pagination which is 30-60s
+ * cold and was the "From/To campaigns won't load" problem. Returns null when
+ * the table is empty/missing so callers fall back to the live fetch.
+ */
+async function fromCache(clientTag: string | null): Promise<CampaignRow[] | null> {
+  try {
+    const sql = clientTag
+      ? "SELECT id, uuid, name, status, client_tag, total_leads, bison_instance FROM nurture_campaigns_cache WHERE UPPER(client_tag) = UPPER(?)"
+      : "SELECT id, uuid, name, status, client_tag, total_leads, bison_instance FROM nurture_campaigns_cache";
+    const res = clientTag ? await db.execute({ sql, args: [clientTag] }) : await db.execute(sql);
+    if (!res.rows || res.rows.length === 0) return null;
+    return res.rows.map((r) => ({
+      id: Number(r.id),
+      uuid: (r.uuid as string) ?? null,
+      name: r.name as string,
+      status: r.status as string,
+      client_tag: (r.client_tag as string) ?? null,
+      total_leads: Number(r.total_leads) || 0,
+      bison_instance: r.bison_instance as BisonInstanceKey,
+    }));
+  } catch {
+    return null; // table not created yet → live fallback
+  }
+}
 
 interface CampaignRow {
   id: number;
@@ -70,6 +99,13 @@ export async function GET(req: NextRequest) {
   const clientTag = req.nextUrl.searchParams.get("clientTag");
 
   try {
+    // Fastest path: the shared snapshot table (instant, cross-instance).
+    // Skipped on ?fresh=1 (force a live Bison pull).
+    if (!fresh) {
+      const cached = await fromCache(clientTag);
+      if (cached) return NextResponse.json({ campaigns: cached, cached: true, source: "table" });
+    }
+
     // Scoped fetch — one instance only. Fast path for the per-client
     // detail page since it only ever cares about its own client.
     if (clientTag) {
