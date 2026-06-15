@@ -429,16 +429,12 @@ export default function NurturePage() {
       : clientFilter ? [clientFilter]
       : null;
     if (!tagsToMatch) return canonical;
-    return canonical.filter((c) => {
-      if (c.client_tag && tagsToMatch.includes(c.client_tag)) return true;
-      const prefix = c.name.match(/^\s*([A-Za-z0-9&_]+)\s*[-–—:|/]/);
-      if (prefix && tagsToMatch.some((t) => t.toLowerCase() === prefix[1].toLowerCase())) return true;
-      // Whole-word match anywhere in the name (escapes regex specials in the tag).
-      return tagsToMatch.some((t) => {
-        const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return new RegExp(`\\b${escaped}\\b`, "i").test(c.name);
-      });
-    });
+    // EXACT client-tag match only. client_tag is the tag extracted from the
+    // campaign name by /api/nurture/campaigns, so "JPC" never matches "JPC&A".
+    // (The old word-boundary fallback matched JPC&A for JPC because "&" is a
+    // regex word boundary.)
+    const want = new Set(tagsToMatch.map((t) => t.toUpperCase()));
+    return canonical.filter((c) => !!c.client_tag && want.has(c.client_tag.toUpperCase()));
   }, [campaigns, selectedClientTags, clientFilter]);
 
   // Search filter only — server already returns rows in the chosen sort
@@ -655,9 +651,8 @@ export default function NurturePage() {
       // chosen. See isCanonicalNurtureCampaign().
       if (filters.esp) {
         const matches = campaigns.filter((c) => {
-          const tagMatches =
-            (c.client_tag && c.client_tag === filters.client_tag) ||
-            new RegExp(`\\b${filters.client_tag}\\b`, "i").test(c.name);
+          // EXACT client-tag match — "JPC" must never match "JPC&A".
+          const tagMatches = !!c.client_tag && c.client_tag.toUpperCase() === (filters.client_tag || "").toUpperCase();
           return tagMatches && isCanonicalNurtureCampaign(c.name) && detectCampaignEsp(c.name) === filters.esp;
         });
         if (matches.length === 1) {
@@ -931,9 +926,8 @@ export default function NurturePage() {
       const planErrors: string[] = [];
       for (const [esp, bucketRefs] of byBucket) {
         const matches = campaigns.filter((c) => {
-          const tagMatches =
-            (c.client_tag && c.client_tag === clientTag) ||
-            new RegExp(`\\b${clientTag}\\b`, "i").test(c.name);
+          // EXACT client-tag match — "JPC" must never match "JPC&A".
+          const tagMatches = !!c.client_tag && c.client_tag.toUpperCase() === clientTag.toUpperCase();
           return tagMatches && isCanonicalNurtureCampaign(c.name) && detectCampaignEsp(c.name) === esp;
         });
         if (matches.length === 0) {
@@ -2468,9 +2462,10 @@ function ClientInsights({
   // Only the canonical "[Nurture] (Cleaning Client)" campaigns — legacy/source
   // variants are hidden everywhere on this page.
   const clientCampaigns = useMemo(() => {
-    const re = new RegExp(`\\b${clientTag}\\b`, "i");
+    // EXACT client-tag match only (no word-boundary fallback — "JPC" must not
+    // match "JPC&A").
     return campaigns
-      .filter((c) => isCanonicalNurtureCampaign(c.name) && ((c.client_tag && c.client_tag.toUpperCase() === clientTag.toUpperCase()) || re.test(c.name)))
+      .filter((c) => isCanonicalNurtureCampaign(c.name) && !!c.client_tag && c.client_tag.toUpperCase() === clientTag.toUpperCase())
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [campaigns, clientTag]);
 

@@ -21,6 +21,7 @@ import { listCampaigns, attachLeadsToCampaign, findLeadByEmail } from "@/lib/out
 import { resolveInstanceForClient } from "@/lib/bison-instances";
 import { effectiveEsp, isCanonicalNurtureCampaign, detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
+import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { logActivity, logError } from "@/lib/errors";
 
 const NURTURE_DAYS = 45;
@@ -146,6 +147,10 @@ export async function runAutoPushForClient(clientTag: string): Promise<AutoPushR
   }
   const canonicalByEsp = new Map<Esp, typeof allCampaigns[number]>();
   for (const c of allCampaigns) {
+    // EXACT client-tag match — Bison's search is fuzzy ("JPC:" can return
+    // "JPC&A:" campaigns), so confirm the campaign's extracted tag IS this
+    // client. Without this, JPC's leads could be pushed into JPC&A's campaign.
+    if ((extractTagFromCampaignName(c.name) || "").toUpperCase() !== clientTag.toUpperCase()) continue;
     if (!isCanonicalNurtureCampaign(c.name)) continue;
     const esp = detectCampaignEsp(c.name);
     if (!esp) continue;
