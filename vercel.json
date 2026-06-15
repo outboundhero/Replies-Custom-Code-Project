@@ -40,6 +40,10 @@
     {
       "path": "/api/cron/refresh-nurture-summary",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-churned-clients",
+      "schedule": "0 6 * * *"
     }
   ]
 }

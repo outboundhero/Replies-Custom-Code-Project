@@ -20,6 +20,7 @@ import supabase from "@/lib/supabase";
 import { resolveInstanceForClient } from "@/lib/bison-instances";
 import { findLeadByEmail } from "@/lib/outboundhero-api";
 import { pickEspFromTags, bucketEsp } from "@/lib/nurture/esp";
+import { getChurnedTags } from "@/lib/churn";
 
 export const maxDuration = 300;
 
@@ -86,6 +87,10 @@ export async function GET(req: NextRequest) {
   else if (tier === 2) jobs = await fetchTier2(cutoffIso, clientFilter);
   else if (tier === 3) jobs = await fetchTier3(clientFilter);
   else return NextResponse.json({ error: "Unknown tier; use 1, 2, or 3" }, { status: 400 });
+
+  // Skip churned clients (Status=Churned + Churn Date) — no backfill for them.
+  const churned = await getChurnedTags();
+  if (churned.size > 0) jobs = jobs.filter((j) => !churned.has((j.clientTag || "").toUpperCase()));
 
   // Cap so we fit inside the 5-min route budget even on slow Bison.
   jobs = jobs.slice(0, PER_CALL_CAP);

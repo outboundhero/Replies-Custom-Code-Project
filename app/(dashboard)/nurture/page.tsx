@@ -59,14 +59,17 @@ export default function NurtureHub() {
       .then((r) => (r.ok ? r.json() : null))
       .then((rows) => {
         if (!Array.isArray(rows)) return;
+        // Hide churned clients (Status=Churned + Churn Date in the tracker)
+        // from the nurture hub entirely.
+        const live = (rows as Array<{ tag?: string; churned?: boolean }>).filter((r) => !r.churned);
         const tags = Array.from(
-          new Set(rows.map((r: { tag?: string }) => r.tag).filter(Boolean))
+          new Set(live.map((r) => r.tag).filter(Boolean))
         ).sort() as string[];
         setAllTags(tags);
         // Track which clients have auto-route (auto-nurture) enabled so the
         // cards can show a badge.
         const auto = new Set<string>();
-        for (const r of rows as Array<{ tag?: string; auto_nurture_enabled?: number | null }>) {
+        for (const r of live as Array<{ tag?: string; auto_nurture_enabled?: number | null }>) {
           if (r.tag && Number(r.auto_nurture_enabled) === 1) auto.add(r.tag);
         }
         setAutoTags(auto);

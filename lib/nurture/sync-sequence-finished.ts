@@ -18,6 +18,7 @@ import supabase from "@/lib/supabase";
 import { listCampaigns, listCampaignLeads, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
+import { getChurnedTags } from "@/lib/churn";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 
 interface InstanceSyncResult {
@@ -89,7 +90,10 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
   // Leave a few seconds for log persistence + response serialization.
   const SOFT_BUDGET_MS = INSTANCE_TIMEOUT_MS - 30_000;
 
-  const tags = await listClientTagsForInstance(instanceKey);
+  let tags = await listClientTagsForInstance(instanceKey);
+  // Skip churned clients (Status=Churned + Churn Date) — no sync for them.
+  const churned = await getChurnedTags();
+  if (churned.size > 0) tags = tags.filter((t) => !churned.has((t || "").toUpperCase()));
   // Sort oldest-synced first so each tick covers different clients.
   // Clients never synced have synced_at = epoch and sort first.
   const lastSyncedByTag = await loadLastSyncedByTag(instanceKey);

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import db from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
+import { getChurnedTags } from "@/lib/churn";
 
 // GET /api/config/clients — list all clients with section + config info.
 //
@@ -50,9 +51,11 @@ export async function GET() {
       // Table doesn't exist yet — every client renders as "default" in the UI.
     }
 
+    const churned = await getChurnedTags();
     const rows = result.rows.map((r) => ({
       ...r,
       bison_instance: instanceMap.get(r.tag as string) ?? null,
+      churned: churned.has(String(r.tag).toUpperCase()),
     }));
     return NextResponse.json(rows);
   } catch (error) {

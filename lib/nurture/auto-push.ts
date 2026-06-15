@@ -20,6 +20,7 @@ import db from "@/lib/db";
 import { listCampaigns, attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
 import { resolveInstanceForClient } from "@/lib/bison-instances";
 import { effectiveEsp, isCanonicalNurtureCampaign, detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
+import { getChurnedTags } from "@/lib/churn";
 import { logActivity, logError } from "@/lib/errors";
 
 const NURTURE_DAYS = 45;
@@ -277,5 +278,9 @@ export async function listAutoEnabledClients(): Promise<string[]> {
     sql: "SELECT client_tag FROM client_config WHERE auto_nurture_enabled = 1",
     args: [],
   });
-  return res.rows.map((r) => r.client_tag as string);
+  const tags = res.rows.map((r) => r.client_tag as string);
+  // Never auto-push for churned clients (Status=Churned + Churn Date), even if
+  // their auto_nurture flag is still on from before they churned.
+  const churned = await getChurnedTags();
+  return tags.filter((t) => !churned.has((t || "").toUpperCase()));
 }

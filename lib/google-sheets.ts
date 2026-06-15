@@ -38,6 +38,7 @@ function findColumnStartsWith(headers: string[], ...prefixes: string[]): number 
 export interface ClientTrackerRow {
   clientAbbreviation: string;
   status: string;
+  churnDate: string;
 }
 
 export async function fetchClientTracker(): Promise<ClientTrackerRow[]> {
@@ -55,6 +56,7 @@ export async function fetchClientTracker(): Promise<ClientTrackerRow[]> {
   const headers = rows[0].map((h: string) => h?.toString() || "");
   const abbrIdx = findColumnIndex(headers, "Client Abbreviation", "Client Abbrevation");
   const statusIdx = findColumnIndex(headers, "Status");
+  const churnIdx = findColumnIndex(headers, "Churn Date");
 
   if (abbrIdx === -1 || statusIdx === -1) {
     throw new Error(`Client Tracker: missing columns (abbreviation=${abbrIdx}, status=${statusIdx})`);
@@ -64,12 +66,36 @@ export async function fetchClientTracker(): Promise<ClientTrackerRow[]> {
   for (let i = 1; i < rows.length; i++) {
     const abbr = rows[i][abbrIdx]?.toString()?.trim();
     const status = rows[i][statusIdx]?.toString()?.trim();
+    const churnDate = churnIdx === -1 ? "" : (rows[i][churnIdx]?.toString()?.trim() || "");
     if (abbr) {
-      results.push({ clientAbbreviation: abbr, status: status || "Unknown" });
+      results.push({ clientAbbreviation: abbr, status: status || "Unknown", churnDate });
     }
   }
 
   return results;
+}
+
+/**
+ * The set of client TAGS that are CHURNED — defined as Status containing
+ * "Churned" AND a non-empty Churn Date. A "Churned" status with no date is a
+ * waitlisted/returning client and is treated as active.
+ *
+ * Combined abbreviations (e.g. "JPDFW & JPK", "CPGH & CPGA") are split on
+ * " & " / " and " into individual tags; an "&" WITHOUT surrounding spaces is
+ * kept intact (so "JPC&A", "K&LCS" stay single tags). Tags are upper-cased.
+ */
+export async function fetchChurnedClientTags(): Promise<Set<string>> {
+  const rows = await fetchClientTracker();
+  const churned = new Set<string>();
+  for (const r of rows) {
+    if (!/churn/i.test(r.status)) continue;
+    if (!r.churnDate) continue; // status churned but no date → not actually churned
+    for (const t of r.clientAbbreviation.split(/\s+&\s+|\s+and\s+/i)) {
+      const tag = t.trim().toUpperCase();
+      if (tag) churned.add(tag);
+    }
+  }
+  return churned;
 }
 
 export interface OnboardingFormRow {
