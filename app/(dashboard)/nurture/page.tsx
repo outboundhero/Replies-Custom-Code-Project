@@ -17,14 +17,7 @@ import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowRight, Search, RefreshCw, Zap } from "lucide-react";
-
-interface OverallCounts {
-  total: number;
-  eligible: number;
-  eligibleSafe: number;
-  waiting: number;
-  added: number;
-}
+import AutomationTab from "./_components/AutomationTab";
 
 interface ClientSummary {
   clientTag: string;
@@ -38,7 +31,7 @@ interface ClientSummary {
 type SortKey = "ready" | "waiting" | "added" | "tag";
 
 export default function NurtureHub() {
-  const [counts, setCounts] = useState<OverallCounts | null>(null);
+  const [tab, setTab] = useState<"overview" | "automation">("overview");
   const [allTags, setAllTags] = useState<string[] | null>(null);
   const [autoTags, setAutoTags] = useState<Set<string>>(new Set());
   const [summaryByTag, setSummaryByTag] = useState<Map<string, ClientSummary>>(new Map());
@@ -47,14 +40,10 @@ export default function NurtureHub() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("ready");
 
-  // Phase 1: fetch overall counts + client tag list in parallel. Both are
-  // cheap (counts ~1–2s, tags ~100ms) so the cards render quickly.
+  // Phase 1: fetch the client tag list (cheap Turso). Tiles come from the
+  // cached clients-summary sum (Phase 2) — we dropped the slow whole-table
+  // /api/nurture/counts call that gated the hub on every load.
   useEffect(() => {
-    fetch("/api/nurture/counts")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d) setCounts(d); })
-      .catch(() => {});
-
     fetch("/api/config/clients")
       .then((r) => (r.ok ? r.json() : null))
       .then((rows) => {
@@ -66,11 +55,10 @@ export default function NurtureHub() {
           new Set(live.map((r) => r.tag).filter(Boolean))
         ).sort() as string[];
         setAllTags(tags);
-        // Track which clients have auto-route (auto-nurture) enabled so the
-        // cards can show a badge.
+        // Auto badge under the opt-out model: ON unless explicitly disabled.
         const auto = new Set<string>();
-        for (const r of live as Array<{ tag?: string; auto_nurture_enabled?: number | null }>) {
-          if (r.tag && Number(r.auto_nurture_enabled) === 1) auto.add(r.tag);
+        for (const r of live as Array<{ tag?: string; auto_nurture_disabled?: number | null }>) {
+          if (r.tag && Number(r.auto_nurture_disabled) !== 1) auto.add(r.tag);
         }
         setAutoTags(auto);
       })
@@ -106,11 +94,10 @@ export default function NurtureHub() {
     if (summaryByTag.size > 0) {
       let ready = 0, waiting = 0, added = 0;
       for (const s of summaryByTag.values()) { ready += s.ready; waiting += s.waiting; added += s.added; }
-      return { ready, waiting, added, exact: true };
+      return { ready, waiting, added };
     }
-    if (counts) return { ready: counts.eligibleSafe, waiting: counts.waiting, added: counts.added, exact: false };
-    return null;
-  }, [summaryByTag, counts]);
+    return null; // skeleton until the cached summary lands (sub-100ms warm)
+  }, [summaryByTag]);
 
   // Merge: every client tag has a card. Counts come from the map if loaded.
   const cards = useMemo<Array<ClientSummary & { hasCounts: boolean }>>(() => {
@@ -158,6 +145,28 @@ export default function NurtureHub() {
           Refresh
         </button>
       </div>
+
+      {/* Tabs */}
+      <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
+        <button
+          type="button"
+          onClick={() => setTab("overview")}
+          className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "overview" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          Overview
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("automation")}
+          className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "automation" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          Automation
+        </button>
+      </div>
+
+      {tab === "automation" && <AutomationTab />}
+
+      {tab === "overview" && (<>
 
       {/* Overall tiles — Eligible bucket dropped per workflow update;
           every safe + eligible lead lives under "Ready". */}
@@ -227,6 +236,7 @@ export default function NurtureHub() {
           ))}
         </div>
       )}
+      </>)}
     </div>
   );
 }
