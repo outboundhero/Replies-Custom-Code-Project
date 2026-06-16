@@ -7,9 +7,10 @@
  * campaigns created (and where). Bulk enable/disable by section + multi-select.
  * Reads the fast, cached /api/nurture/automation-status (Turso-only).
  */
-import { useEffect, useMemo, useState, useCallback, Fragment } from "react";
-import { InstanceBadge } from "@/components/instance-badge";
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/input";
+import { getInstanceLabel } from "@/lib/bison-instances-shared";
 import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 
 type Esp = "google" | "outlook" | "segs";
@@ -108,6 +109,15 @@ export default function AutomationTab() {
         {syncedAt && <span className="text-xs text-muted-foreground ml-auto">campaign data as of {new Date(syncedAt).toLocaleString()}</span>}
       </div>
 
+      {/* Legend */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="font-medium text-foreground/70">Campaign per ESP:</span>
+        <span className="inline-flex items-center gap-1.5"><span className="inline-flex items-center justify-center size-4 rounded bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200 text-[9px] font-semibold">G</span> active</span>
+        <span className="inline-flex items-center gap-1.5"><span className="inline-flex items-center justify-center size-4 rounded bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200 text-[9px] font-semibold">O</span> draft</span>
+        <span className="inline-flex items-center gap-1.5"><span className="inline-flex items-center justify-center size-4 rounded bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-200 text-[9px] font-semibold">S</span> missing</span>
+        <span className="text-muted-foreground/70">· G = Google, O = Outlook, S = SEGs · B2B / B2C = workspace lane</span>
+      </div>
+
       {/* Sticky bulk bar */}
       {selected.size > 0 && (
         <div className="sticky top-2 z-10 flex items-center gap-3 rounded-lg border bg-card shadow-sm px-4 py-2.5">
@@ -160,53 +170,97 @@ function Tile({ label, value, accent }: { label: string; value: number; accent: 
   );
 }
 
+// Within a client's group there is exactly one B2B and one B2C instance, so a
+// compact lane label (B2B / B2C) is far cleaner than repeating the full
+// workspace name; the full name lives in the tooltip.
+function laneFor(inst: string, c: ClientRow): "B2B" | "B2C" | null {
+  if (inst === c.b2b) return "B2B";
+  if (inst === c.b2c) return "B2C";
+  return null;
+}
+
+const ESP_FULL: Record<Esp, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
+
+function EspPill({ cell, label, title }: { cell: Cell | undefined; label: string; title: string }) {
+  const ok = cell?.state === "ok";
+  const draft = cell?.draft;
+  const cls = !ok
+    ? "bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-200"
+    : draft
+      ? "bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200"
+      : "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200";
+  return <span title={title} className={`inline-flex items-center justify-center size-5 rounded-md text-[10px] font-semibold ${cls}`}>{label}</span>;
+}
+
 function ClientRowView({ c, autoOn, selected, onSelect, onToggle }: {
   c: ClientRow; autoOn: boolean; selected: boolean; onSelect: (v: boolean) => void; onToggle: (v: boolean) => void;
 }) {
+  const router = useRouter();
   const danger = autoOn && !c.configured;
-  const instances = useMemo(() => Object.keys(c.matrix), [c.matrix]);
+  // Order instances B2B first, then B2C, so the matrix reads consistently.
+  const instances = useMemo(() => {
+    const keys = Object.keys(c.matrix);
+    return keys.sort((a, b) => (a === c.b2b ? -1 : b === c.b2b ? 1 : 0));
+  }, [c.matrix, c.b2b]);
+
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
+
   return (
-    <div className={`flex items-center gap-3 px-4 py-2.5 hover:bg-muted/20 ${danger ? "border-l-2 border-l-amber-400" : ""}`}>
-      <input type="checkbox" checked={selected} onChange={(e) => onSelect(e.target.checked)} className="size-3.5 rounded border-muted-foreground/40" />
-      <div className="w-40 shrink-0">
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono font-semibold text-sm">{c.clientTag}</span>
-          {c.group && <span className="text-[9px] rounded bg-muted px-1 py-0.5 text-muted-foreground">G{c.group}</span>}
-        </div>
-        <div className="flex items-center gap-1 mt-1">
-          {c.b2b && <InstanceBadge instance={c.b2b} size="xs" />}
-          {c.b2c && <InstanceBadge instance={c.b2c} size="xs" />}
-          {c.mappingMissing && <span className="text-[9px] rounded bg-amber-100 text-amber-700 px-1 py-0.5">no group</span>}
-        </div>
+    <div
+      onClick={() => router.push(`/nurture/c/${encodeURIComponent(c.clientTag)}`)}
+      className={`group flex items-center gap-4 px-4 py-3 cursor-pointer transition-colors hover:bg-muted/40 ${danger ? "border-l-2 border-l-amber-400" : "border-l-2 border-l-transparent"}`}
+    >
+      <input
+        type="checkbox" checked={selected} onClick={stop} onChange={(e) => onSelect(e.target.checked)}
+        className="size-3.5 rounded border-muted-foreground/40 cursor-pointer"
+      />
+
+      {/* Client identity */}
+      <div className="w-32 shrink-0 flex items-center gap-2">
+        <span className="font-mono font-semibold text-sm truncate group-hover:text-foreground">{c.clientTag}</span>
+        {c.group
+          ? <span className="text-[9px] font-medium rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">G{c.group}</span>
+          : <span className="text-[9px] font-medium rounded bg-amber-100 px-1.5 py-0.5 text-amber-700" title="No group mapping — run the group sheet sync">no group</span>}
       </div>
 
-      {/* matrix: per instance, 3 ESP chips */}
-      <div className="flex-1 flex flex-wrap gap-x-4 gap-y-1.5">
-        {instances.length === 0 ? <span className="text-xs text-muted-foreground/60">unmapped — sync group sheet</span> : instances.map((inst) => (
-          <div key={inst} className="flex items-center gap-1.5">
-            <InstanceBadge instance={inst} size="xs" />
-            {ESPS.map((esp) => {
-              const cell = c.matrix[inst]?.[esp];
-              const ok = cell?.state === "ok";
-              const draft = cell?.draft;
-              const cls = !ok ? "bg-rose-100 text-rose-600" : draft ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700";
-              const title = !ok ? `Missing: create "${c.clientTag}: ${esp[0].toUpperCase() + esp.slice(1)} [Nurture] (Cleaning Client)" in ${inst}` : draft ? `${esp} ready (draft — won't send until active)` : `${esp} active`;
-              return <span key={esp} title={title} className={`text-[10px] font-medium rounded px-1 py-0.5 leading-none ${cls}`}>{ESP_SHORT[esp]}</span>;
+      {/* Matrix: per instance (lane), 3 ESP pills */}
+      <div className="flex-1 flex flex-wrap items-center gap-x-5 gap-y-2">
+        {instances.length === 0
+          ? <span className="text-xs text-muted-foreground/60 italic">unmapped — sync the group sheet to route this client</span>
+          : instances.map((inst) => {
+              const lane = laneFor(inst, c);
+              return (
+                <div key={inst} className="flex items-center gap-1.5">
+                  <span title={getInstanceLabel(inst)} className="text-[10px] font-semibold text-muted-foreground tabular-nums w-7">{lane ?? "—"}</span>
+                  {ESPS.map((esp) => {
+                    const cell = c.matrix[inst]?.[esp];
+                    const ok = cell?.state === "ok";
+                    const title = !ok
+                      ? `Missing: create "${c.clientTag}: ${ESP_FULL[esp]} [Nurture] (Cleaning Client)" in ${getInstanceLabel(inst)}`
+                      : cell?.draft ? `${ESP_FULL[esp]} — draft (won't send until activated)` : `${ESP_FULL[esp]} — active`;
+                    return <EspPill key={esp} cell={cell} label={ESP_SHORT[esp]} title={title} />;
+                  })}
+                </div>
+              );
             })}
-          </div>
-        ))}
       </div>
 
-      <div className="shrink-0 w-20 text-center">
+      {/* Configured status */}
+      <div className="shrink-0 w-24 flex justify-end">
         {c.configured
-          ? <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700"><Check className="size-3" /> Ready</span>
-          : <span className="inline-flex items-center gap-1 text-[11px] text-rose-600" title={c.missingCells.map((m) => `${m.esp}@${m.instance}`).join(", ")}><AlertTriangle className="size-3" /> {c.missingCells.length} gap{c.missingCells.length === 1 ? "" : "s"}</span>}
+          ? <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700"><Check className="size-3.5" /> Ready</span>
+          : <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600" title={c.missingCells.map((m) => `${ESP_FULL[m.esp]} @ ${getInstanceLabel(m.instance)}`).join("\n")}><AlertTriangle className="size-3.5" /> {c.missingCells.length} gap{c.missingCells.length === 1 ? "" : "s"}</span>}
       </div>
 
       {/* Auto toggle */}
-      <button onClick={() => onToggle(!autoOn)} className={`shrink-0 flex items-center gap-1.5 px-2.5 h-7 rounded-full text-[11px] font-medium transition-colors ${autoOn ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-muted text-muted-foreground hover:bg-muted/70"}`}>
+      <button
+        onClick={(e) => { stop(e); onToggle(!autoOn); }}
+        className={`shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold transition-colors ${autoOn ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
+      >
         {autoOn ? <Zap className="size-3" /> : <ZapOff className="size-3" />} {autoOn ? "Auto" : "Off"}
       </button>
+
+      <ChevronRight className="size-4 text-muted-foreground/30 shrink-0 group-hover:text-muted-foreground/70 transition-colors" />
     </div>
   );
 }

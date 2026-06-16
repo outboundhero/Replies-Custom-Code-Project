@@ -58,7 +58,13 @@ export interface AutoPushResult {
   error?: string;
 }
 
-export async function runAutoPushForClient(clientTag: string): Promise<AutoPushResult> {
+export async function runAutoPushForClient(
+  clientTag: string,
+  opts: { cap?: number } = {},
+): Promise<AutoPushResult> {
+  // Cron uses the conservative PER_CLIENT_CAP safety belt; the on-demand
+  // "Route all ready" action passes a larger cap and loops until drained.
+  const cap = Math.max(1, opts.cap ?? PER_CLIENT_CAP);
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0 };
 
@@ -78,14 +84,14 @@ export async function runAutoPushForClient(clientTag: string): Promise<AutoPushR
     .not("esp", "is", null)
     .lte("sequence_finished_at", cutoffIso)
     .order("sequence_finished_at", { ascending: true })
-    .limit(PER_CLIENT_CAP);
+    .limit(cap);
   if (seqErr) {
     result.error = `seq fetch failed: ${seqErr.message}`;
     return result;
   }
 
   // 2. Pull eligible reply-based candidates (soft_negative + OOO, safe).
-  const remaining = Math.max(0, PER_CLIENT_CAP - (seqRows?.length ?? 0));
+  const remaining = Math.max(0, cap - (seqRows?.length ?? 0));
   let replyRows: Array<{ id: number; lead_id: number | null; lead_email: string; esp: string | null }> = [];
   if (remaining > 0) {
     const { data, error } = await supabase

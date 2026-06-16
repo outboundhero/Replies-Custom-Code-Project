@@ -85,11 +85,15 @@ interface Counts {
   added: number;
 }
 
-// Show all rows up-front instead of paginating. /api/nurture caps each
-// request at 2000; loadPage auto-chains follow-ups when hasMore is true,
-// up to ABSOLUTE_CAP, so a single client's full pool lands in one scroll.
+// Show rows up-front instead of paginating. /api/nurture caps each request at
+// 2000; loadPage auto-chains follow-ups when hasMore is true, up to
+// ABSOLUTE_CAP. The cap is a RENDER limit for page speed — the authoritative
+// totals come from the cached counts endpoint (shown in the tiles/pipeline),
+// and a "showing first N of M" notice appears when a client exceeds it. Kept at
+// 4000 (2 fetches) so even huge clients settle in ~1-2s instead of stalling on
+// a 5-fetch 10k drain.
 const PAGE_SIZE = 2000;
-const ABSOLUTE_CAP = 10000;
+const ABSOLUTE_CAP = 4000;
 
 const SOURCE_LABEL: Record<Source, string> = {
   soft_negative: "Soft Negative",
@@ -184,6 +188,11 @@ export default function NurturePage() {
   } | null>(null);
   const [pushTargetCampaignId, setPushTargetCampaignId] = useState<string>("");
   const [pushing, setPushing] = useState(false);
+  // "Route all ready" — server-side loop that routes the client's ENTIRE
+  // ESP-resolved ready pool (not just rendered rows), batch by batch.
+  const [routingAll, setRoutingAll] = useState(false);
+  const [routeAllProgress, setRouteAllProgress] = useState<{ routed: number; batches: number } | null>(null);
+  const routeAllAbortRef = useRef(false);
   // Per-client auto-nurture state. Loaded once for the current
   // clientFilter via /api/config/clients/[tag]. Flipped automatically
   // after a successful Auto-route push (the operator clicks ONE button
@@ -317,12 +326,15 @@ export default function NurturePage() {
         setFetchError(null);
 
         // Keep the "Ready to nurture" tile in lockstep with what the table
-        // actually loaded. In the unfiltered actionable view the drained set
-        // IS the full eligible+safe population, so its length is the true
-        // Ready count. A source filter or the Waiting/Added view would be a
-        // subset, so don't trust those for the tile.
+        // actually loaded — but ONLY when we drained the whole population. If
+        // we hit the display cap (big clients like TGS have far more than
+        // ABSOLUTE_CAP eligible+safe leads), the loaded length is just the cap,
+        // NOT the true total — using it would make the tile wrongly drop from
+        // the real count (e.g. 48k) to 10k. In that case leave readyFromList
+        // null so the tile/pipeline fall back to the authoritative
+        // counts.eligibleSafe.
         if (!append && view === "actionable" && sourceFilter === "all") {
-          setReadyFromList(accumulated.length);
+          setReadyFromList(accumulated.length < ABSOLUTE_CAP ? accumulated.length : null);
         }
       } catch (e) {
         setFetchError((e as Error).message);
@@ -1008,6 +1020,55 @@ export default function NurturePage() {
     setPushing(false);
   }
 
+  // Route the client's ENTIRE ESP-resolved ready pool, server-side, batch by
+  // batch — independent of what's selected or rendered. Loops the route-all
+  // endpoint (each call routes up to ~800) until it reports nothing left.
+  async function routeAllReady() {
+    if (!clientFilter) return;
+    if (routingAll) { routeAllAbortRef.current = true; return; } // click again = stop
+    routeAllAbortRef.current = false;
+    setRoutingAll(true);
+    setRouteAllProgress({ routed: 0, batches: 0 });
+    let totalRouted = 0, batches = 0;
+    const SAFETY_MAX_BATCHES = 200; // 200 × 800 = 160k hard stop
+    try {
+      for (;;) {
+        if (routeAllAbortRef.current) { toast.info(`Stopped — routed ${totalRouted.toLocaleString()} so far.`); break; }
+        if (batches >= SAFETY_MAX_BATCHES) { toast.warning(`Reached safety limit after routing ${totalRouted.toLocaleString()}.`); break; }
+        const res = await fetch("/api/nurture/route-all", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTag: clientFilter }),
+        });
+        if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+        const data = await res.json();
+        if (!res.ok) { toast.error(data.error || `Route-all failed (HTTP ${res.status})`); break; }
+        batches++;
+        totalRouted += data.totalAttached || 0;
+        setRouteAllProgress({ routed: totalRouted, batches });
+        // Surface per-bucket campaign-missing errors once so the operator knows.
+        const bucketErrs = (data.perBucket || []).filter((b: { error?: string }) => b.error);
+        if (data.done) {
+          if (totalRouted === 0 && bucketErrs.length) {
+            toast.error(`Couldn't route — ${bucketErrs.map((b: { esp: string; error: string }) => `${b.esp}: ${b.error}`).join("; ")}`);
+          } else {
+            toast.success(`Routed ${totalRouted.toLocaleString()} ready lead${totalRouted === 1 ? "" : "s"} into ${clientFilter}'s nurture campaigns.`);
+            if (totalRouted > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(clientFilter, true);
+          }
+          break;
+        }
+        if ((data.totalAttached || 0) === 0 && bucketErrs.length) {
+          // Scanned leads but attached none and have bucket errors → stuck (missing campaigns). Stop.
+          toast.error(`Stopped — ${bucketErrs.map((b: { esp: string; error: string }) => `${b.esp}: ${b.error}`).join("; ")}`);
+          break;
+        }
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+    setRoutingAll(false);
+    void Promise.all([loadPage(true, false), loadCounts(true)]);
+  }
+
   async function pushSelected() {
     if (!pushTargetCampaignId || selected.size === 0) return;
     setPushing(true);
@@ -1478,6 +1539,20 @@ export default function NurturePage() {
           >
             {pushing ? "Pushing…" : `Auto-route${selected.size > 0 ? ` (${selected.size})` : ""}`}
           </Button>
+          {view === "actionable" && (
+            <Button
+              size="sm"
+              variant="default"
+              onClick={routeAllReady}
+              disabled={pushing}
+              className={`h-9 ${routingAll ? "bg-rose-600 hover:bg-rose-700" : "bg-violet-600 hover:bg-violet-700"} text-white`}
+              title="Route EVERY ESP-resolved ready lead for this client into the correct Google/Outlook/SEGs nurture campaign — server-side, all of them, not just the selected/visible rows. Click again to stop."
+            >
+              {routingAll
+                ? `Stop (routed ${routeAllProgress?.routed.toLocaleString() ?? 0})`
+                : "Route all ready"}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -1515,6 +1590,17 @@ export default function NurturePage() {
           )}
         </div>
       </div>
+
+      {/* Capped-list notice — the table renders at most ABSOLUTE_CAP rows for
+          performance, but the tile/pipeline show the TRUE total. Make the gap
+          explicit so a big client (e.g. 48k ready, 10k shown) isn't confusing. */}
+      {view === "actionable" && sourceFilter === "all" && items.length >= ABSOLUTE_CAP &&
+        typeof counts?.eligibleSafe === "number" && counts.eligibleSafe > items.length && (
+        <div className="rounded-lg border border-sky-200 bg-sky-50/60 px-4 py-2.5 text-xs text-sky-800 flex items-center gap-2">
+          <span className="font-medium">Showing the first {items.length.toLocaleString()} of {counts.eligibleSafe.toLocaleString()} ready leads.</span>
+          <span className="text-sky-700/80">The list caps rows for speed — use <strong>Route all ready</strong> to auto-route every ESP-resolved lead (all {counts.eligibleSafe.toLocaleString()}, not just these) into the correct campaigns.</span>
+        </div>
+      )}
 
       {/* ── Lead table ── */}
       <div className="rounded-lg border bg-card overflow-hidden">
