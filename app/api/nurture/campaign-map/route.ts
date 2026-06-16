@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
+import { getClientInstances } from "@/lib/nurture/group-routing";
 
 export const dynamic = "force-dynamic";
 
@@ -21,8 +22,18 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
   const clientTag = (req.nextUrl.searchParams.get("clientTag") || "").trim();
   if (!clientTag) return NextResponse.json({ error: "clientTag required" }, { status: 400 });
-  const [entries, confirmedAt] = await Promise.all([getCampaignMap(clientTag), getMapConfirmedAt(clientTag)]);
-  return NextResponse.json({ entries, confirmedAt });
+  const [entries, confirmedAt, instances] = await Promise.all([
+    getCampaignMap(clientTag),
+    getMapConfirmedAt(clientTag),
+    getClientInstances(clientTag),
+  ]);
+  // The cells the operator needs to map: each of the client's group instances
+  // (B2B + B2C) × the 3 ESPs.
+  return NextResponse.json({
+    entries,
+    confirmedAt,
+    instances: instances ? { group: instances.group, b2b: instances.b2b, b2c: instances.b2c } : null,
+  });
 }
 
 interface Entry { bison_instance?: string; esp?: string; campaign_id?: number; campaign_name?: string; lane?: string }

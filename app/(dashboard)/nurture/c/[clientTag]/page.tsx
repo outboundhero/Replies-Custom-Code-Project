@@ -12,6 +12,7 @@ import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, 
 import { toast } from "sonner";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
+import TargetCampaigns from "./_components/TargetCampaigns";
 import { ESP_LABEL, detectCampaignEsp, isCanonicalNurtureCampaign, type Esp } from "@/lib/nurture/esp";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
@@ -193,6 +194,8 @@ export default function NurturePage() {
   const [routingAll, setRoutingAll] = useState(false);
   const [routeAllProgress, setRouteAllProgress] = useState<{ routed: number; batches: number } | null>(null);
   const routeAllAbortRef = useRef(false);
+  // Target-campaign map confirmation — gates all sending (must pick campaigns first).
+  const [mapConfirmedAt, setMapConfirmedAt] = useState<string | null>(null);
   // Per-client auto-nurture state. Loaded once for the current
   // clientFilter via /api/config/clients/[tag]. Flipped automatically
   // after a successful Auto-route push (the operator clicks ONE button
@@ -1311,6 +1314,11 @@ export default function NurturePage() {
         <NurturePipeline clientTag={clientFilter} counts={counts} campaigns={filteredCampaigns} readyCount={readyFromList} />
       )}
 
+      {/* ── Target campaigns — operator picks destinations; gates sending ── */}
+      {clientFilter && (
+        <TargetCampaigns clientTag={clientFilter} campaigns={campaigns} onConfirmedChange={setMapConfirmedAt} />
+      )}
+
       {/* ── Classify progress banner (visible while classify-loop is active) ── */}
       {classifyProgress.status !== "idle" && (
         <ClassifyProgressBanner
@@ -1533,9 +1541,9 @@ export default function NurturePage() {
             size="sm"
             variant="default"
             onClick={pushSelectedAutoRoute}
-            disabled={pushing || selected.size === 0}
+            disabled={pushing || selected.size === 0 || !mapConfirmedAt}
             className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
-            title="Split the selection by email provider (Google / Outlook / SEGs) and push each bucket to its matching nurture campaign automatically."
+            title={!mapConfirmedAt ? "Confirm your Target Campaigns first to enable sending." : "Split the selection by email provider (Google / Outlook / SEGs) and push each bucket to its matching nurture campaign automatically."}
           >
             {pushing ? "Pushing…" : `Auto-route${selected.size > 0 ? ` (${selected.size})` : ""}`}
           </Button>
@@ -1544,9 +1552,11 @@ export default function NurturePage() {
               size="sm"
               variant="default"
               onClick={routeAllReady}
-              disabled={pushing}
+              disabled={pushing || !mapConfirmedAt}
               className={`h-9 ${routingAll ? "bg-rose-600 hover:bg-rose-700" : "bg-violet-600 hover:bg-violet-700"} text-white`}
-              title="Route EVERY ESP-resolved ready lead for this client into the correct Google/Outlook/SEGs nurture campaign — server-side, all of them, not just the selected/visible rows. Click again to stop."
+              title={!mapConfirmedAt
+                ? "Confirm your Target Campaigns first to enable sending."
+                : "Route EVERY ESP-resolved ready lead for this client into the campaigns you mapped — creating each lead in the correct B2B/B2C Bison instance, server-side, all of them. Click again to stop."}
             >
               {routingAll
                 ? `Stop (routed ${routeAllProgress?.routed.toLocaleString() ?? 0})`
