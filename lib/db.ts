@@ -77,6 +77,11 @@ export async function initializeDatabase() {
       bcc_name_1 TEXT, bcc_email_1 TEXT,
       bcc_name_2 TEXT, bcc_email_2 TEXT,
       reply_template TEXT,
+      auto_nurture_enabled INTEGER NOT NULL DEFAULT 0,
+      auto_nurture_enabled_at TEXT,
+      auto_nurture_last_run_at TEXT,
+      auto_nurture_disabled INTEGER NOT NULL DEFAULT 0,
+      auto_nurture_disabled_at TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE TABLE IF NOT EXISTS client_instances (

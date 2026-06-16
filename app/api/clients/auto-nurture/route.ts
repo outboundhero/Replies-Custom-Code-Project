@@ -37,10 +37,15 @@ export async function POST(req: NextRequest) {
     sql: "INSERT OR IGNORE INTO client_config (client_tag) VALUES (?)",
     args: [clientTag],
   });
+  // Opt-out model: the gate is auto_nurture_disabled. enabled=true clears it
+  // (default ON); enabled=false sets it. We keep auto_nurture_enabled in sync
+  // for the legacy badge/timestamp, but it is NOT the gate anymore.
   if (enabled) {
     await db.execute({
       sql: `UPDATE client_config
-            SET auto_nurture_enabled = 1,
+            SET auto_nurture_disabled = 0,
+                auto_nurture_disabled_at = NULL,
+                auto_nurture_enabled = 1,
                 auto_nurture_enabled_at = COALESCE(auto_nurture_enabled_at, datetime('now')),
                 updated_at = datetime('now')
             WHERE client_tag = ?`,
@@ -49,7 +54,9 @@ export async function POST(req: NextRequest) {
   } else {
     await db.execute({
       sql: `UPDATE client_config
-            SET auto_nurture_enabled = 0,
+            SET auto_nurture_disabled = 1,
+                auto_nurture_disabled_at = datetime('now'),
+                auto_nurture_enabled = 0,
                 updated_at = datetime('now')
             WHERE client_tag = ?`,
       args: [clientTag],

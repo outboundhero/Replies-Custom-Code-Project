@@ -279,13 +279,18 @@ export async function runAutoPushForClient(clientTag: string): Promise<AutoPushR
 
 /** List every client tag that has opted into auto-push. */
 export async function listAutoEnabledClients(): Promise<string[]> {
+  // OPT-OUT model: every active client tag is auto-nurtured by default unless
+  // explicitly disabled (auto_nurture_disabled=1). Drive off the full tag
+  // universe (client_tags) so clients with no client_config row are included.
   const res = await db.execute({
-    sql: "SELECT client_tag FROM client_config WHERE auto_nurture_enabled = 1",
+    sql: `SELECT ct.tag AS client_tag
+          FROM client_tags ct
+          LEFT JOIN client_config cc ON cc.client_tag = ct.tag
+          WHERE COALESCE(cc.auto_nurture_disabled, 0) = 0`,
     args: [],
   });
   const tags = res.rows.map((r) => r.client_tag as string);
-  // Never auto-push for churned clients (Status=Churned + Churn Date), even if
-  // their auto_nurture flag is still on from before they churned.
+  // Never auto-push for churned clients (Status=Churned + Churn Date).
   const churned = await getChurnedTags();
   return tags.filter((t) => !churned.has((t || "").toUpperCase()));
 }
