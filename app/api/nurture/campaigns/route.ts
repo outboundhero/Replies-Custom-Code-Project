@@ -21,6 +21,7 @@ import { requireAuth } from "@/lib/auth";
 import { listCampaigns } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES, resolveInstanceForClient, type BisonInstanceKey } from "@/lib/bison-instances";
+import { getClientInstances } from "@/lib/nurture/group-routing";
 import db from "@/lib/db";
 
 /**
@@ -106,15 +107,29 @@ export async function GET(req: NextRequest) {
       if (cached) return NextResponse.json({ campaigns: cached, cached: true, source: "table" });
     }
 
-    // Scoped fetch — one instance only. Fast path for the per-client
-    // detail page since it only ever cares about its own client.
+    // Scoped fetch — only the client's own instances. A client's nurture
+    // campaigns can live in BOTH its group's B2B and B2C instances (identical
+    // names, different workspaces), so fan out across {b2b, b2c} rather than a
+    // single resolveInstanceForClient — otherwise the per-client page silently
+    // drops half the campaigns. Falls back to the legacy single-instance
+    // resolution for unmapped clients (no group row yet).
     if (clientTag) {
-      const instanceKey = await resolveInstanceForClient(clientTag);
-      const data = await loadInstance(instanceKey, fresh);
+      const inst = await getClientInstances(clientTag);
+      const instanceKeys = inst
+        ? Array.from(new Set<BisonInstanceKey>([inst.b2b, inst.b2c]))
+        : [await resolveInstanceForClient(clientTag)];
+      const settled = await Promise.allSettled(instanceKeys.map((k) => loadInstance(k, fresh)));
+      const data: CampaignRow[] = [];
+      const failures: Array<{ instance: string; error: string }> = [];
+      settled.forEach((r, idx) => {
+        if (r.status === "fulfilled") data.push(...r.value);
+        else failures.push({ instance: instanceKeys[idx], error: (r.reason as Error)?.message || "unknown" });
+      });
       return NextResponse.json({
         campaigns: data,
-        cached: !fresh && cache.has(instanceKey),
-        instance: instanceKey,
+        cached: !fresh && instanceKeys.every((k) => cache.has(k)),
+        instances: instanceKeys,
+        failures: failures.length ? failures : undefined,
       });
     }
 

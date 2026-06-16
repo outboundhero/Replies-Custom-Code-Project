@@ -68,6 +68,15 @@ interface NurtureCampaign {
   bison_instance: string;
 }
 
+/**
+ * Composite selection key for the campaign dropdown. Numeric campaign ids can
+ * COLLIDE across Bison workspaces (the same id exists in B2B#1 and B2B#2), so a
+ * bare id is ambiguous once a client's campaigns span both instances. Keying on
+ * `${instance}:${id}` makes each option unique and lets pushSelected route the
+ * attach to the right workspace.
+ */
+const campaignKey = (c: { bison_instance: string; id: number }) => `${c.bison_instance}:${c.id}`;
+
 interface Counts {
   total: number;
   eligible: number;
@@ -656,7 +665,7 @@ export default function NurturePage() {
           return tagMatches && isCanonicalNurtureCampaign(c.name) && detectCampaignEsp(c.name) === filters.esp;
         });
         if (matches.length === 1) {
-          setPushTargetCampaignId(String(matches[0].id));
+          setPushTargetCampaignId(campaignKey(matches[0]));
         }
       }
 
@@ -1012,13 +1021,15 @@ export default function NurturePage() {
         const it = itemMap.get(id);
         return { id, ob_lead_id: meta?.ob_lead_id ?? it?.ob_lead_id };
       });
-      const campaign = campaigns.find((c) => c.id === Number(pushTargetCampaignId)) || null;
+      // pushTargetCampaignId is the composite `${instance}:${id}` key — match
+      // on it so we never grab a same-id campaign from the wrong workspace.
+      const campaign = campaigns.find((c) => campaignKey(c) === pushTargetCampaignId) || null;
       const res = await fetch("/api/nurture/mutate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "push-to-nurture",
-          nurtureCampaignId: Number(pushTargetCampaignId),
+          nurtureCampaignId: campaign?.id ?? null,
           // Route the attach to whichever Bison instance the campaign
           // lives on. /api/nurture/campaigns now returns bison_instance
           // per row, so we just forward it.
@@ -1438,7 +1449,12 @@ export default function NurturePage() {
               </SelectTrigger>
               <SelectContent>
                 {filteredCampaigns.map((c) => (
-                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                  <SelectItem key={campaignKey(c)} value={campaignKey(c)}>
+                    <span className="flex items-center gap-2">
+                      <InstanceBadge instance={c.bison_instance} size="xs" />
+                      <span>{c.name}</span>
+                    </span>
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -2018,23 +2034,33 @@ function NurturePipeline({
   campaigns: NurtureCampaign[];
   readyCount: number | null;
 }) {
-  const byEsp = useMemo(() => {
+  // Group canonical campaigns by INSTANCE, then ESP. A client's nurture
+  // campaigns can live in both its group's B2B and B2C workspaces (identical
+  // ESP names, different instances), so we render one block per instance rather
+  // than collapsing across them.
+  const byInstance = useMemo(() => {
     const rank = (s: string) => (s === "active" ? 0 : s === "paused" ? 1 : s === "draft" ? 2 : s === "archived" ? 4 : 3);
-    const m: Partial<Record<Esp, NurtureCampaign>> = {};
+    const m = new Map<string, Partial<Record<Esp, NurtureCampaign>>>();
     for (const c of campaigns) {
       const esp = detectCampaignEsp(c.name);
       if (!esp) continue;
-      const cur = m[esp];
-      if (!cur || rank(c.status) < rank(cur.status)) m[esp] = c; // prefer routable status
+      const inst = c.bison_instance || "outboundhero";
+      if (!m.has(inst)) m.set(inst, {});
+      const espMap = m.get(inst)!;
+      const cur = espMap[esp];
+      if (!cur || rank(c.status) < rank(cur.status)) espMap[esp] = c; // prefer routable status
     }
     return m;
   }, [campaigns]);
+  const instanceKeys = useMemo(() => [...byInstance.keys()].sort(), [byInstance]);
 
   const total = counts?.total ?? 0;
   const ready = readyCount ?? counts?.eligibleSafe ?? 0;
   const added = counts?.added ?? 0;
   const waiting = counts?.waiting ?? 0;
-  const anyActive = (["google", "outlook", "segs"] as Esp[]).some((e) => byEsp[e]?.status === "active");
+  const anyActive = [...byInstance.values()].some((espMap) =>
+    (["google", "outlook", "segs"] as Esp[]).some((e) => espMap[e]?.status === "active"),
+  );
 
   const stages: Array<{ n: number; label: string; value: number | string; hint: string; lit: boolean }> = [
     { n: 1, label: "Synced", value: total, hint: "pulled from Bison", lit: total > 0 },
@@ -2064,22 +2090,41 @@ function NurturePipeline({
           </Fragment>
         ))}
       </div>
-      <div className="grid grid-cols-3 gap-2">
-        {(["outlook", "google", "segs"] as Esp[]).map((esp) => {
-          const c = byEsp[esp];
-          return (
+      {instanceKeys.length === 0 ? (
+        <div className="grid grid-cols-3 gap-2">
+          {(["outlook", "google", "segs"] as Esp[]).map((esp) => (
             <div key={esp} className="rounded-md border px-3 py-2">
               <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{ESP_LABEL[esp]} campaign</p>
-              {c ? (
-                <div className="flex items-center justify-between gap-2 mt-1">
-                  <span className="text-sm font-semibold tabular-nums" title={c.name}>{(c.total_leads ?? 0).toLocaleString()} leads</span>
-                  <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
-                </div>
-              ) : <p className="text-xs text-rose-600 mt-1">not set up</p>}
+              <p className="text-xs text-rose-600 mt-1">not set up</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        instanceKeys.map((inst) => {
+          const espMap = byInstance.get(inst)!;
+          return (
+            <div key={inst} className="space-y-1.5">
+              <InstanceBadge instance={inst} size="xs" />
+              <div className="grid grid-cols-3 gap-2">
+                {(["outlook", "google", "segs"] as Esp[]).map((esp) => {
+                  const c = espMap[esp];
+                  return (
+                    <div key={esp} className="rounded-md border px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{ESP_LABEL[esp]} campaign</p>
+                      {c ? (
+                        <div className="flex items-center justify-between gap-2 mt-1">
+                          <span className="text-sm font-semibold tabular-nums" title={c.name}>{(c.total_leads ?? 0).toLocaleString()} leads</span>
+                          <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
+                        </div>
+                      ) : <p className="text-xs text-rose-600 mt-1">not set up</p>}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           );
-        })}
-      </div>
+        })
+      )}
     </div>
   );
 }
@@ -2567,13 +2612,14 @@ function ClientInsights({
           <div className="divide-y">
             {clientCampaigns.map((c) => (
               <a
-                key={c.id}
+                key={campaignKey(c)}
                 href={c.uuid ? `${getInstanceBaseUrl(c.bison_instance)}/campaigns/${c.uuid}` : `${getInstanceBaseUrl(c.bison_instance)}/campaigns/${c.id}/leads`}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/30"
               >
                 <span className={`size-1.5 rounded-full ${c.status === "active" ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
+                <InstanceBadge instance={c.bison_instance} size="xs" />
                 <span className="text-sm flex-1 truncate">{c.name}</span>
                 {typeof c.total_leads === "number" && (
                   <span className="text-xs text-muted-foreground tabular-nums">
