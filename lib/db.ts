@@ -104,6 +104,20 @@ export async function initializeDatabase() {
       client_tag TEXT PRIMARY KEY,
       synced_at TEXT
     )`,
+    // Operator-confirmed target campaign per (client, instance, ESP). The
+    // nurture route engine (manual Route-all + auto-push) sends leads ONLY to
+    // the campaigns chosen here — nothing is auto-picked. A client can't be
+    // sent to until its map is confirmed (client_config.nurture_map_confirmed_at).
+    `CREATE TABLE IF NOT EXISTS nurture_campaign_map (
+      client_tag TEXT NOT NULL,
+      bison_instance TEXT NOT NULL,
+      esp TEXT NOT NULL,
+      campaign_id INTEGER NOT NULL,
+      campaign_name TEXT,
+      lane TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (client_tag, bison_instance, esp)
+    )`,
     `CREATE INDEX IF NOT EXISTS idx_client_tags_tag ON client_tags(tag)`,
     `CREATE INDEX IF NOT EXISTS idx_client_config_tag ON client_config(client_tag)`,
     `CREATE INDEX IF NOT EXISTS idx_company_codes_priority ON company_codes(priority DESC)`,
@@ -120,6 +134,16 @@ export async function initializeDatabase() {
   for (const col of ["cc_name_5", "cc_email_5", "cc_name_6", "cc_email_6"]) {
     try {
       await db.execute(`ALTER TABLE client_config ADD COLUMN ${col} TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
+
+  // Timestamp set when an operator confirms the client's target-campaign map.
+  // Gates all nurture sending (Route-all / Auto-route / auto-push cron).
+  for (const col of ["nurture_map_confirmed_at TEXT"]) {
+    try {
+      await db.execute(`ALTER TABLE client_config ADD COLUMN ${col}`);
     } catch {
       // Column already exists — ignore
     }
