@@ -248,8 +248,13 @@ export async function GET(req: NextRequest) {
     // 1000-row chunks and dedupe the whole set in one pass, so the table,
     // the "Ready" tile, and "Select all" all see the same complete set.
     const DRAIN_CHUNK = 1000;       // PostgREST max-rows per request
-    const RAW_DRAIN_CAP = 25000;    // ceiling on raw rows scanned per source
-    const DISTINCT_CAP = 10000;     // ceiling on deduped rows returned (matches client ABSOLUTE_CAP)
+    // Bounded to match the client render cap (ABSOLUTE_CAP=4000). Draining
+    // 25k rows in 6 parallel deep-offset queries — each ordering a huge
+    // client's full eligible set (TGS ~52k) — overloaded Postgres and tripped
+    // the statement timeout. The authoritative totals come from the cached
+    // counts endpoint, not this list, so capping the rendered drain is safe.
+    const RAW_DRAIN_CAP = 8000;     // ceiling on raw rows scanned per source
+    const DISTINCT_CAP = 4000;      // ceiling on deduped rows returned (matches client ABSOLUTE_CAP)
     const drainMode = !!clientTag;
     const itemCap = drainMode ? DISTINCT_CAP : limit;
     const legacyCap = drainMode ? DISTINCT_CAP : limit * 3;
@@ -273,7 +278,7 @@ export async function GET(req: NextRequest) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const all: any[] = [];
       let start = offset;
-      const WAVE = 6;
+      const WAVE = 4;
       while (all.length < RAW_DRAIN_CAP) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const reqs: Promise<any>[] = [];
