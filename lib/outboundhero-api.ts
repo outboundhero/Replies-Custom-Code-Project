@@ -603,12 +603,23 @@ export async function getFirstSentEmail(
   return sorted[0] || null;
 }
 
-/** Find a single lead by email (search). Returns the first matching lead or null. */
+/**
+ * Find a single lead by email. Returns the matching lead or null.
+ *
+ * Uses the direct path lookup `GET /api/leads/{email}` (Bison resolves the
+ * email as a lead identifier) rather than the `?search=` query endpoint. The
+ * search endpoint was returning HTTP 504 (server-side timeout, ~100s/call) and
+ * stalled the ESP backfill; the path endpoint returns in ~200-600ms with the
+ * same `{ data: {...lead, tags:[…]} }` shape. A missing lead returns 404 (with
+ * a `{data:{success:false}}` body), which we map to null via the !res.ok guard.
+ */
 export async function findLeadByEmail(instanceKey: string, email: string): Promise<OutboundLead | null> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetchWithTimeout(`${baseUrl}/api/leads?search=${encodeURIComponent(email)}&per_page=10`, { headers: buildHeaders(token) });
-  if (!res.ok) return null;
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${encodeURIComponent(email)}`, { headers: buildHeaders(token) });
+  if (!res.ok) return null; // 404 = not found, anything else = transient/error
   const data = await res.json();
-  const rows: OutboundLead[] = data?.data || [];
-  return rows.find((r) => r.email?.toLowerCase() === email.toLowerCase()) || rows[0] || null;
+  const lead = (data?.data ?? data) as OutboundLead | undefined;
+  // Guard against the 404-with-200 edge: only treat it as a hit if it has an id.
+  if (!lead || typeof lead.id !== "number") return null;
+  return lead;
 }
