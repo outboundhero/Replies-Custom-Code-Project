@@ -85,6 +85,20 @@ export async function initializeDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_by TEXT
     )`,
+    // Nurture group (1 or 2) per client → drives which B2B/B2C Bison instances
+    // its leads route to. Synced from the instance-mapping sheet by
+    // /api/cron/sync-client-groups. See lib/nurture/group-routing.ts.
+    `CREATE TABLE IF NOT EXISTS client_groups (
+      client_tag TEXT PRIMARY KEY,
+      group_num INTEGER NOT NULL,
+      synced_at TEXT
+    )`,
+    // Churned clients (Status=Churned + Churn Date), synced from the Client
+    // Tracker sheet by /api/cron/sync-churned-clients. See lib/churn.ts.
+    `CREATE TABLE IF NOT EXISTS churned_clients (
+      client_tag TEXT PRIMARY KEY,
+      synced_at TEXT
+    )`,
     `CREATE INDEX IF NOT EXISTS idx_client_tags_tag ON client_tags(tag)`,
     `CREATE INDEX IF NOT EXISTS idx_client_config_tag ON client_config(client_tag)`,
     `CREATE INDEX IF NOT EXISTS idx_company_codes_priority ON company_codes(priority DESC)`,

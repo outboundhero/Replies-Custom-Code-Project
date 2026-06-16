@@ -48,6 +48,10 @@
     {
       "path": "/api/cron/refresh-nurture-campaigns",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-client-groups",
+      "schedule": "30 6 * * *"
     }
   ]
 }

@@ -98,6 +98,44 @@ export async function fetchChurnedClientTags(): Promise<Set<string>> {
   return churned;
 }
 
+/**
+ * Each client tag's nurture GROUP (1 or 2) from the instance-mapping sheet
+ * (a SEPARATE spreadsheet). "Sheet1" is column-positional with a header row:
+ *   col A = Group-1 client tags ("B2B #1 (OutboundHero) & B2C #1 (CleaningOutbound)")
+ *   col C = Group-2 client tags ("B2B #2 (FacilityReach) & B2C #2 (OutboundClean)")
+ *   cols B/D are "DONE" booleans (ignored).
+ * Combined abbreviations ("DBSM & DBSA") split like fetchChurnedClientTags.
+ * Returns Map<TAG_UPPER, 1|2>.
+ */
+const GROUPS_SPREADSHEET_ID = "1P-5H4pxB-cRO0i2tp6WjXNN77ibIB4hCnNTuyRzQOYw";
+
+export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
+  const auth = getAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: GROUPS_SPREADSHEET_ID,
+    range: "'Sheet1'!A:C",
+  });
+  const rows = res.data.values || [];
+  const out = new Map<string, 1 | 2>();
+  const addCell = (cell: unknown, group: 1 | 2) => {
+    const raw = (cell?.toString() || "").trim();
+    if (!raw) return;
+    for (const t of raw.split(/\s+&\s+|\s+and\s+/i)) {
+      const tag = t.trim().toUpperCase();
+      // Skip header fragments / the DONE-column truthy values.
+      if (!tag || tag === "TRUE" || tag === "FALSE" || tag === "DONE") continue;
+      if (/B2B|B2C|OUTBOUNDHERO|CLEANINGOUTBOUND|FACILITYREACH|OUTBOUNDCLEAN/i.test(tag)) continue;
+      out.set(tag, group);
+    }
+  };
+  for (let i = 1; i < rows.length; i++) {   // skip header row
+    addCell(rows[i][0], 1); // col A → Group 1
+    addCell(rows[i][2], 2); // col C → Group 2
+  }
+  return out;
+}
+
 export interface OnboardingFormRow {
   clientAbbreviation: string;
   exclusionIndustries: string;
