@@ -623,3 +623,123 @@ export async function findLeadByEmail(instanceKey: string, email: string): Promi
   if (!lead || typeof lead.id !== "number") return null;
   return lead;
 }
+
+// Per-process cache of known custom-variable names per instance, so a routing
+// run doesn't re-list/re-create the same variables for every batch.
+const _customVarCache = new Map<string, Set<string>>();
+
+/** List the custom-variable names defined in an instance. */
+export async function listCustomVariables(instanceKey: string): Promise<string[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/custom-variables?per_page=1000`, { headers: buildHeaders(token) });
+  if (!res.ok) return [];
+  const body = await res.json().catch(() => null);
+  const rows: Array<{ name?: string }> = body?.data ?? [];
+  return rows.map((r) => String(r.name)).filter(Boolean);
+}
+
+/**
+ * Ensure every named custom variable exists in the target instance, creating
+ * any that are missing. Required before createLeadsInInstance can attach custom
+ * variables: Bison 422s the whole lead batch if a referenced variable doesn't
+ * exist in that workspace. Idempotent — "already been taken" is treated as OK.
+ */
+export async function ensureCustomVariables(
+  instanceKey: string,
+  names: string[],
+): Promise<{ created: string[]; existing: string[]; errors: string[] }> {
+  const out = { created: [] as string[], existing: [] as string[], errors: [] as string[] };
+  const wanted = [...new Set(names.map((n) => (n || "").trim()).filter(Boolean))];
+  if (wanted.length === 0) return out;
+  let known = _customVarCache.get(instanceKey);
+  if (!known) {
+    known = new Set((await listCustomVariables(instanceKey)).map((n) => n.toLowerCase()));
+    _customVarCache.set(instanceKey, known);
+  }
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  for (const name of wanted) {
+    if (known.has(name.toLowerCase())) { out.existing.push(name); continue; }
+    const res = await fetchWithTimeout(`${baseUrl}/api/custom-variables`, {
+      method: "POST", headers: buildHeaders(token), body: JSON.stringify({ name }),
+    });
+    if (res.ok) { out.created.push(name); known.add(name.toLowerCase()); continue; }
+    const body = await res.json().catch(() => null);
+    const msg = JSON.stringify(body) || "";
+    if (res.status === 422 && /already been taken/i.test(msg)) { out.existing.push(name); known.add(name.toLowerCase()); }
+    else out.errors.push(`${name}: ${res.status} ${msg.slice(0, 120)}`);
+  }
+  return out;
+}
+
+export interface CreateLeadInput {
+  email: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  company?: string | null;
+  title?: string | null;
+  notes?: string | null;
+  custom_variables?: Array<{ name: string; value: string }>;
+}
+
+/**
+ * Bulk-create leads in a specific Bison instance via POST /api/leads/multiple
+ * (≤500 per request). Returns the instance-specific lead id per email — this is
+ * how cross-instance nurture routing places a lead into the correct workspace
+ * (B2B#1/#2, B2C#1/#2) before attaching it to that workspace's campaign.
+ *
+ * Bison returns `{ data: [{ id, email, ... }] }`. Emails NOT echoed back are
+ * `notReturned` — typically a personal domain on an instance that hasn't
+ * enabled them, or a dedupe the API didn't surface — and the caller should
+ * fall back to findLeadByEmail (the lead may already exist there).
+ */
+export async function createLeadsInInstance(
+  instanceKey: string,
+  leads: CreateLeadInput[],
+  opts: { ensureVars?: boolean } = {},
+): Promise<{ created: Array<{ email: string; ob_lead_id: number }>; notReturned: string[]; errors: string[] }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const created: Array<{ email: string; ob_lead_id: number }> = [];
+  const notReturned: string[] = [];
+  const errors: string[] = [];
+
+  // A referenced custom variable that doesn't exist in this workspace 422s the
+  // ENTIRE batch — so make sure they all exist first (default on). Cheap after
+  // the first call thanks to the per-instance cache.
+  if (opts.ensureVars !== false) {
+    const varNames = [...new Set(leads.flatMap((l) => (l.custom_variables || []).map((v) => v.name)))];
+    if (varNames.length > 0) {
+      const r = await ensureCustomVariables(instanceKey, varNames);
+      if (r.errors.length) errors.push(...r.errors.map((e) => `custom-var: ${e}`));
+    }
+  }
+
+  const BATCH = 500;
+  for (let i = 0; i < leads.length; i += BATCH) {
+    const chunk = leads.slice(i, i + BATCH);
+    const payload = {
+      leads: chunk.map((l) => ({
+        email: l.email,
+        ...(l.first_name != null ? { first_name: l.first_name } : {}),
+        ...(l.last_name != null ? { last_name: l.last_name } : {}),
+        ...(l.company != null ? { company: l.company } : {}),
+        ...(l.title != null ? { title: l.title } : {}),
+        ...(l.notes != null ? { notes: l.notes } : {}),
+        ...(l.custom_variables?.length ? { custom_variables: l.custom_variables } : {}),
+      })),
+    };
+    const res = await fetchWithTimeout(`${baseUrl}/api/leads/multiple`, {
+      method: "POST", headers: buildHeaders(token), body: JSON.stringify(payload), timeoutMs: 30_000,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) { errors.push(`HTTP ${res.status}: ${JSON.stringify(body)?.slice(0, 300)}`); continue; }
+    const rows: Array<{ id?: number; email?: string }> = body?.data ?? [];
+    const byEmail = new Map<string, number>();
+    for (const r of rows) if (r?.email && r?.id) byEmail.set(String(r.email).toLowerCase(), Number(r.id));
+    for (const l of chunk) {
+      const id = byEmail.get(l.email.toLowerCase());
+      if (id) created.push({ email: l.email, ob_lead_id: id });
+      else notReturned.push(l.email);
+    }
+  }
+  return { created, notReturned, errors };
+}
