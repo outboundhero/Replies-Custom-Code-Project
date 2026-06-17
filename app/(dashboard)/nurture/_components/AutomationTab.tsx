@@ -68,7 +68,11 @@ export default function AutomationTab() {
   const stats = useMemo(() => {
     let total = 0, on = 0, configured = 0, needCampaigns = 0, needMap = 0;
     for (const s of sections || []) for (const c of s.clients) {
-      total++; if (autoFor(c)) on++; if (c.configured) configured++; if (!c.configured) needCampaigns++;
+      total++;
+      // "Auto-route ON" = effectively running: opted-in AND map confirmed
+      // (without a confirmed map, sending is gated off no matter the flag).
+      if (autoFor(c) && c.mapConfirmed) on++;
+      if (c.configured) configured++; if (!c.configured) needCampaigns++;
       if (!c.mapConfirmed) needMap++;
     }
     return { total, on, configured, needCampaigns, needMap };
@@ -290,13 +294,24 @@ function ClientRowView({ c, autoOn, selected, onSelect, onToggle }: {
           : <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600" title={c.missingCells.map((m) => `${ESP_FULL[m.esp]} @ ${getInstanceLabel(m.instance)}`).join("\n")}><AlertTriangle className="size-3.5" /> {c.missingCells.length} gap{c.missingCells.length === 1 ? "" : "s"}</span>}
       </div>
 
-      {/* Auto toggle */}
-      <button
-        onClick={(e) => { stop(e); onToggle(!autoOn); }}
-        className={`shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold transition-colors ${autoOn ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
-      >
-        {autoOn ? <Zap className="size-3" /> : <ZapOff className="size-3" />} {autoOn ? "Auto" : "Off"}
-      </button>
+      {/* Auto toggle — gated on a confirmed map: without one, auto-routing can't
+          run, so the control is disabled and shows the gated state rather than a
+          misleading "Auto ON". */}
+      {!c.mapConfirmed ? (
+        <span
+          title="Confirm this client's Target Campaigns to enable auto-routing"
+          className="shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-400 cursor-not-allowed"
+        >
+          <ZapOff className="size-3" /> Off
+        </span>
+      ) : (
+        <button
+          onClick={(e) => { stop(e); onToggle(!autoOn); }}
+          className={`shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold transition-colors ${autoOn ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
+        >
+          {autoOn ? <Zap className="size-3" /> : <ZapOff className="size-3" />} {autoOn ? "Auto" : "Off"}
+        </button>
+      )}
 
       <ChevronRight className="size-4 text-muted-foreground/30 shrink-0 group-hover:text-muted-foreground/70 transition-colors" />
     </div>
