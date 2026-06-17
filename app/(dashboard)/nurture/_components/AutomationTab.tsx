@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/input";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
-import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
+import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronRight } from "lucide-react";
 
 type Esp = "google" | "outlook" | "segs";
 type Cell = { state: "ok" | "missing"; status?: string; draft?: boolean };
@@ -34,7 +34,6 @@ export default function AutomationTab() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [onlyUnmapped, setOnlyUnmapped] = useState(false);
   // local optimistic overrides: tag -> autoOn
@@ -74,6 +73,20 @@ export default function AutomationTab() {
     }
     return { total, on, configured, needCampaigns, needMap };
   }, [sections, autoOverride]);
+
+  // Flat, globally-sorted client list (no section grouping): needs-attention
+  // (un-mapped or campaign-gaps) first, then alphabetical.
+  const flatClients = useMemo(() => {
+    const all = (filtered || []).flatMap((s) => s.clients);
+    const attn = (c: ClientRow) => (!c.mapConfirmed || !c.configured) ? 0 : 1;
+    return [...all].sort((a, b) => attn(a) - attn(b) || a.clientTag.localeCompare(b.clientTag));
+  }, [filtered]);
+
+  const allSelected = flatClients.length > 0 && flatClients.every((c) => selected.has(c.clientTag));
+  const toggleSelectAll = () => setSelected((prev) => {
+    if (allSelected) { const n = new Set(prev); flatClients.forEach((c) => n.delete(c.clientTag)); return n; }
+    return new Set([...prev, ...flatClients.map((c) => c.clientTag)]);
+  });
 
   async function toggleOne(tag: string, enabled: boolean) {
     setAutoOverride((m) => new Map(m).set(tag, enabled));
@@ -146,32 +159,26 @@ export default function AutomationTab() {
         </div>
       )}
 
-      {/* Sections */}
-      <div className="space-y-4">
-        {(filtered || []).map((s) => {
-          const isCollapsed = collapsed.has(s.id);
-          return (
-            <div key={s.id} className="rounded-lg border bg-card overflow-hidden">
-              <div className="flex items-center gap-3 px-4 py-2.5 bg-muted/30 border-b">
-                <button onClick={() => setCollapsed((c) => { const n = new Set(c); n.has(s.id) ? n.delete(s.id) : n.add(s.id); return n; })} className="text-muted-foreground hover:text-foreground">
-                  {isCollapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
-                </button>
-                <span className="font-semibold text-sm">{s.name}</span>
-                <span className="text-xs text-muted-foreground">{s.clients.length} clients</span>
-                <div className="ml-auto flex gap-2">
-                  <button disabled={busy} onClick={() => bulk(true, { sectionIds: [s.id] })} className="px-2.5 h-7 text-[11px] rounded-md border hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-50">Enable all</button>
-                  <button disabled={busy} onClick={() => bulk(false, { sectionIds: [s.id] })} className="px-2.5 h-7 text-[11px] rounded-md border hover:bg-muted/50 disabled:opacity-50">Disable all</button>
-                </div>
-              </div>
-              {!isCollapsed && (
-                <div className="divide-y">
-                  {s.clients.map((c) => <ClientRowView key={c.clientTag} c={c} autoOn={autoFor(c)} selected={selected.has(c.clientTag)} onSelect={(v) => setSelected((sel) => { const n = new Set(sel); v ? n.add(c.clientTag) : n.delete(c.clientTag); return n; })} onToggle={(v) => toggleOne(c.clientTag, v)} />)}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {filtered && filtered.length === 0 && <div className="rounded-lg border bg-card p-8 text-center text-sm text-muted-foreground">No clients match.</div>}
+      {/* Flat client list (no section grouping) */}
+      <div className="rounded-lg border bg-card overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-2 bg-muted/30 border-b text-xs text-muted-foreground">
+          <span>{flatClients.length} client{flatClients.length === 1 ? "" : "s"}{onlyUnmapped ? " · needing a map" : ""}</span>
+          <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none">
+            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="size-3.5 rounded border-muted-foreground/40" />
+            Select all
+          </label>
+        </div>
+        {flatClients.length === 0
+          ? <div className="p-8 text-center text-sm text-muted-foreground">No clients match.</div>
+          : <div className="divide-y">
+              {flatClients.map((c) => (
+                <ClientRowView
+                  key={c.clientTag} c={c} autoOn={autoFor(c)} selected={selected.has(c.clientTag)}
+                  onSelect={(v) => setSelected((sel) => { const n = new Set(sel); v ? n.add(c.clientTag) : n.delete(c.clientTag); return n; })}
+                  onToggle={(v) => toggleOne(c.clientTag, v)}
+                />
+              ))}
+            </div>}
       </div>
     </div>
   );
