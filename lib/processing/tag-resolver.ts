@@ -5,7 +5,8 @@ import type { Section } from "@/lib/types";
  * Extract the client tag from a tracked campaign name.
  * Campaign names follow the format "TAG: rest of campaign name"
  */
-export function extractTagFromCampaignName(campaignName: string): string {
+export function extractTagFromCampaignName(campaignName: string | null | undefined): string {
+  if (!campaignName || typeof campaignName !== "string") return "";
   const matches = campaignName.match(/^(.*?):/);
   return matches ? matches[1].trim() : "";
 }

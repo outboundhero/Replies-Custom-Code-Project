@@ -12,7 +12,15 @@ import { toast } from "sonner";
 import { InstanceBadge } from "@/components/instance-badge";
 import { Check, ShieldCheck, ShieldAlert, Loader2 } from "lucide-react";
 import { ESP_LABEL, detectCampaignEsp, isCanonicalNurtureCampaign, type Esp } from "@/lib/nurture/esp";
-import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
+
+// Inline tag extractor — do NOT import from lib/processing/tag-resolver here:
+// that module pulls in lib/db (the server-only Turso client), which crashes the
+// browser bundle. Same "TAG: rest" logic.
+const extractTagFromCampaignName = (name: string | null | undefined): string => {
+  if (!name || typeof name !== "string") return "";
+  const m = name.match(/^(.*?):/);
+  return m ? m[1].trim() : "";
+};
 
 interface Campaign { id: number; name: string; status: string; client_tag: string | null; bison_instance: string; total_leads?: number }
 interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: string | null }

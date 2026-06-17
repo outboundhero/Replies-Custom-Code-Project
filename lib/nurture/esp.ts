@@ -207,7 +207,8 @@ export function pickEspFromTags(
  *   "JPH: Outlook (...)"                                       → "outlook"
  *   "JPH: SEGs (...)" / "JPH: SEG ..."                         → "segs"
  */
-export function detectCampaignEsp(name: string): Esp | null {
+export function detectCampaignEsp(name: string | null | undefined): Esp | null {
+  if (!name || typeof name !== "string") return null;
   const lower = name.toLowerCase();
   // SEG check first — "Outlook" and "SEGs" can both appear in names like
   // "JPH: SEGs Outlook" if you ever rename oddly; SEGs is the more
