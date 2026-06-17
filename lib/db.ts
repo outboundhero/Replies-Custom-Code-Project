@@ -104,6 +104,18 @@ export async function initializeDatabase() {
       client_tag TEXT PRIMARY KEY,
       synced_at TEXT
     )`,
+    // Where a lead physically lives after cross-instance placement: its
+    // instance-specific Bison lead id, keyed by (instance, email). Lets the
+    // route engine attach a placed lead to its campaign WITHOUT re-creating /
+    // re-looking-it-up. Populated by scripts/place-leads.ts and the engine.
+    `CREATE TABLE IF NOT EXISTS nurture_instance_lead (
+      bison_instance TEXT NOT NULL,
+      email TEXT NOT NULL,
+      lead_id INTEGER NOT NULL,
+      client_tag TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (bison_instance, email)
+    )`,
     // Operator-confirmed target campaign per (client, instance, ESP). The
     // nurture route engine (manual Route-all + auto-push) sends leads ONLY to
     // the campaigns chosen here — nothing is auto-picked. A client can't be

@@ -713,25 +713,54 @@ export async function createLeadsInInstance(
     }
   }
 
-  const BATCH = 500;
-  for (let i = 0; i < leads.length; i += BATCH) {
-    const chunk = leads.slice(i, i + BATCH);
-    const payload = {
-      leads: chunk.map((l) => ({
-        email: l.email,
-        ...(l.first_name != null ? { first_name: l.first_name } : {}),
-        ...(l.last_name != null ? { last_name: l.last_name } : {}),
-        ...(l.company != null ? { company: l.company } : {}),
-        ...(l.title != null ? { title: l.title } : {}),
-        ...(l.notes != null ? { notes: l.notes } : {}),
-        ...(l.custom_variables?.length ? { custom_variables: l.custom_variables } : {}),
-      })),
-    };
+  const toPayload = (l: CreateLeadInput) => ({
+    email: l.email,
+    ...(l.first_name != null ? { first_name: l.first_name } : {}),
+    ...(l.last_name != null ? { last_name: l.last_name } : {}),
+    ...(l.company != null ? { company: l.company } : {}),
+    ...(l.title != null ? { title: l.title } : {}),
+    ...(l.notes != null ? { notes: l.notes } : {}),
+    ...(l.custom_variables?.length ? { custom_variables: l.custom_variables } : {}),
+  });
+
+  // Post one chunk. On a hard error (e.g. one malformed lead 422s the whole
+  // batch), split and retry so a single bad lead can't sink 500 good ones.
+  // A size-1 chunk that still errors is recorded and skipped.
+  async function postChunk(chunk: CreateLeadInput[], depth: number): Promise<void> {
+    if (chunk.length === 0) return;
     const res = await fetchWithTimeout(`${baseUrl}/api/leads/multiple`, {
-      method: "POST", headers: buildHeaders(token), body: JSON.stringify(payload), timeoutMs: 30_000,
+      method: "POST", headers: buildHeaders(token), body: JSON.stringify({ leads: chunk.map(toPayload) }), timeoutMs: 30_000,
     });
     const body = await res.json().catch(() => null);
-    if (!res.ok) { errors.push(`HTTP ${res.status}: ${JSON.stringify(body)?.slice(0, 300)}`); continue; }
+    if (!res.ok) {
+      const msg = JSON.stringify(body) || "";
+      // "already been taken" → the batch contains lead(s) that already exist in
+      // this instance. Bison rejects the WHOLE batch when custom_variables are
+      // present. Don't split-storm: re-create WITHOUT custom vars (so any
+      // genuinely-new leads still get created; existing ones are silently
+      // skipped), then route the whole chunk to notReturned so the caller
+      // resolves ids via findLeadByEmail and PATCHes custom vars uniformly.
+      if (res.status === 422 && /already been taken/i.test(msg)) {
+        try {
+          await fetchWithTimeout(`${baseUrl}/api/leads/multiple`, {
+            method: "POST", headers: buildHeaders(token),
+            body: JSON.stringify({ leads: chunk.map((l) => { const p: Record<string, unknown> = toPayload(l); delete p.custom_variables; return p; }) }),
+            timeoutMs: 30_000,
+          });
+        } catch { /* best effort — caller still resolves via findLeadByEmail */ }
+        for (const l of chunk) notReturned.push(l.email);
+        return;
+      }
+      if (chunk.length === 1) {
+        errors.push(`HTTP ${res.status} (${chunk[0].email}): ${msg.slice(0, 200)}`);
+        notReturned.push(chunk[0].email); // let caller try findLeadByEmail / PATCH
+        return;
+      }
+      const mid = Math.floor(chunk.length / 2);
+      await postChunk(chunk.slice(0, mid), depth + 1);
+      await postChunk(chunk.slice(mid), depth + 1);
+      return;
+    }
     const rows: Array<{ id?: number; email?: string }> = body?.data ?? [];
     const byEmail = new Map<string, number>();
     for (const r of rows) if (r?.email && r?.id) byEmail.set(String(r.email).toLowerCase(), Number(r.id));
@@ -741,5 +770,28 @@ export async function createLeadsInInstance(
       else notReturned.push(l.email);
     }
   }
+
+  const BATCH = 500;
+  for (let i = 0; i < leads.length; i += BATCH) {
+    await postChunk(leads.slice(i, i + BATCH), 0);
+  }
   return { created, notReturned, errors };
+}
+
+/**
+ * PATCH a lead's custom variables in an instance. Used to backfill custom
+ * variables onto leads that already exist there (createLeadsInInstance is a
+ * no-op for existing emails — it neither updates fields nor custom variables).
+ */
+export async function updateLeadCustomVars(
+  instanceKey: string,
+  leadId: number,
+  customVars: Array<{ name: string; value: string }>,
+): Promise<boolean> {
+  if (!customVars.length) return true;
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${leadId}`, {
+    method: "PATCH", headers: buildHeaders(token), body: JSON.stringify({ custom_variables: customVars }), timeoutMs: 20_000,
+  });
+  return res.ok;
 }
