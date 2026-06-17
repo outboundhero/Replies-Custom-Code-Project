@@ -734,49 +734,36 @@ export async function createLeadsInInstance(
     };
   };
 
-  // Post one chunk. On a hard error (e.g. one malformed lead 422s the whole
-  // batch), split and retry so a single bad lead can't sink 500 good ones.
-  // A size-1 chunk that still errors is recorded and skipped.
+  // Post one chunk via the UPSERT endpoint (create-or-update). With
+  // existing_lead_behavior="patch" Bison creates new leads and patches existing
+  // ones (updating passed fields/custom-vars, keeping the rest) — and returns an
+  // id for BOTH, so there's no "already been taken" 422 and no findLeadByEmail
+  // dance. A missing custom variable still 422s → auto-create + retry. Other
+  // hard errors split so one bad lead can't sink the batch.
   async function postChunk(chunk: CreateLeadInput[], depth: number): Promise<void> {
     if (chunk.length === 0) return;
-    const res = await fetchWithTimeout(`${baseUrl}/api/leads/multiple`, {
-      method: "POST", headers: buildHeaders(token), body: JSON.stringify({ leads: chunk.map(toPayload) }), timeoutMs: 30_000,
+    const res = await fetchWithTimeout(`${baseUrl}/api/leads/create-or-update/multiple`, {
+      method: "POST", headers: buildHeaders(token),
+      body: JSON.stringify({ existing_lead_behavior: "patch", leads: chunk.map(toPayload) }),
+      timeoutMs: 30_000,
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) {
       const msg = JSON.stringify(body) || "";
-      // Missing custom variable → Bison says "You do not have a custom variable
-      // named X". Auto-create the named variable(s) and retry the same chunk
-      // (depth-guarded against loops). Belt-and-suspenders on top of the upfront
-      // ensureCustomVariables.
+      // Missing custom variable → "You do not have a custom variable named X".
+      // Auto-create the named variable(s) and retry the same chunk (depth-guarded).
       if (res.status === 422 && /do not have a custom variable named/i.test(msg) && depth < 6) {
         const names = [...msg.matchAll(/custom variable named ([^."\\]+)/gi)].map((m) => m[1].trim()).filter(Boolean);
         if (names.length) {
           await ensureCustomVariables(instanceKey, names);
-          await postChunk(chunk, depth + 1); // retry the same chunk
+          await postChunk(chunk, depth + 1);
           return;
         }
       }
-      // "already been taken" → the batch contains lead(s) that already exist in
-      // this instance. Bison rejects the WHOLE batch when custom_variables are
-      // present. Don't split-storm: re-create WITHOUT custom vars (so any
-      // genuinely-new leads still get created; existing ones are silently
-      // skipped), then route the whole chunk to notReturned so the caller
-      // resolves ids via findLeadByEmail and PATCHes custom vars uniformly.
-      if (res.status === 422 && /already been taken/i.test(msg)) {
-        try {
-          await fetchWithTimeout(`${baseUrl}/api/leads/multiple`, {
-            method: "POST", headers: buildHeaders(token),
-            body: JSON.stringify({ leads: chunk.map((l) => { const p: Record<string, unknown> = toPayload(l); delete p.custom_variables; return p; }) }),
-            timeoutMs: 30_000,
-          });
-        } catch { /* best effort — caller still resolves via findLeadByEmail */ }
-        for (const l of chunk) notReturned.push(l.email);
-        return;
-      }
+      // Other hard error → split to isolate a malformed lead; size-1 is recorded.
       if (chunk.length === 1) {
         errors.push(`HTTP ${res.status} (${chunk[0].email}): ${msg.slice(0, 200)}`);
-        notReturned.push(chunk[0].email); // let caller try findLeadByEmail / PATCH
+        notReturned.push(chunk[0].email);
         return;
       }
       const mid = Math.floor(chunk.length / 2);
@@ -789,8 +776,8 @@ export async function createLeadsInInstance(
     for (const r of rows) if (r?.email && r?.id) byEmail.set(String(r.email).toLowerCase(), Number(r.id));
     for (const l of chunk) {
       const id = byEmail.get(l.email.toLowerCase());
-      if (id) created.push({ email: l.email, ob_lead_id: id });
-      else notReturned.push(l.email);
+      if (id) created.push({ email: l.email, ob_lead_id: id }); // created OR patched — both carry an id
+      else notReturned.push(l.email); // only personal-domain-skipped on a non-enabled instance
     }
   }
 

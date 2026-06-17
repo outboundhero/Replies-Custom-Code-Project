@@ -120,7 +120,7 @@ async function main() {
   if (VERIFY) { await verify(); log("VERIFY done"); return; }
 
   const { getClientInstances } = await import("../lib/nurture/group-routing");
-  const { createLeadsInInstance, findLeadByEmail, updateLeadCustomVars } = await import("../lib/outboundhero-api");
+  const { createLeadsInInstance } = await import("../lib/outboundhero-api");
   const { default: db } = await import("../lib/db");
 
   let clients = await activeClients();
@@ -138,7 +138,7 @@ async function main() {
     }
   }
 
-  const grand = { created: 0, skipped_same: 0, patched: 0, saved: 0, errors: 0 };
+  const grand = { created: 0, skipped_same: 0, notReturned: 0, saved: 0, errors: 0 };
   const perInstance: Record<string, number> = {};
 
   for (const tag of clients) {
@@ -163,47 +163,25 @@ async function main() {
     for (const [target, m] of byTarget) {
       const items = [...m.values()];
       if (DRY) { parts.push(`${target}:would_create=${items.length}`); perInstance[target] = (perInstance[target] || 0) + items.length; continue; }
-      const cvByEmail = new Map(items.map((l) => [l.email.toLowerCase(), l.custom_variables]));
       const payloads = items.map((l) => ({ email: l.email, first_name: l.first_name, last_name: l.last_name, company: l.company, custom_variables: l.custom_variables }));
 
-      const r = await createLeadsInInstance(target, payloads); // ensureVars on by default
-      grand.created += r.created.length; grand.errors += r.errors.length;
+      // Upsert: creates new + patches existing, returns an id (with custom vars
+      // set) for every lead. notReturned = personal-domain-skipped only.
+      const r = await createLeadsInInstance(target, payloads);
+      grand.created += r.created.length; grand.errors += r.errors.length; grand.notReturned += r.notReturned.length;
       perInstance[target] = (perInstance[target] || 0) + r.created.length;
 
-      const idRows: Array<{ email: string; id: number }> = r.created.map((c) => ({ email: c.email, id: c.ob_lead_id }));
-
-      // Existing leads (notReturned): resolve id, PATCH custom vars, save id too.
-      let patched = 0;
-      if (r.notReturned.length > 0) {
-        const CONC = 6; let idx = 0;
-        const found: Array<{ email: string; id: number }> = [];
-        await Promise.all(Array.from({ length: Math.min(CONC, r.notReturned.length) }, async () => {
-          while (idx < r.notReturned.length) {
-            const em = r.notReturned[idx++];
-            try {
-              const lead = await findLeadByEmail(target, em);
-              if (lead?.id) {
-                found.push({ email: em, id: lead.id });
-                const cv = cvByEmail.get(em.toLowerCase()) || [];
-                if (cv.length) { const ok = await updateLeadCustomVars(target, lead.id, cv); if (ok) patched++; }
-              }
-            } catch { /* skip */ }
-          }
-        }));
-        idRows.push(...found);
-      }
-      grand.patched += patched;
-
+      const idRows = r.created.map((c) => ({ email: c.email, id: c.ob_lead_id }));
       await saveIds(target, tag, idRows);
       grand.saved += idRows.length;
-      parts.push(`${target}:created=${r.created.length} patched=${patched} saved=${idRows.length} errs=${r.errors.length}`);
+      parts.push(`${target}:upserted=${r.created.length} skipped=${r.notReturned.length} saved=${idRows.length} errs=${r.errors.length}`);
     }
     log(`${tag} (G${inst.group}): ${parts.join(" | ")}`);
   }
 
   log(`=== PLACE-LEADS DONE ${DRY ? "(DRY)" : ""} ===`);
   if (DRY) log(`totals: would_create=${Object.values(perInstance).reduce((a, b) => a + b, 0)} same_instance_skipped=${grand.skipped_same}`);
-  else log(`totals: created=${grand.created} patched_existing=${grand.patched} ids_saved=${grand.saved} same_instance_skipped=${grand.skipped_same} batch_errors=${grand.errors}`);
+  else log(`totals: upserted=${grand.created} ids_saved=${grand.saved} same_instance_skipped=${grand.skipped_same} personal_skipped=${grand.notReturned} batch_errors=${grand.errors}`);
   log(`per instance: ${JSON.stringify(perInstance)}`);
 }
 main().then(() => process.exit(0)).catch((e) => { log(`FATAL: ${e.message}`); process.exit(1); });
