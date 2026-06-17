@@ -745,6 +745,18 @@ export async function createLeadsInInstance(
     const body = await res.json().catch(() => null);
     if (!res.ok) {
       const msg = JSON.stringify(body) || "";
+      // Missing custom variable → Bison says "You do not have a custom variable
+      // named X". Auto-create the named variable(s) and retry the same chunk
+      // (depth-guarded against loops). Belt-and-suspenders on top of the upfront
+      // ensureCustomVariables.
+      if (res.status === 422 && /do not have a custom variable named/i.test(msg) && depth < 6) {
+        const names = [...msg.matchAll(/custom variable named ([^."\\]+)/gi)].map((m) => m[1].trim()).filter(Boolean);
+        if (names.length) {
+          await ensureCustomVariables(instanceKey, names);
+          await postChunk(chunk, depth + 1); // retry the same chunk
+          return;
+        }
+      }
       // "already been taken" → the batch contains lead(s) that already exist in
       // this instance. Bison rejects the WHOLE batch when custom_variables are
       // present. Don't split-storm: re-create WITHOUT custom vars (so any
