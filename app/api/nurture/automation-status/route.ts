@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
 
   const [tagRows, cfgRows, instances, churned, campRows] = await Promise.all([
     db.execute("SELECT ct.tag, ct.section_id, s.name AS section_name FROM client_tags ct JOIN sections s ON ct.section_id = s.id"),
-    db.execute("SELECT client_tag, auto_nurture_disabled, auto_nurture_last_run_at FROM client_config"),
+    db.execute("SELECT client_tag, auto_nurture_disabled, auto_nurture_last_run_at, nurture_map_confirmed_at FROM client_config"),
     getAllClientInstances(),
     getChurnedTags(),
     db.execute("SELECT name, status, client_tag, bison_instance, synced_at FROM nurture_campaigns_cache"),
@@ -66,11 +66,12 @@ export async function GET(req: NextRequest) {
     if (!cur || rankStatus(status) < rankStatus(cur)) instMap.set(inst, status);
   }
 
-  const cfgByTag = new Map<string, { disabled: number; lastRun: string | null }>();
+  const cfgByTag = new Map<string, { disabled: number; lastRun: string | null; mapConfirmedAt: string | null }>();
   for (const r of cfgRows.rows) {
     cfgByTag.set(String(r.client_tag).toUpperCase(), {
       disabled: Number(r.auto_nurture_disabled) || 0,
       lastRun: (r.auto_nurture_last_run_at as string) ?? null,
+      mapConfirmedAt: (r.nurture_map_confirmed_at as string) ?? null,
     });
   }
 
@@ -79,6 +80,7 @@ export async function GET(req: NextRequest) {
     autoOn: boolean; lastRunAt: string | null; mappingMissing: boolean;
     matrix: Record<string, Record<Esp, Cell>>; configured: boolean;
     missingCells: Array<{ instance: string; esp: Esp }>;
+    mapConfirmed: boolean; mapConfirmedAt: string | null;
   };
   const sections = new Map<number, { id: number; name: string; clients: ClientOut[] }>();
 
@@ -110,16 +112,18 @@ export async function GET(req: NextRequest) {
       clientTag: tag, group: inst?.group ?? null, b2b: inst?.b2b ?? null, b2c: inst?.b2c ?? null,
       autoOn, lastRunAt: cfg?.lastRun ?? null, mappingMissing: !inst,
       matrix, configured, missingCells,
+      mapConfirmed: !!cfg?.mapConfirmedAt, mapConfirmedAt: cfg?.mapConfirmedAt ?? null,
     });
   }
 
-  // Sort: within each section, danger rows (autoOn && !configured) first, then by tag.
+  // Sort: within each section, "needs attention" first — un-mapped (no
+  // confirmed target campaigns) and campaign-gaps float to the top, then by tag.
+  const needsAttn = (c: ClientOut) => (!c.mapConfirmed || !c.configured) ? 0 : 1;
   const sectionList = [...sections.values()].sort((a, b) => a.name.localeCompare(b.name));
   for (const s of sectionList) {
     s.clients.sort((a, b) => {
-      const da = a.autoOn && !a.configured ? 0 : 1;
-      const dbb = b.autoOn && !b.configured ? 0 : 1;
-      if (da !== dbb) return da - dbb;
+      const d = needsAttn(a) - needsAttn(b);
+      if (d !== 0) return d;
       return a.clientTag.localeCompare(b.clientTag);
     });
   }

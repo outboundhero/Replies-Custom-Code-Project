@@ -20,6 +20,7 @@ interface ClientRow {
   autoOn: boolean; lastRunAt: string | null; mappingMissing: boolean;
   matrix: Record<string, Record<Esp, Cell>>; configured: boolean;
   missingCells: Array<{ instance: string; esp: Esp }>;
+  mapConfirmed: boolean; mapConfirmedAt: string | null;
 }
 interface Section { id: number; name: string; clients: ClientRow[] }
 
@@ -35,6 +36,7 @@ export default function AutomationTab() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [onlyUnmapped, setOnlyUnmapped] = useState(false);
   // local optimistic overrides: tag -> autoOn
   const [autoOverride, setAutoOverride] = useState<Map<string, boolean>>(new Map());
 
@@ -54,16 +56,23 @@ export default function AutomationTab() {
     if (!sections) return null;
     const q = search.trim().toLowerCase();
     return sections
-      .map((s) => ({ ...s, clients: q ? s.clients.filter((c) => c.clientTag.toLowerCase().includes(q)) : s.clients }))
+      .map((s) => ({
+        ...s,
+        clients: s.clients.filter((c) =>
+          (!q || c.clientTag.toLowerCase().includes(q)) &&
+          (!onlyUnmapped || !c.mapConfirmed),
+        ),
+      }))
       .filter((s) => s.clients.length > 0);
-  }, [sections, search]);
+  }, [sections, search, onlyUnmapped]);
 
   const stats = useMemo(() => {
-    let total = 0, on = 0, configured = 0, needCampaigns = 0;
+    let total = 0, on = 0, configured = 0, needCampaigns = 0, needMap = 0;
     for (const s of sections || []) for (const c of s.clients) {
       total++; if (autoFor(c)) on++; if (c.configured) configured++; if (!c.configured) needCampaigns++;
+      if (!c.mapConfirmed) needMap++;
     }
-    return { total, on, configured, needCampaigns };
+    return { total, on, configured, needCampaigns, needMap };
   }, [sections, autoOverride]);
 
   async function toggleOne(tag: string, enabled: boolean) {
@@ -90,11 +99,18 @@ export default function AutomationTab() {
   return (
     <div className="space-y-4">
       {/* Summary tiles */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <Tile label="Clients" value={stats.total} accent="text-foreground" />
         <Tile label="Auto-route ON" value={stats.on} accent="text-emerald-700" />
         <Tile label="Fully configured" value={stats.configured} accent="text-emerald-700" />
         <Tile label="Need campaigns" value={stats.needCampaigns} accent="text-rose-700" />
+        <Tile
+          label="Need mapping"
+          value={stats.needMap}
+          accent="text-amber-700"
+          active={onlyUnmapped}
+          onClick={() => setOnlyUnmapped((v) => !v)}
+        />
       </div>
 
       {/* Controls */}
@@ -161,13 +177,21 @@ export default function AutomationTab() {
   );
 }
 
-function Tile({ label, value, accent }: { label: string; value: number; accent: string }) {
-  return (
-    <div className="rounded-lg border bg-card px-4 py-3">
+function Tile({ label, value, accent, active, onClick }: { label: string; value: number; accent: string; active?: boolean; onClick?: () => void }) {
+  const inner = (
+    <>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className={`text-2xl font-semibold tabular-nums mt-1 ${accent}`}>{value.toLocaleString()}</p>
-    </div>
+    </>
   );
+  if (onClick) {
+    return (
+      <button onClick={onClick} className={`text-left rounded-lg border px-4 py-3 transition-colors ${active ? "border-amber-400 bg-amber-50/60 ring-1 ring-amber-300" : "bg-card hover:bg-muted/40"}`}>
+        {inner}
+      </button>
+    );
+  }
+  return <div className="rounded-lg border bg-card px-4 py-3">{inner}</div>;
 }
 
 // Within a client's group there is exactly one B2B and one B2C instance, so a
@@ -245,7 +269,14 @@ function ClientRowView({ c, autoOn, selected, onSelect, onToggle }: {
             })}
       </div>
 
-      {/* Configured status */}
+      {/* Target-campaign map status */}
+      <div className="shrink-0 w-28 flex justify-end">
+        {c.mapConfirmed
+          ? <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700" title={c.mapConfirmedAt ? `Confirmed ${new Date(c.mapConfirmedAt).toLocaleString()}` : "Target campaigns confirmed"}><Check className="size-3.5" /> Mapped</span>
+          : <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700" title="No target-campaign map confirmed — open the client and pick campaigns to enable sending"><AlertTriangle className="size-3.5" /> No map</span>}
+      </div>
+
+      {/* Configured status (campaigns exist?) */}
       <div className="shrink-0 w-24 flex justify-end">
         {c.configured
           ? <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700"><Check className="size-3.5" /> Ready</span>
