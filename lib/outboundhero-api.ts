@@ -702,26 +702,37 @@ export async function createLeadsInInstance(
   const notReturned: string[] = [];
   const errors: string[] = [];
 
+  // Custom-variable names are CASE-SENSITIVE on reference but Bison's canonical
+  // vars are lowercase, and the source data has inconsistent casing
+  // ("City"/"city"). Normalise names to lowercase everywhere so ensure +
+  // reference agree (otherwise "You do not have a custom variable named City"
+  // 422s the batch). Values are left untouched.
+  const normVars = (cv?: Array<{ name: string; value: string }>) =>
+    (cv || []).filter((v) => v && v.name).map((v) => ({ name: v.name.toLowerCase().trim(), value: v.value }));
+
   // A referenced custom variable that doesn't exist in this workspace 422s the
   // ENTIRE batch — so make sure they all exist first (default on). Cheap after
   // the first call thanks to the per-instance cache.
   if (opts.ensureVars !== false) {
-    const varNames = [...new Set(leads.flatMap((l) => (l.custom_variables || []).map((v) => v.name)))];
+    const varNames = [...new Set(leads.flatMap((l) => normVars(l.custom_variables).map((v) => v.name)))];
     if (varNames.length > 0) {
       const r = await ensureCustomVariables(instanceKey, varNames);
       if (r.errors.length) errors.push(...r.errors.map((e) => `custom-var: ${e}`));
     }
   }
 
-  const toPayload = (l: CreateLeadInput) => ({
-    email: l.email,
-    ...(l.first_name != null ? { first_name: l.first_name } : {}),
-    ...(l.last_name != null ? { last_name: l.last_name } : {}),
-    ...(l.company != null ? { company: l.company } : {}),
-    ...(l.title != null ? { title: l.title } : {}),
-    ...(l.notes != null ? { notes: l.notes } : {}),
-    ...(l.custom_variables?.length ? { custom_variables: l.custom_variables } : {}),
-  });
+  const toPayload = (l: CreateLeadInput) => {
+    const cv = normVars(l.custom_variables);
+    return {
+      email: l.email,
+      ...(l.first_name != null ? { first_name: l.first_name } : {}),
+      ...(l.last_name != null ? { last_name: l.last_name } : {}),
+      ...(l.company != null ? { company: l.company } : {}),
+      ...(l.title != null ? { title: l.title } : {}),
+      ...(l.notes != null ? { notes: l.notes } : {}),
+      ...(cv.length ? { custom_variables: cv } : {}),
+    };
+  };
 
   // Post one chunk. On a hard error (e.g. one malformed lead 422s the whole
   // batch), split and retry so a single bad lead can't sink 500 good ones.
@@ -790,8 +801,10 @@ export async function updateLeadCustomVars(
 ): Promise<boolean> {
   if (!customVars.length) return true;
   const { baseUrl, token } = getInstanceConfig(instanceKey);
+  // Same lowercase normalisation as createLeadsInInstance (case-sensitive names).
+  const cv = customVars.filter((v) => v && v.name).map((v) => ({ name: v.name.toLowerCase().trim(), value: v.value }));
   const res = await fetchWithTimeout(`${baseUrl}/api/leads/${leadId}`, {
-    method: "PATCH", headers: buildHeaders(token), body: JSON.stringify({ custom_variables: customVars }), timeoutMs: 20_000,
+    method: "PATCH", headers: buildHeaders(token), body: JSON.stringify({ custom_variables: cv }), timeoutMs: 20_000,
   });
   return res.ok;
 }
