@@ -52,6 +52,10 @@
     {
       "path": "/api/cron/sync-client-groups",
       "schedule": "30 6 * * *"
+    },
+    {
+      "path": "/api/cron/nurture-expand-campaigns",
+      "schedule": "0 7 * * *"
     }
   ]
 }

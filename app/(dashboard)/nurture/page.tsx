@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowRight, Search, RefreshCw, Zap } from "lucide-react";
 import AutomationTab from "./_components/AutomationTab";
+import CampaignsTab from "./_components/CampaignsTab";
 
 interface ClientSummary {
   clientTag: string;
@@ -31,7 +32,7 @@ interface ClientSummary {
 type SortKey = "ready" | "waiting" | "added" | "tag";
 
 export default function NurtureHub() {
-  const [tab, setTab] = useState<"overview" | "automation">("overview");
+  const [tab, setTab] = useState<"overview" | "automation" | "campaigns">("overview");
   const [allTags, setAllTags] = useState<string[] | null>(null);
   const [autoTags, setAutoTags] = useState<Set<string>>(new Set());
   const [summaryByTag, setSummaryByTag] = useState<Map<string, ClientSummary>>(new Map());
@@ -162,9 +163,17 @@ export default function NurtureHub() {
         >
           Automation
         </button>
+        <button
+          type="button"
+          onClick={() => setTab("campaigns")}
+          className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "campaigns" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          Campaigns
+        </button>
       </div>
 
       {tab === "automation" && <AutomationTab />}
+      {tab === "campaigns" && <CampaignsTab />}
 
       {tab === "overview" && (<>
 

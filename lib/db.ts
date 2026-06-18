@@ -116,6 +116,36 @@ export async function initializeDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (bison_instance, email)
     )`,
+    // Audit + batch counter for auto-expanded nurture campaigns. One row per
+    // expansion of a (client, instance, ESP) routing → the next batch number,
+    // the old campaign, and the new (cloned) campaign. Drives the "Batch N"
+    // naming + the Recent-expansions feed.
+    `CREATE TABLE IF NOT EXISTS nurture_campaign_expansions (
+      client_tag TEXT NOT NULL,
+      bison_instance TEXT NOT NULL,
+      esp TEXT NOT NULL,
+      batch INTEGER NOT NULL,
+      old_campaign_id INTEGER,
+      new_campaign_id INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (client_tag, bison_instance, esp, batch)
+    )`,
+    // Latest health snapshot per mapped nurture campaign, written by the
+    // expansion evaluator each run (completion %, total leads, status). The
+    // Campaigns monitoring tab reads this so the page is Turso-only and fast.
+    `CREATE TABLE IF NOT EXISTS nurture_routing_health (
+      client_tag TEXT NOT NULL,
+      bison_instance TEXT NOT NULL,
+      esp TEXT NOT NULL,
+      campaign_id INTEGER,
+      campaign_name TEXT,
+      completion_percentage REAL,
+      total_leads INTEGER,
+      status TEXT,
+      batch INTEGER,
+      checked_at TEXT,
+      PRIMARY KEY (client_tag, bison_instance, esp)
+    )`,
     // Operator-confirmed target campaign per (client, instance, ESP). The
     // nurture route engine (manual Route-all + auto-push) sends leads ONLY to
     // the campaigns chosen here — nothing is auto-picked. A client can't be

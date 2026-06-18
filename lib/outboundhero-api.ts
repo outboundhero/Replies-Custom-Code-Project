@@ -807,3 +807,104 @@ export async function updateLeadCustomVars(
   });
   return res.ok;
 }
+
+// ── Campaign clone / details (used by nurture campaign-expansion) ───────────
+
+/** Full campaign object from GET /api/campaigns/{id} — includes the fields
+ *  listCampaigns omits (completion_percentage, total_leads_contacted, settings). */
+export interface CampaignDetails {
+  id: number;
+  uuid?: string | null;
+  name: string;
+  type: string;
+  status: string;
+  completion_percentage?: number;
+  total_leads?: number;
+  total_leads_contacted?: number;
+  max_emails_per_day?: number;
+  max_new_leads_per_day?: number;
+  plain_text?: boolean;
+  open_tracking?: boolean;
+  can_unsubscribe?: boolean;
+  sequence_prioritization?: string;
+}
+
+export async function getCampaignDetails(instanceKey: string, campaignId: number): Promise<CampaignDetails | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}`, { headers: buildHeaders(token) });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const d = (body?.data ?? body) as CampaignDetails | undefined;
+  return d && typeof d.id === "number" ? d : null;
+}
+
+/** Duplicate a campaign (POST /api/campaigns/{id}/duplicate, no body). Bison
+ *  copies the campaign + sequence/settings; the clone comes back as "Draft"
+ *  named "Copy of …". Returns the new campaign or null on failure. */
+export async function duplicateCampaign(instanceKey: string, campaignId: number): Promise<CampaignDetails | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/duplicate`, {
+    method: "POST", headers: buildHeaders(token), timeoutMs: 45_000,
+  });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const d = (body?.data ?? body) as CampaignDetails | undefined;
+  return d && typeof d.id === "number" ? d : null;
+}
+
+/** Update a campaign's settings/name (PATCH /api/campaigns/{id}/update). */
+export async function updateCampaign(
+  instanceKey: string,
+  campaignId: number,
+  fields: Record<string, unknown>,
+): Promise<boolean> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/update`, {
+    method: "PATCH", headers: buildHeaders(token), body: JSON.stringify(fields), timeoutMs: 30_000,
+  });
+  return res.ok;
+}
+
+// ── Verification / fallback helpers (read what duplicate carried) ───────────
+
+export async function getCampaignSchedule(instanceKey: string, campaignId: number): Promise<Record<string, unknown> | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/schedule`, { headers: buildHeaders(token) });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return (body?.data ?? body) ?? null;
+}
+
+export async function createCampaignSchedule(instanceKey: string, campaignId: number, schedule: Record<string, unknown>): Promise<boolean> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/schedule`, {
+    method: "POST", headers: buildHeaders(token), body: JSON.stringify(schedule), timeoutMs: 30_000,
+  });
+  return res.ok;
+}
+
+export async function getCampaignSenderEmails(instanceKey: string, campaignId: number): Promise<Array<{ id: number; email: string }>> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/sender-emails`, { headers: buildHeaders(token) });
+  if (!res.ok) return [];
+  const body = await res.json().catch(() => null);
+  const rows: Array<{ id?: number; email?: string }> = body?.data ?? [];
+  return rows.filter((r) => typeof r.id === "number").map((r) => ({ id: r.id as number, email: String(r.email ?? "") }));
+}
+
+export async function attachSenderEmails(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<boolean> {
+  if (!senderEmailIds.length) return true;
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/attach-sender-emails`, {
+    method: "POST", headers: buildHeaders(token), body: JSON.stringify({ sender_email_ids: senderEmailIds }), timeoutMs: 30_000,
+  });
+  return res.ok;
+}
+
+export async function getSequenceSteps(instanceKey: string, campaignId: number): Promise<unknown> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/v1.1/${campaignId}/sequence-steps`, { headers: buildHeaders(token) });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  return body?.data ?? body ?? null;
+}
