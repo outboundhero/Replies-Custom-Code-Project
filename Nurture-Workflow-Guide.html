@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nurture Workflow — The Complete Guide</title>
+<style>
+  :root{
+    --ink:#0f172a; --ink-soft:#334155; --muted:#64748b; --faint:#94a3b8;
+    --line:#e2e8f0; --bg:#ffffff; --panel:#f8fafc;
+    --indigo:#6366f1; --indigo-soft:#eef2ff;
+    --emerald:#059669; --emerald-soft:#ecfdf5; --emerald-ring:#a7f3d0;
+    --amber:#b45309; --amber-soft:#fffbeb; --amber-ring:#fcd34d;
+    --rose:#e11d48; --rose-soft:#fff1f2; --rose-ring:#fecdd3;
+    --violet:#7c3aed; --violet-soft:#f5f3ff;
+    --blue:#2563eb; --blue-soft:#eff6ff;
+  }
+  *{box-sizing:border-box;}
+  html{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  body{
+    margin:0;color:var(--ink);background:var(--bg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:15px;line-height:1.65;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:880px;margin:0 auto;padding:0 40px 80px;}
+  h1,h2,h3{line-height:1.2;letter-spacing:-0.02em;font-weight:700;}
+  h2{font-size:26px;margin:54px 0 6px;padding-top:20px;}
+  h3{font-size:18px;margin:30px 0 4px;}
+  p{margin:10px 0;color:var(--ink-soft);}
+  a{color:var(--indigo);}
+  strong{color:var(--ink);font-weight:600;}
+  .lead{font-size:17px;color:var(--ink-soft);}
+  .eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:12px;font-weight:700;color:var(--indigo);}
+
+  /* Hero */
+  .hero{
+    background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 55%,#0ea5e9 100%);
+    color:#fff;padding:80px 40px 64px;text-align:center;margin-bottom:8px;
+  }
+  .hero .kicker{text-transform:uppercase;letter-spacing:.2em;font-size:12px;font-weight:700;opacity:.85;}
+  .hero h1{font-size:46px;margin:14px 0 10px;color:#fff;}
+  .hero p{color:rgba(255,255,255,.92);font-size:18px;max-width:620px;margin:0 auto;}
+  .hero .meta{margin-top:26px;font-size:13px;opacity:.8;}
+
+  /* Section divider number */
+  .sec-num{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9px;background:var(--indigo-soft);color:var(--indigo);font-weight:800;font-size:15px;margin-right:10px;vertical-align:middle;}
+
+  /* Cards & panels */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px 24px;margin:18px 0;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 18px;}
+  .card h4{margin:0 0 4px;font-size:15px;font-weight:700;}
+  .card p{margin:0;font-size:13.5px;color:var(--muted);}
+
+  /* Callouts */
+  .callout{border-radius:14px;padding:14px 18px;margin:18px 0;border:1px solid;font-size:14.5px;}
+  .callout p{margin:4px 0;}
+  .callout .t{font-weight:700;display:block;margin-bottom:2px;}
+  .tip{background:var(--emerald-soft);border-color:var(--emerald-ring);} .tip .t{color:var(--emerald);}
+  .warn{background:var(--amber-soft);border-color:var(--amber-ring);} .warn .t{color:var(--amber);}
+  .info{background:var(--blue-soft);border-color:#bfdbfe;} .info .t{color:var(--blue);}
+
+  /* Pills / badges */
+  .pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:700;line-height:1;white-space:nowrap;}
+  .chip{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;font-size:11px;font-weight:800;}
+  .p-emerald{background:var(--emerald-soft);color:var(--emerald);}
+  .p-amber{background:var(--amber-soft);color:var(--amber);}
+  .p-rose{background:var(--rose-soft);color:var(--rose);}
+  .p-slate{background:#f1f5f9;color:#475569;}
+  .p-violet{background:var(--violet-soft);color:var(--violet);}
+  .p-blue{background:var(--blue-soft);color:var(--blue);}
+  .ring-emerald{box-shadow:inset 0 0 0 1px var(--emerald-ring);}
+  .ring-amber{box-shadow:inset 0 0 0 1px var(--amber-ring);}
+  .ring-rose{box-shadow:inset 0 0 0 1px var(--rose-ring);}
+
+  /* Steps */
+  .step{display:flex;gap:16px;margin:16px 0;align-items:flex-start;}
+  .step .n{flex:none;width:34px;height:34px;border-radius:50%;background:var(--indigo);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:15px;box-shadow:0 4px 10px rgba(99,102,241,.35);}
+  .step .body{flex:1;}
+  .step h3{margin:2px 0 4px;}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700;background:var(--panel);}
+  td:first-child{white-space:nowrap;}
+  tr:last-child td{border-bottom:none;}
+
+  /* Flow diagram */
+  .flow{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap;margin:18px 0;}
+  .flow .node{flex:1;min-width:120px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center;}
+  .flow .node .lbl{font-weight:700;font-size:14px;}
+  .flow .node .sub{font-size:12px;color:var(--muted);margin-top:2px;}
+  .flow .arrow{display:flex;align-items:center;color:var(--faint);font-size:20px;font-weight:700;}
+
+  ul.clean{margin:10px 0;padding-left:0;list-style:none;}
+  ul.clean li{position:relative;padding:5px 0 5px 26px;color:var(--ink-soft);}
+  ul.clean li:before{content:"";position:absolute;left:6px;top:13px;width:7px;height:7px;border-radius:50%;background:var(--indigo);}
+
+  .toc{columns:2;column-gap:32px;}
+  .toc a{display:block;padding:5px 0;color:var(--ink-soft);text-decoration:none;font-size:14.5px;border-bottom:1px dashed var(--line);}
+  .toc a span{color:var(--faint);font-weight:700;margin-right:8px;}
+
+  .kbd{display:inline-block;background:#fff;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:1px 7px;font-size:13px;font-weight:600;color:var(--ink);}
+  .divider{height:1px;background:var(--line);margin:30px 0;border:0;}
+  footer{text-align:center;color:var(--faint);font-size:13px;margin-top:60px;}
+
+  @media print{
+    .hero{padding:60px 40px 48px;}
+    h2{page-break-after:avoid;} .step,.card,.callout,table{page-break-inside:avoid;}
+    .page-break{page-break-before:always;}
+    .wrap{padding-bottom:20px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="kicker">OutboundHero · Operations Playbook</div>
+  <h1>The Nurture Workflow</h1>
+  <p>How we re-engage cooled-down leads, route them to the right campaigns in the right inbox, and put the whole funnel on autopilot — explained simply.</p>
+  <div class="meta">A complete, plain-English guide to the Nurture hub, the Automation tab, and every button.</div>
+</div>
+
+<div class="wrap">
+
+  <h2 style="border:0;padding-top:30px;">What this is</h2>
+  <p class="lead">Nurture is our second-chance engine. When a lead goes quiet, says “not right now,” is out of office, or finishes a sequence without replying — we don’t throw them away. After a <strong>45-day cooldown</strong>, Nurture re-engages them with a fresh campaign in the correct inbox.</p>
+  <p>This guide walks through the entire flow: the screens, what every button does, and exactly how to switch a client “on” so leads start flowing automatically. No jargon — just what you see and what to click.</p>
+
+  <div class="panel">
+    <div class="eyebrow">In this guide</div>
+    <div class="toc" style="margin-top:10px;">
+      <a href="#bigpicture"><span>01</span>The big picture</a>
+      <a href="#words"><span>02</span>A few words to know</a>
+      <a href="#instances"><span>03</span>Where your leads live</a>
+      <a href="#hub"><span>04</span>The Nurture hub (Overview)</a>
+      <a href="#automation"><span>05</span>The Automation tab</a>
+      <a href="#client"><span>06</span>The client page</a>
+      <a href="#mapping"><span>07</span>Target Campaigns &amp; “Confirm”</a>
+      <a href="#buttons"><span>08</span>Every button, explained</a>
+      <a href="#start"><span>09</span>How to start — step by step</a>
+      <a href="#auto"><span>10</span>Putting it on autopilot</a>
+      <a href="#legend"><span>11</span>Colours &amp; badges</a>
+      <a href="#faq"><span>12</span>Good to know / FAQ</a>
+    </div>
+  </div>
+
+  <!-- 01 -->
+  <h2 id="bigpicture"><span class="sec-num">01</span>The big picture</h2>
+  <p>Every nurture lead travels the same short journey. Once you understand these five stops, the whole system makes sense:</p>
+  <div class="flow">
+    <div class="node"><div class="lbl">Synced</div><div class="sub">pulled in from the campaigns</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="lbl">Waiting</div><div class="sub">in the 45-day cooldown</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="lbl">Ready</div><div class="sub">cooldown done, safe to contact</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="lbl">Routed</div><div class="sub">added to a nurture campaign</div></div>
+    <div class="arrow">→</div>
+    <div class="node"><div class="lbl">Sending</div><div class="sub">campaign is live</div></div>
+  </div>
+  <p>Your job in the tool is simple: tell each client <strong>which campaign</strong> its Ready leads should go into, turn it on, and the system keeps the funnel flowing.</p>
+
+  <!-- 02 -->
+  <h2 id="words"><span class="sec-num">02</span>A few words to know</h2>
+  <div class="grid2">
+    <div class="card"><h4>Client (tag)</h4><p>A cleaning client, shown by its short code — e.g. <strong>JPC</strong>, <strong>CCGW</strong>. Everything in Nurture is organised per client.</p></div>
+    <div class="card"><h4>Group 1 &amp; Group 2</h4><p>Each client belongs to a group, which decides <strong>which inboxes</strong> their leads use. Shown as a small <span class="pill p-slate">G1</span> / <span class="pill p-slate">G2</span> tag.</p></div>
+    <div class="card"><h4>Instance (workspace)</h4><p>One of four Bison sending workspaces. Each group has a <strong>Business (B2B)</strong> one and a <strong>Personal (B2C)</strong> one.</p></div>
+    <div class="card"><h4>Lane: B2B vs B2C</h4><p>A lead with a <strong>company email</strong> goes to the Business inbox; a <strong>personal email</strong> (gmail, yahoo…) goes to the Personal inbox. Automatic.</p></div>
+    <div class="card"><h4>ESP — G / O / S</h4><p>The lead’s email provider: <span class="chip p-emerald">G</span> Google, <span class="chip p-emerald" style="background:var(--blue-soft);color:var(--blue)">O</span> Outlook, <span class="chip p-amber">S</span> SEGs (everything else). Each gets its own campaign.</p></div>
+    <div class="card"><h4>Ready / Waiting / Added</h4><p><strong>Ready</strong> = can be contacted now. <strong>Waiting</strong> = still cooling down. <strong>Added</strong> = already pushed into a campaign.</p></div>
+  </div>
+  <div class="callout info"><span class="t">Why groups &amp; lanes matter</span><p>They guarantee a lead lands in the <em>right</em> workspace and the <em>right</em> provider campaign — so a Group-2 business lead never ends up in a Group-1 Google campaign. The system handles all of this for you; you just pick the campaigns.</p></div>
+
+  <!-- 03 -->
+  <h2 id="instances" class="page-break"><span class="sec-num">03</span>Where your leads live: the four inboxes</h2>
+  <p class="lead">A nurture lead doesn’t just sit in one place — it is physically <strong>placed into the correct Bison inbox (workspace)</strong> for that client before any campaign sends. This is what makes sure every lead is contacted from the right sending account.</p>
+
+  <h3>We send from four inboxes, not one</h3>
+  <p>There are <strong>four Bison sending workspaces</strong>, paired into two groups. Every client belongs to one group, and each group has a <strong>Business (B2B)</strong> inbox and a <strong>Personal (B2C)</strong> inbox:</p>
+
+  <div class="grid2">
+    <div class="card"><h4><span class="pill p-slate">G1</span>&nbsp; Group 1</h4><p style="margin-top:8px">
+      <strong>Business (B2B):</strong> OutboundHero<br/>
+      <strong>Personal (B2C):</strong> Cleaning Outbound
+    </p></div>
+    <div class="card"><h4><span class="pill p-slate">G2</span>&nbsp; Group 2</h4><p style="margin-top:8px">
+      <strong>Business (B2B):</strong> Facility Reach<br/>
+      <strong>Personal (B2C):</strong> Outbound Clean
+    </p></div>
+  </div>
+
+  <h3>How each lead finds its inbox</h3>
+  <p>It’s automatic, based on two things — the client’s <strong>group</strong> and the lead’s <strong>email type</strong>:</p>
+  <ul class="clean">
+    <li>A lead with a <strong>company email</strong> → the group’s <strong>Business (B2B)</strong> inbox.</li>
+    <li>A lead with a <strong>personal email</strong> (gmail, yahoo, outlook.com…) → the group’s <strong>Personal (B2C)</strong> inbox.</li>
+  </ul>
+
+  <div class="panel">
+    <div class="eyebrow">Worked example</div>
+    <p style="margin-top:8px"><strong>Client “JPC&amp;A” is Group 2.</strong></p>
+    <div class="flow" style="margin-top:6px">
+      <div class="node"><div class="lbl">tucker@southside.church</div><div class="sub">company email → B2B</div></div>
+      <div class="arrow">→</div>
+      <div class="node"><div class="lbl">Facility Reach</div><div class="sub">Group 2’s B2B inbox</div></div>
+    </div>
+    <div class="flow" style="margin-top:0">
+      <div class="node"><div class="lbl">carla.clark@gmail.com</div><div class="sub">personal email → B2C</div></div>
+      <div class="arrow">→</div>
+      <div class="node"><div class="lbl">Outbound Clean</div><div class="sub">Group 2’s B2C inbox</div></div>
+    </div>
+  </div>
+
+  <h3>The leads are already in place</h3>
+  <p>Every Ready lead has already been <strong>created in its correct inbox</strong>, carrying its full details (company, city, and other personalisation) so your campaign templates fill in normally. From now on, new leads are placed into the right inbox <strong>automatically</strong> as they become Ready — you never sort them by hand.</p>
+
+  <div class="callout tip"><span class="t">Why this matters</span><p>It guarantees each lead is contacted from the inbox that actually belongs to that client and matches their domain setup — business leads from the business sender, personal leads from the personal sender. No cross-mixing between clients or workspaces, and deliverability stays clean.</p></div>
+
+  <div class="callout info"><span class="t">How it connects to campaigns</span><p>Being “in the right inbox” is step one. The <strong>Target Campaigns map</strong> (Section 07) is step two: within that inbox, you choose which Google / Outlook / SEGs campaign the lead joins. Inbox + campaign together = the lead lands exactly where you intend.</p></div>
+
+  <!-- 04 -->
+  <h2 id="hub"><span class="sec-num">04</span>The Nurture hub (Overview)</h2>
+  <p>This is the landing screen. It’s your bird’s-eye view across all clients.</p>
+  <h3>The three tiles at the top</h3>
+  <ul class="clean">
+    <li><strong>Ready to nurture</strong> — leads that are eligible &amp; safe to contact right now, across all clients.</li>
+    <li><strong>Waiting</strong> — leads still inside their 45-day cooldown.</li>
+    <li><strong>Added</strong> — leads already pushed into a nurture campaign.</li>
+  </ul>
+  <h3>Client cards</h3>
+  <p>Below the tiles, every client appears as a card with their counts. <strong>Click any card to open that client’s page.</strong> Use the <span class="kbd">Search</span> box to find a client and the <span class="kbd">Sort</span> menu to order by Ready, Waiting, Added or name.</p>
+  <h3>The two tabs</h3>
+  <p>At the top you’ll see <span class="pill p-slate">Overview</span> and <span class="pill p-violet">Automation</span>. Overview is this client-card view. Automation is the control room — next section.</p>
+
+  <!-- 04 -->
+  <h2 id="automation" class="page-break"><span class="sec-num">05</span>The Automation tab</h2>
+  <p class="lead">This is the heart of the new workflow — your single screen to see, at a glance, which clients are ready to send and which still need setup.</p>
+
+  <h3>The five summary tiles</h3>
+  <table>
+    <tr><th>Tile</th><th>What it tells you</th></tr>
+    <tr><td><strong>Clients</strong></td><td>Total active clients (churned clients are hidden automatically).</td></tr>
+    <tr><td><strong>Auto-route ON</strong></td><td>Clients that are <em>actually</em> sending on autopilot — i.e. switched on <strong>and</strong> with campaigns confirmed.</td></tr>
+    <tr><td><strong>Fully configured</strong></td><td>Clients whose nurture campaigns all exist in the right workspaces.</td></tr>
+    <tr><td><strong>Need campaigns</strong></td><td>Clients missing one or more campaigns — they need creating in Bison.</td></tr>
+    <tr><td><strong>Need mapping</strong></td><td><strong>Your to-do list.</strong> Clients that still need you to pick &amp; confirm their campaigns. <em>Click this tile to filter the list to just them.</em></td></tr>
+  </table>
+
+  <h3>The client list (reading a row)</h3>
+  <p>Each row is one client. From left to right:</p>
+  <ul class="clean">
+    <li><strong>Checkbox</strong> — select clients for a bulk action.</li>
+    <li><strong>Client tag</strong> + <span class="pill p-slate">G1</span>/<span class="pill p-slate">G2</span> group.</li>
+    <li><strong>The campaign matrix</strong> — for each lane (<strong>B2B</strong> and <strong>B2C</strong>) you see three provider chips:
+      <span class="chip p-emerald ring-emerald">G</span> <span class="chip p-emerald ring-emerald">O</span> <span class="chip p-emerald ring-emerald">S</span>.
+      Their colour tells you the campaign’s state (see the colour key below).</li>
+    <li><span class="pill p-amber">⚠ No map</span> / <span class="pill p-emerald">✓ Mapped</span> — whether you’ve confirmed this client’s target campaigns.</li>
+    <li><span class="pill p-emerald">✓ Ready</span> / <span class="pill p-rose">⚠ 2 gaps</span> — whether all campaigns exist, or how many are missing.</li>
+    <li><span class="pill p-emerald">⚡ Auto</span> / <span class="pill p-slate">Off</span> — the autopilot switch (only turns on once mapped).</li>
+    <li><strong>›</strong> — the whole row is clickable; it opens the client’s page.</li>
+  </ul>
+
+  <h3>The controls</h3>
+  <ul class="clean">
+    <li><strong>Search</strong> — jump to a client tag.</li>
+    <li><strong>Refresh</strong> — re-pull the latest campaign data.</li>
+    <li><strong>Select all</strong> + the <strong>bulk bar</strong> — tick several clients, then <span class="pill p-emerald">Enable</span> or <span class="pill p-slate">Disable</span> autopilot for all of them at once.</li>
+    <li>Rows that need attention (no map, or missing campaigns) automatically <strong>float to the top</strong>.</li>
+  </ul>
+
+  <div class="callout tip"><span class="t">The fastest way to see what’s left</span><p>Open the Automation tab and click the <strong>“Need mapping”</strong> tile. The list filters to exactly the clients that still need you to choose their campaigns. Work down the list; each one drops off as you confirm it.</p></div>
+
+  <!-- 05 -->
+  <h2 id="client" class="page-break"><span class="sec-num">06</span>The client page</h2>
+  <p>Click any client to open their page. Top to bottom:</p>
+
+  <h3>Header actions</h3>
+  <ul class="clean">
+    <li><strong>Sync Sequence-Finished</strong> — pulls in leads whose outbound sequence finished with no reply (a fresh source of nurture leads).</li>
+    <li><strong>Classify Unclassified</strong> — runs the safety check on any un-checked leads so they can become “Ready”.</li>
+    <li><strong>Re-classify Safe</strong> — re-checks leads currently marked safe (useful after rules tighten).</li>
+  </ul>
+
+  <h3>The three count tiles</h3>
+  <p>Same as the hub, but for this one client: <strong>Ready to nurture</strong>, <strong>Waiting</strong>, <strong>Added</strong>. Click a tile to filter the lead list to that group.</p>
+
+  <h3>Nurture pipeline</h3>
+  <p>A quick status strip — <strong>Synced → Ready → Routed → Sending</strong> — plus, for each workspace, the live status of the Google / Outlook / SEGs campaigns (active, draft, or not set up). Anyone opening the page instantly sees how far along this client is.</p>
+
+  <h3>Target Campaigns</h3>
+  <p>The setup panel — covered in full next. This is where you choose where leads go.</p>
+
+  <h3>Charts &amp; the lead list</h3>
+  <p>Below that: a source breakdown, an ESP split, an eligibility forecast, and the full lead table with the action buttons.</p>
+
+  <!-- 06 -->
+  <h2 id="mapping"><span class="sec-num">07</span>Target Campaigns &amp; “Confirm &amp; enable sending”</h2>
+  <p class="lead">This is the one piece of setup you do per client. You’re telling the system: “for this client, send each kind of lead into <em>this exact campaign</em>.”</p>
+
+  <h3>What you’ll see</h3>
+  <p>The panel shows the client’s two lanes — <strong>Business (B2B)</strong> and <strong>Personal (B2C)</strong> — each with three drop-downs: <strong>Outlook</strong>, <strong>Google</strong>, <strong>SEGs</strong>. Each drop-down lists the matching nurture campaigns in that workspace. You simply pick the right one for each.</p>
+
+  <h3>The two buttons</h3>
+  <table>
+    <tr><th>Button</th><th>What it does</th></tr>
+    <tr><td><strong>Save draft</strong></td><td>Saves your selections without turning anything on. Sending stays <strong>disabled</strong>. Use it if you’re mid-setup.</td></tr>
+    <tr><td><strong>Confirm &amp; enable sending</strong></td><td>Locks in your choices <strong>and unlocks sending</strong> for this client. The badge flips to <span class="pill p-emerald">✓ Confirmed</span>.</td></tr>
+  </table>
+
+  <div class="callout warn"><span class="t">Confirming does NOT send any leads</span><p>It only records your campaign choices and <em>permits</em> sending. No lead moves at that moment. Leads are sent when you click <strong>“Route all ready”</strong>, or automatically by the autopilot (see Section 10). Think of Confirm as flipping the safety off — you still pull the trigger separately, or let autopilot do it.</p></div>
+
+  <div class="callout info"><span class="t">Why sending is gated</span><p>Nothing can be sent for a client until you’ve confirmed its campaigns. This is the guardrail that guarantees leads only ever go where <em>you</em> decided — never auto-picked.</p></div>
+
+  <!-- 07 -->
+  <h2 id="buttons" class="page-break"><span class="sec-num">08</span>Every button, explained</h2>
+  <p>The action buttons sit above the lead list on a client’s page.</p>
+  <table>
+    <tr><th>Button</th><th>What it does</th><th>When to use</th></tr>
+    <tr>
+      <td><span class="pill p-violet">Route all ready</span></td>
+      <td><strong>The main one.</strong> Sends <em>every</em> ready lead for this client into the campaigns you mapped, in the correct workspace — all of them, not just what’s on screen. Click again to stop.</td>
+      <td>Your go-to for sending a client’s whole ready pool in one click.</td>
+    </tr>
+    <tr>
+      <td><span class="pill p-emerald">Auto-route</span></td>
+      <td>Sends only the leads you’ve <strong>selected</strong> (ticked) in the table, split by provider.</td>
+      <td>When you want to push a specific hand-picked subset. <em>Prefer “Route all ready” for the full set.</em></td>
+    </tr>
+    <tr>
+      <td><span class="pill p-slate">Add to nurture</span></td>
+      <td>Sends the selected leads to <strong>one campaign you choose</strong> from the drop-down.</td>
+      <td>Manual override for a one-off push to a single campaign.</td>
+    </tr>
+    <tr>
+      <td><span class="pill p-slate">Skip</span></td>
+      <td>Marks selected leads as skipped so they leave the queue.</td>
+      <td>To remove leads you don’t want to nurture.</td>
+    </tr>
+    <tr>
+      <td><span class="pill p-amber">Rollback to Ready</span></td>
+      <td>Moves “Added” leads back to “Ready” (only shows on the Added view). Does not remove them from the campaign in Bison.</td>
+      <td>To undo a push within the tool.</td>
+    </tr>
+    <tr>
+      <td><span class="pill p-slate">⚡ Auto / Off</span></td>
+      <td>The autopilot switch (on the Automation tab and client page). Turns hands-off sending on or off. Only switches on once the map is confirmed.</td>
+      <td>Leave ON to let the funnel run itself.</td>
+    </tr>
+  </table>
+  <div class="callout tip"><span class="t">Rule of thumb</span><p><strong>“Route all ready”</strong> is what you’ll use 95% of the time — it respects your mapping and sends everything correctly. The other buttons are for selective, manual control.</p></div>
+
+  <!-- 08 -->
+  <h2 id="start"><span class="sec-num">09</span>How to start — step by step</h2>
+  <p>To switch a client on from scratch:</p>
+
+  <div class="step"><div class="n">1</div><div class="body">
+    <h3>See what needs setup</h3>
+    <p>Open <strong>Nurture → Automation</strong> and click the <strong>“Need mapping”</strong> tile. You now have your exact to-do list of clients.</p>
+  </div></div>
+  <div class="step"><div class="n">2</div><div class="body">
+    <h3>Open a client &amp; choose campaigns</h3>
+    <p>Click a client to open its page. In <strong>Target Campaigns</strong>, pick the right campaign for each lane × provider (Business and Personal → Outlook, Google, SEGs).</p>
+  </div></div>
+  <div class="step"><div class="n">3</div><div class="body">
+    <h3>Confirm</h3>
+    <p>Click <strong>Confirm &amp; enable sending</strong>. The client’s badge flips to <span class="pill p-emerald">✓ Mapped</span> and sending is now unlocked. (Still no leads sent yet.)</p>
+  </div></div>
+  <div class="step"><div class="n">4</div><div class="body">
+    <h3>Send the ready leads</h3>
+    <p>Click <strong>Route all ready</strong>. The system sends the client’s entire ready pool into your chosen campaigns, in the right workspace. Watch the live progress; it stops automatically when done.</p>
+  </div></div>
+  <div class="step"><div class="n">5</div><div class="body">
+    <h3>Make sure the campaigns are live</h3>
+    <p>In Bison, confirm the mapped campaigns are <strong>Active</strong> (not Draft). Leads will sit in a draft campaign but won’t actually send until it’s activated.</p>
+  </div></div>
+  <div class="step"><div class="n">6</div><div class="body">
+    <h3>Leave autopilot on</h3>
+    <p>Keep the client’s switch on <span class="pill p-emerald">⚡ Auto</span>. From now on, new leads that become Ready are routed automatically — you don’t need to touch it again.</p>
+  </div></div>
+
+  <div class="callout info"><span class="t">Doing many clients?</span><p>On the Automation tab you can tick several clients and use the <strong>bulk Enable/Disable</strong> bar to flip autopilot for all of them at once. (You still confirm each client’s campaigns on its own page — that’s the deliberate, per-client decision.)</p></div>
+
+  <!-- 09 -->
+  <h2 id="auto" class="page-break"><span class="sec-num">10</span>Putting it on autopilot</h2>
+  <p>Once a client is <strong>mapped</strong> and its switch is <strong>ON</strong>, the system runs the funnel for you:</p>
+  <ul class="clean">
+    <li><strong>Every couple of hours</strong>, it checks each switched-on, mapped client for newly-ready leads.</li>
+    <li>It routes them into your mapped campaigns, in the correct workspace — exactly like “Route all ready”, but automatic and in steady batches.</li>
+    <li>It only ever touches <strong>eligible, safe, provider-confirmed</strong> leads — anything uncertain is held back so it can’t be mis-sent.</li>
+    <li>Churned clients are skipped entirely.</li>
+  </ul>
+  <p>So the practical model is: <strong>set each client up once</strong> (map + confirm), make sure campaigns are active, and the leads keep flowing on their own. You only revisit a client to change its campaigns or pause it.</p>
+
+  <!-- 10 -->
+  <h2 id="legend"><span class="sec-num">11</span>Colours &amp; badges</h2>
+  <div class="grid2">
+    <div class="card"><h4>Provider chips</h4><p style="margin-top:8px">
+      <span class="chip p-emerald ring-emerald">G</span> green = campaign <strong>active</strong><br/><br/>
+      <span class="chip p-amber ring-amber">O</span> amber = campaign exists but is <strong>draft</strong><br/><br/>
+      <span class="chip p-rose ring-rose">S</span> red = campaign <strong>missing</strong> (needs creating)
+    </p></div>
+    <div class="card"><h4>Status badges</h4><p style="margin-top:8px">
+      <span class="pill p-emerald">✓ Mapped</span> campaigns confirmed<br/><br/>
+      <span class="pill p-amber">⚠ No map</span> still needs setup<br/><br/>
+      <span class="pill p-emerald">✓ Ready</span> all campaigns exist<br/><br/>
+      <span class="pill p-rose">⚠ gaps</span> some campaigns missing
+    </p></div>
+    <div class="card"><h4>Autopilot</h4><p style="margin-top:8px">
+      <span class="pill p-emerald">⚡ Auto</span> running automatically<br/><br/>
+      <span class="pill p-slate">Off</span> not sending (or not yet mapped)
+    </p></div>
+    <div class="card"><h4>Group &amp; lane</h4><p style="margin-top:8px">
+      <span class="pill p-slate">G1</span> / <span class="pill p-slate">G2</span> the client’s group<br/><br/>
+      <strong>B2B</strong> business-email inbox · <strong>B2C</strong> personal-email inbox
+    </p></div>
+  </div>
+
+  <!-- 11 -->
+  <h2 id="faq"><span class="sec-num">12</span>Good to know / FAQ</h2>
+
+  <h3>“Auto” shows ON but it says “No map” — is it sending?</h3>
+  <p>No. A client can be switched on by default, but <strong>nothing sends until its campaigns are confirmed</strong>. The display now reflects this: “Auto” only shows as truly ON once mapped. Until then it’s effectively off.</p>
+
+  <h3>What counts as a “Ready” lead?</h3>
+  <p>One that has finished its 45-day cooldown, passed the safety check (not a bounce, unsubscribe, or “do not contact”), and has a confirmed email provider. Anything missing one of these stays out of the send.</p>
+
+  <h3>The client page shows “first 10,000 of 48,000” — why?</h3>
+  <p>The on-screen list caps rows for speed; the tile shows the true total. <strong>“Route all ready” still processes every lead</strong>, not just the visible ones.</p>
+
+  <h3>Leads are routed but nothing is sending.</h3>
+  <p>The campaign is probably still <strong>Draft</strong> in Bison. Activate it and sending begins.</p>
+
+  <h3>Do leads keep their personalisation?</h3>
+  <p>Yes — each lead carries its details (city, company, etc.) into the correct workspace, so your campaign templates personalise normally.</p>
+
+  <h3>Are churned clients shown?</h3>
+  <p>No. Clients marked churned are hidden from Nurture automatically and never receive nurture sends.</p>
+
+  <div class="callout tip" style="margin-top:30px"><span class="t">The whole thing in one line</span><p>Open Automation → click “Need mapping” → for each client, pick its campaigns and Confirm → click “Route all ready” → make sure campaigns are Active → leave autopilot on. Done.</p></div>
+
+  <footer>OutboundHero — Nurture Workflow Guide · Internal operations document</footer>
+
+</div>
+</body>
+</html>
