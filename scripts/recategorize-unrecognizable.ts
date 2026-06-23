@@ -2,17 +2,19 @@
  * Re-categorize replies that were wrongly tagged "Unrecognizable by AI" while
  * the OpenAI quota was exhausted. Re-runs the categorizer over each reply's
  * actual content and writes the corrected category back to BOTH Supabase
- * (replies.ai_categorized_lead_category + lead_category) and the Airtable record
- * (Lead Category + AI Categorized Lead Category) so the inbox + Airtable agree.
+ * Updates ONLY the AI-suggested category: replies.ai_categorized_lead_category
+ * (Supabase) + "AI Categorized Lead Category" (Airtable). Leaves the operator's
+ * working `lead_category` / "Lead Category" untouched.
  *
  *   --dry            preview only (no writes); also prints an hourly histogram
  *   --since <iso>    only replies with reply_time >= this (default: start of today UTC)
+ *   --until <iso>    only replies with reply_time <  this (default: none — open-ended)
  *   --concurrency N  parallel OpenAI calls (default 5)
  */
 import { config } from "dotenv";
 config({ path: ".env.local" });
 import supabase from "../lib/supabase";
-import { categorizeReply, getLeadCategory } from "../lib/processing/lead-categorizer";
+import { categorizeReply } from "../lib/processing/lead-categorizer";
 import { updateRecord } from "../lib/airtable";
 
 const args = process.argv.slice(2);
@@ -23,6 +25,7 @@ const SINCE = (() => {
   if (i >= 0 && args[i + 1]) return args[i + 1];
   const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0)).toISOString();
 })();
+const UNTIL = (() => { const i = args.indexOf("--until"); return i >= 0 && args[i + 1] ? args[i + 1] : null; })();
 
 interface Row {
   id: number; from_email: string | null; prospect_cc_email: string | null;
@@ -31,16 +34,18 @@ interface Row {
 }
 
 async function main() {
-  console.log(`Re-categorize "Unrecognizable by AI" since ${SINCE} ${DRY ? "(DRY RUN)" : "(LIVE)"}`);
+  console.log(`Re-categorize "Unrecognizable by AI" since ${SINCE}${UNTIL ? ` until ${UNTIL}` : ""} ${DRY ? "(DRY RUN)" : "(LIVE)"}`);
 
   // Pull affected replies (paginate).
   const rows: Row[] = [];
   let start = 0;
   for (;;) {
-    const { data, error } = await supabase.from("replies")
+    let q = supabase.from("replies")
       .select("id, from_email, prospect_cc_email, email_subject, reply_we_got, reply_time, airtable_record_id, airtable_base_id, section_name")
       .eq("ai_categorized_lead_category", "Unrecognizable by AI")
-      .gte("reply_time", SINCE)
+      .gte("reply_time", SINCE);
+    if (UNTIL) q = q.lt("reply_time", UNTIL);
+    const { data, error } = await q
       .order("reply_time", { ascending: true })
       .range(start, start + 999);
     if (error) { console.log("fetch err:", error.message); return; }
@@ -74,12 +79,12 @@ async function main() {
         const cat = await categorizeReply(r.from_email || "", r.prospect_cc_email || "", r.email_subject || "", r.reply_we_got || "");
         if (cat === "Unrecognizable by AI") { unchanged++; continue; }
         // write Supabase
-        await supabase.from("replies").update({ ai_categorized_lead_category: cat, lead_category: getLeadCategory(cat) }).eq("id", r.id);
+        await supabase.from("replies").update({ ai_categorized_lead_category: cat }).eq("id", r.id);
         // write Airtable (best-effort)
         const sec = r.section_name ? secByName.get(r.section_name) : null;
         const base = sec?.base || r.airtable_base_id || null;
         if (r.airtable_record_id && base && sec?.table) {
-          try { await updateRecord(base, sec.table, r.airtable_record_id, { "Lead Category": getLeadCategory(cat), "AI Categorized Lead Category": cat }); }
+          try { await updateRecord(base, sec.table, r.airtable_record_id, { "AI Categorized Lead Category": cat }); }
           catch (e) { console.log(`  airtable update failed id=${r.id}: ${(e as Error).message}`); }
         }
         changed++; tally[cat] = (tally[cat] || 0) + 1;

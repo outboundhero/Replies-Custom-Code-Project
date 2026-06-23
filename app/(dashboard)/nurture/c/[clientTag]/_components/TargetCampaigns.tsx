@@ -60,15 +60,14 @@ export default function TargetCampaigns({
   }, [clientTag, onConfirmedChange]);
   useEffect(() => { load(); }, [load]);
 
-  // Candidate campaigns for a given (instance, esp): ONLY the CANONICAL nurture
-  // campaigns — name like "TAG: ESP [Nurture] (Cleaning Client)" — in that
-  // instance, exact-tag, matching ESP, and not archived. This excludes the old
-  // legacy "(Nurture)" / "(Nurture) (2)" variants and any archived/source
-  // campaigns that were cluttering (and confusing) the dropdown.
+  // Candidate campaigns for a given (instance, esp): the canonical nurture
+  // campaigns — name must contain "[Nurture]" AND "(Cleaning Client)" — present
+  // in THAT instance for this exact client + ESP. Archived ones ARE included
+  // (status is shown in the label); only the legacy "(Nurture)" parenthetical
+  // variants that lack the "(Cleaning Client)" marker are filtered out.
   const optionsFor = useCallback((instance: string, esp: Esp) => {
     return campaigns.filter((c) =>
       c.bison_instance === instance &&
-      c.status !== "archived" &&
       (extractTagFromCampaignName(c.name) || "").toUpperCase() === clientTag.toUpperCase() &&
       detectCampaignEsp(c.name) === esp &&
       isCanonicalNurtureCampaign(c.name),
