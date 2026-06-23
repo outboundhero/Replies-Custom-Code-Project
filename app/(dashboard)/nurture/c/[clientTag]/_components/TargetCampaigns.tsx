@@ -60,13 +60,18 @@ export default function TargetCampaigns({
   }, [clientTag, onConfirmedChange]);
   useEffect(() => { load(); }, [load]);
 
-  // Candidate campaigns for a given (instance, esp): canonical nurture campaigns
-  // in that instance whose exact tag is this client and whose ESP matches.
+  // Candidate campaigns for a given (instance, esp): ONLY the CANONICAL nurture
+  // campaigns — name like "TAG: ESP [Nurture] (Cleaning Client)" — in that
+  // instance, exact-tag, matching ESP, and not archived. This excludes the old
+  // legacy "(Nurture)" / "(Nurture) (2)" variants and any archived/source
+  // campaigns that were cluttering (and confusing) the dropdown.
   const optionsFor = useCallback((instance: string, esp: Esp) => {
     return campaigns.filter((c) =>
       c.bison_instance === instance &&
+      c.status !== "archived" &&
       (extractTagFromCampaignName(c.name) || "").toUpperCase() === clientTag.toUpperCase() &&
-      detectCampaignEsp(c.name) === esp,
+      detectCampaignEsp(c.name) === esp &&
+      isCanonicalNurtureCampaign(c.name),
     );
   }, [campaigns, clientTag]);
 
@@ -159,7 +164,7 @@ export default function TargetCampaigns({
                         >
                           <option value={0}>— none —</option>
                           {opts.map((c) => (
-                            <option key={c.id} value={c.id}>{c.status === "active" ? "● " : c.status === "draft" ? "○ " : "· "}{c.name.replace(/\s*\[Nurture\].*/i, "")} ({c.status})</option>
+                            <option key={c.id} value={c.id}>{c.status === "active" ? "● " : c.status === "draft" ? "○ " : "· "}{c.name} ({c.status})</option>
                           ))}
                         </select>
                       )}
