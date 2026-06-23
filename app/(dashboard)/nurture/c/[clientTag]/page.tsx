@@ -123,7 +123,7 @@ function viewToFilters(view: View): { status: string; safety: string } {
 
 // ── "Confirm & enable sending" progress model (persistent panel) ────────────
 type EnablePhaseStatus = "pending" | "running" | "done" | "error";
-interface EnableAttachRow { instance: string; esp: string; campaign: string | null; pool: number; matched: number; attached: number; error?: string }
+interface EnableAttachRow { instance: string; esp: string; campaign: string | null; pool: number; connected: number; attached: number; alreadyPresent: number; error?: string }
 interface EnableActivateRow { instance: string; esp: string; campaign: string | null; activated: boolean; error?: string }
 interface EnableSendingState {
   clientTag: string;
@@ -1104,7 +1104,7 @@ export default function NurturePage() {
       });
       const d = await res.json();
       if (!res.ok) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error(d.error || "Inbox attach failed"); return; }
-      const rows: EnableAttachRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; poolTotal: number; matchedForEsp: number; attached: number; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, matched: c.matchedForEsp, attached: c.attached, error: c.error }));
+      const rows: EnableAttachRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; poolTotal: number; connected: number; attached: number; alreadyPresent: number; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, connected: c.connected, attached: c.attached, alreadyPresent: c.alreadyPresent, error: c.error }));
       setEnableProgress((p) => p && { ...p, attach: { status: "done", rows, total: d.totalAttached || 0 }, route: { ...p.route, status: "running" } });
     } catch (e) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error((e as Error).message); return; }
 
@@ -1971,7 +1971,7 @@ function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: 
           <div className="flex items-center gap-2">
             <EnablePhaseIcon status={attach.status} />
             <span className="font-medium">1. Attach inboxes</span>
-            {attach.status !== "pending" && <span className="text-xs text-muted-foreground"><span className="text-emerald-700 font-medium">{attach.total.toLocaleString()}</span> attached</span>}
+            {attach.status !== "pending" && <span className="text-xs text-muted-foreground"><span className="text-emerald-700 font-medium">{attach.total.toLocaleString()}</span> newly attached</span>}
           </div>
           {attach.rows.length > 0 && (
             <div className="ml-6 space-y-1">
@@ -1981,7 +1981,9 @@ function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: 
                   <InstanceBadge instance={r.instance} size="xs" />
                   {r.error
                     ? <span className="text-rose-600">{r.error}</span>
-                    : <span className="text-muted-foreground"><span className="text-emerald-700 font-medium">{r.attached.toLocaleString()}</span> inbox{r.attached === 1 ? "" : "es"} attached{r.matched !== r.attached ? ` of ${r.matched.toLocaleString()} matched` : ""} <span className="text-muted-foreground/60">· pool {r.pool.toLocaleString()}</span></span>}
+                    : r.attached === 0 && r.alreadyPresent > 0
+                      ? <span className="text-muted-foreground">all <span className="font-medium text-foreground">{r.alreadyPresent.toLocaleString()}</span> inboxes already present — none added <span className="text-muted-foreground/60">· pool {r.pool.toLocaleString()}</span></span>
+                      : <span className="text-muted-foreground"><span className="text-emerald-700 font-medium">{r.attached.toLocaleString()}</span> inbox{r.attached === 1 ? "" : "es"} attached{r.alreadyPresent > 0 ? `, ${r.alreadyPresent.toLocaleString()} already present` : ""} <span className="text-muted-foreground/60">· pool {r.pool.toLocaleString()}</span></span>}
                 </div>
               ))}
             </div>

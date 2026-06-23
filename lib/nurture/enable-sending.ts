@@ -15,7 +15,7 @@
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getChurnedTags } from "@/lib/churn";
 import {
-  getCampaignSenderEmails, attachSenderEmails, resumeCampaign, inboxEsp,
+  getCampaignSenderEmails, attachSenderEmails, resumeCampaign,
 } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
 import type { Esp } from "@/lib/nurture/esp";
@@ -26,58 +26,60 @@ const ATTACH_CHUNK = 500; // batch the attach call so a 3k-inbox pool doesn't ov
 
 export interface AttachCampaignResult {
   instance: string; esp: Esp; campaignId: number; campaignName: string | null;
-  poolTotal: number;        // inboxes returned for THIS campaign (all ESPs)
-  matchedForEsp: number;    // pool inboxes whose provider matches this campaign's ESP
-  attached: number;
+  poolTotal: number;        // inboxes in the client's tagged pool for this campaign
+  connected: number;        // connected ones (candidates to attach)
+  attached: number;         // newly attached
+  alreadyPresent: number;   // were already on the campaign (nothing added)
   error?: string;
 }
 export interface AttachResult {
   clientTag: string; campaigns: AttachCampaignResult[];
-  totalAttached: number; error?: string;
+  totalAttached: number; totalAlreadyPresent: number; error?: string;
 }
 
 export async function attachInboxesForClient(clientTag: string): Promise<AttachResult> {
   const TAG = clientTag.toUpperCase();
-  const result: AttachResult = { clientTag: TAG, campaigns: [], totalAttached: 0 };
+  const result: AttachResult = { clientTag: TAG, campaigns: [], totalAttached: 0, totalAlreadyPresent: 0 };
 
   if (!(await getMapConfirmedAt(TAG))) { result.error = "target-campaign map not confirmed"; return result; }
   if ((await getChurnedTags()).has(TAG)) { result.error = "churned"; return result; }
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { result.error = "no campaigns mapped"; return result; }
 
-  // Read EACH mapped campaign's own tagged inbox pool, keep only the inboxes
-  // whose provider matches that campaign's ESP (a campaign's pool can include
-  // mixed types; never send e.g. an Outlook campaign from Google inboxes),
-  // then attach in batches. Per-campaign reads matter: the pool returned for
-  // the Outlook campaign differs from the Google one.
+  // Attach ALL of the client's tagged inboxes to each mapped campaign. ESP is
+  // a LEAD-routing concept (each lead goes to its provider's campaign) — it is
+  // NOT a filter on sender inboxes, so we never split the inbox pool by ESP.
+  // We only drop disconnected inboxes (they can't send).
   for (const e of map) {
     const row: AttachCampaignResult = {
       instance: e.bison_instance, esp: e.esp, campaignId: e.campaign_id, campaignName: e.campaign_name,
-      poolTotal: 0, matchedForEsp: 0, attached: 0,
+      poolTotal: 0, connected: 0, attached: 0, alreadyPresent: 0,
     };
     try {
       const pool = await getCampaignSenderEmails(e.bison_instance, e.campaign_id);
       row.poolTotal = pool.length;
-      // Only CONNECTED inboxes of this campaign's ESP — a disconnected inbox
-      // can't send, so attaching it is noise.
       const ids = pool
-        .filter((ib) => inboxEsp(ib) === e.esp && ib.status.toLowerCase() === "connected")
+        .filter((ib) => ib.status.toLowerCase() === "connected")
         .map((ib) => ib.id);
-      row.matchedForEsp = ids.length;
+      row.connected = ids.length;
       if (ids.length === 0) {
         row.error = pool.length === 0
           ? "no tagged inbox pool returned for this campaign"
-          : `no connected ${e.esp} inboxes in this campaign's tagged pool`;
+          : "no connected inboxes in this campaign's tagged pool";
       } else {
-        let attached = 0; let ok = true;
+        let attached = 0, alreadyPresent = 0; let failMsg: string | undefined;
         for (let i = 0; i < ids.length; i += ATTACH_CHUNK) {
           const chunk = ids.slice(i, i + ATTACH_CHUNK);
-          if (await attachSenderEmails(e.bison_instance, e.campaign_id, chunk)) attached += chunk.length;
-          else { ok = false; break; }
+          const r = await attachSenderEmails(e.bison_instance, e.campaign_id, chunk);
+          if (r.added) attached += chunk.length;
+          else if (r.alreadyPresent) alreadyPresent += chunk.length;
+          else { failMsg = r.message || "attach failed"; break; }
         }
         row.attached = attached;
+        row.alreadyPresent = alreadyPresent;
         result.totalAttached += attached;
-        if (!ok) row.error = `attach failed after ${attached}/${ids.length}`;
+        result.totalAlreadyPresent += alreadyPresent;
+        if (failMsg) row.error = `attach failed after ${attached}/${ids.length}: ${failMsg}`;
       }
     } catch (err) {
       row.error = (err as Error).message;
@@ -90,7 +92,8 @@ export async function attachInboxesForClient(clientTag: string): Promise<AttachR
     client_tag: TAG,
     details: {
       total_attached: result.totalAttached,
-      campaigns: result.campaigns.map((c) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, matched: c.matchedForEsp, attached: c.attached, error: c.error })),
+      total_already_present: result.totalAlreadyPresent,
+      campaigns: result.campaigns.map((c) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, connected: c.connected, attached: c.attached, already_present: c.alreadyPresent, error: c.error })),
     },
   });
   return result;

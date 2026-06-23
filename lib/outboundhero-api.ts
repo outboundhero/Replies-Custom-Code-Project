@@ -949,13 +949,29 @@ export function inboxEsp(inbox: { type?: string; tags?: string[] }): "outlook" |
   return "segs"; // smtp / custom mail server / anything else
 }
 
-export async function attachSenderEmails(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<boolean> {
-  if (!senderEmailIds.length) return true;
+export interface AttachSendersResult { ok: boolean; added: boolean; alreadyPresent: boolean; message?: string }
+
+/**
+ * Attach inboxes to a campaign. Bison quirk: it returns HTTP 200 even when the
+ * inboxes are ALREADY on the campaign — with body
+ * {data:{success:false,message:"These emails already exist on this campaign…"}}.
+ * So we parse the body: success:false + "already exist" ⇒ alreadyPresent (not an
+ * error, nothing added); any other success:false ⇒ a real failure.
+ */
+export async function attachSenderEmails(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<AttachSendersResult> {
+  if (!senderEmailIds.length) return { ok: true, added: false, alreadyPresent: false };
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/attach-sender-emails`, {
     method: "POST", headers: buildHeaders(token), body: JSON.stringify({ sender_email_ids: senderEmailIds }), timeoutMs: 30_000,
   });
-  return res.ok;
+  const body = await res.json().catch(() => null);
+  const message = body?.data?.message as string | undefined;
+  if (!res.ok) return { ok: false, added: false, alreadyPresent: false, message: message || `HTTP ${res.status}` };
+  if (body?.data?.success === false) {
+    if (message && /already exist/i.test(message)) return { ok: true, added: false, alreadyPresent: true, message };
+    return { ok: false, added: false, alreadyPresent: false, message }; // genuine failure
+  }
+  return { ok: true, added: true, alreadyPresent: false, message };
 }
 
 export async function getSequenceSteps(instanceKey: string, campaignId: number): Promise<unknown> {

@@ -16,7 +16,7 @@ import { getCampaignMap, getMapConfirmedAt, type CampaignMapEntry } from "@/lib/
 import { getChurnedTags } from "@/lib/churn";
 import {
   getCampaignDetails, duplicateCampaign, updateCampaign,
-  getCampaignSenderEmails, attachSenderEmails, resumeCampaign, inboxEsp,
+  getCampaignSenderEmails, attachSenderEmails, resumeCampaign,
 } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
 import type { Esp } from "@/lib/nurture/esp";
@@ -129,11 +129,11 @@ export async function expandCampaignsForClient(
       try {
         const clone = await duplicateCampaign(instance, x.entry.campaign_id);
         if (!clone) { await logError("nurture-expand", `${TAG}/${instance}/${x.esp}`, "duplicate returned null"); continue; }
-        // Re-attach sender emails (duplicate drops them). getCampaignSenderEmails
-        // returns the client's full tagged inbox pool (all ESPs), so keep only
-        // this campaign's ESP — never send an Outlook campaign from Google inboxes.
+        // Re-attach sender emails (duplicate drops them). ESP is a lead-routing
+        // concept, not a sender-inbox filter — attach all of the client's
+        // connected tagged inboxes, mirroring the source campaign.
         const pool = await getCampaignSenderEmails(instance, x.entry.campaign_id);
-        const senderIds = pool.filter((s) => inboxEsp(s) === x.esp).map((s) => s.id);
+        const senderIds = pool.filter((s) => s.status.toLowerCase() === "connected").map((s) => s.id);
         if (senderIds.length) await attachSenderEmails(instance, clone.id, senderIds);
         // Rename to canonical + next batch (markers preserved for detection).
         const n = x.batch + 1;
