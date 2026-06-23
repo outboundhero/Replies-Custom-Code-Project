@@ -883,13 +883,56 @@ export async function createCampaignSchedule(instanceKey: string, campaignId: nu
   return res.ok;
 }
 
-export async function getCampaignSenderEmails(instanceKey: string, campaignId: number): Promise<Array<{ id: number; email: string }>> {
+export interface CampaignSenderInbox { id: number; email: string; type: string; status: string; tags: string[] }
+
+/**
+ * The inbox pool returned by GET /api/campaigns/{id}/sender-emails.
+ *
+ * NOTE: this endpoint returns the client(tag)-scoped inbox POOL available to
+ * the campaign — NOT the inboxes attached to that one campaign (a 0-lead draft
+ * and an active campaign in the same tag group return the identical list, mixed
+ * ESP types). Treat the result as "the inboxes carrying this campaign's client
+ * tag", to be split by ESP before attaching. 15/page, paginated with a small
+ * 429 backoff (the token is shared with live automations).
+ */
+export async function getCampaignSenderEmails(instanceKey: string, campaignId: number): Promise<CampaignSenderInbox[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/sender-emails`, { headers: buildHeaders(token) });
-  if (!res.ok) return [];
-  const body = await res.json().catch(() => null);
-  const rows: Array<{ id?: number; email?: string }> = body?.data ?? [];
-  return rows.filter((r) => typeof r.id === "number").map((r) => ({ id: r.id as number, email: String(r.email ?? "") }));
+  const out: CampaignSenderInbox[] = [];
+  const seen = new Set<number>();
+  const MAX_PAGES = 400; // 400 × 15 = 6,000 inboxes ceiling
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      res = await fetchWithTimeout(
+        `${baseUrl}/api/campaigns/${campaignId}/sender-emails?page=${page}`,
+        { headers: buildHeaders(token) },
+      );
+      if (res.status !== 429) break;
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); // backoff on shared-token throttle
+    }
+    if (!res || !res.ok) break;
+    const body = await res.json().catch(() => null);
+    const rows: Array<{ id?: number; email?: string; type?: string; status?: string; tags?: Array<{ name?: string }> }> = body?.data ?? [];
+    for (const r of rows) {
+      if (typeof r.id === "number" && !seen.has(r.id)) {
+        seen.add(r.id);
+        out.push({ id: r.id, email: String(r.email ?? ""), type: String(r.type ?? ""), status: String(r.status ?? ""), tags: (r.tags ?? []).map((t) => String(t?.name ?? "")) });
+      }
+    }
+    const lastPage = Number(body?.meta?.last_page);
+    if (rows.length === 0 || (Number.isFinite(lastPage) && page >= lastPage)) break;
+    if (rows.length < 15) break; // short page → no more
+  }
+  return out;
+}
+
+/** Classify a Bison inbox to its ESP bucket from its connection type + tags. */
+export function inboxEsp(inbox: { type?: string; tags?: string[] }): "outlook" | "google" | "segs" {
+  const type = (inbox.type || "").toLowerCase();
+  const tags = (inbox.tags || []).map((t) => t.toLowerCase());
+  if (type.includes("microsoft") || type.includes("outlook") || tags.includes("outlook")) return "outlook";
+  if (type.includes("google") || type.includes("gmail") || tags.includes("google") || tags.includes("gmail")) return "google";
+  return "segs"; // smtp / custom mail server / anything else
 }
 
 export async function attachSenderEmails(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<boolean> {

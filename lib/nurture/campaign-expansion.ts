@@ -16,7 +16,7 @@ import { getCampaignMap, getMapConfirmedAt, type CampaignMapEntry } from "@/lib/
 import { getChurnedTags } from "@/lib/churn";
 import {
   getCampaignDetails, duplicateCampaign, updateCampaign,
-  getCampaignSenderEmails, attachSenderEmails, resumeCampaign,
+  getCampaignSenderEmails, attachSenderEmails, resumeCampaign, inboxEsp,
 } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
 import type { Esp } from "@/lib/nurture/esp";
@@ -129,9 +129,12 @@ export async function expandCampaignsForClient(
       try {
         const clone = await duplicateCampaign(instance, x.entry.campaign_id);
         if (!clone) { await logError("nurture-expand", `${TAG}/${instance}/${x.esp}`, "duplicate returned null"); continue; }
-        // Re-attach sender emails (duplicate drops them).
-        const senders = await getCampaignSenderEmails(instance, x.entry.campaign_id);
-        if (senders.length) await attachSenderEmails(instance, clone.id, senders.map((s) => s.id));
+        // Re-attach sender emails (duplicate drops them). getCampaignSenderEmails
+        // returns the client's full tagged inbox pool (all ESPs), so keep only
+        // this campaign's ESP — never send an Outlook campaign from Google inboxes.
+        const pool = await getCampaignSenderEmails(instance, x.entry.campaign_id);
+        const senderIds = pool.filter((s) => inboxEsp(s) === x.esp).map((s) => s.id);
+        if (senderIds.length) await attachSenderEmails(instance, clone.id, senderIds);
         // Rename to canonical + next batch (markers preserved for detection).
         const n = x.batch + 1;
         const name = `${baseName(x.name)} — Batch ${n}`;

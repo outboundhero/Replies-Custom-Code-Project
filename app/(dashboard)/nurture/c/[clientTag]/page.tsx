@@ -1072,6 +1072,27 @@ export default function NurturePage() {
     void Promise.all([loadPage(true, false), loadCounts(true)]);
   }
 
+  // Hand-off from Target Campaigns "Confirm & enable sending": inboxes have
+  // already been attached, so route every ready lead into the campaigns, then
+  // activate them (attach → route → activate).
+  async function enableSendingFlow() {
+    if (!clientFilter) return;
+    await routeAllReady();
+    try {
+      const res = await fetch("/api/nurture/enable-sending", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientTag: clientFilter, phase: "activate" }),
+      });
+      const d = await res.json();
+      if (!res.ok) { toast.error(d.error || "Couldn't activate campaigns"); return; }
+      const n = d.totalActivated ?? 0;
+      const errs = (d.campaigns || []).filter((c: { error?: string }) => c.error);
+      if (n > 0) toast.success(`Activated ${n} campaign${n === 1 ? "" : "s"} — sending is live.`);
+      else toast.warning("No campaigns activated — check inbox attach / campaign status.");
+      if (errs.length) toast.warning(errs.map((c: { instance: string; esp: string; error: string }) => `${c.instance}/${c.esp}: ${c.error}`).join(" · "), { duration: 10000 });
+    } catch (e) { toast.error((e as Error).message); }
+  }
+
   async function pushSelected() {
     if (!pushTargetCampaignId || selected.size === 0) return;
     setPushing(true);
@@ -1316,7 +1337,7 @@ export default function NurturePage() {
 
       {/* ── Target campaigns — operator picks destinations; gates sending ── */}
       {clientFilter && (
-        <TargetCampaigns clientTag={clientFilter} campaigns={campaigns} onConfirmedChange={setMapConfirmedAt} />
+        <TargetCampaigns clientTag={clientFilter} campaigns={campaigns} onConfirmedChange={setMapConfirmedAt} onSendingEnabled={enableSendingFlow} />
       )}
 
       {/* ── Classify progress banner (visible while classify-loop is active) ── */}

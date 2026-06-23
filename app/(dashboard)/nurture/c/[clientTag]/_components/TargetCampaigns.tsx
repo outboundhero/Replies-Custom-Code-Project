@@ -29,11 +29,15 @@ const ESPS: Esp[] = ["outlook", "google", "segs"];
 const LANE_LABEL: Record<string, string> = { b2b: "Business (B2B)", b2c: "Personal (B2C)" };
 
 export default function TargetCampaigns({
-  clientTag, campaigns, onConfirmedChange,
+  clientTag, campaigns, onConfirmedChange, onSendingEnabled,
 }: {
   clientTag: string;
   campaigns: Campaign[];
   onConfirmedChange?: (confirmedAt: string | null) => void;
+  // Called after confirm has (a) saved the map, (b) attached inboxes +
+  // activated the mapped campaigns. The parent uses this to kick off the
+  // "route all ready" drain so leads land in now-live campaigns.
+  onSendingEnabled?: () => void;
 }) {
   const [instances, setInstances] = useState<{ group: number; b2b: string; b2c: string } | null>(null);
   const [confirmedAt, setConfirmedAt] = useState<string | null>(null);
@@ -117,7 +121,36 @@ export default function TargetCampaigns({
       setConfirmedAt(d.confirmedAt || null);
       onConfirmedChange?.(d.confirmedAt || null);
       setDirty(false);
-      toast.success(confirm ? `Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — sending enabled.` : "Saved (not confirmed — sending stays disabled).");
+      if (!confirm) { toast.success("Saved (not confirmed — sending stays disabled)."); return; }
+
+      // CONFIRM path: attach the client's tagged inboxes (ESP-split) to each
+      // campaign, then hand off to the parent which routes ready leads and
+      // finally activates the campaigns (attach → route → activate).
+      toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"}.`);
+      const attachingToast = toast.loading("Attaching the client's inboxes to each campaign…");
+      try {
+        const er = await fetch("/api/nurture/enable-sending", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTag, phase: "attach" }),
+        });
+        const ed = await er.json();
+        toast.dismiss(attachingToast);
+        if (!er.ok) {
+          toast.error(ed.error || "Couldn't attach inboxes");
+          return; // don't proceed to route/activate if inbox attach failed outright
+        }
+        const attached = ed.totalAttached ?? 0;
+        const errs = (ed.campaigns || []).filter((c: { error?: string }) => c.error);
+        toast.success(`Attached ${attached} inbox${attached === 1 ? "" : "es"} across mapped campaigns. Routing ready leads…`);
+        if (errs.length) {
+          toast.warning(errs.map((c: { esp: string; instance: string; error: string }) => `${c.instance}/${c.esp}: ${c.error}`).join(" · "), { duration: 10000 });
+        }
+        // Parent: route all ready leads, then activate the campaigns.
+        onSendingEnabled?.();
+      } catch (e) {
+        toast.dismiss(attachingToast);
+        toast.error((e as Error).message);
+      }
     } finally { setSaving(false); }
   }
 
