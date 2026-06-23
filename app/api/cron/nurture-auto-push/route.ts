@@ -36,6 +36,10 @@ export async function GET(req: NextRequest) {
   const tags = await listAutoEnabledClients();
   const summary: Array<{ tag: string; scanned: number; attached: number; buckets: number; errors: number }> = [];
 
+  const PER_CLIENT_PAGES = 60;   // page past up to ~12k scanned/client/tick so an
+                                 // unmappable-lane backlog can't block newer leads
+  const PER_CLIENT_ATTACH = 1000; // but bound actual attach work per client/tick
+
   // Process clients sequentially. Bison API rate-limits per token, so
   // running them in parallel would just thrash the limit. The wall-
   // clock budget below stops us before the 5-min route ceiling.
@@ -50,16 +54,26 @@ export async function GET(req: NextRequest) {
       });
       break;
     }
+    // Page through this client with id cursors so unmappable-lane leads
+    // (e.g. B2C when only B2B is mapped) are scanned-and-skipped, never jamming
+    // the window. Bounded per tick by pages, attach count, and the soft budget.
+    let seqAfterId = 0, repAfterId = 0, scanned = 0, attached = 0, buckets = 0, errors = 0;
     try {
-      const r = await runAutoPushForClient(tag);
-      summary.push({
-        tag, scanned: r.scanned, attached: r.totalAttached,
-        buckets: r.perBucket.length,
-        errors: r.perBucket.filter((b) => b.error).length + (r.error ? 1 : 0),
-      });
+      for (let page = 0; page < PER_CLIENT_PAGES; page++) {
+        if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
+        const r = await runAutoPushForClient(tag, { seqAfterId, repAfterId });
+        scanned += r.scanned;
+        attached += r.totalAttached;
+        buckets = Math.max(buckets, r.perBucket.length);
+        errors += r.perBucket.filter((b) => b.error).length + (r.error ? 1 : 0);
+        seqAfterId = r.nextSeqAfterId;
+        repAfterId = r.nextRepAfterId;
+        if (r.error || r.exhausted || attached >= PER_CLIENT_ATTACH) break;
+      }
+      summary.push({ tag, scanned, attached, buckets, errors });
     } catch (e) {
       await logError("nurture-auto-push", `fatal:${tag}`, (e as Error).message);
-      summary.push({ tag, scanned: 0, attached: 0, buckets: 0, errors: 1 });
+      summary.push({ tag, scanned, attached, buckets, errors: errors + 1 });
     }
   }
 

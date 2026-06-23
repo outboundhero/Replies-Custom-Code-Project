@@ -29,17 +29,20 @@ export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
 
-  let body: { clientTag?: string; cap?: number };
+  let body: { clientTag?: string; cap?: number; seqAfterId?: number; repAfterId?: number };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
   const clientTag = (body.clientTag || "").trim().toUpperCase();
   if (!clientTag) return NextResponse.json({ error: "clientTag required" }, { status: 400 });
   const cap = Math.min(MAX_CAP, Math.max(1, Number(body.cap) || MAX_CAP));
+  const seqAfterId = Math.max(0, Number(body.seqAfterId) || 0);
+  const repAfterId = Math.max(0, Number(body.repAfterId) || 0);
 
   try {
-    const result = await runAutoPushForClient(clientTag, { cap });
-    // done when this batch found nothing left to route.
-    return NextResponse.json({ ...result, batchCap: cap, done: result.scanned === 0 });
+    const result = await runAutoPushForClient(clientTag, { cap, seqAfterId, repAfterId });
+    // done when this page scanned nothing left (cursor past the whole pool).
+    // The caller pages with nextSeqAfterId / nextRepAfterId until done.
+    return NextResponse.json({ ...result, batchCap: cap, done: result.exhausted });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }

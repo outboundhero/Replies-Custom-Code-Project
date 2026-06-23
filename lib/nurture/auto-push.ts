@@ -67,18 +67,28 @@ export interface AutoPushResult {
   scanned: number;
   perBucket: BucketResult[];
   totalAttached: number;
+  // Id cursors so the caller can page through the ENTIRE pool without the
+  // head-of-line block that unmappable-lane leads (e.g. B2C when only B2B is
+  // mapped) used to cause: those rows keep added_at=null and, ordered oldest-
+  // first, would jam the window forever. The cursor advances past everything
+  // scanned, mappable or not.
+  nextSeqAfterId: number;
+  nextRepAfterId: number;
+  exhausted: boolean; // no rows scanned this batch from either source
   error?: string;
 }
 
 export async function runAutoPushForClient(
   clientTag: string,
-  opts: { cap?: number } = {},
+  opts: { cap?: number; seqAfterId?: number; repAfterId?: number } = {},
 ): Promise<AutoPushResult> {
   // Cron uses the conservative PER_CLIENT_CAP safety belt; the on-demand
   // "Route all ready" action passes a larger cap and loops until drained.
   const cap = Math.max(1, opts.cap ?? PER_CLIENT_CAP);
+  const seqAfterId = Math.max(0, opts.seqAfterId ?? 0);
+  const repAfterId = Math.max(0, opts.repAfterId ?? 0);
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0 };
+  const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0, nextSeqAfterId: seqAfterId, nextRepAfterId: repAfterId, exhausted: true };
 
   // GATE 1: the operator must have confirmed this client's target-campaign map.
   // Nothing is auto-picked — we send ONLY to campaigns chosen in the map.
@@ -108,14 +118,19 @@ export async function runAutoPushForClient(
     .not("skipped", "is", true)
     .not("esp", "is", null)
     .lte("sequence_finished_at", cutoffIso)
-    .order("sequence_finished_at", { ascending: true })
+    .gt("id", seqAfterId)
+    .order("id", { ascending: true })
     .limit(cap);
   if (seqErr) {
     result.error = `seq fetch failed: ${seqErr.message}`;
     return result;
   }
+  // Advance the seq cursor past everything scanned (mappable or not).
+  if (seqRows && seqRows.length) result.nextSeqAfterId = Math.max(...seqRows.map((r) => r.id as number));
 
   // 2. Pull eligible reply-based candidates (soft_negative + OOO, safe).
+  // Only after the seq source is drained for this page (remaining budget),
+  // paged by its own id cursor.
   const remaining = Math.max(0, cap - (seqRows?.length ?? 0));
   let replyRows: Array<{ id: number; lead_id: number | null; bison_instance: string | null; lead_email: string; esp: string | null; first_name: string | null; last_name: string | null; company_name: string | null }> = [];
   if (remaining > 0) {
@@ -130,17 +145,21 @@ export async function runAutoPushForClient(
       .not("reply_we_got", "is", null).neq("reply_we_got", "")
       .not("reply_time", "is", null)
       .lte("reply_time", cutoffIso)
+      .gt("id", repAfterId)
       .or(
         `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
       )
-      .order("reply_time", { ascending: true })
+      .order("id", { ascending: true })
       .limit(remaining);
     if (error) {
       result.error = `replies fetch failed: ${error.message}`;
       return result;
     }
     replyRows = (data || []) as typeof replyRows;
+    if (replyRows.length) result.nextRepAfterId = Math.max(...replyRows.map((r) => r.id));
   }
+  // Exhausted when neither source returned a row this page.
+  result.exhausted = (seqRows?.length ?? 0) === 0 && replyRows.length === 0;
 
   // 3. Normalise into Candidate[] with computed esp bucket + lane/instance.
   //    lane = personal email → B2C instance, else B2B instance (by group).

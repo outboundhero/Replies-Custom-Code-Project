@@ -1041,24 +1041,31 @@ export default function NurturePage() {
   // server reports nothing left. Returns a summary; callers render the UI.
   async function drainRouteAll(onProgress?: (routed: number, batches: number) => void): Promise<{ routed: number; batches: number; stopped: boolean; errored: boolean; bucketErrs: string[] }> {
     let routed = 0, batches = 0; let stopped = false, errored = false; let bucketErrs: string[] = [];
-    const SAFETY_MAX_BATCHES = 200; // 200 × 800 = 160k hard stop
+    // Id cursors page through the ENTIRE eligible pool. Unmappable-lane leads
+    // (e.g. B2C when only B2B is mapped) are scanned and passed over — the
+    // cursor advances past them so they never block newer mappable leads.
+    let seqAfterId = 0, repAfterId = 0;
+    const SAFETY_MAX_BATCHES = 1000;
     try {
       for (;;) {
         if (routeAllAbortRef.current) { stopped = true; break; }
         if (batches >= SAFETY_MAX_BATCHES) { stopped = true; break; }
         const res = await fetch("/api/nurture/route-all", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientTag: clientFilter }),
+          body: JSON.stringify({ clientTag: clientFilter, seqAfterId, repAfterId }),
         });
         if (res.redirected || res.status === 401) { window.location.href = "/login"; errored = true; break; }
         const data = await res.json();
         if (!res.ok) { errored = true; bucketErrs = [data.error || `HTTP ${res.status}`]; break; }
         batches++;
         routed += data.totalAttached || 0;
+        seqAfterId = data.nextSeqAfterId ?? seqAfterId;
+        repAfterId = data.nextRepAfterId ?? repAfterId;
         onProgress?.(routed, batches);
+        // Keep the latest bucket errors for messaging, but DON'T stop on them —
+        // a batch of unmappable leads is expected; we page past it.
         bucketErrs = (data.perBucket || []).filter((b: { error?: string }) => b.error).map((b: { esp: string; error: string }) => `${b.esp}: ${b.error}`);
-        if (data.done) break;
-        if ((data.totalAttached || 0) === 0 && bucketErrs.length) { stopped = true; break; } // stuck on missing campaigns
+        if (data.done) break; // scanned the whole pool
       }
     } catch (e) { errored = true; bucketErrs = [(e as Error).message]; }
     return { routed, batches, stopped, errored, bucketErrs };
@@ -1977,7 +1984,7 @@ function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: 
             <div className="ml-6 space-y-1">
               {attach.rows.map((r, i) => (
                 <div key={i} className="flex items-center gap-2 text-xs">
-                  <span className="uppercase font-semibold text-muted-foreground w-12 shrink-0">{r.esp}</span>
+                  <span className="uppercase font-semibold text-muted-foreground w-16 shrink-0">{r.esp}</span>
                   <InstanceBadge instance={r.instance} size="xs" />
                   {r.error
                     ? <span className="text-rose-600">{r.error}</span>
@@ -2011,7 +2018,7 @@ function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: 
             <div className="ml-6 space-y-1">
               {activate.rows.map((r, i) => (
                 <div key={i} className="flex items-center gap-2 text-xs">
-                  <span className="uppercase font-semibold text-muted-foreground w-12 shrink-0">{r.esp}</span>
+                  <span className="uppercase font-semibold text-muted-foreground w-16 shrink-0">{r.esp}</span>
                   <InstanceBadge instance={r.instance} size="xs" />
                   {r.activated
                     ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3" /> activated</span>
