@@ -897,31 +897,45 @@ export interface CampaignSenderInbox { id: number; email: string; type: string; 
  */
 export async function getCampaignSenderEmails(instanceKey: string, campaignId: number): Promise<CampaignSenderInbox[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
+  const MAX_PAGES = 600;     // 600 × 15 = 9,000 inboxes ceiling
+  const CONCURRENCY = 8;     // parallelise the page sweep — 15/page is tiny, latency dominates
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  type Row = { id?: number; email?: string; type?: string; status?: string; tags?: Array<{ name?: string }> };
+  async function fetchPage(page: number): Promise<{ rows: Row[]; lastPage: number }> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const res = await fetchWithTimeout(
+        `${baseUrl}/api/campaigns/${campaignId}/sender-emails?page=${page}`,
+        { headers, timeoutMs: 20_000 },
+      );
+      if (res.status === 429) { await sleep(1200 * (attempt + 1)); continue; } // shared-token throttle
+      if (!res.ok) return { rows: [], lastPage: page };
+      const body = await res.json().catch(() => null);
+      return { rows: (body?.data ?? []) as Row[], lastPage: Number(body?.meta?.last_page) || page };
+    }
+    return { rows: [], lastPage: page };
+  }
+
   const out: CampaignSenderInbox[] = [];
   const seen = new Set<number>();
-  const MAX_PAGES = 400; // 400 × 15 = 6,000 inboxes ceiling
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    let res: Response | null = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      res = await fetchWithTimeout(
-        `${baseUrl}/api/campaigns/${campaignId}/sender-emails?page=${page}`,
-        { headers: buildHeaders(token) },
-      );
-      if (res.status !== 429) break;
-      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); // backoff on shared-token throttle
-    }
-    if (!res || !res.ok) break;
-    const body = await res.json().catch(() => null);
-    const rows: Array<{ id?: number; email?: string; type?: string; status?: string; tags?: Array<{ name?: string }> }> = body?.data ?? [];
+  const collect = (rows: Row[]) => {
     for (const r of rows) {
       if (typeof r.id === "number" && !seen.has(r.id)) {
         seen.add(r.id);
         out.push({ id: r.id, email: String(r.email ?? ""), type: String(r.type ?? ""), status: String(r.status ?? ""), tags: (r.tags ?? []).map((t) => String(t?.name ?? "")) });
       }
     }
-    const lastPage = Number(body?.meta?.last_page);
-    if (rows.length === 0 || (Number.isFinite(lastPage) && page >= lastPage)) break;
-    if (rows.length < 15) break; // short page → no more
+  };
+
+  // Page 1 tells us how many pages there are; fetch the rest concurrently.
+  const first = await fetchPage(1);
+  collect(first.rows);
+  const lastPage = Math.min(first.lastPage, MAX_PAGES);
+  if (lastPage > 1) {
+    let next = 2;
+    const worker = async () => { while (next <= lastPage) { const p = next++; collect((await fetchPage(p)).rows); } };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, lastPage - 1) }, worker));
   }
   return out;
 }

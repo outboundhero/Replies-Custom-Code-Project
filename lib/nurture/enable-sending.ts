@@ -58,12 +58,16 @@ export async function attachInboxesForClient(clientTag: string): Promise<AttachR
     try {
       const pool = await getCampaignSenderEmails(e.bison_instance, e.campaign_id);
       row.poolTotal = pool.length;
-      const ids = pool.filter((ib) => inboxEsp(ib) === e.esp).map((ib) => ib.id);
+      // Only CONNECTED inboxes of this campaign's ESP — a disconnected inbox
+      // can't send, so attaching it is noise.
+      const ids = pool
+        .filter((ib) => inboxEsp(ib) === e.esp && ib.status.toLowerCase() === "connected")
+        .map((ib) => ib.id);
       row.matchedForEsp = ids.length;
       if (ids.length === 0) {
         row.error = pool.length === 0
           ? "no tagged inbox pool returned for this campaign"
-          : `no ${e.esp} inboxes in this campaign's tagged pool`;
+          : `no connected ${e.esp} inboxes in this campaign's tagged pool`;
       } else {
         let attached = 0; let ok = true;
         for (let i = 0; i < ids.length; i += ATTACH_CHUNK) {

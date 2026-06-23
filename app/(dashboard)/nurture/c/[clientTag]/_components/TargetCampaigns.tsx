@@ -123,34 +123,11 @@ export default function TargetCampaigns({
       setDirty(false);
       if (!confirm) { toast.success("Saved (not confirmed — sending stays disabled)."); return; }
 
-      // CONFIRM path: attach the client's tagged inboxes (ESP-split) to each
-      // campaign, then hand off to the parent which routes ready leads and
-      // finally activates the campaigns (attach → route → activate).
-      toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"}.`);
-      const attachingToast = toast.loading("Attaching the client's inboxes to each campaign…");
-      try {
-        const er = await fetch("/api/nurture/enable-sending", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientTag, phase: "attach" }),
-        });
-        const ed = await er.json();
-        toast.dismiss(attachingToast);
-        if (!er.ok) {
-          toast.error(ed.error || "Couldn't attach inboxes");
-          return; // don't proceed to route/activate if inbox attach failed outright
-        }
-        const attached = ed.totalAttached ?? 0;
-        const errs = (ed.campaigns || []).filter((c: { error?: string }) => c.error);
-        toast.success(`Attached ${attached} inbox${attached === 1 ? "" : "es"} across mapped campaigns. Routing ready leads…`);
-        if (errs.length) {
-          toast.warning(errs.map((c: { esp: string; instance: string; error: string }) => `${c.instance}/${c.esp}: ${c.error}`).join(" · "), { duration: 10000 });
-        }
-        // Parent: route all ready leads, then activate the campaigns.
-        onSendingEnabled?.();
-      } catch (e) {
-        toast.dismiss(attachingToast);
-        toast.error((e as Error).message);
-      }
+      // CONFIRM path: map saved + confirmed. Hand off to the parent, which runs
+      // the full attach inboxes → route ready leads → activate flow and shows a
+      // persistent progress panel.
+      toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — enabling sending…`);
+      onSendingEnabled?.();
     } finally { setSaving(false); }
   }
 

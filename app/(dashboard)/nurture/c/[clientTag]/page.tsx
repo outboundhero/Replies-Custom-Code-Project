@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search, ArrowLeft } from "lucide-react";
+import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search, ArrowLeft, X, Rocket, CheckCircle2, AlertCircle, Loader2, Circle } from "lucide-react";
 import { toast } from "sonner";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
@@ -121,6 +121,17 @@ function viewToFilters(view: View): { status: string; safety: string } {
   }
 }
 
+// ── "Confirm & enable sending" progress model (persistent panel) ────────────
+type EnablePhaseStatus = "pending" | "running" | "done" | "error";
+interface EnableAttachRow { instance: string; esp: string; campaign: string | null; pool: number; matched: number; attached: number; error?: string }
+interface EnableActivateRow { instance: string; esp: string; campaign: string | null; activated: boolean; error?: string }
+interface EnableSendingState {
+  clientTag: string;
+  attach: { status: EnablePhaseStatus; rows: EnableAttachRow[]; total: number };
+  route: { status: EnablePhaseStatus; routed: number; batches: number };
+  activate: { status: EnablePhaseStatus; rows: EnableActivateRow[]; total: number };
+}
+
 export default function NurturePage() {
   // URL param locks this page to a single client tag. All queries below
   // are automatically scoped to it because clientFilter is initialised
@@ -196,6 +207,9 @@ export default function NurturePage() {
   const routeAllAbortRef = useRef(false);
   // Target-campaign map confirmation — gates all sending (must pick campaigns first).
   const [mapConfirmedAt, setMapConfirmedAt] = useState<string | null>(null);
+  // Persistent "Confirm & enable sending" progress (attach → route → activate).
+  // Stays on screen until the operator dismisses it (no auto-hide).
+  const [enableProgress, setEnableProgress] = useState<EnableSendingState | null>(null);
   // Per-client auto-nurture state. Loaded once for the current
   // clientFilter via /api/config/clients/[tag]. Flipped automatically
   // after a successful Auto-route push (the operator clicks ONE button
@@ -1023,74 +1037,97 @@ export default function NurturePage() {
     setPushing(false);
   }
 
-  // Route the client's ENTIRE ESP-resolved ready pool, server-side, batch by
-  // batch — independent of what's selected or rendered. Loops the route-all
-  // endpoint (each call routes up to ~800) until it reports nothing left.
+  // Core route-all drain loop: keeps firing /route-all (≤800/batch) until the
+  // server reports nothing left. Returns a summary; callers render the UI.
+  async function drainRouteAll(onProgress?: (routed: number, batches: number) => void): Promise<{ routed: number; batches: number; stopped: boolean; errored: boolean; bucketErrs: string[] }> {
+    let routed = 0, batches = 0; let stopped = false, errored = false; let bucketErrs: string[] = [];
+    const SAFETY_MAX_BATCHES = 200; // 200 × 800 = 160k hard stop
+    try {
+      for (;;) {
+        if (routeAllAbortRef.current) { stopped = true; break; }
+        if (batches >= SAFETY_MAX_BATCHES) { stopped = true; break; }
+        const res = await fetch("/api/nurture/route-all", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTag: clientFilter }),
+        });
+        if (res.redirected || res.status === 401) { window.location.href = "/login"; errored = true; break; }
+        const data = await res.json();
+        if (!res.ok) { errored = true; bucketErrs = [data.error || `HTTP ${res.status}`]; break; }
+        batches++;
+        routed += data.totalAttached || 0;
+        onProgress?.(routed, batches);
+        bucketErrs = (data.perBucket || []).filter((b: { error?: string }) => b.error).map((b: { esp: string; error: string }) => `${b.esp}: ${b.error}`);
+        if (data.done) break;
+        if ((data.totalAttached || 0) === 0 && bucketErrs.length) { stopped = true; break; } // stuck on missing campaigns
+      }
+    } catch (e) { errored = true; bucketErrs = [(e as Error).message]; }
+    return { routed, batches, stopped, errored, bucketErrs };
+  }
+
+  // Standalone "Route all ready" button — drains with toasts.
   async function routeAllReady() {
     if (!clientFilter) return;
     if (routingAll) { routeAllAbortRef.current = true; return; } // click again = stop
     routeAllAbortRef.current = false;
     setRoutingAll(true);
     setRouteAllProgress({ routed: 0, batches: 0 });
-    let totalRouted = 0, batches = 0;
-    const SAFETY_MAX_BATCHES = 200; // 200 × 800 = 160k hard stop
-    try {
-      for (;;) {
-        if (routeAllAbortRef.current) { toast.info(`Stopped — routed ${totalRouted.toLocaleString()} so far.`); break; }
-        if (batches >= SAFETY_MAX_BATCHES) { toast.warning(`Reached safety limit after routing ${totalRouted.toLocaleString()}.`); break; }
-        const res = await fetch("/api/nurture/route-all", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientTag: clientFilter }),
-        });
-        if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
-        const data = await res.json();
-        if (!res.ok) { toast.error(data.error || `Route-all failed (HTTP ${res.status})`); break; }
-        batches++;
-        totalRouted += data.totalAttached || 0;
-        setRouteAllProgress({ routed: totalRouted, batches });
-        // Surface per-bucket campaign-missing errors once so the operator knows.
-        const bucketErrs = (data.perBucket || []).filter((b: { error?: string }) => b.error);
-        if (data.done) {
-          if (totalRouted === 0 && bucketErrs.length) {
-            toast.error(`Couldn't route — ${bucketErrs.map((b: { esp: string; error: string }) => `${b.esp}: ${b.error}`).join("; ")}`);
-          } else {
-            toast.success(`Routed ${totalRouted.toLocaleString()} ready lead${totalRouted === 1 ? "" : "s"} into ${clientFilter}'s nurture campaigns.`);
-            if (totalRouted > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(clientFilter, true);
-          }
-          break;
-        }
-        if ((data.totalAttached || 0) === 0 && bucketErrs.length) {
-          // Scanned leads but attached none and have bucket errors → stuck (missing campaigns). Stop.
-          toast.error(`Stopped — ${bucketErrs.map((b: { esp: string; error: string }) => `${b.esp}: ${b.error}`).join("; ")}`);
-          break;
-        }
-      }
-    } catch (e) {
-      toast.error((e as Error).message);
+    const r = await drainRouteAll((routed, batches) => setRouteAllProgress({ routed, batches }));
+    if (r.errored) toast.error(r.bucketErrs[0] || "Route-all failed");
+    else if (r.stopped && r.routed === 0 && r.bucketErrs.length) toast.error(`Couldn't route — ${r.bucketErrs.join("; ")}`);
+    else if (r.stopped) toast.info(`Stopped — routed ${r.routed.toLocaleString()} so far.`);
+    else {
+      toast.success(`Routed ${r.routed.toLocaleString()} ready lead${r.routed === 1 ? "" : "s"} into ${clientFilter}'s nurture campaigns.`);
+      if (r.routed > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(clientFilter, true);
     }
     setRoutingAll(false);
     void Promise.all([loadPage(true, false), loadCounts(true)]);
   }
 
-  // Hand-off from Target Campaigns "Confirm & enable sending": inboxes have
-  // already been attached, so route every ready lead into the campaigns, then
-  // activate them (attach → route → activate).
+  // Full "Confirm & enable sending" hand-off (attach inboxes → route ready
+  // leads → activate). Drives the persistent EnableSendingProgress panel; the
+  // map was already confirmed by TargetCampaigns before calling this.
   async function enableSendingFlow() {
     if (!clientFilter) return;
-    await routeAllReady();
+    const tag = clientFilter;
+    setEnableProgress({
+      clientTag: tag,
+      attach: { status: "running", rows: [], total: 0 },
+      route: { status: "pending", routed: 0, batches: 0 },
+      activate: { status: "pending", rows: [], total: 0 },
+    });
+
+    // 1) ATTACH inboxes (ESP-split) to each mapped campaign.
     try {
       const res = await fetch("/api/nurture/enable-sending", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientTag: clientFilter, phase: "activate" }),
+        body: JSON.stringify({ clientTag: tag, phase: "attach" }),
       });
       const d = await res.json();
-      if (!res.ok) { toast.error(d.error || "Couldn't activate campaigns"); return; }
-      const n = d.totalActivated ?? 0;
-      const errs = (d.campaigns || []).filter((c: { error?: string }) => c.error);
-      if (n > 0) toast.success(`Activated ${n} campaign${n === 1 ? "" : "s"} — sending is live.`);
-      else toast.warning("No campaigns activated — check inbox attach / campaign status.");
-      if (errs.length) toast.warning(errs.map((c: { instance: string; esp: string; error: string }) => `${c.instance}/${c.esp}: ${c.error}`).join(" · "), { duration: 10000 });
-    } catch (e) { toast.error((e as Error).message); }
+      if (!res.ok) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error(d.error || "Inbox attach failed"); return; }
+      const rows: EnableAttachRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; poolTotal: number; matchedForEsp: number; attached: number; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, matched: c.matchedForEsp, attached: c.attached, error: c.error }));
+      setEnableProgress((p) => p && { ...p, attach: { status: "done", rows, total: d.totalAttached || 0 }, route: { ...p.route, status: "running" } });
+    } catch (e) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error((e as Error).message); return; }
+
+    // 2) ROUTE all ready leads (by ESP + B2B/B2C lane).
+    routeAllAbortRef.current = false;
+    setRoutingAll(true);
+    const r = await drainRouteAll((routed, batches) => setEnableProgress((p) => p && { ...p, route: { status: "running", routed, batches } }));
+    setRoutingAll(false);
+    setEnableProgress((p) => p && { ...p, route: { status: r.errored ? "error" : "done", routed: r.routed, batches: r.batches }, activate: { ...p.activate, status: "running" } });
+    void Promise.all([loadPage(true, false), loadCounts(true)]);
+
+    // 3) ACTIVATE the campaigns.
+    try {
+      const res = await fetch("/api/nurture/enable-sending", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientTag: tag, phase: "activate" }),
+      });
+      const d = await res.json();
+      if (!res.ok) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error(d.error || "Activate failed"); return; }
+      const rows: EnableActivateRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; activated: boolean; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, activated: c.activated, error: c.error }));
+      setEnableProgress((p) => p && { ...p, activate: { status: "done", rows, total: d.totalActivated || 0 } });
+      if ((d.totalActivated || 0) > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(tag, true);
+    } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
   }
 
   async function pushSelected() {
@@ -1338,6 +1375,16 @@ export default function NurturePage() {
       {/* ── Target campaigns — operator picks destinations; gates sending ── */}
       {clientFilter && (
         <TargetCampaigns clientTag={clientFilter} campaigns={campaigns} onConfirmedChange={setMapConfirmedAt} onSendingEnabled={enableSendingFlow} />
+      )}
+
+      {/* ── Enable-sending progress (persistent until dismissed) ── */}
+      {enableProgress && (
+        <EnableSendingProgress
+          progress={enableProgress}
+          routing={routingAll}
+          onStopRouting={() => { routeAllAbortRef.current = true; }}
+          onDismiss={() => setEnableProgress(null)}
+        />
       )}
 
       {/* ── Classify progress banner (visible while classify-loop is active) ── */}
@@ -1880,6 +1927,99 @@ export default function NurturePage() {
 
       {/* ── Push result modal ── */}
       <PushResultDialog result={pushResult} onClose={() => setPushResult(null)} />
+    </div>
+  );
+}
+
+function EnablePhaseIcon({ status }: { status: EnablePhaseStatus }) {
+  if (status === "running") return <Loader2 className="size-4 animate-spin text-sky-600" />;
+  if (status === "done") return <CheckCircle2 className="size-4 text-emerald-600" />;
+  if (status === "error") return <AlertCircle className="size-4 text-rose-600" />;
+  return <Circle className="size-4 text-muted-foreground/40" />;
+}
+
+/**
+ * Persistent progress panel for "Confirm & enable sending" — shows the three
+ * phases (attach inboxes → route ready leads → activate) with per-campaign
+ * detail. Stays on screen until the operator dismisses it with the ✕.
+ */
+function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: {
+  progress: EnableSendingState;
+  routing: boolean;
+  onStopRouting: () => void;
+  onDismiss: () => void;
+}) {
+  const { attach, route, activate } = progress;
+  const allDone = attach.status === "done" && route.status === "done" && activate.status === "done";
+  const anyError = [attach.status, route.status, activate.status].includes("error")
+    || attach.rows.some((r) => r.error) || activate.rows.some((r) => r.error);
+  return (
+    <div className="rounded-lg border bg-card shadow-sm overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b">
+        <div className="flex items-center gap-2">
+          <Rocket className={`size-4 ${allDone ? "text-emerald-600" : anyError ? "text-amber-600" : "text-sky-600"}`} />
+          <span className="text-sm font-semibold">Enabling sending — <span className="font-mono">{progress.clientTag}</span></span>
+          {allDone && <span className="text-[11px] font-medium text-emerald-700">— all steps complete</span>}
+        </div>
+        <button onClick={onDismiss} title="Dismiss" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground">
+          <X className="size-4" />
+        </button>
+      </div>
+      <div className="p-4 space-y-4 text-sm">
+        {/* 1. Attach inboxes */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <EnablePhaseIcon status={attach.status} />
+            <span className="font-medium">1. Attach inboxes</span>
+            {attach.status !== "pending" && <span className="text-xs text-muted-foreground"><span className="text-emerald-700 font-medium">{attach.total.toLocaleString()}</span> attached</span>}
+          </div>
+          {attach.rows.length > 0 && (
+            <div className="ml-6 space-y-1">
+              {attach.rows.map((r, i) => (
+                <div key={i} className="flex items-center gap-2 text-xs">
+                  <span className="uppercase font-semibold text-muted-foreground w-12 shrink-0">{r.esp}</span>
+                  <InstanceBadge instance={r.instance} size="xs" />
+                  {r.error
+                    ? <span className="text-rose-600">{r.error}</span>
+                    : <span className="text-muted-foreground"><span className="text-emerald-700 font-medium">{r.attached.toLocaleString()}</span> inbox{r.attached === 1 ? "" : "es"} attached{r.matched !== r.attached ? ` of ${r.matched.toLocaleString()} matched` : ""} <span className="text-muted-foreground/60">· pool {r.pool.toLocaleString()}</span></span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        {/* 2. Route ready leads */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <EnablePhaseIcon status={route.status} />
+            <span className="font-medium">2. Route ready leads</span>
+            {route.status !== "pending" && <span className="text-xs text-muted-foreground"><span className="text-emerald-700 font-medium">{route.routed.toLocaleString()}</span> pushed{route.batches ? ` · ${route.batches} batch${route.batches === 1 ? "" : "es"}` : ""}</span>}
+            {routing && route.status === "running" && (
+              <button onClick={onStopRouting} className="ml-auto text-[11px] rounded border px-2 py-0.5 hover:bg-muted">Stop</button>
+            )}
+          </div>
+        </div>
+        {/* 3. Activate campaigns */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <EnablePhaseIcon status={activate.status} />
+            <span className="font-medium">3. Activate campaigns</span>
+            {(activate.status === "done" || activate.status === "error") && <span className="text-xs text-muted-foreground"><span className="text-emerald-700 font-medium">{activate.total}</span> activated</span>}
+          </div>
+          {activate.rows.length > 0 && (
+            <div className="ml-6 space-y-1">
+              {activate.rows.map((r, i) => (
+                <div key={i} className="flex items-center gap-2 text-xs">
+                  <span className="uppercase font-semibold text-muted-foreground w-12 shrink-0">{r.esp}</span>
+                  <InstanceBadge instance={r.instance} size="xs" />
+                  {r.activated
+                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3" /> activated</span>
+                    : <span className="text-rose-600">{r.error || "not activated"}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
