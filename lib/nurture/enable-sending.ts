@@ -103,7 +103,7 @@ export async function attachInboxesForClient(clientTag: string): Promise<AttachR
 
 export interface ActivateResult {
   clientTag: string;
-  campaigns: Array<{ instance: string; esp: Esp; campaignId: number; campaignName: string | null; activated: boolean; error?: string }>;
+  campaigns: Array<{ instance: string; esp: Esp; campaignId: number; campaignName: string | null; activated: boolean; alreadyActive: boolean; error?: string }>;
   totalActivated: number; error?: string;
 }
 
@@ -117,12 +117,21 @@ export async function activateMappedCampaigns(clientTag: string): Promise<Activa
   if (map.length === 0) { result.error = "no campaigns mapped"; return result; }
 
   for (const e of map) {
-    const row = { instance: e.bison_instance, esp: e.esp, campaignId: e.campaign_id, campaignName: e.campaign_name, activated: false as boolean, error: undefined as string | undefined };
+    const row = { instance: e.bison_instance, esp: e.esp, campaignId: e.campaign_id, campaignName: e.campaign_name, activated: false as boolean, alreadyActive: false as boolean, error: undefined as string | undefined };
     try {
       const r = await resumeCampaign(e.bison_instance, e.campaign_id);
-      row.activated = r.ok;
-      if (r.ok) result.totalActivated++;
-      else row.error = `activate failed: ${r.error}`;
+      if (r.ok) {
+        row.activated = true;
+        result.totalActivated++;
+      } else if (/not paused|already (active|running|launched)|only paused or draft/i.test(`${r.error ?? ""} ${JSON.stringify(r.raw ?? "")}`)) {
+        // Bison 400 "This campaign is not paused…" = it's already live. Not an
+        // error — count it as active.
+        row.activated = true;
+        row.alreadyActive = true;
+        result.totalActivated++;
+      } else {
+        row.error = `activate failed: ${r.error}`;
+      }
     } catch (err) {
       row.error = (err as Error).message;
       await logError("nurture-enable-sending", `${TAG}/${e.bison_instance}/${e.esp}/activate`, row.error);

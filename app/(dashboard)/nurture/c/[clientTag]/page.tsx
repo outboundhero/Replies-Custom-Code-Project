@@ -124,7 +124,7 @@ function viewToFilters(view: View): { status: string; safety: string } {
 // ── "Confirm & enable sending" progress model (persistent panel) ────────────
 type EnablePhaseStatus = "pending" | "running" | "done" | "error";
 interface EnableAttachRow { instance: string; esp: string; campaign: string | null; pool: number; connected: number; attached: number; alreadyPresent: number; error?: string }
-interface EnableActivateRow { instance: string; esp: string; campaign: string | null; activated: boolean; error?: string }
+interface EnableActivateRow { instance: string; esp: string; campaign: string | null; activated: boolean; alreadyActive: boolean; error?: string }
 interface EnableSendingState {
   clientTag: string;
   attach: { status: EnablePhaseStatus; rows: EnableAttachRow[]; total: number };
@@ -1131,7 +1131,7 @@ export default function NurturePage() {
       });
       const d = await res.json();
       if (!res.ok) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error(d.error || "Activate failed"); return; }
-      const rows: EnableActivateRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; activated: boolean; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, activated: c.activated, error: c.error }));
+      const rows: EnableActivateRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; activated: boolean; alreadyActive: boolean; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, activated: c.activated, alreadyActive: c.alreadyActive, error: c.error }));
       setEnableProgress((p) => p && { ...p, activate: { status: "done", rows, total: d.totalActivated || 0 } });
       if ((d.totalActivated || 0) > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(tag, true);
     } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
@@ -2021,7 +2021,7 @@ function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: 
                   <span className="uppercase font-semibold text-muted-foreground w-16 shrink-0">{r.esp}</span>
                   <InstanceBadge instance={r.instance} size="xs" />
                   {r.activated
-                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3" /> activated</span>
+                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3" /> {r.alreadyActive ? "already live" : "activated"}</span>
                     : <span className="text-rose-600">{r.error || "not activated"}</span>}
                 </div>
               ))}
