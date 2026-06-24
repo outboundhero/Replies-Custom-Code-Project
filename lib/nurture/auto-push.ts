@@ -37,7 +37,7 @@ const EXCLUDED_AI_CATEGORIES = [
 ];
 
 interface Candidate {
-  source: "seq" | "reply";
+  source: "seq" | "reply" | "legacy";
   rowId: number;
   email: string;
   esp: Esp;
@@ -74,21 +74,23 @@ export interface AutoPushResult {
   // scanned, mappable or not.
   nextSeqAfterId: number;
   nextRepAfterId: number;
-  exhausted: boolean; // no rows scanned this batch from either source
+  nextLegAfterId: number;
+  exhausted: boolean; // no rows scanned this batch from any source
   error?: string;
 }
 
 export async function runAutoPushForClient(
   clientTag: string,
-  opts: { cap?: number; seqAfterId?: number; repAfterId?: number } = {},
+  opts: { cap?: number; seqAfterId?: number; repAfterId?: number; legAfterId?: number } = {},
 ): Promise<AutoPushResult> {
   // Cron uses the conservative PER_CLIENT_CAP safety belt; the on-demand
   // "Route all ready" action passes a larger cap and loops until drained.
   const cap = Math.max(1, opts.cap ?? PER_CLIENT_CAP);
   const seqAfterId = Math.max(0, opts.seqAfterId ?? 0);
   const repAfterId = Math.max(0, opts.repAfterId ?? 0);
+  const legAfterId = Math.max(0, opts.legAfterId ?? 0);
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0, nextSeqAfterId: seqAfterId, nextRepAfterId: repAfterId, exhausted: true };
+  const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0, nextSeqAfterId: seqAfterId, nextRepAfterId: repAfterId, nextLegAfterId: legAfterId, exhausted: true };
 
   // GATE 1: the operator must have confirmed this client's target-campaign map.
   // Nothing is auto-picked — we send ONLY to campaigns chosen in the map.
@@ -158,8 +160,41 @@ export async function runAutoPushForClient(
     replyRows = (data || []) as typeof replyRows;
     if (replyRows.length) result.nextRepAfterId = Math.max(...replyRows.map((r) => r.id));
   }
-  // Exhausted when neither source returned a row this page.
-  result.exhausted = (seqRows?.length ?? 0) === 0 && replyRows.length === 0;
+
+  // 2b. Pull eligible legacy candidates (historical Airtable-imported
+  // soft_negative + OOO leads), after seq + replies for this page. Same
+  // eligibility shape as replies; legacy has no bison_instance column, so
+  // sourceInstance is null and the lead is resolved/created in the target
+  // instance like any cross-instance lead.
+  const remainingLeg = Math.max(0, remaining - replyRows.length);
+  let legacyRows: Array<{ id: number; ob_lead_id: number | null; lead_email: string; esp: string | null; first_name: string | null; last_name: string | null; company: string | null }> = [];
+  if (remainingLeg > 0) {
+    const { data, error } = await supabase
+      .from("nurture_legacy_leads")
+      .select("id, ob_lead_id, lead_email, esp, first_name, last_name, company")
+      .eq("client_tag", clientTag)
+      .eq("nurture_safety", "safe")
+      .is("nurture_added_at", null)
+      .not("nurture_skipped", "is", true)
+      .not("esp", "is", null) // confirmed-ESP only — see seq query above
+      .not("reply_at", "is", null)
+      .lte("reply_at", cutoffIso)
+      .gt("id", legAfterId)
+      .or(
+        `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
+      )
+      .order("id", { ascending: true })
+      .limit(remainingLeg);
+    if (error) {
+      result.error = `legacy fetch failed: ${error.message}`;
+      return result;
+    }
+    legacyRows = (data || []) as typeof legacyRows;
+    if (legacyRows.length) result.nextLegAfterId = Math.max(...legacyRows.map((r) => r.id));
+  }
+
+  // Exhausted when no source returned a row this page.
+  result.exhausted = (seqRows?.length ?? 0) === 0 && replyRows.length === 0 && legacyRows.length === 0;
 
   // 3. Normalise into Candidate[] with computed esp bucket + lane/instance.
   //    lane = personal email → B2C instance, else B2B instance (by group).
@@ -191,6 +226,21 @@ export async function runAutoPushForClient(
       company: r.company_name ?? null,
       obLeadId: r.lead_id ?? null,
       sourceInstance: r.bison_instance ?? null,
+      custom_variables: [],
+      lane, instance: instances[lane],
+    });
+  }
+  for (const r of legacyRows) {
+    if (!r.lead_email) continue;
+    const lane: "b2b" | "b2c" = isPersonalDomain(r.lead_email) ? "b2c" : "b2b";
+    candidates.push({
+      source: "legacy", rowId: r.id, email: r.lead_email,
+      esp: effectiveEsp(r.esp, r.lead_email),
+      first_name: r.first_name ?? null,
+      last_name: r.last_name ?? null,
+      company: r.company ?? null,
+      obLeadId: r.ob_lead_id ?? null,
+      sourceInstance: null, // legacy has no source-instance column → resolve in target
       custom_variables: [],
       lane, instance: instances[lane],
     });
@@ -312,8 +362,10 @@ export async function runAutoPushForClient(
     const stamp = new Date().toISOString();
     const seqIds = resolved.filter((i) => i.source === "seq").map((i) => i.rowId);
     const replyIds = resolved.filter((i) => i.source === "reply").map((i) => i.rowId);
+    const legacyIds = resolved.filter((i) => i.source === "legacy").map((i) => i.rowId);
     if (seqIds.length > 0) await supabase.from("nurture_sequence_finished").update({ added_at: stamp, nurture_campaign_id: target.campaign_id }).in("id", seqIds);
     if (replyIds.length > 0) await supabase.from("replies").update({ nurture_added_at: stamp, nurture_campaign_id: target.campaign_id }).in("id", replyIds);
+    if (legacyIds.length > 0) await supabase.from("nurture_legacy_leads").update({ nurture_added_at: stamp, nurture_campaign_id: target.campaign_id }).in("id", legacyIds);
 
     result.perBucket.push({
       esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },

@@ -57,17 +57,18 @@ export async function GET(req: NextRequest) {
     // Page through this client with id cursors so unmappable-lane leads
     // (e.g. B2C when only B2B is mapped) are scanned-and-skipped, never jamming
     // the window. Bounded per tick by pages, attach count, and the soft budget.
-    let seqAfterId = 0, repAfterId = 0, scanned = 0, attached = 0, buckets = 0, errors = 0;
+    let seqAfterId = 0, repAfterId = 0, legAfterId = 0, scanned = 0, attached = 0, buckets = 0, errors = 0;
     try {
       for (let page = 0; page < PER_CLIENT_PAGES; page++) {
         if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
-        const r = await runAutoPushForClient(tag, { seqAfterId, repAfterId });
+        const r = await runAutoPushForClient(tag, { seqAfterId, repAfterId, legAfterId });
         scanned += r.scanned;
         attached += r.totalAttached;
         buckets = Math.max(buckets, r.perBucket.length);
         errors += r.perBucket.filter((b) => b.error).length + (r.error ? 1 : 0);
         seqAfterId = r.nextSeqAfterId;
         repAfterId = r.nextRepAfterId;
+        legAfterId = r.nextLegAfterId;
         if (r.error || r.exhausted || attached >= PER_CLIENT_ATTACH) break;
       }
       summary.push({ tag, scanned, attached, buckets, errors });

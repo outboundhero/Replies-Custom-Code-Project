@@ -1044,7 +1044,7 @@ export default function NurturePage() {
     // Id cursors page through the ENTIRE eligible pool. Unmappable-lane leads
     // (e.g. B2C when only B2B is mapped) are scanned and passed over — the
     // cursor advances past them so they never block newer mappable leads.
-    let seqAfterId = 0, repAfterId = 0;
+    let seqAfterId = 0, repAfterId = 0, legAfterId = 0;
     const SAFETY_MAX_BATCHES = 1000;
     try {
       for (;;) {
@@ -1052,7 +1052,7 @@ export default function NurturePage() {
         if (batches >= SAFETY_MAX_BATCHES) { stopped = true; break; }
         const res = await fetch("/api/nurture/route-all", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientTag: clientFilter, seqAfterId, repAfterId }),
+          body: JSON.stringify({ clientTag: clientFilter, seqAfterId, repAfterId, legAfterId }),
         });
         if (res.redirected || res.status === 401) { window.location.href = "/login"; errored = true; break; }
         const data = await res.json();
@@ -1061,6 +1061,7 @@ export default function NurturePage() {
         routed += data.totalAttached || 0;
         seqAfterId = data.nextSeqAfterId ?? seqAfterId;
         repAfterId = data.nextRepAfterId ?? repAfterId;
+        legAfterId = data.nextLegAfterId ?? legAfterId;
         onProgress?.(routed, batches);
         // Keep the latest bucket errors for messaging, but DON'T stop on them —
         // a batch of unmappable leads is expected; we page past it.

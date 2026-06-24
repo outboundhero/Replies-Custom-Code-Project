@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
 
-  let body: { clientTag?: string; cap?: number; seqAfterId?: number; repAfterId?: number };
+  let body: { clientTag?: string; cap?: number; seqAfterId?: number; repAfterId?: number; legAfterId?: number };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
   const clientTag = (body.clientTag || "").trim().toUpperCase();
@@ -37,9 +37,10 @@ export async function POST(req: NextRequest) {
   const cap = Math.min(MAX_CAP, Math.max(1, Number(body.cap) || MAX_CAP));
   const seqAfterId = Math.max(0, Number(body.seqAfterId) || 0);
   const repAfterId = Math.max(0, Number(body.repAfterId) || 0);
+  const legAfterId = Math.max(0, Number(body.legAfterId) || 0);
 
   try {
-    const result = await runAutoPushForClient(clientTag, { cap, seqAfterId, repAfterId });
+    const result = await runAutoPushForClient(clientTag, { cap, seqAfterId, repAfterId, legAfterId });
     // done when this page scanned nothing left (cursor past the whole pool).
     // The caller pages with nextSeqAfterId / nextRepAfterId until done.
     return NextResponse.json({ ...result, batchCap: cap, done: result.exhausted });
