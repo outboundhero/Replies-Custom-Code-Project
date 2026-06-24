@@ -208,8 +208,26 @@ export async function GET(req: NextRequest) {
     // NOTE: counts are per-source raw totals. The actual list dedupes by
     // (lead_email, client_tag) across replies + legacy, so the visible row
     // count may be lower than (replyX + seqX + legacyX) when leads exist
-    // in both `replies` and `nurture_legacy_leads`. Computing a perfect
-    // deduped count would require a full anti-join — out of scope for now.
+    // in both `replies` and `nurture_legacy_leads`.
+
+    // "Added" = leads actually pushed to a campaign. The per-source COUNT(*)s
+    // over-count because one lead can have several sequence-finished rows (one
+    // per finished sequence). Bison holds one lead per email, so the accurate
+    // tile is the DISTINCT-email count across the added sources. We get that
+    // from an RPC for the per-client view; if the RPC isn't deployed yet, fall
+    // back to the raw row sum so the tile never blanks.
+    const rawAdded = replyAdded + seqAdded + legacyAdded;
+    let added = rawAdded;
+    if (clientTag) {
+      try {
+        const { data, error } = await supabase.rpc("nurture_added_distinct", { tag: clientTag });
+        if (!error && data != null) added = Number(data) || 0;
+        else if (error) console.error("[counts:added.distinct] rpc error:", JSON.stringify(error));
+      } catch (e) {
+        console.error("[counts:added.distinct] threw:", e);
+      }
+    }
+
     return NextResponse.json(
       {
         total: replyTotal + seqTotal + legacyTotal,
@@ -217,7 +235,7 @@ export async function GET(req: NextRequest) {
         // Sequence-finished rows have no safety classifier — treat them as safe.
         eligibleSafe: replyEligibleSafe + seqEligible + legacyEligibleSafe,
         waiting: replyWaiting + seqWaiting + legacyWaiting,
-        added: replyAdded + seqAdded + legacyAdded,
+        added,
       },
       { headers: { "Cache-Control": "private, max-age=30" } }
     );
