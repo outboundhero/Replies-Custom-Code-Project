@@ -257,7 +257,12 @@ export async function GET(req: NextRequest) {
                                     // DISTINCT_CAP so we don't deep-scan a huge client like
                                     // BAJFI's 68k seq rows — that tripped the statement timeout)
     const DISTINCT_CAP = 4000;      // ceiling on deduped rows returned (matches client ABSOLUTE_CAP)
-    const drainMode = !!clientTag;
+    // `quick=1` skips the drain: a small, fast single-window fetch for the
+    // INSTANT first paint on the per-client page; the client then re-requests
+    // the full drained set in the background. Without it, even the first paint
+    // waited on draining up to 5k×3 sources.
+    const quick = req.nextUrl.searchParams.get("quick") === "1";
+    const drainMode = !!clientTag && !quick;
     const itemCap = drainMode ? DISTINCT_CAP : limit;
     const legacyCap = drainMode ? DISTINCT_CAP : limit * 3;
 

@@ -305,65 +305,61 @@ export default function NurturePage() {
       else setLoading(true);
       try {
         const { status, safety } = viewToFilters(view);
-        let cursor = resetOffset ? 0 : offset;
-        const accumulated: NurtureItem[] = [];
-        let pageHasMore = false;
-
-        // Auto-paginate: keep fetching pages until the API says hasMore=false
-        // or we hit the safety cap. The user wants to see every lead at once
-        // for a client, so we don't surface a Load-more button anymore.
-        const maxFetches = Math.ceil(ABSOLUTE_CAP / PAGE_SIZE);
-        for (let i = 0; i < maxFetches; i++) {
+        const baseParams = () => {
           const p = new URLSearchParams();
           p.set("status", status);
           p.set("safety", safety);
-          p.set("limit", String(PAGE_SIZE));
-          p.set("offset", String(cursor));
           p.set("sort", sortKey);
           p.set("dir", sortDir);
           if (clientFilter) p.set("client_tag", clientFilter);
           if (sourceFilter !== "all") p.set("source", sourceFilter);
+          return p;
+        };
 
-          const res = await fetch(`/api/nurture?${p}`);
-          if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            setFetchError(data.error || `HTTP ${res.status}`);
-            return;
+        // 1) QUICK first paint — a small, NON-drained fetch so the table shows
+        // rows in ~200ms instead of waiting on the full server-side drain.
+        if (!append) {
+          const qp = baseParams();
+          qp.set("limit", "100"); // small, fast first paint
+          qp.set("offset", "0");
+          qp.set("quick", "1");
+          const qres = await fetch(`/api/nurture?${qp}`);
+          if (qres.redirected || qres.status === 401) { window.location.href = "/login"; return; }
+          if (qres.ok) {
+            const qd = await qres.json();
+            setItems((qd.items || []) as NurtureItem[]);
+            setSelected(new Set());
+            setSelectedMeta(new Map());
+            setLoading(false);
+            setLoadingMore(true); // keep the "loading rest" indicator up
           }
-          const data = await res.json();
-          const newItems: NurtureItem[] = data.items || [];
-          accumulated.push(...newItems);
-          cursor += newItems.length;
-          pageHasMore = !!data.page?.hasMore;
-          // After the FIRST page paint the table immediately so the user
-          // sees something while we keep fetching the rest in background.
-          if (i === 0) {
-            if (append) setItems((prev) => [...prev, ...accumulated]);
-            else { setItems(accumulated.slice()); setSelected(new Set()); setSelectedMeta(new Map()); }
-            if (pageHasMore) setLoadingMore(true); // banner stays up while we keep going
-          }
-          if (!pageHasMore || newItems.length === 0) break;
         }
 
-        // Final replace once everything's in to capture all rows from the
-        // chained fetches.
-        if (append) setItems((prev) => [...prev.slice(0, prev.length - accumulated.length), ...accumulated]);
-        else setItems(accumulated);
-        setHasMore(false); // we always drain to the end now
-        setOffset(cursor);
+        // 2) FULL drained set — replace once it's in (server returns the whole
+        // deduped client set up to the cap in one response).
+        const fp = baseParams();
+        fp.set("limit", String(ABSOLUTE_CAP));
+        fp.set("offset", "0");
+        const res = await fetch(`/api/nurture?${fp}`);
+        if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setFetchError(data.error || `HTTP ${res.status}`);
+          return;
+        }
+        const data = await res.json();
+        const full: NurtureItem[] = data.items || [];
+        if (append) setItems((prev) => [...prev, ...full]);
+        else setItems(full);
+        setHasMore(false);
+        setOffset(full.length);
         setFetchError(null);
 
-        // Keep the "Ready to nurture" tile in lockstep with what the table
-        // actually loaded — but ONLY when we drained the whole population. If
-        // we hit the display cap (big clients like TGS have far more than
-        // ABSOLUTE_CAP eligible+safe leads), the loaded length is just the cap,
-        // NOT the true total — using it would make the tile wrongly drop from
-        // the real count (e.g. 48k) to 10k. In that case leave readyFromList
-        // null so the tile/pipeline fall back to the authoritative
-        // counts.eligibleSafe.
+        // Keep the "Ready to nurture" tile in lockstep with the loaded set —
+        // but only when we drained the whole population (below the cap). At the
+        // cap the loaded length is just the ceiling, so fall back to counts.
         if (!append && view === "actionable" && sourceFilter === "all") {
-          setReadyFromList(accumulated.length < ABSOLUTE_CAP ? accumulated.length : null);
+          setReadyFromList(full.length < ABSOLUTE_CAP ? full.length : null);
         }
       } catch (e) {
         setFetchError((e as Error).message);
@@ -371,16 +367,27 @@ export default function NurturePage() {
       setLoading(false);
       setLoadingMore(false);
     },
-    [view, clientFilter, sourceFilter, offset, sortKey, sortDir]
+    [view, clientFilter, sourceFilter, sortKey, sortDir]
   );
 
   const loadCounts = useCallback(async (fresh = false) => {
     try {
+      // Phase 1 (INSTANT): seed the tiles from the cron-cached per-client
+      // summary (sub-100ms) so READY / WAITING / ADDED show immediately instead
+      // of waiting ~2s on the live exact counts (slow for 68k-row clients).
+      if (!fresh && clientFilter) {
+        try {
+          const cres = await fetch(`/api/nurture/clients-summary`);
+          if (cres.ok) {
+            const cd = await cres.json();
+            const row = (cd.clients || []).find((r: { clientTag?: string }) => String(r.clientTag).toUpperCase() === clientFilter.toUpperCase());
+            if (row) setCounts((prev) => prev ?? { total: Number(row.total) || 0, eligible: Number(row.eligible) || 0, eligibleSafe: Number(row.ready) || 0, waiting: Number(row.waiting) || 0, added: Number(row.added) || 0 });
+          }
+        } catch { /* fall through to live */ }
+      }
+      // Phase 2 (authoritative): live counts (exact total + eligible).
       const p = new URLSearchParams();
       if (clientFilter) p.set("client_tag", clientFilter);
-      // Initial load reads the precomputed cache (instant). After a mutation
-      // the caller passes fresh=true to force a live recompute so the tiles
-      // reflect the action immediately.
       if (fresh) p.set("fresh", "1");
       const res = await fetch(`/api/nurture/counts?${p}`);
       if (!res.ok) {
@@ -433,11 +440,17 @@ export default function NurturePage() {
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set()); // `${instance}:${id}`
   const toggleSource = (key: string) => setSelectedSources((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
   useEffect(() => {
-    if (!clientFilter) { setSourceCampaigns([]); return; }
-    fetch(`/api/nurture/source-campaigns?clientTag=${encodeURIComponent(clientFilter)}`)
-      .then((r) => r.json())
-      .then((d) => setSourceCampaigns((d.campaigns || []) as SourceCampaign[]))
-      .catch(() => setSourceCampaigns([]));
+    // Optional, below-the-fold feature that hits Bison (slow). Only load it once
+    // the map is confirmed (the picker only renders then), and DEFER it so it
+    // never competes with the critical first-paint fetches (list/counts/pipeline).
+    if (!clientFilter || !mapConfirmedAt) { setSourceCampaigns([]); return; }
+    const t = setTimeout(() => {
+      fetch(`/api/nurture/source-campaigns?clientTag=${encodeURIComponent(clientFilter)}`)
+        .then((r) => r.json())
+        .then((d) => setSourceCampaigns((d.campaigns || []) as SourceCampaign[]))
+        .catch(() => setSourceCampaigns([]));
+    }, 1500);
+    return () => clearTimeout(t);
   }, [clientFilter, mapConfirmedAt]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
