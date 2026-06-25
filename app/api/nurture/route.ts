@@ -253,7 +253,9 @@ export async function GET(req: NextRequest) {
     // client's full eligible set (TGS ~52k) — overloaded Postgres and tripped
     // the statement timeout. The authoritative totals come from the cached
     // counts endpoint, not this list, so capping the rendered drain is safe.
-    const RAW_DRAIN_CAP = 8000;     // ceiling on raw rows scanned per source
+    const RAW_DRAIN_CAP = 5000;     // ceiling on raw rows scanned per source (close to
+                                    // DISTINCT_CAP so we don't deep-scan a huge client like
+                                    // BAJFI's 68k seq rows — that tripped the statement timeout)
     const DISTINCT_CAP = 4000;      // ceiling on deduped rows returned (matches client ABSOLUTE_CAP)
     const drainMode = !!clientTag;
     const itemCap = drainMode ? DISTINCT_CAP : limit;
@@ -278,7 +280,11 @@ export async function GET(req: NextRequest) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const all: any[] = [];
       let start = offset;
-      const WAVE = 4;
+      // WAVE=2 keeps concurrent ordered scans low — WAVE=4 on a 68k-row client
+      // (BAJFI) ran 4 parallel deep-offset sorts that contended past the 8s
+      // statement timeout. The list is a capped preview (DISTINCT_CAP); the
+      // authoritative totals come from the cached counts endpoint.
+      const WAVE = 2;
       while (all.length < RAW_DRAIN_CAP) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const reqs: Promise<any>[] = [];
@@ -287,15 +293,17 @@ export async function GET(req: NextRequest) {
           reqs.push(makeQuery().range(s, s + DRAIN_CHUNK - 1));
         }
         const results = await Promise.all(reqs);
-        let exhausted = false;
+        let exhausted = false, errored = false;
         for (const { data, error } of results) {
-          if (error) throw new Error(error.message);
+          // Degrade gracefully: if a chunk times out under load, stop and render
+          // what we have rather than failing the whole list.
+          if (error) { errored = true; continue; }
           const batch = data || [];
           all.push(...batch);
           if (batch.length < DRAIN_CHUNK) exhausted = true; // this range hit the end
         }
         start += WAVE * DRAIN_CHUNK;
-        if (exhausted) break; // some range in this wave was short → source drained
+        if (exhausted || errored) break; // drained, or a chunk failed → stop with what we have
       }
       return all;
     };
