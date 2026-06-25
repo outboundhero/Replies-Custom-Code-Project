@@ -57,14 +57,24 @@ export async function POST(req: NextRequest) {
   if (map.length === 0) return NextResponse.json({ error: "no campaigns mapped" }, { status: 400 });
 
   try {
-    // 1. Fetch this batch of source leads.
-    const { leads, lastPage } = await getCampaignLeadsPage(sourceInstance, sourceCampaignId, page, PAGES_PER_BATCH, PER_PAGE);
+    // 1. Fetch this batch of SEQUENCE-FINISHED source leads (no-reply nurture
+    //    candidates only — not every lead in the campaign).
+    const { leads, lastPage } = await getCampaignLeadsPage(sourceInstance, sourceCampaignId, page, PAGES_PER_BATCH, { perPage: PER_PAGE, leadCampaignStatus: "sequence_finished" });
 
-    // 2. Build candidates: lane per lead, ESP from the source campaign name.
+    // 2. Build candidates: drop bounced / replied (mirror sync-sequence-finished),
+    //    lane per lead, ESP from the source campaign name.
     const candidates: Candidate[] = [];
+    let skipped = 0;
     for (const l of leads) {
       const email = l.email;
       if (!email) continue;
+      // Belt-and-suspenders past the server-side sequence_finished filter.
+      if (l.status === "bounced") { skipped++; continue; }
+      if ((l.overall_stats?.replies ?? 0) > 0) { skipped++; continue; }
+      const campData = l.lead_campaign_data;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const row = Array.isArray(campData) ? (campData as any[]).find((x) => x.campaign_id === sourceCampaignId) : campData;
+      if (row && ((row.replies ?? 0) > 0 || row.status === "bounced" || (row.status && row.status !== "sequence_finished"))) { skipped++; continue; }
       const lane: "b2b" | "b2c" = isPersonalDomain(email) ? "b2c" : "b2b";
       candidates.push({
         source: "campaign",
@@ -91,7 +101,9 @@ export async function POST(req: NextRequest) {
     const done = nextPage > lastPage || leads.length === 0;
 
     return NextResponse.json({
-      fetched: leads.length,
+      fetched: leads.length,        // sequence-finished leads pulled this batch
+      eligible: candidates.length,  // after dropping replied/bounced
+      skipped,
       added: routed.totalAttached,
       perBucket: routed.perBucket,
       esp,

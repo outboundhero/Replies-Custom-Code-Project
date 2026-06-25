@@ -126,7 +126,8 @@ function viewToFilters(view: View): { status: string; safety: string } {
 interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: "b2b" | "b2c" | string | null }
 
 // A client's outbound campaign usable as a SOURCE to route leads from.
-interface SourceCampaign { id: number; name: string; status: string; bison_instance: string; esp: Esp; total_leads: number }
+// seq_finished = the ROUTABLE count (sequence-finished, no-reply) — not total.
+interface SourceCampaign { id: number; name: string; status: string; bison_instance: string; esp: Esp; total_leads: number; seq_finished: number }
 
 // ── "Confirm & enable sending" progress model (persistent panel) ────────────
 type EnablePhaseStatus = "pending" | "running" | "done" | "error";
@@ -1577,13 +1578,13 @@ export default function NurturePage() {
       {/* ── Optional: route existing campaigns' leads into the nurture campaigns ── */}
       {clientFilter && mapConfirmedAt && (() => {
         const selected = sourceCampaigns.filter((c) => selectedSources.has(`${c.bison_instance}:${c.id}`));
-        const selLeads = selected.reduce((s, c) => s + c.total_leads, 0);
+        const selLeads = selected.reduce((s, c) => s + c.seq_finished, 0);
         return (
           <div className="rounded-lg border bg-card p-4 space-y-3">
             <div className="flex flex-wrap items-center gap-3">
               <div className="min-w-[220px]">
                 <p className="text-sm font-semibold">Route source campaigns&apos; leads</p>
-                <p className="text-xs text-muted-foreground">Pick one or more existing campaigns → push their leads into the nurture campaigns (by lane B2B/B2C; ESP from each campaign&apos;s name). Same-instance leads attach directly; cross-instance ones are created then attached.</p>
+                <p className="text-xs text-muted-foreground">Pick one or more campaigns → push their <strong>sequence-finished, no-reply</strong> leads into the nurture campaigns (by lane B2B/B2C; ESP from each campaign&apos;s name). Same-instance leads attach directly; cross-instance ones are created then attached.</p>
               </div>
               <div className="ml-auto flex items-center gap-2">
                 {sourceCampaigns.length > 0 && (
@@ -1602,7 +1603,7 @@ export default function NurturePage() {
                   className="h-9 bg-violet-600 hover:bg-violet-700 text-white"
                   title="Attach inboxes → fetch the selected campaigns' leads → add them to the mapped nurture campaigns (by lane + each source's ESP) → activate. Live progress; stoppable."
                 >
-                  {enabling ? "Routing…" : `Auto-route${selected.length ? ` (${selected.length} · ${selLeads.toLocaleString()} leads)` : ""}`}
+                  {enabling ? "Routing…" : `Auto-route${selected.length ? ` (${selected.length} · ${selLeads.toLocaleString()} ready)` : ""}`}
                 </Button>
               </div>
             </div>
@@ -1620,7 +1621,7 @@ export default function NurturePage() {
                       <span className="font-medium truncate">{c.name}</span>
                       <span className="text-[10px] uppercase font-semibold text-muted-foreground">{c.esp}</span>
                       <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
-                      <span className="ml-auto text-xs text-muted-foreground tabular-nums shrink-0">{c.total_leads.toLocaleString()} leads</span>
+                      <span className="ml-auto text-xs tabular-nums shrink-0"><span className="text-emerald-700 font-medium">{c.seq_finished.toLocaleString()}</span> ready <span className="text-muted-foreground/60">/ {c.total_leads.toLocaleString()} total</span></span>
                     </label>
                   );
                 })}

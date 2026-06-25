@@ -436,11 +436,15 @@ export async function getCampaignLeadsPage(
   campaignId: number,
   startPage: number,
   pageCount: number,
-  perPage = 100,
+  opts: { perPage?: number; leadCampaignStatus?: string } = {},
 ): Promise<{ leads: OutboundLead[]; lastPage: number }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
-  const url = (page: number) => `${baseUrl}/api/campaigns/${campaignId}/leads?page=${page}&per_page=${perPage}`;
+  const perPage = opts.perPage ?? 100;
+  // `filters[lead_campaign_status]` (plural+brackets) is the ONLY form Bison
+  // honors; append it RAW (URLSearchParams percent-encodes the brackets).
+  const filter = opts.leadCampaignStatus ? `&filters[lead_campaign_status]=${opts.leadCampaignStatus}` : "";
+  const url = (page: number) => `${baseUrl}/api/campaigns/${campaignId}/leads?page=${page}&per_page=${perPage}${filter}`;
   async function fetchPage(page: number): Promise<{ rows: OutboundLead[]; lastPage: number }> {
     const res = await fetchWithTimeout(url(page), { headers, timeoutMs: 15_000 });
     if (!res.ok) return { rows: [], lastPage: page };
@@ -452,7 +456,7 @@ export async function getCampaignLeadsPage(
   const out: OutboundLead[] = [];
   let lastPage = start;
   let idx = 0;
-  await Promise.all(Array.from({ length: Math.min(8, pages.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(16, pages.length) }, async () => {
     while (idx < pages.length) {
       const p = pages[idx++];
       const r = await fetchPage(p);
@@ -461,6 +465,26 @@ export async function getCampaignLeadsPage(
     }
   }));
   return { leads: out, lastPage };
+}
+
+/**
+ * Count of leads in a campaign, optionally filtered by lead_campaign_status
+ * (e.g. "sequence_finished"). One cheap request — reads meta.total from page 1.
+ */
+export async function getCampaignLeadCount(
+  instanceKey: string,
+  campaignId: number,
+  leadCampaignStatus?: string,
+): Promise<number> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const filter = leadCampaignStatus ? `&filters[lead_campaign_status]=${leadCampaignStatus}` : "";
+  const res = await fetchWithTimeout(
+    `${baseUrl}/api/campaigns/${campaignId}/leads?page=1&per_page=1${filter}`,
+    { headers: buildHeaders(token), timeoutMs: 15_000 },
+  );
+  if (!res.ok) return 0;
+  const data = await res.json().catch(() => null);
+  return Number(data?.meta?.total) || 0;
 }
 
 /**

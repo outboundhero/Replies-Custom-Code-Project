@@ -8,7 +8,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import { listCampaigns } from "@/lib/outboundhero-api";
+import { listCampaigns, getCampaignLeadCount } from "@/lib/outboundhero-api";
 import { getClientInstances } from "@/lib/nurture/group-routing";
 import { detectCampaignEsp, isCanonicalNurtureCampaign } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
@@ -35,29 +35,31 @@ export async function GET(req: NextRequest) {
     instanceKeys.map(async (instance) => {
       try {
         const all = await listCampaigns(instance, { search: TAG });
-        return all
-          .filter((c) =>
-            (extractTagFromCampaignName(c.name) || "").toUpperCase() === TAG &&
-            !isCanonicalNurtureCampaign(c.name) &&          // exclude nurture campaigns
-            detectCampaignEsp(c.name) != null &&            // ESP must be readable from the name
-            (c.total_leads ?? 0) > 0,
-          )
-          .map((c) => ({
-            id: c.id,
-            name: c.name,
-            status: c.status,
-            bison_instance: instance,
-            esp: detectCampaignEsp(c.name),
-            total_leads: c.total_leads ?? 0,
-          }));
+        const matched = all.filter((c) =>
+          (extractTagFromCampaignName(c.name) || "").toUpperCase() === TAG &&
+          !isCanonicalNurtureCampaign(c.name) &&          // exclude nurture campaigns
+          detectCampaignEsp(c.name) != null &&            // ESP must be readable from the name
+          (c.total_leads ?? 0) > 0,
+        );
+        // The routable number is SEQUENCE-FINISHED (no-reply) leads, not total —
+        // that's all the nurture flow pulls. Fetch it per campaign (cheap: 1 req).
+        return await Promise.all(matched.map(async (c) => ({
+          id: c.id,
+          name: c.name,
+          status: c.status,
+          bison_instance: instance,
+          esp: detectCampaignEsp(c.name),
+          total_leads: c.total_leads ?? 0,
+          seq_finished: await getCampaignLeadCount(instance, c.id, "sequence_finished"),
+        })));
       } catch {
         return [];
       }
     }),
   );
 
-  // Most leads first.
-  const campaigns = lists.flat().sort((a, b) => b.total_leads - a.total_leads);
+  // Most routable (sequence-finished) leads first.
+  const campaigns = lists.flat().sort((a, b) => b.seq_finished - a.seq_finished);
   const data = { campaigns };
   cache.set(TAG, { ts: Date.now(), data });
   return NextResponse.json({ ...data, cached: false });
