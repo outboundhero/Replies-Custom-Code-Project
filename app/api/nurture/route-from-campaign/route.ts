@@ -12,6 +12,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
+import supabase from "@/lib/supabase";
 import { getCampaignLeadsPage } from "@/lib/outboundhero-api";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getClientInstances } from "@/lib/nurture/group-routing";
@@ -92,9 +93,41 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Route via the shared core (no DB stamping).
-    const routed = candidates.length > 0
-      ? await routeCandidates(clientTag, candidates, map)
+    // 2b. Skip leads we've ALREADY routed (added_at set in our DB) so a re-run
+    //     doesn't re-attach the same people — only genuinely-new leads route.
+    let alreadyRouted = 0;
+    let fresh = candidates;
+    if (candidates.length > 0) {
+      const ids = candidates.map((c) => c.obLeadId).filter((x): x is number => typeof x === "number");
+      const added = new Set<number>();
+      for (let i = 0; i < ids.length; i += 300) {
+        const { data } = await supabase.from("nurture_sequence_finished")
+          .select("ob_lead_id")
+          .eq("client_tag", clientTag).eq("bison_instance", sourceInstance).not("added_at", "is", null)
+          .in("ob_lead_id", ids.slice(i, i + 300));
+        for (const r of data || []) added.add(Number((r as { ob_lead_id: number }).ob_lead_id));
+      }
+      fresh = candidates.filter((c) => !(typeof c.obLeadId === "number" && added.has(c.obLeadId)));
+      alreadyRouted = candidates.length - fresh.length;
+    }
+
+    // 3. Route via the shared core. Stamp the matching nurture_sequence_finished
+    //    rows added_at + nurture_campaign_id (by ob_lead_id in the source
+    //    instance) so the READY/ADDED tiles update and "Route all ready" doesn't
+    //    re-route these same leads.
+    const routed = fresh.length > 0
+      ? await routeCandidates(clientTag, fresh, map, {
+          onAttached: async (campaignId, resolved) => {
+            const ids = resolved.map((r) => r.obLeadId).filter((x): x is number => typeof x === "number");
+            const stamp = new Date().toISOString();
+            for (let i = 0; i < ids.length; i += 300) {
+              const chunk = ids.slice(i, i + 300);
+              await supabase.from("nurture_sequence_finished")
+                .update({ added_at: stamp, nurture_campaign_id: campaignId })
+                .eq("client_tag", clientTag).eq("bison_instance", sourceInstance).is("added_at", null).in("ob_lead_id", chunk);
+            }
+          },
+        })
       : { perBucket: [], totalAttached: 0 };
 
     const nextPage = page + PAGES_PER_BATCH;
@@ -103,6 +136,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       fetched: leads.length,        // sequence-finished leads pulled this batch
       eligible: candidates.length,  // after dropping replied/bounced
+      fresh: fresh.length,          // not already routed
+      alreadyRouted,                // skipped — already added in a prior run
       skipped,
       added: routed.totalAttached,
       perBucket: routed.perBucket,

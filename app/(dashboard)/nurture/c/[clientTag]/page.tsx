@@ -435,6 +435,13 @@ export default function NurturePage() {
       .catch(() => { /* keep cache counts */ });
   }, [clientFilter]);
   useEffect(() => { loadLiveCounts(); }, [loadLiveCounts, mapConfirmedAt]);
+  // Authoritative "added" = leads actually IN the mapped campaigns (live), which
+  // reflects EVERY routing method (ready-pool, source-campaign, manual) — the DB
+  // added_at count only tracks ready-pool routing.
+  const liveAddedTotal = useMemo(() => {
+    if (liveCounts.size === 0) return null;
+    let s = 0; for (const v of liveCounts.values()) s += v; return s;
+  }, [liveCounts]);
 
   // Source campaigns to route leads FROM (the client's ESP-named outbound campaigns).
   const [sourceCampaigns, setSourceCampaigns] = useState<SourceCampaign[]>([]);
@@ -1557,7 +1564,7 @@ export default function NurturePage() {
         <StatTile
           label="Added"
           sublabel="Already pushed to a campaign"
-          value={counts?.added}
+          value={liveAddedTotal ?? counts?.added}
           accent="text-violet-700"
           active={view === "added"}
           activeBorder="border-violet-500"
@@ -2530,7 +2537,12 @@ function NurturePipeline({
 
   const total = counts?.total ?? 0;
   const ready = readyCount ?? counts?.eligibleSafe ?? 0;
-  const added = counts?.added ?? 0;
+  // "Routed" = leads actually in the mapped campaigns (live), so it reflects
+  // source-campaign routing too — not just the DB added_at count.
+  const liveAdded = liveCounts.size > 0
+    ? mapEntries.reduce((s, e) => s + (liveCounts.get(`${e.bison_instance}:${e.campaign_id}`) ?? 0), 0)
+    : null;
+  const added = liveAdded ?? counts?.added ?? 0;
   const waiting = counts?.waiting ?? 0;
   const anyActive = [...byInstance.values()].some((espMap) =>
     (["google", "outlook", "segs"] as Esp[]).some((e) => espMap[e]?.status === "active"),
