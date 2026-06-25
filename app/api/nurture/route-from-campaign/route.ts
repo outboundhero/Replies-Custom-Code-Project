@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import db from "@/lib/db";
 import { getCampaignLeadsPage } from "@/lib/outboundhero-api";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getClientInstances } from "@/lib/nurture/group-routing";
@@ -56,6 +57,18 @@ export async function POST(req: NextRequest) {
   if (!instances) return NextResponse.json({ error: "no group mapping — sync the group sheet" }, { status: 400 });
   const map = await getCampaignMap(clientTag);
   if (map.length === 0) return NextResponse.json({ error: "no campaigns mapped" }, { status: 400 });
+
+  // Record (source_campaign_id, ob_lead_id) so the picker can show an "Added"
+  // badge + how many NEW leads remain, and skip re-routing on re-runs.
+  const recordRouted = async (ids: number[]) => {
+    const uniq = [...new Set(ids.filter((x) => typeof x === "number"))];
+    for (let i = 0; i < uniq.length; i += 200) {
+      const chunk = uniq.slice(i, i + 200);
+      const placeholders = chunk.map(() => "(?,?,?)").join(",");
+      const args = chunk.flatMap((id) => [clientTag, sourceCampaignId, id]);
+      await db.execute({ sql: `INSERT OR IGNORE INTO nurture_source_routed (client_tag, source_campaign_id, ob_lead_id) VALUES ${placeholders}`, args });
+    }
+  };
 
   try {
     // 1. Fetch this batch of SEQUENCE-FINISHED source leads (no-reply nurture
@@ -109,6 +122,9 @@ export async function POST(req: NextRequest) {
       }
       fresh = candidates.filter((c) => !(typeof c.obLeadId === "number" && added.has(c.obLeadId)));
       alreadyRouted = candidates.length - fresh.length;
+      // Already-in-nurture leads still count as "routed FROM this campaign" for
+      // the picker badge/new-count, even though we don't re-attach them.
+      if (added.size) await recordRouted([...added]);
     }
 
     // 3. Route via the shared core. Stamp the matching nurture_sequence_finished
@@ -126,6 +142,7 @@ export async function POST(req: NextRequest) {
                 .update({ added_at: stamp, nurture_campaign_id: campaignId })
                 .eq("client_tag", clientTag).eq("bison_instance", sourceInstance).is("added_at", null).in("ob_lead_id", chunk);
             }
+            await recordRouted(ids); // freshly-routed leads → record under this source
           },
         })
       : { perBucket: [], totalAttached: 0 };

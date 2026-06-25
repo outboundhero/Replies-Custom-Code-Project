@@ -116,6 +116,17 @@ export async function initializeDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (bison_instance, email)
     )`,
+    // Per-source-campaign routing log for the "route a source campaign's leads"
+    // feature: one row per (source campaign, lead) we've pushed into nurture.
+    // Lets the source-campaign picker show an "Added" badge + how many NEW
+    // (not-yet-routed) sequence-finished leads remain, and skip re-routing.
+    `CREATE TABLE IF NOT EXISTS nurture_source_routed (
+      client_tag TEXT NOT NULL,
+      source_campaign_id INTEGER NOT NULL,
+      ob_lead_id INTEGER NOT NULL,
+      routed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (source_campaign_id, ob_lead_id)
+    )`,
     // Audit + batch counter for auto-expanded nurture campaigns. One row per
     // expansion of a (client, instance, ESP) routing → the next batch number,
     // the old campaign, and the new (cloned) campaign. Drives the "Batch N"

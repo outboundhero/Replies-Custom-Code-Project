@@ -126,8 +126,9 @@ function viewToFilters(view: View): { status: string; safety: string } {
 interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: "b2b" | "b2c" | string | null }
 
 // A client's outbound campaign usable as a SOURCE to route leads from.
-// seq_finished = the ROUTABLE count (sequence-finished, no-reply) — not total.
-interface SourceCampaign { id: number; name: string; status: string; bison_instance: string; esp: Esp; total_leads: number; seq_finished: number }
+// seq_finished = sequence-finished, no-reply count; routed = already pushed to
+// nurture from here; new_leads = seq_finished − routed (what's left to route).
+interface SourceCampaign { id: number; name: string; status: string; bison_instance: string; esp: Esp; total_leads: number; seq_finished: number; routed: number; new_leads: number }
 
 // ── "Confirm & enable sending" progress model (persistent panel) ────────────
 type EnablePhaseStatus = "pending" | "running" | "done" | "error";
@@ -447,19 +448,21 @@ export default function NurturePage() {
   const [sourceCampaigns, setSourceCampaigns] = useState<SourceCampaign[]>([]);
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set()); // `${instance}:${id}`
   const toggleSource = (key: string) => setSelectedSources((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const loadSourceCampaigns = useCallback(() => {
+    if (!clientFilter) { setSourceCampaigns([]); return; }
+    fetch(`/api/nurture/source-campaigns?clientTag=${encodeURIComponent(clientFilter)}`)
+      .then((r) => r.json())
+      .then((d) => setSourceCampaigns((d.campaigns || []) as SourceCampaign[]))
+      .catch(() => setSourceCampaigns([]));
+  }, [clientFilter]);
   useEffect(() => {
     // Optional, below-the-fold feature that hits Bison (slow). Only load it once
     // the map is confirmed (the picker only renders then), and DEFER it so it
     // never competes with the critical first-paint fetches (list/counts/pipeline).
     if (!clientFilter || !mapConfirmedAt) { setSourceCampaigns([]); return; }
-    const t = setTimeout(() => {
-      fetch(`/api/nurture/source-campaigns?clientTag=${encodeURIComponent(clientFilter)}`)
-        .then((r) => r.json())
-        .then((d) => setSourceCampaigns((d.campaigns || []) as SourceCampaign[]))
-        .catch(() => setSourceCampaigns([]));
-    }, 1500);
+    const t = setTimeout(loadSourceCampaigns, 1500);
     return () => clearTimeout(t);
-  }, [clientFilter, mapConfirmedAt]);
+  }, [clientFilter, mapConfirmedAt, loadSourceCampaigns]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
@@ -1216,7 +1219,7 @@ export default function NurturePage() {
         setEnableProgress((p) => p && { ...p, activate: { status: "done", rows, total: d.totalActivated || 0 } });
         if ((d.totalActivated || 0) > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(tag, true);
       } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
-    } finally { setEnabling(false); void loadLiveCounts(); }
+    } finally { setEnabling(false); void loadLiveCounts(); loadSourceCampaigns(); }
   }
 
   // "Route all ready" → enable flow with the ready-pool drain as the route phase.
@@ -1585,7 +1588,7 @@ export default function NurturePage() {
       {/* ── Optional: route existing campaigns' leads into the nurture campaigns ── */}
       {clientFilter && mapConfirmedAt && (() => {
         const selected = sourceCampaigns.filter((c) => selectedSources.has(`${c.bison_instance}:${c.id}`));
-        const selLeads = selected.reduce((s, c) => s + c.seq_finished, 0);
+        const selLeads = selected.reduce((s, c) => s + c.new_leads, 0);
         return (
           <div className="rounded-lg border bg-card p-4 space-y-3">
             <div className="flex flex-wrap items-center gap-3">
@@ -1610,7 +1613,7 @@ export default function NurturePage() {
                   className="h-9 bg-violet-600 hover:bg-violet-700 text-white"
                   title="Attach inboxes → fetch the selected campaigns' leads → add them to the mapped nurture campaigns (by lane + each source's ESP) → activate. Live progress; stoppable."
                 >
-                  {enabling ? "Routing…" : `Auto-route${selected.length ? ` (${selected.length} · ${selLeads.toLocaleString()} ready)` : ""}`}
+                  {enabling ? "Routing…" : `Auto-route${selected.length ? ` (${selected.length} · ${selLeads.toLocaleString()} new)` : ""}`}
                 </Button>
               </div>
             </div>
@@ -1628,7 +1631,8 @@ export default function NurturePage() {
                       <span className="font-medium truncate">{c.name}</span>
                       <span className="text-[10px] uppercase font-semibold text-muted-foreground">{c.esp}</span>
                       <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
-                      <span className="ml-auto text-xs tabular-nums shrink-0"><span className="text-emerald-700 font-medium">{c.seq_finished.toLocaleString()}</span> ready <span className="text-muted-foreground/60">/ {c.total_leads.toLocaleString()} total</span></span>
+                      {c.routed > 0 && <span className="text-[10px] rounded-full px-1.5 py-0.5 shrink-0 bg-violet-100 text-violet-700 inline-flex items-center gap-0.5"><CheckCircle2 className="size-2.5" /> {c.routed.toLocaleString()} added</span>}
+                      <span className="ml-auto text-xs tabular-nums shrink-0"><span className="text-emerald-700 font-medium">{c.new_leads.toLocaleString()}</span> new <span className="text-muted-foreground/60">/ {c.seq_finished.toLocaleString()} ready · {c.total_leads.toLocaleString()} total</span></span>
                     </label>
                   );
                 })}
