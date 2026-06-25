@@ -14,6 +14,7 @@ import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
 import TargetCampaigns from "./_components/TargetCampaigns";
 import { ESP_LABEL, detectCampaignEsp, isCanonicalNurtureCampaign, type Esp } from "@/lib/nurture/esp";
+import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -121,6 +122,9 @@ function viewToFilters(view: View): { status: string; safety: string } {
   }
 }
 
+// One confirmed target-campaign mapping cell.
+interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: "b2b" | "b2c" | string | null }
+
 // ── "Confirm & enable sending" progress model (persistent panel) ────────────
 type EnablePhaseStatus = "pending" | "running" | "done" | "error";
 interface EnableAttachRow { instance: string; esp: string; campaign: string | null; pool: number; connected: number; attached: number; alreadyPresent: number; error?: string }
@@ -207,6 +211,10 @@ export default function NurturePage() {
   const routeAllAbortRef = useRef(false);
   // Target-campaign map confirmation — gates all sending (must pick campaigns first).
   const [mapConfirmedAt, setMapConfirmedAt] = useState<string | null>(null);
+  // The confirmed campaign map (instance × esp × lane → campaign). ALL routing
+  // buttons + the pipeline display key off this — never off campaign names — so
+  // duplicate canonical campaigns can't misroute or mis-display.
+  const [mapEntries, setMapEntries] = useState<MapEntry[]>([]);
   // Persistent "Confirm & enable sending" progress (attach → route → activate).
   // Stays on screen until the operator dismisses it (no auto-hide).
   const [enableProgress, setEnableProgress] = useState<EnableSendingState | null>(null);
@@ -387,6 +395,16 @@ export default function NurturePage() {
     loadPage(true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, clientFilter, sourceFilter, sortKey, sortDir]);
+
+  // Load the confirmed campaign map (re-fetched when confirmation changes).
+  const loadMap = useCallback(() => {
+    if (!clientFilter) { setMapEntries([]); return; }
+    fetch(`/api/nurture/campaign-map?clientTag=${encodeURIComponent(clientFilter)}`)
+      .then((r) => r.json())
+      .then((d) => setMapEntries((d.entries || []) as MapEntry[]))
+      .catch(() => setMapEntries([]));
+  }, [clientFilter]);
+  useEffect(() => { loadMap(); }, [loadMap, mapConfirmedAt]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
@@ -1138,6 +1156,75 @@ export default function NurturePage() {
     } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
   }
 
+  /**
+   * Route the SELECTED leads via the confirmed campaign map. Used by both
+   * "Add to nurture" and "Auto-route" — neither matches campaigns by name
+   * anymore. Each lead's lane (personal email → B2C, else B2B) + ESP bucket
+   * resolve to the mapped (instance, campaign); leads are pushed per bucket.
+   */
+  async function routeSelectionViaMap() {
+    if (selected.size === 0) return;
+    if (!mapConfirmedAt) { toast.error("Confirm your Target Campaigns first to enable sending."); return; }
+    // (lane:esp) → mapped campaign.
+    const mapByLaneEsp = new Map<string, MapEntry>();
+    for (const e of mapEntries) {
+      if (e.lane === "b2b" || e.lane === "b2c") mapByLaneEsp.set(`${e.lane}:${e.esp}`, e);
+    }
+    setPushing(true);
+    try {
+      const itemMap = new Map(items.map((i) => [i.id, i]));
+      type Bucket = { campaignId: number; instance: string; campaignName: string | null; refs: Array<{ id: string; ob_lead_id?: number }> };
+      const buckets = new Map<string, Bucket>();
+      let heldNoEsp = 0, unmapped = 0;
+      for (const id of selected) {
+        const it = itemMap.get(id);
+        if (!it) continue; // not loaded on this page — skip (bulk-select loads them into items)
+        if (!it.esp_host) { heldNoEsp++; continue; } // no confirmed ESP yet → hold back
+        const lane: "b2b" | "b2c" = isPersonalDomain(it.email) ? "b2c" : "b2b";
+        const esp = it.esp_bucket || "google";
+        const entry = mapByLaneEsp.get(`${lane}:${esp}`);
+        if (!entry) { unmapped++; continue; }
+        const key = `${entry.bison_instance}:${entry.campaign_id}`;
+        if (!buckets.has(key)) buckets.set(key, { campaignId: entry.campaign_id, instance: entry.bison_instance, campaignName: entry.campaign_name, refs: [] });
+        const meta = selectedMeta.get(id);
+        buckets.get(key)!.refs.push({ id, ob_lead_id: meta?.ob_lead_id ?? it.ob_lead_id });
+      }
+      if (buckets.size === 0) {
+        toast.error(
+          heldNoEsp > 0
+            ? `Holding back ${heldNoEsp.toLocaleString()} lead${heldNoEsp === 1 ? "" : "s"} with no confirmed ESP yet — none routable. They route once the ESP backfill reaches them.`
+            : unmapped > 0
+              ? `${unmapped.toLocaleString()} selected lead${unmapped === 1 ? "" : "s"} have no mapped campaign for their lane/ESP — map that cell in Target Campaigns.`
+              : "Nothing routable in the selection.",
+        );
+        return;
+      }
+      if (heldNoEsp > 0) toast.info(`Holding back ${heldNoEsp.toLocaleString()} lead${heldNoEsp === 1 ? "" : "s"} with no confirmed ESP yet — routing the rest.`);
+
+      const errs: string[] = [];
+      const counts = await Promise.all([...buckets.values()].map(async (b) => {
+        try {
+          const res = await fetch("/api/nurture/mutate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "push-to-nurture", nurtureCampaignId: b.campaignId, bisonInstance: b.instance, items: b.refs }),
+          });
+          const d = await res.json();
+          if (!res.ok) { errs.push(`${b.campaignName ?? `#${b.campaignId}`}: ${d.error || `HTTP ${res.status}`}`); return 0; }
+          return d.attachedCount ?? d.attached ?? b.refs.length;
+        } catch (e) { errs.push((e as Error).message); return 0; }
+      }));
+      const totalAttached = counts.reduce((a, c) => a + c, 0);
+      if (errs.length) toast.error(errs.join(" · "), { duration: 10000 });
+      if (totalAttached > 0) {
+        toast.success(`Routed ${totalAttached.toLocaleString()} selected lead${totalAttached === 1 ? "" : "s"} to their mapped campaign${buckets.size === 1 ? "" : "s"}.`);
+        if (clientFilter && !autoNurture?.enabled) await setAutoNurtureEnabled(clientFilter, true);
+      }
+      setSelected(new Set());
+      setSelectedMeta(new Map());
+      void Promise.all([loadPage(true, false), loadCounts(true)]);
+    } finally { setPushing(false); }
+  }
+
   async function pushSelected() {
     if (!pushTargetCampaignId || selected.size === 0) return;
     setPushing(true);
@@ -1377,7 +1464,7 @@ export default function NurturePage() {
 
       {/* ── Nurture pipeline status (orientation for anyone opening the page) ── */}
       {clientFilter && (
-        <NurturePipeline clientTag={clientFilter} counts={counts} campaigns={filteredCampaigns} readyCount={readyFromList} />
+        <NurturePipeline clientTag={clientFilter} counts={counts} campaigns={campaigns} mapEntries={mapEntries} readyCount={readyFromList} />
       )}
 
       {/* ── Target campaigns — operator picks destinations; gates sending ── */}
@@ -1569,57 +1656,29 @@ export default function NurturePage() {
               ))}
             </div>
           )}
-          {filteredCampaigns.length === 0 ? (
-            // Radix Select can fail to open when SelectContent has zero
-            // SelectItems. Render a static, non-Select placeholder instead
-            // so the user always gets a clear, non-broken UX. The hint is
-            // explicit so they know how to fix it.
-            <div className="h-9 w-72 px-3 flex items-center text-xs text-muted-foreground border rounded-md bg-muted/40">
-              {(() => {
-                const target =
-                  selectedClientTags.length > 0 ? selectedClientTags.join(", ")
-                  : clientFilter || null;
-                if (target) {
-                  return `No "[Nurture]" campaign tagged ${target} (of ${campaigns.length} total)`;
-                }
-                return campaigns.length === 0
-                  ? "Loading nurture campaigns…"
-                  : `${campaigns.length} nurture campaigns — pick a client first`;
-              })()}
-            </div>
-          ) : (
-            <Select value={pushTargetCampaignId} onValueChange={setPushTargetCampaignId}>
-              <SelectTrigger className="h-9 w-72 text-sm" disabled={selected.size === 0}>
-                <SelectValue placeholder="Choose a nurture campaign…" />
-              </SelectTrigger>
-              <SelectContent>
-                {filteredCampaigns.map((c) => (
-                  <SelectItem key={campaignKey(c)} value={campaignKey(c)}>
-                    <span className="flex items-center gap-2">
-                      <InstanceBadge instance={c.bison_instance} size="xs" />
-                      <span>{c.name}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+          {/* All routing keys off the confirmed Target Campaigns map — no manual
+              campaign picker. Leads route by lane (B2B/B2C) → ESP → mapped campaign. */}
+          <span className="h-9 px-3 flex items-center text-xs text-muted-foreground">
+            {mapConfirmedAt
+              ? <>routes by lane → ESP via the confirmed map</>
+              : <span className="text-amber-700">Confirm your Target Campaigns map below to enable routing</span>}
+          </span>
           <Button
             size="sm"
-            onClick={pushSelected}
-            disabled={pushing || !pushTargetCampaignId || selected.size === 0}
+            onClick={routeSelectionViaMap}
+            disabled={pushing || selected.size === 0 || !mapConfirmedAt}
             className="h-9"
-            title="Send the entire selection to the single campaign chosen in the dropdown."
+            title={!mapConfirmedAt ? "Confirm your Target Campaigns first to enable sending." : "Route the selected leads to their mapped campaigns (lane → ESP → campaign from the confirmed map)."}
           >
             {pushing ? "Pushing…" : `Add to nurture${selected.size > 0 ? ` (${selected.size})` : ""}`}
           </Button>
           <Button
             size="sm"
             variant="default"
-            onClick={pushSelectedAutoRoute}
+            onClick={routeSelectionViaMap}
             disabled={pushing || selected.size === 0 || !mapConfirmedAt}
             className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
-            title={!mapConfirmedAt ? "Confirm your Target Campaigns first to enable sending." : "Split the selection by email provider (Google / Outlook / SEGs) and push each bucket to its matching nurture campaign automatically."}
+            title={!mapConfirmedAt ? "Confirm your Target Campaigns first to enable sending." : "Route the selected leads to their mapped campaigns (lane → ESP → campaign from the confirmed map)."}
           >
             {pushing ? "Pushing…" : `Auto-route${selected.size > 0 ? ` (${selected.size})` : ""}`}
           </Button>
@@ -2294,31 +2353,36 @@ const CAMPAIGN_STATUS_BADGE: Record<string, string> = {
  * not-set-up campaigns are visible).
  */
 function NurturePipeline({
-  clientTag, counts, campaigns, readyCount,
+  clientTag, counts, campaigns, mapEntries, readyCount,
 }: {
   clientTag: string;
   counts: Counts | null;
   campaigns: NurtureCampaign[];
+  mapEntries: MapEntry[];
   readyCount: number | null;
 }) {
-  // Group canonical campaigns by INSTANCE, then ESP. A client's nurture
-  // campaigns can live in both its group's B2B and B2C workspaces (identical
-  // ESP names, different instances), so we render one block per instance rather
-  // than collapsing across them.
-  const byInstance = useMemo(() => {
-    const rank = (s: string) => (s === "active" ? 0 : s === "paused" ? 1 : s === "draft" ? 2 : s === "archived" ? 4 : 3);
-    const m = new Map<string, Partial<Record<Esp, NurtureCampaign>>>();
-    for (const c of campaigns) {
-      const esp = detectCampaignEsp(c.name);
-      if (!esp) continue;
-      const inst = c.bison_instance || "outboundhero";
-      if (!m.has(inst)) m.set(inst, {});
-      const espMap = m.get(inst)!;
-      const cur = espMap[esp];
-      if (!cur || rank(c.status) < rank(cur.status)) espMap[esp] = c; // prefer routable status
-    }
+  // Display the EXACT campaigns from the confirmed map (instance → ESP →
+  // campaign_id), looked up in the campaign list for live lead counts. Keying
+  // off the map — never campaign names — means duplicate canonical campaigns
+  // (e.g. "JPC:" vs "JPCIN:") can't make us show the wrong 0-lead one.
+  const byId = useMemo(() => {
+    const m = new Map<string, NurtureCampaign>();
+    for (const c of campaigns) m.set(`${c.bison_instance}:${c.id}`, c);
     return m;
   }, [campaigns]);
+  const byInstance = useMemo(() => {
+    const m = new Map<string, Partial<Record<Esp, NurtureCampaign>>>();
+    for (const e of mapEntries) {
+      const inst = e.bison_instance;
+      if (!m.has(inst)) m.set(inst, {});
+      // The mapped campaign, enriched with the live count from the campaign list
+      // (fall back to a stub carrying the mapped name if it isn't loaded).
+      const c = byId.get(`${inst}:${e.campaign_id}`)
+        ?? ({ id: e.campaign_id, name: e.campaign_name ?? "", status: "draft", client_tag: clientTag, bison_instance: inst, total_leads: undefined } as NurtureCampaign);
+      m.get(inst)![e.esp] = c;
+    }
+    return m;
+  }, [mapEntries, byId, clientTag]);
   const instanceKeys = useMemo(() => [...byInstance.keys()].sort(), [byInstance]);
 
   const total = counts?.total ?? 0;
