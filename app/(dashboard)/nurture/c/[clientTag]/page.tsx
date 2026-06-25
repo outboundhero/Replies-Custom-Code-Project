@@ -218,6 +218,7 @@ export default function NurturePage() {
   // Persistent "Confirm & enable sending" progress (attach → route → activate).
   // Stays on screen until the operator dismisses it (no auto-hide).
   const [enableProgress, setEnableProgress] = useState<EnableSendingState | null>(null);
+  const [enabling, setEnabling] = useState(false); // full enable-sending flow in progress
   // Per-client auto-nurture state. Loaded once for the current
   // clientFilter via /api/config/clients/[tag]. Flipped automatically
   // after a successful Auto-route push (the operator clicks ONE button
@@ -405,6 +406,24 @@ export default function NurturePage() {
       .catch(() => setMapEntries([]));
   }, [clientFilter]);
   useEffect(() => { loadMap(); }, [loadMap, mapConfirmedAt]);
+
+  // LIVE lead counts for the mapped campaigns (Bison fills active campaigns over
+  // time, so the 10-min cache lags). Keyed `${instance}:${campaignId}`.
+  const [liveCounts, setLiveCounts] = useState<Map<string, number>>(new Map());
+  const loadLiveCounts = useCallback(() => {
+    if (!clientFilter) { setLiveCounts(new Map()); return; }
+    fetch(`/api/nurture/campaign-live-counts?clientTag=${encodeURIComponent(clientFilter)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const m = new Map<string, number>();
+        for (const c of (d.counts || []) as Array<{ instance: string; campaignId: number; totalLeads: number | null }>) {
+          if (c.totalLeads != null) m.set(`${c.instance}:${c.campaignId}`, c.totalLeads);
+        }
+        setLiveCounts(m);
+      })
+      .catch(() => { /* keep cache counts */ });
+  }, [clientFilter]);
+  useEffect(() => { loadLiveCounts(); }, [loadLiveCounts, mapConfirmedAt]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
@@ -1114,7 +1133,9 @@ export default function NurturePage() {
   // map was already confirmed by TargetCampaigns before calling this.
   async function enableSendingFlow() {
     if (!clientFilter) return;
+    if (enabling) return; // already running
     const tag = clientFilter;
+    setEnabling(true);
     setEnableProgress({
       clientTag: tag,
       attach: { status: "running", rows: [], total: 0 },
@@ -1122,6 +1143,7 @@ export default function NurturePage() {
       activate: { status: "pending", rows: [], total: 0 },
     });
 
+    try {
     // 1) ATTACH inboxes (ESP-split) to each mapped campaign.
     try {
       const res = await fetch("/api/nurture/enable-sending", {
@@ -1154,6 +1176,7 @@ export default function NurturePage() {
       setEnableProgress((p) => p && { ...p, activate: { status: "done", rows, total: d.totalActivated || 0 } });
       if ((d.totalActivated || 0) > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(tag, true);
     } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
+    } finally { setEnabling(false); void loadLiveCounts(); }
   }
 
   /**
@@ -1464,7 +1487,7 @@ export default function NurturePage() {
 
       {/* ── Nurture pipeline status (orientation for anyone opening the page) ── */}
       {clientFilter && (
-        <NurturePipeline clientTag={clientFilter} counts={counts} campaigns={campaigns} mapEntries={mapEntries} readyCount={readyFromList} />
+        <NurturePipeline clientTag={clientFilter} counts={counts} campaigns={campaigns} mapEntries={mapEntries} liveCounts={liveCounts} readyCount={readyFromList} />
       )}
 
       {/* ── Target campaigns — operator picks destinations; gates sending ── */}
@@ -1656,48 +1679,26 @@ export default function NurturePage() {
               ))}
             </div>
           )}
-          {/* All routing keys off the confirmed Target Campaigns map — no manual
-              campaign picker. Leads route by lane (B2B/B2C) → ESP → mapped campaign. */}
+          {/* Single action: "Route all ready" runs the full enable-sending flow
+              against the confirmed map — attach inboxes → route ALL ready leads →
+              activate campaigns — with a live progress panel. */}
           <span className="h-9 px-3 flex items-center text-xs text-muted-foreground">
             {mapConfirmedAt
-              ? <>routes by lane → ESP via the confirmed map</>
+              ? <>attaches inboxes → routes ready leads → activates, via the confirmed map</>
               : <span className="text-amber-700">Confirm your Target Campaigns map below to enable routing</span>}
           </span>
           <Button
             size="sm"
-            onClick={routeSelectionViaMap}
-            disabled={pushing || selected.size === 0 || !mapConfirmedAt}
-            className="h-9"
-            title={!mapConfirmedAt ? "Confirm your Target Campaigns first to enable sending." : "Route the selected leads to their mapped campaigns (lane → ESP → campaign from the confirmed map)."}
-          >
-            {pushing ? "Pushing…" : `Add to nurture${selected.size > 0 ? ` (${selected.size})` : ""}`}
-          </Button>
-          <Button
-            size="sm"
             variant="default"
-            onClick={routeSelectionViaMap}
-            disabled={pushing || selected.size === 0 || !mapConfirmedAt}
-            className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
-            title={!mapConfirmedAt ? "Confirm your Target Campaigns first to enable sending." : "Route the selected leads to their mapped campaigns (lane → ESP → campaign from the confirmed map)."}
+            onClick={enableSendingFlow}
+            disabled={enabling || !mapConfirmedAt}
+            className="h-9 bg-violet-600 hover:bg-violet-700 text-white"
+            title={!mapConfirmedAt
+              ? "Confirm your Target Campaigns first to enable sending."
+              : "Attach the client's inboxes to each mapped campaign, route EVERY ready lead (B2B/B2C → ESP → mapped campaign), then activate the campaigns. Shows a live progress panel."}
           >
-            {pushing ? "Pushing…" : `Auto-route${selected.size > 0 ? ` (${selected.size})` : ""}`}
+            {enabling ? "Routing…" : "Route all ready"}
           </Button>
-          {view === "actionable" && (
-            <Button
-              size="sm"
-              variant="default"
-              onClick={routeAllReady}
-              disabled={pushing || !mapConfirmedAt}
-              className={`h-9 ${routingAll ? "bg-rose-600 hover:bg-rose-700" : "bg-violet-600 hover:bg-violet-700"} text-white`}
-              title={!mapConfirmedAt
-                ? "Confirm your Target Campaigns first to enable sending."
-                : "Route EVERY ESP-resolved ready lead for this client into the campaigns you mapped — creating each lead in the correct B2B/B2C Bison instance, server-side, all of them. Click again to stop."}
-            >
-              {routingAll
-                ? `Stop (routed ${routeAllProgress?.routed.toLocaleString() ?? 0})`
-                : "Route all ready"}
-            </Button>
-          )}
           <Button
             size="sm"
             variant="outline"
@@ -2353,12 +2354,13 @@ const CAMPAIGN_STATUS_BADGE: Record<string, string> = {
  * not-set-up campaigns are visible).
  */
 function NurturePipeline({
-  clientTag, counts, campaigns, mapEntries, readyCount,
+  clientTag, counts, campaigns, mapEntries, liveCounts, readyCount,
 }: {
   clientTag: string;
   counts: Counts | null;
   campaigns: NurtureCampaign[];
   mapEntries: MapEntry[];
+  liveCounts: Map<string, number>;
   readyCount: number | null;
 }) {
   // Display the EXACT campaigns from the confirmed map (instance → ESP →
@@ -2439,12 +2441,15 @@ function NurturePipeline({
               <div className="grid grid-cols-3 gap-2">
                 {(["outlook", "google", "segs"] as Esp[]).map((esp) => {
                   const c = espMap[esp];
+                  // Prefer the LIVE count (Bison fills active campaigns over time;
+                  // the cache lags); fall back to the cached count.
+                  const leads = c ? (liveCounts.get(`${inst}:${c.id}`) ?? c.total_leads ?? 0) : 0;
                   return (
                     <div key={esp} className="rounded-md border px-3 py-2">
                       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{ESP_LABEL[esp]} campaign</p>
                       {c ? (
                         <div className="flex items-center justify-between gap-2 mt-1">
-                          <span className="text-sm font-semibold tabular-nums" title={c.name}>{(c.total_leads ?? 0).toLocaleString()} leads</span>
+                          <span className="text-sm font-semibold tabular-nums" title={c.name}>{leads.toLocaleString()} leads</span>
                           <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
                         </div>
                       ) : <p className="text-xs text-rose-600 mt-1">not set up</p>}
