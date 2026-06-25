@@ -425,6 +425,45 @@ export async function listCampaignLeads(
 }
 
 /**
+ * Fetch ONE page range of a campaign's leads — pages [startPage, startPage+pageCount).
+ * Returns the rows plus the campaign's `last_page`, so a caller can page through
+ * a campaign with live progress (used by the source-campaign router) instead of
+ * pulling the whole campaign at once. Concurrent within the range, with the same
+ * 429-backoff `fetchWithTimeout` as listCampaignLeads.
+ */
+export async function getCampaignLeadsPage(
+  instanceKey: string,
+  campaignId: number,
+  startPage: number,
+  pageCount: number,
+  perPage = 100,
+): Promise<{ leads: OutboundLead[]; lastPage: number }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
+  const url = (page: number) => `${baseUrl}/api/campaigns/${campaignId}/leads?page=${page}&per_page=${perPage}`;
+  async function fetchPage(page: number): Promise<{ rows: OutboundLead[]; lastPage: number }> {
+    const res = await fetchWithTimeout(url(page), { headers, timeoutMs: 15_000 });
+    if (!res.ok) return { rows: [], lastPage: page };
+    const data = await res.json().catch(() => null);
+    return { rows: (data?.data ?? []) as OutboundLead[], lastPage: Number(data?.meta?.last_page) || page };
+  }
+  const start = Math.max(1, startPage);
+  const pages = Array.from({ length: Math.max(1, pageCount) }, (_, i) => start + i);
+  const out: OutboundLead[] = [];
+  let lastPage = start;
+  let idx = 0;
+  await Promise.all(Array.from({ length: Math.min(8, pages.length) }, async () => {
+    while (idx < pages.length) {
+      const p = pages[idx++];
+      const r = await fetchPage(p);
+      lastPage = Math.max(lastPage, r.lastPage);
+      if (r.rows.length) out.push(...r.rows);
+    }
+  }));
+  return { leads: out, lastPage };
+}
+
+/**
  * Attach existing leads (by ID) to a campaign. Used to push qualified leads
  * into a [Nurture] campaign.
  *

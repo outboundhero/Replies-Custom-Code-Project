@@ -17,13 +17,12 @@
 
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
-import { attachLeadsToCampaign, findLeadByEmail, createLeadsInInstance, type CreateLeadInput } from "@/lib/outboundhero-api";
 import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
 import { getClientInstances } from "@/lib/nurture/group-routing";
-import { getCampaignMap, getMapConfirmedAt, pickFromMap } from "@/lib/nurture/campaign-map";
+import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
-import { getInstanceLeadIds, recordInstanceLeads } from "@/lib/nurture/instance-leads";
+import { routeCandidates, type Candidate, type BucketResult } from "@/lib/nurture/route-candidates";
 import { logActivity, logError } from "@/lib/errors";
 
 const NURTURE_DAYS = 45;
@@ -36,31 +35,8 @@ const EXCLUDED_AI_CATEGORIES = [
   "Automated Catch-All Message", "Referral Given", "Internally Forwarded",
 ];
 
-interface Candidate {
-  source: "seq" | "reply" | "legacy";
-  rowId: number;
-  email: string;
-  esp: Esp;
-  first_name: string | null;
-  last_name: string | null;
-  company: string | null;
-  obLeadId: number | null;       // id in the SOURCE instance
-  sourceInstance: string | null; // where the lead currently lives
-  custom_variables: Array<{ name: string; value: string }>;
-  // Computed during routing:
-  lane?: "b2b" | "b2c";
-  instance?: string;
-}
-
-interface BucketResult {
-  esp: Esp;
-  instance: string;
-  lane: "b2b" | "b2c";
-  campaign: { id: number; name: string; bison_instance: string };
-  requested: number;
-  attached: number;
-  error?: string;
-}
+// Candidate + BucketResult now live in lib/nurture/route-candidates.ts (shared
+// with the source-campaign routing flow).
 
 export interface AutoPushResult {
   clientTag: string;
@@ -248,131 +224,22 @@ export async function runAutoPushForClient(
   result.scanned = candidates.length;
   if (candidates.length === 0) return result;
 
-  // 4. Partition candidates by (instance, esp) — the routing key. A lead's
-  //    instance comes from its lane (B2B/B2C) within the client's group.
-  const byBucket = new Map<string, Candidate[]>();
-  for (const c of candidates) {
-    if (!c.instance) continue;
-    const key = `${c.instance} ${c.esp}`;
-    if (!byBucket.has(key)) byBucket.set(key, []);
-    byBucket.get(key)!.push(c);
-  }
-
-  // 5. For each (instance, esp) bucket: resolve the MAPPED target campaign,
-  //    CREATE the leads in that instance (so they live in the right workspace),
-  //    attach to the campaign, stamp added_at. Sequential per bucket to stay
-  //    gentle on Bison; create + attach within a bucket are batched.
-  for (const [key, items] of byBucket) {
-    const [instance, esp] = key.split(" ") as [string, Esp];
-    const lane: "b2b" | "b2c" = items[0]?.lane ?? "b2b";
-    const target = pickFromMap(map, instance, esp);
-    if (!target) {
-      result.perBucket.push({
-        esp, instance, lane,
-        campaign: { id: 0, name: "(unmapped)", bison_instance: instance },
-        requested: items.length, attached: 0,
-        error: `no campaign mapped for ${esp} in ${instance} — pick one in Target Campaigns`,
-      });
-      continue;
-    }
-    const cName = target.campaign_name ?? "(mapped)";
-
-    const emailToId = new Map<string, number>();
-
-    // Same-instance shortcut: leads already living in the target instance keep
-    // their existing id — no create/lookup needed. Only leads crossing
-    // instances need resolving.
-    for (const i of items) if (i.sourceInstance === instance && i.obLeadId) emailToId.set(i.email.toLowerCase(), i.obLeadId);
-    let crossItems = items.filter((i) => !(i.sourceInstance === instance && i.obLeadId));
-
-    // Reuse pre-placed instance ids (scripts/place-leads.ts records them in
-    // nurture_instance_lead) — attach directly, skip create entirely.
-    if (crossItems.length > 0) {
-      const saved = await getInstanceLeadIds(instance, crossItems.map((i) => i.email));
-      crossItems = crossItems.filter((i) => {
-        const id = saved.get(i.email.toLowerCase());
-        if (id) { emailToId.set(i.email.toLowerCase(), id); return false; }
-        return true;
-      });
-    }
-
-    // Create whatever's left in the TARGET instance (with custom variables).
-    // Existing emails come back notReturned (Bison dedupes) → resolve via
-    // findLeadByEmail. Newly-resolved ids are recorded for next time.
-    const payloads: CreateLeadInput[] = crossItems.map((i) => ({
-      email: i.email, first_name: i.first_name, last_name: i.last_name, company: i.company,
-      custom_variables: i.custom_variables.length ? i.custom_variables : undefined,
-    }));
-    try {
-      if (payloads.length > 0) {
-      const cr = await createLeadsInInstance(instance, payloads);
-      const newlyResolved: Array<{ email: string; id: number }> = [];
-      for (const c of cr.created) { emailToId.set(c.email.toLowerCase(), c.ob_lead_id); newlyResolved.push({ email: c.email, id: c.ob_lead_id }); }
-      const missing = cr.notReturned;
-      if (missing.length > 0) {
-        const CONC = 5; let idx = 0;
-        await Promise.all(Array.from({ length: Math.min(CONC, missing.length) }, async () => {
-          while (idx < missing.length) {
-            const em = missing[idx++];
-            try { const lead = await findLeadByEmail(instance, em); if (lead?.id) { emailToId.set(em.toLowerCase(), lead.id); newlyResolved.push({ email: em, id: lead.id }); } } catch { /* skip */ }
-          }
-        }));
-      }
-      if (newlyResolved.length) await recordInstanceLeads(instance, clientTag, newlyResolved);
-      if (cr.errors.length) console.warn(`[auto-push:${clientTag}] create errors in ${instance}/${esp}:`, cr.errors);
-      }
-    } catch (e) {
-      result.perBucket.push({
-        esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
-        requested: items.length, attached: 0, error: `create failed: ${(e as Error).message}`,
-      });
-      continue;
-    }
-
-    const resolved = items.filter((i) => emailToId.has(i.email.toLowerCase()));
-    if (resolved.length === 0) {
-      result.perBucket.push({
-        esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
-        requested: items.length, attached: 0, error: "no lead ids resolved in target instance",
-      });
-      continue;
-    }
-
-    // Attach to the mapped campaign in the target instance.
-    let attached = 0;
-    try {
-      const r = await attachLeadsToCampaign(instance, target.campaign_id, resolved.map((i) => emailToId.get(i.email.toLowerCase())!), true);
-      attached = r.attachedCount ?? (r.ok ? resolved.length : 0);
-      if (!r.ok) {
-        result.perBucket.push({
-          esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
-          requested: items.length, attached: 0, error: `attach failed: ${r.error}`,
-        });
-        continue;
-      }
-    } catch (e) {
-      result.perBucket.push({
-        esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
-        requested: items.length, attached: 0, error: `attach failed: ${(e as Error).message}`,
-      });
-      continue;
-    }
-
-    // Stamp added_at + nurture_campaign_id (best-effort; Bison succeeded).
-    const stamp = new Date().toISOString();
-    const seqIds = resolved.filter((i) => i.source === "seq").map((i) => i.rowId);
-    const replyIds = resolved.filter((i) => i.source === "reply").map((i) => i.rowId);
-    const legacyIds = resolved.filter((i) => i.source === "legacy").map((i) => i.rowId);
-    if (seqIds.length > 0) await supabase.from("nurture_sequence_finished").update({ added_at: stamp, nurture_campaign_id: target.campaign_id }).in("id", seqIds);
-    if (replyIds.length > 0) await supabase.from("replies").update({ nurture_added_at: stamp, nurture_campaign_id: target.campaign_id }).in("id", replyIds);
-    if (legacyIds.length > 0) await supabase.from("nurture_legacy_leads").update({ nurture_added_at: stamp, nurture_campaign_id: target.campaign_id }).in("id", legacyIds);
-
-    result.perBucket.push({
-      esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
-      requested: items.length, attached,
-    });
-    result.totalAttached += attached;
-  }
+  // 4+5. Route via the shared core: partition by (instance, esp) → create in
+  // the target instance → attach to the mapped campaign. The onAttached
+  // callback stamps our source rows (added_at + nurture_campaign_id) per bucket.
+  const routed = await routeCandidates(clientTag, candidates, map, {
+    onAttached: async (campaignId, resolved) => {
+      const stamp = new Date().toISOString();
+      const seqIds = resolved.filter((i) => i.source === "seq").map((i) => i.rowId);
+      const replyIds = resolved.filter((i) => i.source === "reply").map((i) => i.rowId);
+      const legacyIds = resolved.filter((i) => i.source === "legacy").map((i) => i.rowId);
+      if (seqIds.length > 0) await supabase.from("nurture_sequence_finished").update({ added_at: stamp, nurture_campaign_id: campaignId }).in("id", seqIds);
+      if (replyIds.length > 0) await supabase.from("replies").update({ nurture_added_at: stamp, nurture_campaign_id: campaignId }).in("id", replyIds);
+      if (legacyIds.length > 0) await supabase.from("nurture_legacy_leads").update({ nurture_added_at: stamp, nurture_campaign_id: campaignId }).in("id", legacyIds);
+    },
+  });
+  result.perBucket = routed.perBucket;
+  result.totalAttached = routed.totalAttached;
 
   // 7. Log activity so the operator sees this in Recent Activity.
   await logActivity("nurture-auto-push", result.totalAttached > 0 ? "auto-pushed" : "no-op", {

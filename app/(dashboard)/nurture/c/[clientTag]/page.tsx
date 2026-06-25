@@ -125,6 +125,9 @@ function viewToFilters(view: View): { status: string; safety: string } {
 // One confirmed target-campaign mapping cell.
 interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: "b2b" | "b2c" | string | null }
 
+// A client's outbound campaign usable as a SOURCE to route leads from.
+interface SourceCampaign { id: number; name: string; status: string; bison_instance: string; esp: Esp; total_leads: number }
+
 // ── "Confirm & enable sending" progress model (persistent panel) ────────────
 type EnablePhaseStatus = "pending" | "running" | "done" | "error";
 interface EnableAttachRow { instance: string; esp: string; campaign: string | null; pool: number; connected: number; attached: number; alreadyPresent: number; error?: string }
@@ -132,7 +135,7 @@ interface EnableActivateRow { instance: string; esp: string; campaign: string | 
 interface EnableSendingState {
   clientTag: string;
   attach: { status: EnablePhaseStatus; rows: EnableAttachRow[]; total: number };
-  route: { status: EnablePhaseStatus; routed: number; batches: number };
+  route: { status: EnablePhaseStatus; routed: number; batches: number; fetched?: number };
   activate: { status: EnablePhaseStatus; rows: EnableActivateRow[]; total: number };
 }
 
@@ -424,6 +427,18 @@ export default function NurturePage() {
       .catch(() => { /* keep cache counts */ });
   }, [clientFilter]);
   useEffect(() => { loadLiveCounts(); }, [loadLiveCounts, mapConfirmedAt]);
+
+  // Source campaigns to route leads FROM (the client's ESP-named outbound campaigns).
+  const [sourceCampaigns, setSourceCampaigns] = useState<SourceCampaign[]>([]);
+  const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set()); // `${instance}:${id}`
+  const toggleSource = (key: string) => setSelectedSources((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  useEffect(() => {
+    if (!clientFilter) { setSourceCampaigns([]); return; }
+    fetch(`/api/nurture/source-campaigns?clientTag=${encodeURIComponent(clientFilter)}`)
+      .then((r) => r.json())
+      .then((d) => setSourceCampaigns((d.campaigns || []) as SourceCampaign[]))
+      .catch(() => setSourceCampaigns([]));
+  }, [clientFilter, mapConfirmedAt]);
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
@@ -1128,10 +1143,13 @@ export default function NurturePage() {
     void Promise.all([loadPage(true, false), loadCounts(true)]);
   }
 
-  // Full "Confirm & enable sending" hand-off (attach inboxes → route ready
-  // leads → activate). Drives the persistent EnableSendingProgress panel; the
-  // map was already confirmed by TargetCampaigns before calling this.
-  async function enableSendingFlow() {
+  // Shared "enable sending" runner: attach inboxes → <route phase> → activate,
+  // driving the persistent progress panel. The route phase is pluggable so the
+  // same attach/activate wrap both "Route all ready" (the ready pool) and
+  // "Auto-route a source campaign". Skips activate if the route phase was stopped.
+  async function runEnableFlow(
+    routePhase: (onProgress: (routed: number, batches: number, fetched?: number) => void) => Promise<{ routed: number; batches: number; fetched?: number; stopped: boolean; errored: boolean }>,
+  ) {
     if (!clientFilter) return;
     if (enabling) return; // already running
     const tag = clientFilter;
@@ -1144,39 +1162,87 @@ export default function NurturePage() {
     });
 
     try {
-    // 1) ATTACH inboxes (ESP-split) to each mapped campaign.
-    try {
-      const res = await fetch("/api/nurture/enable-sending", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientTag: tag, phase: "attach" }),
-      });
-      const d = await res.json();
-      if (!res.ok) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error(d.error || "Inbox attach failed"); return; }
-      const rows: EnableAttachRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; poolTotal: number; connected: number; attached: number; alreadyPresent: number; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, connected: c.connected, attached: c.attached, alreadyPresent: c.alreadyPresent, error: c.error }));
-      setEnableProgress((p) => p && { ...p, attach: { status: "done", rows, total: d.totalAttached || 0 }, route: { ...p.route, status: "running" } });
-    } catch (e) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error((e as Error).message); return; }
+      // 1) ATTACH inboxes (ESP-split) to each mapped campaign.
+      try {
+        const res = await fetch("/api/nurture/enable-sending", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTag: tag, phase: "attach" }),
+        });
+        const d = await res.json();
+        if (!res.ok) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error(d.error || "Inbox attach failed"); return; }
+        const rows: EnableAttachRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; poolTotal: number; connected: number; attached: number; alreadyPresent: number; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, pool: c.poolTotal, connected: c.connected, attached: c.attached, alreadyPresent: c.alreadyPresent, error: c.error }));
+        setEnableProgress((p) => p && { ...p, attach: { status: "done", rows, total: d.totalAttached || 0 }, route: { ...p.route, status: "running" } });
+      } catch (e) { setEnableProgress((p) => p && { ...p, attach: { ...p.attach, status: "error" } }); toast.error((e as Error).message); return; }
 
-    // 2) ROUTE all ready leads (by ESP + B2B/B2C lane).
-    routeAllAbortRef.current = false;
-    setRoutingAll(true);
-    const r = await drainRouteAll((routed, batches) => setEnableProgress((p) => p && { ...p, route: { status: "running", routed, batches } }));
-    setRoutingAll(false);
-    setEnableProgress((p) => p && { ...p, route: { status: r.errored ? "error" : "done", routed: r.routed, batches: r.batches }, activate: { ...p.activate, status: "running" } });
-    void Promise.all([loadPage(true, false), loadCounts(true)]);
+      // 2) ROUTE (pluggable: ready pool or a source campaign).
+      routeAllAbortRef.current = false;
+      setRoutingAll(true);
+      const r = await routePhase((routed, batches, fetched) => setEnableProgress((p) => p && { ...p, route: { status: "running", routed, batches, fetched } }));
+      setRoutingAll(false);
+      setEnableProgress((p) => p && { ...p, route: { status: r.errored ? "error" : "done", routed: r.routed, batches: r.batches, fetched: r.fetched }, activate: { ...p.activate, status: r.stopped ? "pending" : "running" } });
+      void Promise.all([loadPage(true, false), loadCounts(true)]);
+      if (r.stopped) { toast.info(`Stopped — added ${r.routed.toLocaleString()} so far. Campaigns not activated (stopped early).`); return; }
 
-    // 3) ACTIVATE the campaigns.
-    try {
-      const res = await fetch("/api/nurture/enable-sending", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientTag: tag, phase: "activate" }),
-      });
-      const d = await res.json();
-      if (!res.ok) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error(d.error || "Activate failed"); return; }
-      const rows: EnableActivateRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; activated: boolean; alreadyActive: boolean; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, activated: c.activated, alreadyActive: c.alreadyActive, error: c.error }));
-      setEnableProgress((p) => p && { ...p, activate: { status: "done", rows, total: d.totalActivated || 0 } });
-      if ((d.totalActivated || 0) > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(tag, true);
-    } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
+      // 3) ACTIVATE the campaigns.
+      try {
+        const res = await fetch("/api/nurture/enable-sending", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTag: tag, phase: "activate" }),
+        });
+        const d = await res.json();
+        if (!res.ok) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error(d.error || "Activate failed"); return; }
+        const rows: EnableActivateRow[] = (d.campaigns || []).map((c: { instance: string; esp: string; campaignName: string | null; activated: boolean; alreadyActive: boolean; error?: string }) => ({ instance: c.instance, esp: c.esp, campaign: c.campaignName, activated: c.activated, alreadyActive: c.alreadyActive, error: c.error }));
+        setEnableProgress((p) => p && { ...p, activate: { status: "done", rows, total: d.totalActivated || 0 } });
+        if ((d.totalActivated || 0) > 0 && !autoNurture?.enabled) await setAutoNurtureEnabled(tag, true);
+      } catch (e) { setEnableProgress((p) => p && { ...p, activate: { ...p.activate, status: "error" } }); toast.error((e as Error).message); }
     } finally { setEnabling(false); void loadLiveCounts(); }
+  }
+
+  // "Route all ready" → enable flow with the ready-pool drain as the route phase.
+  function enableSendingFlow() {
+    return runEnableFlow(async (onProgress) => {
+      const r = await drainRouteAll((routed, batches) => onProgress(routed, batches));
+      return { routed: r.routed, batches: r.batches, stopped: r.stopped, errored: r.errored };
+    });
+  }
+
+  // Loop the source-campaign router over EACH selected source, paging through
+  // each with fetched/added progress; stoppable between batches/sources.
+  async function drainFromCampaigns(
+    sources: SourceCampaign[],
+    onProgress: (routed: number, batches: number, fetched: number) => void,
+  ): Promise<{ routed: number; batches: number; fetched: number; stopped: boolean; errored: boolean }> {
+    let routed = 0, batches = 0, fetched = 0, stopped = false, errored = false;
+    const SAFETY_MAX_BATCHES = 8000;
+    try {
+      outer: for (const source of sources) {
+        let page = 1;
+        for (;;) {
+          if (routeAllAbortRef.current) { stopped = true; break outer; }
+          if (batches >= SAFETY_MAX_BATCHES) { stopped = true; break outer; }
+          const res = await fetch("/api/nurture/route-from-campaign", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ clientTag: clientFilter, sourceInstance: source.bison_instance, sourceCampaignId: source.id, sourceCampaignName: source.name, page }),
+          });
+          if (res.redirected || res.status === 401) { window.location.href = "/login"; errored = true; break outer; }
+          const data = await res.json();
+          if (!res.ok) { errored = true; toast.error(`${source.name}: ${data.error || `HTTP ${res.status}`}`); break outer; }
+          batches++;
+          fetched += data.fetched || 0;
+          routed += data.added || 0;
+          page = data.nextPage ?? page + 40;
+          onProgress(routed, batches, fetched);
+          if (data.done) break; // this source exhausted → next source
+        }
+      }
+    } catch (e) { errored = true; toast.error((e as Error).message); }
+    return { routed, batches, fetched, stopped, errored };
+  }
+
+  // "Auto-route" selected source campaigns → full enable flow sourcing from them.
+  function routeFromCampaignFlow(sources: SourceCampaign[]) {
+    if (sources.length === 0) return;
+    return runEnableFlow((onProgress) => drainFromCampaigns(sources, (routed, batches, fetched) => onProgress(routed, batches, fetched)));
   }
 
   /**
@@ -1494,6 +1560,62 @@ export default function NurturePage() {
       {clientFilter && (
         <TargetCampaigns clientTag={clientFilter} campaigns={campaigns} onConfirmedChange={setMapConfirmedAt} onSendingEnabled={enableSendingFlow} />
       )}
+
+      {/* ── Optional: route existing campaigns' leads into the nurture campaigns ── */}
+      {clientFilter && mapConfirmedAt && (() => {
+        const selected = sourceCampaigns.filter((c) => selectedSources.has(`${c.bison_instance}:${c.id}`));
+        const selLeads = selected.reduce((s, c) => s + c.total_leads, 0);
+        return (
+          <div className="rounded-lg border bg-card p-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="min-w-[220px]">
+                <p className="text-sm font-semibold">Route source campaigns&apos; leads</p>
+                <p className="text-xs text-muted-foreground">Pick one or more existing campaigns → push their leads into the nurture campaigns (by lane B2B/B2C; ESP from each campaign&apos;s name). Same-instance leads attach directly; cross-instance ones are created then attached.</p>
+              </div>
+              <div className="ml-auto flex items-center gap-2">
+                {sourceCampaigns.length > 0 && (
+                  <button
+                    onClick={() => setSelectedSources((s) => s.size === sourceCampaigns.length ? new Set() : new Set(sourceCampaigns.map((c) => `${c.bison_instance}:${c.id}`)))}
+                    className="text-xs text-primary hover:underline"
+                  >
+                    {selectedSources.size === sourceCampaigns.length ? "Clear all" : "Select all"}
+                  </button>
+                )}
+                <Button
+                  size="sm"
+                  variant="default"
+                  disabled={enabling || selected.length === 0}
+                  onClick={() => routeFromCampaignFlow(selected)}
+                  className="h-9 bg-violet-600 hover:bg-violet-700 text-white"
+                  title="Attach inboxes → fetch the selected campaigns' leads → add them to the mapped nurture campaigns (by lane + each source's ESP) → activate. Live progress; stoppable."
+                >
+                  {enabling ? "Routing…" : `Auto-route${selected.length ? ` (${selected.length} · ${selLeads.toLocaleString()} leads)` : ""}`}
+                </Button>
+              </div>
+            </div>
+            {sourceCampaigns.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No ESP-named source campaigns with leads for {clientFilter}.</p>
+            ) : (
+              <div className="max-h-64 overflow-auto rounded-md border divide-y">
+                {sourceCampaigns.map((c) => {
+                  const key = `${c.bison_instance}:${c.id}`;
+                  const checked = selectedSources.has(key);
+                  return (
+                    <label key={key} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-muted/40">
+                      <input type="checkbox" checked={checked} onChange={() => toggleSource(key)} disabled={enabling} className="size-4 shrink-0" />
+                      <InstanceBadge instance={c.bison_instance} size="xs" />
+                      <span className="font-medium truncate">{c.name}</span>
+                      <span className="text-[10px] uppercase font-semibold text-muted-foreground">{c.esp}</span>
+                      <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${CAMPAIGN_STATUS_BADGE[c.status] ?? "bg-slate-100 text-slate-600"}`}>{c.status}</span>
+                      <span className="ml-auto text-xs text-muted-foreground tabular-nums shrink-0">{c.total_leads.toLocaleString()} leads</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Enable-sending progress (persistent until dismissed) ── */}
       {enableProgress && (
@@ -2057,12 +2179,17 @@ function EnableSendingProgress({ progress, routing, onStopRouting, onDismiss }: 
             </div>
           )}
         </div>
-        {/* 2. Route ready leads */}
+        {/* 2. Route leads (ready pool, or fetched from a source campaign) */}
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
             <EnablePhaseIcon status={route.status} />
-            <span className="font-medium">2. Route ready leads</span>
-            {route.status !== "pending" && <span className="text-xs text-muted-foreground"><span className="text-emerald-700 font-medium">{route.routed.toLocaleString()}</span> pushed{route.batches ? ` · ${route.batches} batch${route.batches === 1 ? "" : "es"}` : ""}</span>}
+            <span className="font-medium">2. {route.fetched !== undefined ? "Fetch & route source leads" : "Route ready leads"}</span>
+            {route.status !== "pending" && (
+              <span className="text-xs text-muted-foreground">
+                {route.fetched !== undefined && <><span className="text-foreground font-medium">{route.fetched.toLocaleString()}</span> fetched · </>}
+                <span className="text-emerald-700 font-medium">{route.routed.toLocaleString()}</span> added{route.batches ? ` · ${route.batches} batch${route.batches === 1 ? "" : "es"}` : ""}
+              </span>
+            )}
             {routing && route.status === "running" && (
               <button onClick={onStopRouting} className="ml-auto text-[11px] rounded border px-2 py-0.5 hover:bg-muted">Stop</button>
             )}
