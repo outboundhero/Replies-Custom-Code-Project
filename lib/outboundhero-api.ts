@@ -468,6 +468,46 @@ export async function getCampaignLeadsPage(
 }
 
 /**
+ * Enumerate ALL of a campaign's leads via CURSOR pagination.
+ *
+ * Traditional page pagination is capped by Bison at 1000 pages (= 15,000 leads,
+ * since per_page is locked to 15), so it cannot reach the tail of large
+ * campaigns. Cursor pagination has no such cap — we follow `meta.next_cursor`
+ * until it's null. It's inherently sequential (each request needs the previous
+ * response's cursor) and still returns ~15 rows/request, so this is slow
+ * (~N/15 requests) — use it for one-time/background full sweeps, not live UI.
+ * See https://docs.emailbison.com/get-started/pagination .
+ */
+export async function listCampaignLeadsCursor(
+  instanceKey: string,
+  campaignId: number,
+  opts: { leadCampaignStatus?: string; onProgress?: (fetched: number) => void } = {},
+): Promise<OutboundLead[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
+  const filter = opts.leadCampaignStatus ? `&filters[lead_campaign_status]=${opts.leadCampaignStatus}` : "";
+  const out: OutboundLead[] = [];
+  let cursor: string | null = null;
+  let guard = 0;
+  for (;;) {
+    const url = `${baseUrl}/api/campaigns/${campaignId}/leads?pagination_type=cursor&per_page=100${filter}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const res = await fetchWithTimeout(url, { headers, timeoutMs: 15_000 });
+    if (!res.ok) {
+      if (res.status === 429) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+      break;
+    }
+    const data = await res.json().catch(() => null);
+    const rows = (data?.data ?? []) as OutboundLead[];
+    if (rows.length) { out.push(...rows); opts.onProgress?.(out.length); }
+    const next = (data?.meta?.next_cursor as string | null | undefined) ?? null;
+    if (!next || rows.length === 0) break;
+    cursor = next;
+    if (++guard > 200_000) break; // hard safety stop
+  }
+  return out;
+}
+
+/**
  * Count of leads in a campaign, optionally filtered by lead_campaign_status
  * (e.g. "sequence_finished"). One cheap request — reads meta.total from page 1.
  */

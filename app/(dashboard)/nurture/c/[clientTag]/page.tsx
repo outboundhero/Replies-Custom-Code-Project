@@ -96,6 +96,11 @@ interface Counts {
 // a 5-fetch 10k drain.
 const PAGE_SIZE = 2000;
 const ABSOLUTE_CAP = 4000;
+// Default render: a fast, non-drained preview. The tiles/pipeline counts are
+// authoritative (cached counts endpoint), so the list doesn't need to drain the
+// whole client population on load — that deep-offset drain was the slow part and
+// the statement-timeout source. "Load all" opts into the full ABSOLUTE_CAP set.
+const PREVIEW_LIMIT = 500;
 
 const SOURCE_LABEL: Record<Source, string> = {
   soft_negative: "Soft Negative",
@@ -302,7 +307,11 @@ export default function NurturePage() {
   } | null>(null);
 
   const loadPage = useCallback(
-    async (resetOffset: boolean, append: boolean) => {
+    // `full` = drain the WHOLE deduped client set (slow on big clients, the old
+    // default). Off by default: we show a fast preview and let the authoritative
+    // tiles come from the counts endpoint. The user opts into the full list via
+    // the "Load all" button (setWantFull) — keeps the page snappy + error-free.
+    async (resetOffset: boolean, append: boolean, full = false) => {
       if (append) setLoadingMore(true);
       else setLoading(true);
       try {
@@ -318,27 +327,37 @@ export default function NurturePage() {
           return p;
         };
 
-        // 1) QUICK first paint — a small, NON-drained fetch so the table shows
-        // rows in ~200ms instead of waiting on the full server-side drain.
+        // 1) FAST preview — a NON-drained fetch (quick=1) that returns in ~200ms.
+        // This is the default render: enough rows to eyeball, no deep-offset
+        // drain (which tripped the statement timeout on big clients).
         if (!append) {
           const qp = baseParams();
-          qp.set("limit", "100"); // small, fast first paint
+          qp.set("limit", String(PREVIEW_LIMIT));
           qp.set("offset", "0");
           qp.set("quick", "1");
           const qres = await fetch(`/api/nurture?${qp}`);
           if (qres.redirected || qres.status === 401) { window.location.href = "/login"; return; }
           if (qres.ok) {
             const qd = await qres.json();
-            setItems((qd.items || []) as NurtureItem[]);
+            const preview = (qd.items || []) as NurtureItem[];
+            setItems(preview);
             setSelected(new Set());
             setSelectedMeta(new Map());
-            setLoading(false);
-            setLoadingMore(true); // keep the "loading rest" indicator up
+            setFetchError(null);
+            setOffset(preview.length);
+            // More rows likely exist if the preview came back full. The tiles
+            // (counts) are authoritative, so we don't drain just to count.
+            setHasMore(preview.length >= PREVIEW_LIMIT);
+            setReadyFromList(null); // tile falls back to exact counts
           }
+          // Default load stops here — fast. Only drain when explicitly asked.
+          if (!full) { setLoading(false); setLoadingMore(false); return; }
+          setLoading(false);
+          setLoadingMore(true); // "Load all" → keep the loading-rest indicator up
         }
 
-        // 2) FULL drained set — replace once it's in (server returns the whole
-        // deduped client set up to the cap in one response).
+        // 2) FULL drained set — the whole deduped client set up to the cap.
+        // Only reached when `full` (the "Load all" button or append/scroll).
         const fp = baseParams();
         fp.set("limit", String(ABSOLUTE_CAP));
         fp.set("offset", "0");
@@ -350,18 +369,15 @@ export default function NurturePage() {
           return;
         }
         const data = await res.json();
-        const full: NurtureItem[] = data.items || [];
-        if (append) setItems((prev) => [...prev, ...full]);
-        else setItems(full);
+        const drained: NurtureItem[] = data.items || [];
+        if (append) setItems((prev) => [...prev, ...drained]);
+        else setItems(drained);
         setHasMore(false);
-        setOffset(full.length);
+        setOffset(drained.length);
         setFetchError(null);
 
-        // Keep the "Ready to nurture" tile in lockstep with the loaded set —
-        // but only when we drained the whole population (below the cap). At the
-        // cap the loaded length is just the ceiling, so fall back to counts.
         if (!append && view === "actionable" && sourceFilter === "all") {
-          setReadyFromList(full.length < ABSOLUTE_CAP ? full.length : null);
+          setReadyFromList(drained.length < ABSOLUTE_CAP ? drained.length : null);
         }
       } catch (e) {
         setFetchError((e as Error).message);
@@ -1884,14 +1900,19 @@ export default function NurturePage() {
         </div>
       </div>
 
-      {/* Capped-list notice — the table renders at most ABSOLUTE_CAP rows for
-          performance, but the tile/pipeline show the TRUE total. Make the gap
-          explicit so a big client (e.g. 48k ready, 10k shown) isn't confusing. */}
-      {view === "actionable" && sourceFilter === "all" && items.length >= ABSOLUTE_CAP &&
-        typeof counts?.eligibleSafe === "number" && counts.eligibleSafe > items.length && (
-        <div className="rounded-lg border border-sky-200 bg-sky-50/60 px-4 py-2.5 text-xs text-sky-800 flex items-center gap-2">
-          <span className="font-medium">Showing the first {items.length.toLocaleString()} of {counts.eligibleSafe.toLocaleString()} ready leads.</span>
-          <span className="text-sky-700/80">The list caps rows for speed — use <strong>Route all ready</strong> to auto-route every ESP-resolved lead (all {counts.eligibleSafe.toLocaleString()}, not just these) into the correct campaigns.</span>
+      {/* Preview notice — the list renders a fast preview (PREVIEW_LIMIT rows);
+          the tile/pipeline show the TRUE total. "Load all" drains the full set on
+          demand (slower) for operators who want to scan every row. */}
+      {sourceFilter === "all" && hasMore && !loadingMore && items.length > 0 && (
+        <div className="rounded-lg border border-sky-200 bg-sky-50/60 px-4 py-2.5 text-xs text-sky-800 flex items-center gap-2 flex-wrap">
+          <span className="font-medium">Showing a fast preview of {items.length.toLocaleString()} rows{typeof counts?.eligibleSafe === "number" && counts.eligibleSafe > items.length ? ` of ${counts.eligibleSafe.toLocaleString()} ready` : ""}.</span>
+          <span className="text-sky-700/80">Counts above are exact. Use <strong>Route all ready</strong> to route every ESP-resolved lead — no need to load the full list first.</span>
+          <button
+            onClick={() => loadPage(true, false, true)}
+            className="ml-auto rounded-md border border-sky-300 bg-white px-2.5 py-1 font-medium text-sky-800 hover:bg-sky-100 transition-colors"
+          >
+            Load all
+          </button>
         </div>
       )}
 
