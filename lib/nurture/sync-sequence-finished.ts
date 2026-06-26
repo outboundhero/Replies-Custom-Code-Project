@@ -15,9 +15,9 @@
  */
 
 import supabase from "@/lib/supabase";
-import { listCampaigns, listCampaignLeads, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
+import { listCampaigns, listCampaignLeads, findLeadByEmail, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
-import { detectCampaignEsp } from "@/lib/nurture/esp";
+import { detectCampaignEsp, pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 
@@ -335,19 +335,54 @@ async function processCampaigns(
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
-      // ESP from the SOURCE campaign name — but ONLY for the segments where
-      // the campaign placement IS the mailbox provider:
-      //   • Outlook source → "outlook" directly (an Office365 mailbox behind
-      //     a SEG gateway is still routed as Outlook — mailbox wins).
-      //   • SEGs source (where a client segmented one) → "segs" directly.
-      // The GOOGLE / "Gmail + Others" catch-all is a MIX of true Gmail/custom
-      // domains AND SEG-gateway recipients (Mimecast/Proofpoint/Barracuda)
-      // that were never broken into a separate SEGs send. The campaign name
-      // can't tell those apart, so we leave esp NULL and let the tag-based
-      // backfill split google vs segs per-lead. (The /campaigns/{id}/leads
-      // endpoint omits the `tags` array, which is why the backfill exists.)
+      // Resolve ESP at INGESTION so every lead is routable the moment it lands:
+      //   • Outlook / SEGs campaign → the placement IS the mailbox provider, so
+      //     take ESP straight from the campaign name (no per-lead call needed).
+      //   • Google / "Gmail + Others" catch-all → a MIX of true Gmail/custom
+      //     domains AND SEG-gateway recipients (Mimecast/Proofpoint/Barracuda)
+      //     the name can't tell apart. Look the lead up in Bison and read its
+      //     mailbox TAGS (pickEspFromTags) to split google vs segs vs outlook;
+      //     fall back to the email-domain default so NO lead is ever left
+      //     without an ESP. (The /campaigns/{id}/leads list omits `tags`, so the
+      //     per-lead /api/leads/{email} lookup is the only tag source here.)
       const campaignEsp = detectCampaignEsp(campaign.name);
       const directEsp = campaignEsp === "outlook" || campaignEsp === "segs" ? campaignEsp : null;
+
+      // For the google catch-all, resolve per-lead ESP from tags — but ONLY for
+      // leads we haven't already classified. Steady-state, a 2-hourly re-sync
+      // only looks up the small delta of newly-finished leads (not the whole
+      // table), so this stays well inside the Bison rate budget. A per-campaign
+      // cap bounds the worst case (e.g. a first run with a large unresolved set)
+      // — the remainder is picked up next sync / by the hourly backfill cron.
+      const espByLeadId = new Map<number, string>();
+      if (!directEsp && candidates.length > 0) {
+        const MAX_LOOKUPS_PER_CAMPAIGN = 300;
+        const ids = candidates.map((l) => l.id);
+        const alreadyResolved = new Set<number>();
+        for (let i = 0; i < ids.length; i += 300) {
+          const { data } = await supabase
+            .from("nurture_sequence_finished")
+            .select("ob_lead_id")
+            .eq("ob_campaign_id", campaign.id)
+            .eq("bison_instance", instanceKey)
+            .not("esp", "is", null)
+            .in("ob_lead_id", ids.slice(i, i + 300));
+          for (const r of data || []) alreadyResolved.add(Number(r.ob_lead_id));
+        }
+        const toResolve = candidates
+          .filter((l) => !alreadyResolved.has(l.id))
+          .slice(0, MAX_LOOKUPS_PER_CAMPAIGN);
+        await parallelForEach(toResolve, 5, async (lead) => {
+          let esp: string;
+          try {
+            const full = await findLeadByEmail(instanceKey, lead.email);
+            esp = pickEspFromTags(full?.tags) || detectEsp(lead.email);
+          } catch {
+            esp = detectEsp(lead.email); // never block ingestion on a Bison hiccup
+          }
+          espByLeadId.set(lead.id, esp);
+        });
+      }
 
       const rows = candidates.map((lead: OutboundLead) => {
         const base = {
@@ -364,10 +399,11 @@ async function processCampaigns(
           synced_at: new Date().toISOString(),
           bison_instance: instanceKey,
         };
-        // Set esp only for the precise Outlook/SEGs segments. Google-segment
-        // leads are OMITTED (not set to null) so a re-sync never clobbers a
-        // value the tag backfill already resolved.
-        return directEsp ? { ...base, esp: directEsp } : base;
+        // Outlook/SEGs from the name → per-lead tag/default for new google leads
+        // → else OMIT esp (already-classified leads keep their value; the upsert
+        // never clobbers it).
+        const esp = directEsp ?? espByLeadId.get(lead.id) ?? null;
+        return esp ? { ...base, esp } : base;
       });
 
       // Dedupe within the batch — Bison's listCampaignLeads can return the
