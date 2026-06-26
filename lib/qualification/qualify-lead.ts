@@ -249,8 +249,14 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
  * Google Search grounding (real driving distances).
  *
  * Changes from the old version (each fixed a reported "missing suggestion"):
- *  - No longer FILTERS to Active-only — a perfect fit mis-marked inactive in
- *    the sync (the JPCHI / DBSF misses) still surfaces, flagged [INACTIVE].
+ *  - EXCLUDES churned clients (status "Churned") from the candidate pool — a
+ *    churned client is gone and must never be suggested. Churned clients were
+ *    ~half the pool (89 of 181) and, combined with the old 40-cap, crowded out
+ *    valid active matches (the SFS @ index 84 / SBSSE @ index 180 misses).
+ *  - No 40-candidate cap — EVERY non-churned client is sent to the model, so
+ *    the right active client can always be chosen. (High safety ceiling only.)
+ *  - Still does NOT filter to Active-only — inactive-but-not-churned clients
+ *    (Paused / mis-marked, e.g. the JPCHI / DBSF misses) surface, flagged.
  *  - No 150-char truncation of inclusion_locations — large multi-state service
  *    areas were getting cut off and masking matches.
  *  - Uses each client's hq_anchor as the precise distance anchor.
@@ -259,17 +265,19 @@ async function findFittingClients(
   excludeTag: string,
   enriched: EnrichedLeadData,
 ): Promise<string> {
-  // Active statuses — used only to MARK suggestions, not to exclude them.
-  const { data: activeStatuses } = await supabase
+  // Pull ALL statuses so we can both MARK non-active suggestions and EXCLUDE
+  // churned clients entirely from the candidate pool.
+  const { data: statusRows } = await supabase
     .from("client_status")
-    .select("client_abbreviation")
-    .eq("status", "Active");
+    .select("client_abbreviation, status");
   const activeTags = new Set<string>();
-  if (activeStatuses) {
-    for (const row of activeStatuses) {
-      for (const part of row.client_abbreviation.split(/\s*[&\/,]+\s*/)) {
-        if (part.trim()) activeTags.add(part.trim());
-      }
+  const churnedTags = new Set<string>();
+  for (const row of statusRows || []) {
+    for (const part of String(row.client_abbreviation).split(/\s*[&\/,]+\s*/)) {
+      const tag = part.trim();
+      if (!tag) continue;
+      if (row.status === "Active") activeTags.add(tag);
+      else if (row.status === "Churned") churnedTags.add(tag);
     }
   }
 
@@ -278,16 +286,22 @@ async function findFittingClients(
     .select("client_abbreviation, exclusion_industries, inclusion_locations, hq_anchor");
   if (!allRules?.length) return "";
 
-  // Candidates: any OTHER client with a location signal (anchor or service
-  // area). No Active-only gate — inactive ones are flagged, not dropped.
+  // Candidates: any OTHER, NON-CHURNED client with a location signal (anchor or
+  // service area). Churned clients are dropped outright; inactive-but-not-churned
+  // ones stay in (flagged), since they may be mis-marked in the status sync.
   const candidates = allRules.filter(
-    (r) => r.client_abbreviation !== excludeTag && (r.inclusion_locations?.trim() || r.hq_anchor?.trim()),
+    (r) =>
+      r.client_abbreviation !== excludeTag &&
+      !churnedTags.has(r.client_abbreviation) &&
+      (r.inclusion_locations?.trim() || r.hq_anchor?.trim()),
   );
   if (!candidates.length) return "";
 
-  // Full service-area text, no truncation. Cap candidate count to keep the
-  // prompt bounded.
-  const clientsList = candidates.slice(0, 40)
+  // Send EVERY non-churned candidate. The old slice(0, 40) silently dropped
+  // valid active matches (SFS, SBSSE) that sorted past the first 40. The cap is
+  // now just a high safety ceiling so the prompt stays bounded if the roster
+  // grows very large — it sits well above the current ~92 non-churned clients.
+  const clientsList = candidates.slice(0, 250)
     .map((r) => {
       const parts = [`- ${r.client_abbreviation} (${activeTags.has(r.client_abbreviation) ? "Active" : "INACTIVE"})`];
       if (r.hq_anchor?.trim()) parts.push(`office: "${r.hq_anchor.trim()}"`);
