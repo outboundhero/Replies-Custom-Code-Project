@@ -7,11 +7,12 @@
  * campaigns created (and where). Bulk enable/disable by section + multi-select.
  * Reads the fast, cached /api/nurture/automation-status (Turso-only).
  */
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/input";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
-import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronRight } from "lucide-react";
+import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronRight, Sparkles, Loader2 } from "lucide-react";
+import AutoMapPanel, { type AutoMapResultItem } from "./AutoMapPanel";
 
 type Esp = "google" | "outlook" | "segs";
 type Cell = { state: "ok" | "missing"; status?: string; draft?: boolean };
@@ -110,6 +111,61 @@ export default function AutomationTab() {
     } finally { setBusy(false); }
   }
 
+  // ── Auto-map nurture campaigns (draft + gap-fill) ──
+  const [autoMapDryRun, setAutoMapDryRun] = useState(false);
+  const [autoMapActive, setAutoMapActive] = useState(false);   // panel visible
+  const [autoMapRunning, setAutoMapRunning] = useState(false);
+  const [autoMapPanelDryRun, setAutoMapPanelDryRun] = useState(false);
+  const [autoMapTotal, setAutoMapTotal] = useState(0);
+  const [autoMapCurrent, setAutoMapCurrent] = useState<string | null>(null);
+  const [autoMapResults, setAutoMapResults] = useState<AutoMapResultItem[]>([]);
+  const autoMapStop = useRef(false);
+
+  const emptyReport = (tag: string) => ({ tag, added: [], skippedAlreadyMapped: [], noCandidate: [], ambiguous: [] });
+
+  async function runAutoMap() {
+    const dryRun = autoMapDryRun;
+    autoMapStop.current = false;
+    setAutoMapPanelDryRun(dryRun);
+    setAutoMapActive(true);
+    setAutoMapRunning(true);
+    setAutoMapResults([]);
+    setAutoMapCurrent(null);
+    setAutoMapTotal(0);
+    try {
+      const res = await fetch(`/api/nurture/auto-map?needsMap=1`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const clients: Array<{ tag: string }> = data.clients || [];
+      setAutoMapTotal(clients.length);
+      for (const c of clients) {
+        if (autoMapStop.current) break;
+        setAutoMapCurrent(c.tag);
+        try {
+          const r = await fetch(`/api/nurture/auto-map`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ clientTag: c.tag, dryRun }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (!r.ok || !body.report) {
+            setAutoMapResults((prev) => [...prev, { report: emptyReport(c.tag), error: body.error || `HTTP ${r.status}` }]);
+          } else {
+            setAutoMapResults((prev) => [...prev, { report: body.report }]);
+          }
+        } catch (e) {
+          setAutoMapResults((prev) => [...prev, { report: emptyReport(c.tag), error: (e as Error).message }]);
+        }
+      }
+    } catch (e) {
+      setAutoMapResults((prev) => [...prev, { report: emptyReport("—"), error: (e as Error).message }]);
+    } finally {
+      setAutoMapCurrent(null);
+      setAutoMapRunning(false);
+      if (!dryRun) load(true); // refresh matrix/tiles to reflect the new draft maps
+    }
+  }
+
   if (loading && !sections) return <div className="space-y-2">{Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-12 rounded-lg border bg-card animate-pulse" />)}</div>;
   if (error) return <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">Couldn&apos;t load automation status: {error}</div>;
 
@@ -139,8 +195,36 @@ export default function AutomationTab() {
         <button onClick={() => load(true)} disabled={loading} className="flex items-center gap-2 px-3 h-9 text-sm rounded-md border bg-white hover:bg-muted/50 disabled:opacity-50">
           <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
         </button>
+        <label
+          className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+          title="Preview what would be mapped without writing anything"
+        >
+          <input type="checkbox" checked={autoMapDryRun} onChange={(e) => setAutoMapDryRun(e.target.checked)} className="size-3.5 rounded border-muted-foreground/40" />
+          Dry-run
+        </label>
+        <button
+          onClick={runAutoMap}
+          disabled={autoMapRunning}
+          title="Auto-detect each active client's canonical nurture campaigns and fill empty map slots (draft only — you still confirm to enable sending)"
+          className="flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50"
+        >
+          {autoMapRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />} Auto-map campaigns
+        </button>
         {syncedAt && <span className="text-xs text-muted-foreground ml-auto">campaign data as of {new Date(syncedAt).toLocaleString()}</span>}
       </div>
+
+      {/* Auto-map live progress */}
+      {autoMapActive && (
+        <AutoMapPanel
+          dryRun={autoMapPanelDryRun}
+          running={autoMapRunning}
+          total={autoMapTotal}
+          current={autoMapCurrent}
+          results={autoMapResults}
+          onStop={() => { autoMapStop.current = true; }}
+          onClose={() => setAutoMapActive(false)}
+        />
+      )}
 
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">

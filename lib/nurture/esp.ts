@@ -119,19 +119,34 @@ export const ESP_LABEL: Record<Esp, string> = {
  *   "JPNNJ: Outlook [Nurture] (Cleaning Client)"
  *   "JPNNJ: SEGs [Nurture] (Cleaning Client)"
  *
+ * The trailing marker is EITHER "(Cleaning Client)" OR "(Non-Cleaning
+ * Client)" depending on the client type — both are canonical.
+ *
  * Legacy variants (e.g. "JPNNJ: Outlook (Nurture) (2)") still exist in
- * Bison but auto-route must ignore them — the marker is the literal
- * "(Cleaning Client)" suffix. Operators can still pick a legacy
- * campaign via the manual dropdown if they need to.
+ * Bison but auto-route must ignore them — the markers are the literal
+ * "[Nurture]" + "(… Cleaning Client)" suffixes. Operators can still pick a
+ * legacy campaign via the manual dropdown if they need to.
  */
 export function isCanonicalNurtureCampaign(name: string): boolean {
-  // Must be BOTH a [Nurture] campaign AND carry the "(Cleaning Client)" marker.
-  // Requiring only "(Cleaning Client)" was too loose — it also matched the
-  // SOURCE campaigns (e.g. "SBCC: Outlook (Cleaning Client)") and legacy
-  // parenthetical "(Nurture)" variants, so auto-route could target the wrong
-  // campaign. The canonical nurture campaigns are named exactly like
-  // "JPNNJ: Outlook [Nurture] (Cleaning Client)".
-  return /\[nurture\]/i.test(name) && /\(cleaning client\)/i.test(name);
+  // Must be BOTH a [Nurture] campaign AND carry the "(Cleaning Client)" /
+  // "(Non-Cleaning Client)" marker. Requiring only the parenthetical was too
+  // loose — it also matched SOURCE campaigns (e.g. "SBCC: Outlook (Cleaning
+  // Client)") and legacy "(Nurture)" variants, so the "[Nurture]" requirement
+  // is what disambiguates. Canonical names look like
+  // "JPNNJ: Outlook [Nurture] (Cleaning Client)" or "… (Non-Cleaning Client)".
+  return /\[nurture\]/i.test(name) && /\((?:non-)?cleaning client\)/i.test(name);
+}
+
+/**
+ * True when a nurture campaign is a Batch 2+ clone — its name ends with a
+ * "— Batch N" (or "- Batch N") suffix where N >= 2. The original / batch-1
+ * canonical campaign has NO suffix, so it passes through as `false`. Auto-map
+ * uses this to skip batch clones and only map the original campaign.
+ * (Mirrors the `baseName` suffix pattern in campaign-expansion.ts.)
+ */
+export function isBatchTwoPlus(name: string): boolean {
+  const m = name.match(/[—-]\s*batch\s*(\d+)\s*$/i);
+  return m ? Number(m[1]) >= 2 : false;
 }
 
 /**
