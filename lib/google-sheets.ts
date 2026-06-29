@@ -102,8 +102,9 @@ export async function fetchChurnedClientTags(): Promise<Set<string>> {
  * Each client tag's nurture GROUP (1 or 2) from the instance-mapping sheet
  * (a SEPARATE spreadsheet). "Sheet1" is column-positional with a header row:
  *   col A = Group-1 client tags ("B2B #1 (OutboundHero) & B2C #1 (CleaningOutbound)")
- *   col C = Group-2 client tags ("B2B #2 (FacilityReach) & B2C #2 (OutboundClean)")
- *   cols B/D are "DONE" booleans (ignored).
+ *   col B = Group-2 client tags ("B2B #2 (FacilityReach) & B2C #2 (OutboundClean)")
+ * (The sheet previously had "DONE" boolean columns at B/D with Group 2 in col C;
+ *  those were removed, so Group 2 now sits directly in column B.)
  * Combined abbreviations ("DBSM & DBSA") split like fetchChurnedClientTags.
  * Returns Map<TAG_UPPER, 1|2>.
  */
@@ -131,7 +132,7 @@ export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
   };
   for (let i = 1; i < rows.length; i++) {   // skip header row
     addCell(rows[i][0], 1); // col A → Group 1
-    addCell(rows[i][2], 2); // col C → Group 2
+    addCell(rows[i][1], 2); // col B → Group 2
   }
   return out;
 }
