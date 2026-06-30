@@ -201,4 +201,15 @@ export async function initializeDatabase() {
       // Column already exists — ignore
     }
   }
+
+  // Per-client GoHighLevel credentials. When both are set, marking a lead with a
+  // GHL_PUSH_CATEGORY (in the Reply Router) upserts it into that client's GHL
+  // sub-account. Only configured clients push. See lib/push-to-ghl.ts.
+  for (const col of ["ghl_api_key TEXT", "ghl_location_id TEXT"]) {
+    try {
+      await db.execute(`ALTER TABLE client_config ADD COLUMN ${col}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
 }

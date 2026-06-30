@@ -4,6 +4,7 @@ import supabase from "@/lib/supabase";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
+import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmail } from "@/lib/processing/extract-redirect-email";
 import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
@@ -172,6 +173,39 @@ export async function POST(req: NextRequest) {
             }
             extras.pushed_to_sheet = result.ok;
             if (result.error) extras.sheet_error = result.error;
+          }
+        }
+
+        // Auto-push to the client's GoHighLevel sub-account for qualifying
+        // categories — only fires for clients with GHL creds configured in
+        // client_config (pushToGhl returns a no-op otherwise). Upsert dedupes
+        // on email, so re-marking updates the existing contact.
+        if (isGhlPushCategory(category)) {
+          const { data: reply } = await supabase.from("replies").select("*").eq("id", id).single();
+          if (reply && reply.client_tag && reply.client_tag !== "N/A") {
+            const result = await pushToGhl(reply.client_tag, {
+              lead_email: reply.lead_email,
+              first_name: reply.first_name,
+              last_name: reply.last_name,
+              lead_name: reply.lead_name,
+              company_name: reply.company_name,
+              phone: reply.phone,
+              address: reply.address,
+              city: reply.city,
+              state: reply.state,
+              lead_category: category,
+            });
+            if (result.ok) {
+              // Audit columns are optional; if they don't exist this is a
+              // harmless no-op (Supabase returns an error we don't read).
+              await supabase.from("replies").update({
+                pushed_to_ghl: true,
+                pushed_to_ghl_at: new Date().toISOString(),
+              }).eq("id", id);
+              extras.pushed_to_ghl = true;
+            } else if (result.error && !result.error.startsWith("no GHL config")) {
+              extras.ghl_error = result.error;
+            }
           }
         }
         return NextResponse.json({ ok: true, ...extras });
