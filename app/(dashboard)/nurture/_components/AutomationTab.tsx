@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronRight, Sparkles, Loader2, UserX } from "lucide-react";
 import AutoMapPanel, { type AutoMapResultItem } from "./AutoMapPanel";
+import EnablePipelinePanel, { type EnablePipelineState, type EnableClientRow } from "./EnablePipelinePanel";
 
 type Esp = "google" | "outlook" | "segs";
 type Cell = { state: "ok" | "missing"; status?: string; draft?: boolean };
@@ -42,6 +43,9 @@ export default function AutomationTab() {
   const [onlyUnmapped, setOnlyUnmapped] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
   const [churnSyncing, setChurnSyncing] = useState(false);
+  const [enablePipeline, setEnablePipeline] = useState<EnablePipelineState | null>(null);
+  const [enableRunning, setEnableRunning] = useState(false);
+  const enableAbortRef = useRef(false);
   // local optimistic overrides: tag -> autoOn
   const [autoOverride, setAutoOverride] = useState<Map<string, boolean>>(new Map());
 
@@ -127,15 +131,106 @@ export default function AutomationTab() {
     setChurnSyncing(false);
   }
 
-  // Bulk-enable, but only clients that have a nurture campaign map (draft OK).
-  // Unmapped clients can't auto-push, so they're skipped with a warning.
-  function enableSelected() {
+  // ── Bulk "Enable" pipeline ──────────────────────────────────────────────
+  // For each selected client with a CONFIRMED map: route all ready leads →
+  // attach the client's inboxes → activate the campaigns → flip auto-push on.
+  // Clients without a confirmed map are skipped with a toast + a panel row.
+  const patchRow = useCallback((tag: string, patch: Partial<EnableClientRow>) => {
+    setEnablePipeline((p) => p && { ...p, rows: p.rows.map((r) => (r.tag === tag ? { ...r, ...patch } : r)) });
+  }, []);
+
+  // Drain /route-all (≤800/batch) until the server reports the whole ready pool
+  // is scanned. Returns total routed + whether it errored.
+  async function drainRouteAllFor(tag: string, onProgress: (routed: number, batches: number) => void) {
+    let routed = 0, batches = 0, seqAfterId = 0, repAfterId = 0, legAfterId = 0;
+    const SAFETY = 1000;
+    for (;;) {
+      if (enableAbortRef.current || batches >= SAFETY) break;
+      let data: { totalAttached?: number; nextSeqAfterId?: number; nextRepAfterId?: number; nextLegAfterId?: number; done?: boolean; error?: string };
+      try {
+        const res = await fetch("/api/nurture/route-all", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTag: tag, seqAfterId, repAfterId, legAfterId }),
+        });
+        data = await res.json();
+        if (!res.ok) return { routed, batches, errored: true, error: data?.error || `HTTP ${res.status}` };
+      } catch (e) { return { routed, batches, errored: true, error: (e as Error).message }; }
+      batches++;
+      routed += data.totalAttached || 0;
+      seqAfterId = data.nextSeqAfterId ?? seqAfterId;
+      repAfterId = data.nextRepAfterId ?? repAfterId;
+      legAfterId = data.nextLegAfterId ?? legAfterId;
+      onProgress(routed, batches);
+      if (data.done) break;
+    }
+    return { routed, batches, errored: false as boolean, error: undefined as string | undefined };
+  }
+
+  async function enableSendingPhase(tag: string, phase: "attach" | "activate") {
+    try {
+      const res = await fetch("/api/nurture/enable-sending", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientTag: tag, phase }),
+      });
+      const d = await res.json();
+      if (!res.ok) return { ok: false, total: 0, error: d?.error as string | undefined };
+      return { ok: true, total: (phase === "attach" ? d.totalAttached : d.totalActivated) || 0, error: d.error as string | undefined };
+    } catch (e) { return { ok: false, total: 0, error: (e as Error).message }; }
+  }
+
+  async function enableSelected() {
+    if (enableRunning) return;
     const tags = [...selected];
-    const mapped = tags.filter((t) => clientByTag.get(t)?.hasMap);
-    const skipped = tags.length - mapped.length;
-    if (mapped.length) bulk(true, { clientTags: mapped });
-    if (skipped) toast.warning(`${skipped} client${skipped === 1 ? "" : "s"} skipped — nurture campaign map is not set`);
-    if (!mapped.length) setSelected(new Set());
+    const confirmed: string[] = [], unconfirmed: string[] = [];
+    for (const t of tags) (clientByTag.get(t)?.mapConfirmed ? confirmed : unconfirmed).push(t);
+    if (unconfirmed.length) {
+      toast.warning(`${unconfirmed.length} client${unconfirmed.length === 1 ? "" : "s"} skipped — nurture campaign map is not confirmed: ${unconfirmed.slice(0, 6).join(", ")}${unconfirmed.length > 6 ? "…" : ""}`);
+    }
+    setSelected(new Set());
+    if (!confirmed.length) return;
+
+    const rows: EnableClientRow[] = [
+      ...confirmed.map((t) => ({ tag: t, state: "queued" as const, routed: 0, routeBatches: 0, inboxesAttached: 0, activated: 0 })),
+      ...unconfirmed.map((t) => ({ tag: t, state: "skipped" as const, skipReason: "map not confirmed", routed: 0, routeBatches: 0, inboxesAttached: 0, activated: 0 })),
+    ];
+    setEnablePipeline({ status: "running", rows });
+    setEnableRunning(true);
+    enableAbortRef.current = false;
+
+    for (const tag of confirmed) {
+      if (enableAbortRef.current) { patchRow(tag, { state: "error", error: "stopped" }); continue; }
+      try {
+        // 1) Route all ready leads (attach to / create-in correct campaigns).
+        patchRow(tag, { state: "routing" });
+        const r = await drainRouteAllFor(tag, (routed, batches) => patchRow(tag, { routed, routeBatches: batches }));
+        patchRow(tag, { routed: r.routed, routeBatches: r.batches });
+        if (r.errored) { patchRow(tag, { state: "error", error: r.error }); continue; }
+
+        // 2) Attach the client's tagged inboxes to each mapped campaign.
+        patchRow(tag, { state: "inboxes" });
+        const inb = await enableSendingPhase(tag, "attach");
+        patchRow(tag, { inboxesAttached: inb.total });
+
+        // 3) Activate the campaigns.
+        patchRow(tag, { state: "activating" });
+        const act = await enableSendingPhase(tag, "activate");
+        patchRow(tag, { activated: act.total });
+
+        // 4) Turn auto-push on so future ready leads keep flowing.
+        try {
+          await fetch("/api/clients/auto-nurture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientTag: tag, enabled: true }) });
+          setAutoOverride((m) => new Map(m).set(tag, true));
+        } catch { /* non-fatal */ }
+
+        patchRow(tag, { state: "done" });
+      } catch (e) {
+        patchRow(tag, { state: "error", error: (e as Error).message });
+      }
+    }
+
+    setEnablePipeline((p) => p && { ...p, status: "done" });
+    setEnableRunning(false);
+    load(true);
   }
 
   // Flat, globally-sorted client list (no section grouping): needs-attention
@@ -307,6 +402,16 @@ export default function AutomationTab() {
         />
       )}
 
+      {/* Bulk-enable pipeline live progress */}
+      {enablePipeline && (
+        <EnablePipelinePanel
+          state={enablePipeline}
+          running={enableRunning}
+          onStop={() => { enableAbortRef.current = true; }}
+          onClose={() => setEnablePipeline(null)}
+        />
+      )}
+
       {/* Legend */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
         <span className="font-medium text-foreground/70">Campaign per ESP:</span>
@@ -321,7 +426,7 @@ export default function AutomationTab() {
         <div className="sticky top-2 z-10 flex items-center gap-3 rounded-lg border bg-card shadow-sm px-4 py-2.5">
           <span className="text-sm font-medium">{selected.size} selected</span>
           <div className="ml-auto flex gap-2">
-            <button disabled={busy} onClick={enableSelected} className="flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"><Zap className="size-3" /> Enable</button>
+            <button disabled={busy || enableRunning} onClick={enableSelected} className="flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"><Zap className="size-3" /> Enable</button>
             <button disabled={busy} onClick={() => bulk(false, { clientTags: [...selected] })} className="flex items-center gap-1.5 px-3 h-8 text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50"><ZapOff className="size-3" /> Disable</button>
             <button onClick={() => setSelected(new Set())} className="px-2 h-8 text-xs text-muted-foreground hover:underline">Clear</button>
           </div>
