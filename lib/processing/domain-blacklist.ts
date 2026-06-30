@@ -222,6 +222,20 @@ export async function blacklistEmail(
 ): Promise<void> {
   if (!email) return;
 
+  // Skip malformed addresses: the blacklist API 422s on them ("must be a valid
+  // email address"), which floods the error log with permanent, un-retryable
+  // failures — and an invalid address can't receive mail anyway, so there's
+  // nothing to blacklist. Record it as activity (not an error) and bail.
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
+    await logActivity(workflow, "email-blacklist-skipped-invalid", {
+      client_tag: opts?.client_tag,
+      section_name: opts?.section_name,
+      lead_email: email,
+      details: { email, bison_instance: instanceKey, reason: "invalid email format" },
+    });
+    return;
+  }
+
   try {
     const { baseUrl, token } = getInstanceConfig(instanceKey);
     const res = await fetch(`${baseUrl}/api/blacklisted-emails`, {
