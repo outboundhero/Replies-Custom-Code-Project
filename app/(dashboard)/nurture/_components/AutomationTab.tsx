@@ -178,15 +178,14 @@ export default function AutomationTab() {
     } catch (e) { return { ok: false, total: 0, error: (e as Error).message }; }
   }
 
-  async function enableSelected() {
-    if (enableRunning) return;
-    const tags = [...selected];
+  // Shared by the bulk "Enable" button AND the per-row "Auto" toggle (when OFF).
+  async function runEnablePipeline(tags: string[]) {
+    if (enableRunning || !tags.length) return;
     const confirmed: string[] = [], unconfirmed: string[] = [];
     for (const t of tags) (clientByTag.get(t)?.mapConfirmed ? confirmed : unconfirmed).push(t);
     if (unconfirmed.length) {
       toast.warning(`${unconfirmed.length} client${unconfirmed.length === 1 ? "" : "s"} skipped — nurture campaign map is not confirmed: ${unconfirmed.slice(0, 6).join(", ")}${unconfirmed.length > 6 ? "…" : ""}`);
     }
-    setSelected(new Set());
     if (!confirmed.length) return;
 
     const rows: EnableClientRow[] = [
@@ -231,6 +230,22 @@ export default function AutomationTab() {
     setEnablePipeline((p) => p && { ...p, status: "done" });
     setEnableRunning(false);
     load(true);
+  }
+
+  // Bulk "Enable" button → run the pipeline for the whole selection.
+  function enableSelected() {
+    const tags = [...selected];
+    setSelected(new Set());
+    void runEnablePipeline(tags);
+  }
+
+  // Per-row "Auto" toggle. Turning ON runs the SAME pipeline for that one client
+  // (gated on a confirmed map); turning OFF just flips auto-push off.
+  function toggleClient(c: ClientRow, turnOn: boolean) {
+    if (!turnOn) { void toggleOne(c.clientTag, false); return; }
+    if (!c.hasMap) { toast.warning(`${c.clientTag}: nurture campaign map is not set`); return; }
+    if (!c.mapConfirmed) { toast.warning(`${c.clientTag}: nurture campaign map is not confirmed — confirm it first`); return; }
+    void runEnablePipeline([c.clientTag]);
   }
 
   // Flat, globally-sorted client list (no section grouping): needs-attention
@@ -450,7 +465,7 @@ export default function AutomationTab() {
                   key={c.clientTag} c={c} autoOn={autoFor(c)} selected={selected.has(c.clientTag)}
                   onDragStart={() => beginDrag(c.clientTag, selected.has(c.clientTag))}
                   onDragEnter={() => dragOver(c.clientTag)}
-                  onToggle={(v) => toggleOne(c.clientTag, v)}
+                  onToggle={(v) => toggleClient(c, v)}
                 />
               ))}
             </div>}
@@ -586,18 +601,13 @@ function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle
       {/* Auto toggle — enabling requires a nurture campaign map (draft OK). With
           no map, clicking ON is blocked with a message; it never turns on. */}
       <button
-        onClick={(e) => {
-          stop(e);
-          if (!autoOn && !c.hasMap) {
-            toast.warning(`${c.clientTag}: nurture campaign map is not set — map this client first`);
-            return;
-          }
-          onToggle(!autoOn);
-        }}
+        onClick={(e) => { stop(e); onToggle(!autoOn); }}
         title={
           !c.hasMap
-            ? "Nurture campaign map is not set — map this client to enable auto-push"
-            : autoOn ? "Auto-push ON — click to turn off" : "Click to turn auto-push on"
+            ? "Nurture campaign map is not set — map this client first"
+            : !c.mapConfirmed
+              ? "Map not confirmed — confirm it first to enable sending"
+              : autoOn ? "Auto-push ON — click to turn off" : "Click to route ready leads, attach inboxes & activate"
         }
         className={`shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold transition-colors ${
           !c.hasMap

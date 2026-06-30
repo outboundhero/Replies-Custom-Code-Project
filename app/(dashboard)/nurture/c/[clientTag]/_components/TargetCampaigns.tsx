@@ -102,7 +102,7 @@ export default function TargetCampaigns({
     setDirty(true);
   }
 
-  async function save(confirm: boolean) {
+  async function save(confirm: boolean, enableSending: boolean = false) {
     setSaving(true);
     const entries: MapEntry[] = [];
     for (const { lane, instance } of lanes) for (const esp of ESPS) {
@@ -123,8 +123,16 @@ export default function TargetCampaigns({
       setDirty(false);
       if (!confirm) { toast.success("Saved (not confirmed — sending stays disabled)."); return; }
 
-      // CONFIRM path: map saved + confirmed. Hand off to the parent, which runs
-      // the full attach inboxes → route ready leads → activate flow and shows a
+      // CONFIRM-ONLY ("Confirm draft"): mark the map confirmed so it counts as
+      // confirmed everywhere (auto-push cron, route-all, the Automation-tab bulk
+      // Enable / Auto button) — but do NOT start sending now. Enable it later.
+      if (!enableSending) {
+        toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — sending not started (enable from here or the Automation tab).`);
+        return;
+      }
+
+      // CONFIRM + ENABLE: map saved + confirmed. Hand off to the parent, which
+      // runs the full route ready leads → attach inboxes → activate flow with a
       // persistent progress panel.
       toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — enabling sending…`);
       onSendingEnabled?.();
@@ -141,7 +149,7 @@ export default function TargetCampaigns({
           <span className="text-[11px] text-muted-foreground">leads route by lane → instance → ESP</span>
         </div>
         {confirmedAt && !dirty
-          ? <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700"><ShieldCheck className="size-3.5" /> Confirmed · sending enabled</span>
+          ? <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700"><ShieldCheck className="size-3.5" /> Confirmed</span>
           : <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700"><ShieldAlert className="size-3.5" /> {dirty ? "Unsaved changes" : "Not confirmed · sending disabled"}</span>}
       </div>
 
@@ -188,7 +196,10 @@ export default function TargetCampaigns({
             <span className="text-xs text-muted-foreground">{chosen}/{mappable} cells mapped</span>
             <div className="ml-auto flex gap-2">
               <button disabled={saving} onClick={() => save(false)} className="px-3 h-8 text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50">Save draft</button>
-              <button disabled={saving || chosen === 0} onClick={() => save(true)} className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+              <button disabled={saving || chosen === 0} onClick={() => save(true, false)} title="Mark the map confirmed without sending — you can enable later from here or the Automation tab" className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
+                {saving ? <Loader2 className="size-3 animate-spin" /> : <ShieldCheck className="size-3" />} Confirm draft
+              </button>
+              <button disabled={saving || chosen === 0} onClick={() => save(true, true)} className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
                 {saving ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />} Confirm & enable sending
               </button>
             </div>
