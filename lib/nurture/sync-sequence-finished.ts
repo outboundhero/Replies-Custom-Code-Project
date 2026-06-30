@@ -183,6 +183,27 @@ async function loadLastSyncedByTag(instanceKey: BisonInstanceKey): Promise<Map<s
   return out;
 }
 
+/** Per-campaign ESP split of the leads written to the nurture queue. */
+export interface SyncEspBreakdown { google: number; outlook: number; segs: number; other: number }
+
+/** One progress event emitted while a client sync runs (for the live UI). */
+export type SyncProgressEvent =
+  | { phase: "plan"; instance: string; campaigns: Array<{ id: number; name: string; status: string; totalLeads: number }> }
+  | {
+      phase: "campaign";
+      instance: string;
+      campaignId: number;
+      name: string;
+      status: string;
+      totalLeads: number;
+      candidates: number; // sequence-finished leads found (not replied/bounced)
+      upserted: number;   // rows written to the nurture queue
+      esp: SyncEspBreakdown;
+      error?: string;
+    };
+
+export type SyncProgressFn = (e: SyncProgressEvent) => void;
+
 /**
  * Sync a single client's campaigns on a specific Bison instance.
  *
@@ -192,11 +213,15 @@ async function loadLastSyncedByTag(instanceKey: BisonInstanceKey): Promise<Map<s
  * limit without aborts. Useful for:
  *   - manually backfilling a specific client (curl /api/cron/nurture-sync-client/JPH)
  *   - per-client cron in the future
+ *
+ * Source statuses include `archived` so leads finished in old/paused/archived
+ * campaigns are pulled in too — not just live ones. Pass `onProgress` to stream
+ * a plan event (the campaign work-list) + one event per campaign as it finishes.
  */
 export async function syncOneClient(
   instanceKey: BisonInstanceKey,
   clientTag: string,
-  opts: { maxPagesPerCampaign?: number; preloadedCampaigns?: OutboundCampaign[] } = {},
+  opts: { maxPagesPerCampaign?: number; preloadedCampaigns?: OutboundCampaign[]; onProgress?: SyncProgressFn } = {},
 ): Promise<InstanceSyncResult> {
   const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
 
@@ -207,7 +232,7 @@ export async function syncOneClient(
   const matched = opts.preloadedCampaigns
     ? opts.preloadedCampaigns
     : await listCampaigns(instanceKey, {
-        statuses: ["active", "completed", "paused", "stopped"],
+        statuses: ["active", "completed", "paused", "stopped", "archived"],
         search: `${clientTag}:`,
       });
 
@@ -229,7 +254,20 @@ export async function syncOneClient(
     return true;
   });
 
-  await processCampaigns(instanceKey, usableCampaigns, state, { maxPagesPerCampaign: opts.maxPagesPerCampaign });
+  // Announce the work-list up front so the UI can render the full set of
+  // campaigns and a real progress bar before any scanning starts.
+  opts.onProgress?.({
+    phase: "plan",
+    instance: instanceKey,
+    campaigns: usableCampaigns.map((c) => ({
+      id: c.id, name: c.name, status: c.status ?? "", totalLeads: c.total_leads ?? 0,
+    })),
+  });
+
+  await processCampaigns(instanceKey, usableCampaigns, state, {
+    maxPagesPerCampaign: opts.maxPagesPerCampaign,
+    onProgress: opts.onProgress,
+  });
   return { instance: instanceKey, ...state };
 }
 
@@ -294,7 +332,7 @@ async function processCampaigns(
   instanceKey: BisonInstanceKey,
   campaigns: OutboundCampaign[],
   state: InstanceSyncState,
-  opts: { maxPagesPerCampaign?: number } = {},
+  opts: { maxPagesPerCampaign?: number; onProgress?: SyncProgressFn } = {},
 ): Promise<void> {
   const errors = state.errors;
   const CONCURRENCY = 6;
@@ -331,7 +369,14 @@ async function processCampaigns(
       });
 
       state.candidatesFound += candidates.length;
-      if (candidates.length === 0) return;
+      if (candidates.length === 0) {
+        opts.onProgress?.({
+          phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
+          status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
+          candidates: 0, upserted: 0, esp: { google: 0, outlook: 0, segs: 0, other: 0 },
+        });
+        return;
+      }
 
       const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
@@ -425,17 +470,37 @@ async function processCampaigns(
         .from("nurture_sequence_finished")
         .upsert(dedupedRows, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
 
+      // ESP split of what we're writing this run (for the live progress UI).
+      const esp: SyncEspBreakdown = { google: 0, outlook: 0, segs: 0, other: 0 };
+      for (const r of dedupedRows) {
+        const e = (r as { esp?: string }).esp;
+        if (e === "google" || e === "outlook" || e === "segs") esp[e]++;
+        else esp.other++;
+      }
+
       if (error) {
         errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
       } else {
         state.upserted += dedupedRows.length;
       }
+      opts.onProgress?.({
+        phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
+        status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
+        candidates: candidates.length, upserted: error ? 0 : dedupedRows.length, esp,
+        error: error ? error.message : undefined,
+      });
       // ESP populated inline above from lead.tags — no more fire-and-
       // forget EmailGuard chain. Bison's `default: true` tags are the
       // canonical mailbox-provider signal, free, and never lost to
       // Lambda timeouts.
     } catch (e) {
-      errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${(e as Error).message}`);
+      const msg = (e as Error).message;
+      errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${msg}`);
+      opts.onProgress?.({
+        phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
+        status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
+        candidates: 0, upserted: 0, esp: { google: 0, outlook: 0, segs: 0, other: 0 }, error: msg,
+      });
     }
   });
 }

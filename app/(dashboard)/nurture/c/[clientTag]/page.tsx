@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
 import TargetCampaigns from "./_components/TargetCampaigns";
+import SyncProgressPanel, { type SyncProgressState, type SyncCampaignRow } from "./_components/SyncProgressPanel";
 import { ESP_LABEL, detectCampaignEsp, isCanonicalNurtureCampaign, type Esp } from "@/lib/nurture/esp";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import {
@@ -287,6 +288,9 @@ export default function NurturePage() {
   const [classifying, setClassifying] = useState(false);
   const [reclassifying, setReclassifying] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgressState>({
+    status: "idle", instances: [], campaigns: [], found: 0, upserted: 0, startedAt: null,
+  });
 
   const [detailItem, setDetailItem] = useState<NurtureItem | null>(null);
 
@@ -873,7 +877,7 @@ export default function NurturePage() {
           const res = await fetch("/api/nurture/mutate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "classify-all-unclassified" }),
+            body: JSON.stringify({ action: "classify-all-unclassified", clientTag: lockedClientTag }),
             signal: ac.signal,
           });
           if (!res.ok) {
@@ -938,7 +942,7 @@ export default function NurturePage() {
       const res = await fetch("/api/nurture/mutate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "classify-reset-safe" }),
+        body: JSON.stringify({ action: "classify-reset-safe", clientTag: lockedClientTag }),
       });
       const data = await res.json();
       if (res.ok) toast.success(`Re-classified ${data.reclassified} • ${data.flippedToUnsafe} flipped to unsafe`);
@@ -950,22 +954,100 @@ export default function NurturePage() {
     setReclassifying(false);
   }
 
+  // Apply one streamed NDJSON event from /api/nurture/sync to the live panel.
+  function applySyncEvent(ev: Record<string, unknown>) {
+    const type = ev.type as string;
+    if (type === "start") {
+      setSyncProgress((p) => ({ ...p, instances: (ev.instances as string[]) || [] }));
+    } else if (type === "plan") {
+      const instance = ev.instance as string;
+      const planned = (ev.campaigns as Array<{ id: number; name: string; status: string; totalLeads: number }>) || [];
+      setSyncProgress((p) => {
+        const existing = new Set(p.campaigns.map((c) => c.key));
+        const additions: SyncCampaignRow[] = planned
+          .map((c) => ({
+            key: `${instance}:${c.id}`, instance, campaignId: c.id, name: c.name,
+            status: c.status, totalLeads: c.totalLeads, state: "pending" as const,
+          }))
+          .filter((c) => !existing.has(c.key));
+        return { ...p, campaigns: [...p.campaigns, ...additions] };
+      });
+    } else if (type === "campaign") {
+      const key = `${ev.instance}:${ev.campaignId}`;
+      const candidates = Number(ev.candidates) || 0;
+      const upserted = Number(ev.upserted) || 0;
+      setSyncProgress((p) => ({
+        ...p,
+        found: p.found + candidates,
+        upserted: p.upserted + upserted,
+        campaigns: p.campaigns.map((c) =>
+          c.key === key
+            ? {
+                ...c,
+                state: ev.error ? "error" : "done",
+                candidates, upserted,
+                esp: ev.esp as SyncCampaignRow["esp"],
+                error: ev.error as string | undefined,
+              }
+            : c,
+        ),
+      }));
+    } else if (type === "done") {
+      setSyncProgress((p) => ({ ...p, status: "done" }));
+      const found = Number(ev.candidatesFound) || 0;
+      const queued = Number(ev.upserted) || 0;
+      toast.success(`Synced ${queued.toLocaleString()} of ${found.toLocaleString()} sequence-finished leads`);
+      if (Array.isArray(ev.errors) && ev.errors.length) console.warn("Sync errors:", ev.errors);
+    } else if (type === "error") {
+      setSyncProgress((p) => ({ ...p, status: "error", error: ev.error as string }));
+      toast.error((ev.error as string) || "Sync failed");
+    }
+  }
+
   async function syncSequenceFinished() {
     setSyncing(true);
+    setSyncProgress({ status: "running", instances: [], campaigns: [], found: 0, upserted: 0, startedAt: Date.now() });
     try {
-      const res = await fetch("/api/nurture/sync", { method: "POST" });
-      const data = await res.json();
-      if (res.ok) {
-        toast.success(`Synced ${data.upserted} leads from ${data.campaignsScanned} campaigns`);
-        if (data.errors?.length) console.warn("Sync errors:", data.errors);
-      } else {
-        toast.error(data.error || "Sync failed");
+      const res = await fetch("/api/nurture/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientTag: lockedClientTag }),
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({}));
+        setSyncProgress((p) => ({ ...p, status: "error", error: err.error || `HTTP ${res.status}` }));
+        toast.error(err.error || "Sync failed");
+        setSyncing(false);
+        return;
       }
+      // Read the NDJSON stream line-by-line and apply each event live.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t) continue;
+          try { applySyncEvent(JSON.parse(t)); } catch { /* partial/garbage line */ }
+        }
+      }
+      if (buf.trim()) { try { applySyncEvent(JSON.parse(buf.trim())); } catch { /* ignore */ } }
+      setSyncProgress((p) => (p.status === "running" ? { ...p, status: "done" } : p));
       await Promise.all([loadPage(true, false), loadCounts(true)]);
     } catch (e) {
+      setSyncProgress((p) => ({ ...p, status: "error", error: (e as Error).message }));
       toast.error((e as Error).message);
     }
     setSyncing(false);
+  }
+
+  function dismissSyncProgress() {
+    setSyncProgress({ status: "idle", instances: [], campaigns: [], found: 0, upserted: 0, startedAt: null });
   }
 
   /**
@@ -1679,6 +1761,11 @@ export default function NurturePage() {
           onStop={cancelClassify}
           onDismiss={dismissClassifyProgress}
         />
+      )}
+
+      {/* ── Sync progress panel (live per-campaign sequence-finished sync) ── */}
+      {syncProgress.status !== "idle" && (
+        <SyncProgressPanel progress={syncProgress} onClose={dismissSyncProgress} />
       )}
 
       {/* ── Charts + campaigns ── */}

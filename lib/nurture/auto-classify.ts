@@ -41,24 +41,30 @@ async function runWithConcurrency<T>(
   await Promise.all(runners);
 }
 
-export async function classifyOneBatch(): Promise<ClassifyResult> {
+/**
+ * @param clientTag When provided (run from a client page), only this client's
+ *   rows are classified. Omitted by the global cron, which drains all clients.
+ *   client_tag is stored UPPERCASE — callers must upper-case before passing.
+ */
+export async function classifyOneBatch(clientTag?: string): Promise<ClassifyResult> {
+  let replyQuery = supabase
+    .from("replies")
+    .select("id, reply_we_got, ai_categorized_lead_category")
+    .not("reply_we_got", "is", null)
+    .neq("reply_we_got", "")
+    .is("nurture_safety", null);
+  let legacyQuery = supabase
+    .from("nurture_legacy_leads")
+    .select("id, reply_text, original_ai_category")
+    .not("reply_text", "is", null)
+    .neq("reply_text", "")
+    .is("nurture_safety", null);
+  if (clientTag) {
+    replyQuery = replyQuery.eq("client_tag", clientTag);
+    legacyQuery = legacyQuery.eq("client_tag", clientTag);
+  }
   const [{ data: replyRows, error: replyErr }, { data: legacyRows, error: legacyErr }] =
-    await Promise.all([
-      supabase
-        .from("replies")
-        .select("id, reply_we_got, ai_categorized_lead_category")
-        .not("reply_we_got", "is", null)
-        .neq("reply_we_got", "")
-        .is("nurture_safety", null)
-        .limit(BATCH_SIZE),
-      supabase
-        .from("nurture_legacy_leads")
-        .select("id, reply_text, original_ai_category")
-        .not("reply_text", "is", null)
-        .neq("reply_text", "")
-        .is("nurture_safety", null)
-        .limit(BATCH_SIZE),
-    ]);
+    await Promise.all([replyQuery.limit(BATCH_SIZE), legacyQuery.limit(BATCH_SIZE)]);
   if (replyErr) throw new Error(`replies: ${replyErr.message}`);
   if (legacyErr) throw new Error(`legacy: ${legacyErr.message}`);
 

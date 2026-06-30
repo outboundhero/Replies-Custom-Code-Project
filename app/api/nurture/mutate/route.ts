@@ -18,6 +18,13 @@ import { classifyOneBatch } from "@/lib/nurture/auto-classify";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
 import { coerceInstance } from "@/lib/bison-instances";
 
+// classify-all-unclassified / classify-reset-safe each run up to 400 GPT
+// classifications (200 replies + 200 legacy) per request. Without this the route
+// inherits the platform default and a batch can be killed mid-flight (the cron
+// twin /api/cron/nurture-classify-unclassified sets maxDuration = 60). 300 gives
+// headroom for every action this route serves.
+export const maxDuration = 300;
+
 const CLASSIFY_CONCURRENCY = 8;
 
 async function runWithConcurrency<T>(
@@ -58,6 +65,12 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action } = body;
+    // When invoked from a client page, scope the classify actions to that
+    // client only. client_tag is stored UPPERCASE. Omitted → global (legacy).
+    const clientTag: string | undefined =
+      typeof body.clientTag === "string" && body.clientTag.trim()
+        ? body.clientTag.trim().toUpperCase()
+        : undefined;
 
     // ── classify a specific batch of reply IDs ──
     if (action === "classify-batch") {
@@ -102,7 +115,7 @@ export async function POST(req: NextRequest) {
     // Re-run to continue if more remain. Shares the same code path as the
     // /api/cron/nurture-classify-unclassified job.
     if (action === "classify-all-unclassified") {
-      const result = await classifyOneBatch();
+      const result = await classifyOneBatch(clientTag);
       return NextResponse.json({
         ok: true,
         classified: result.classified,
@@ -115,23 +128,24 @@ export async function POST(req: NextRequest) {
     // ── re-classify everything currently marked safe (apply new classifier rules) ──
     // Pulls 200 from each of replies + legacy.
     if (action === "classify-reset-safe") {
+      let replyQuery = supabase
+        .from("replies")
+        .select("id, reply_we_got, ai_categorized_lead_category, nurture_safety")
+        .not("reply_we_got", "is", null)
+        .neq("reply_we_got", "")
+        .eq("nurture_safety", "safe");
+      let legacyQuery = supabase
+        .from("nurture_legacy_leads")
+        .select("id, reply_text, original_ai_category, nurture_safety")
+        .not("reply_text", "is", null)
+        .neq("reply_text", "")
+        .eq("nurture_safety", "safe");
+      if (clientTag) {
+        replyQuery = replyQuery.eq("client_tag", clientTag);
+        legacyQuery = legacyQuery.eq("client_tag", clientTag);
+      }
       const [{ data: replyRows, error: replyErr }, { data: legacyRows, error: legacyErr }] =
-        await Promise.all([
-          supabase
-            .from("replies")
-            .select("id, reply_we_got, ai_categorized_lead_category, nurture_safety")
-            .not("reply_we_got", "is", null)
-            .neq("reply_we_got", "")
-            .eq("nurture_safety", "safe")
-            .limit(200),
-          supabase
-            .from("nurture_legacy_leads")
-            .select("id, reply_text, original_ai_category, nurture_safety")
-            .not("reply_text", "is", null)
-            .neq("reply_text", "")
-            .eq("nurture_safety", "safe")
-            .limit(200),
-        ]);
+        await Promise.all([replyQuery.limit(200), legacyQuery.limit(200)]);
       if (replyErr) throw new Error(replyErr.message);
       if (legacyErr) throw new Error(legacyErr.message);
 
