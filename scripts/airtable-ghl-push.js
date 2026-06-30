@@ -86,7 +86,7 @@ if (cfg.state) body.state = String(cfg.state);
 const res = await fetch("https://services.leadconnectorhq.com/contacts/upsert", {
   method: "POST",
   headers: {
-    Authorization: "Bearer " + GHL_TOKEN,
+    Authorization: "Bearer " + GHL_TOKEN.trim(),
     Version: "2021-07-28",
     "Content-Type": "application/json",
     Accept: "application/json",

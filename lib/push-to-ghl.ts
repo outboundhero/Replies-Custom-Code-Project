@@ -117,8 +117,8 @@ export async function getGhlConfig(clientTag: string): Promise<GhlConfig | null>
     });
     const row = res.rows[0];
     if (!row) return null;
-    const apiKey = (row.ghl_api_key as string) || "";
-    const locationId = (row.ghl_location_id as string) || "";
+    const apiKey = ((row.ghl_api_key as string) || "").trim();
+    const locationId = ((row.ghl_location_id as string) || "").trim();
     if (!apiKey || !locationId) return null;
     return { apiKey, locationId };
   } catch {
