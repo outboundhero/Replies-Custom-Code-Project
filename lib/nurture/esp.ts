@@ -119,8 +119,8 @@ export const ESP_LABEL: Record<Esp, string> = {
  *   "JPNNJ: Outlook [Nurture] (Cleaning Client)"
  *   "JPNNJ: SEGs [Nurture] (Cleaning Client)"
  *
- * The trailing marker is EITHER "(Cleaning Client)" OR "(Non-Cleaning
- * Client)" depending on the client type — both are canonical.
+ * The trailing marker is "(Cleaning Client)", "(Non-Cleaning Client)", or
+ * "(Internal)" depending on the client type — all three are canonical.
  *
  * Legacy variants (e.g. "JPNNJ: Outlook (Nurture) (2)") still exist in
  * Bison but auto-route must ignore them — the markers are the literal
@@ -128,13 +128,14 @@ export const ESP_LABEL: Record<Esp, string> = {
  * legacy campaign via the manual dropdown if they need to.
  */
 export function isCanonicalNurtureCampaign(name: string): boolean {
-  // Must be BOTH a [Nurture] campaign AND carry the "(Cleaning Client)" /
-  // "(Non-Cleaning Client)" marker. Requiring only the parenthetical was too
-  // loose — it also matched SOURCE campaigns (e.g. "SBCC: Outlook (Cleaning
-  // Client)") and legacy "(Nurture)" variants, so the "[Nurture]" requirement
-  // is what disambiguates. Canonical names look like
-  // "JPNNJ: Outlook [Nurture] (Cleaning Client)" or "… (Non-Cleaning Client)".
-  return /\[nurture\]/i.test(name) && /\((?:non-)?cleaning client\)/i.test(name);
+  // Must be BOTH a [Nurture] campaign AND carry one of the type markers:
+  // "(Cleaning Client)", "(Non-Cleaning Client)", or "(Internal)". Requiring
+  // only the parenthetical was too loose — it also matched SOURCE campaigns
+  // (e.g. "SBCC: Outlook (Cleaning Client)") and legacy "(Nurture)" variants,
+  // so the "[Nurture]" requirement is what disambiguates. Canonical names look
+  // like "JPNNJ: Outlook [Nurture] (Cleaning Client)" / "… (Non-Cleaning
+  // Client)" / "… (Internal)".
+  return /\[nurture\]/i.test(name) && /\((?:(?:non-)?cleaning client|internal)\)/i.test(name);
 }
 
 /**
