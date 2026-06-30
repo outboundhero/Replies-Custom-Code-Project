@@ -18,8 +18,9 @@ export interface SyncCampaignRow {
   status: string;         // active / paused / completed / archived …
   totalLeads: number;
   state: "pending" | "done" | "error";
-  candidates?: number;    // sequence-finished leads found
+  candidates?: number;    // NEW sequence-finished leads found
   upserted?: number;      // rows written to the queue
+  skipped?: number;       // already in our system (ready/waiting/added) — not re-added
   esp?: { google: number; outlook: number; segs: number; other: number };
   error?: string;
 }
@@ -28,8 +29,9 @@ export interface SyncProgressState {
   status: "idle" | "running" | "done" | "error";
   instances: string[];
   campaigns: SyncCampaignRow[];
-  found: number;          // running total of sequence-finished leads found
+  found: number;          // running total of NEW sequence-finished leads found
   upserted: number;       // running total written to the queue
+  skippedTotal: number;   // running total already in our system (skipped)
   error?: string;
   startedAt: number | null;
 }
@@ -119,8 +121,9 @@ export default function SyncProgressPanel({
       {!running && total > 0 && (
         <div className="px-4 py-3 border-t bg-muted/20 text-xs text-muted-foreground">
           Scanned <span className="font-medium text-foreground">{total}</span> campaign{total === 1 ? "" : "s"} · found{" "}
-          <span className="font-medium text-sky-700">{found.toLocaleString()}</span> sequence-finished lead{found === 1 ? "" : "s"} ·{" "}
-          <span className="font-medium text-emerald-700">{upserted.toLocaleString()}</span> written to the nurture queue.
+          <span className="font-medium text-sky-700">{found.toLocaleString()}</span> new lead{found === 1 ? "" : "s"} ·{" "}
+          <span className="font-medium text-emerald-700">{upserted.toLocaleString()}</span> written to the queue
+          {progress.skippedTotal > 0 && <> · <span className="font-medium">{progress.skippedTotal.toLocaleString()}</span> already in system (skipped)</>}.
         </div>
       )}
     </div>
@@ -168,8 +171,11 @@ function CampaignRow({ c }: { c: SyncCampaignRow }) {
           <p className="text-xs text-rose-600 mt-0.5 truncate" title={c.error}>{c.error}</p>
         ) : c.state === "done" ? (
           <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
-            {(c.candidates ?? 0).toLocaleString()} found
+            {(c.candidates ?? 0) > 0
+              ? <><span className="text-sky-700">{(c.candidates ?? 0).toLocaleString()} new</span></>
+              : <span className="text-muted-foreground/70">no new leads</span>}
             {(c.upserted ?? 0) > 0 && <> · <span className="text-emerald-700">{(c.upserted ?? 0).toLocaleString()} queued</span></>}
+            {(c.skipped ?? 0) > 0 && <> · <span className="text-muted-foreground/70">{(c.skipped ?? 0).toLocaleString()} already in system</span></>}
             {c.esp && (c.esp.google + c.esp.outlook + c.esp.segs) > 0 && (
               <span className="ml-1 text-muted-foreground/80">
                 ({[c.esp.google && `${c.esp.google} G`, c.esp.outlook && `${c.esp.outlook} O`, c.esp.segs && `${c.esp.segs} S`].filter(Boolean).join(" · ")})

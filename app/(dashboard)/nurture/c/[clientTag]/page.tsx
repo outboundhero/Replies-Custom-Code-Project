@@ -289,7 +289,7 @@ export default function NurturePage() {
   const [reclassifying, setReclassifying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgressState>({
-    status: "idle", instances: [], campaigns: [], found: 0, upserted: 0, startedAt: null,
+    status: "idle", instances: [], campaigns: [], found: 0, upserted: 0, skippedTotal: 0, startedAt: null,
   });
 
   const [detailItem, setDetailItem] = useState<NurtureItem | null>(null);
@@ -976,16 +976,18 @@ export default function NurturePage() {
       const key = `${ev.instance}:${ev.campaignId}`;
       const candidates = Number(ev.candidates) || 0;
       const upserted = Number(ev.upserted) || 0;
+      const skipped = Number(ev.skipped) || 0;
       setSyncProgress((p) => ({
         ...p,
         found: p.found + candidates,
         upserted: p.upserted + upserted,
+        skippedTotal: p.skippedTotal + skipped,
         campaigns: p.campaigns.map((c) =>
           c.key === key
             ? {
                 ...c,
                 state: ev.error ? "error" : "done",
-                candidates, upserted,
+                candidates, upserted, skipped,
                 esp: ev.esp as SyncCampaignRow["esp"],
                 error: ev.error as string | undefined,
               }
@@ -1006,7 +1008,7 @@ export default function NurturePage() {
 
   async function syncSequenceFinished() {
     setSyncing(true);
-    setSyncProgress({ status: "running", instances: [], campaigns: [], found: 0, upserted: 0, startedAt: Date.now() });
+    setSyncProgress({ status: "running", instances: [], campaigns: [], found: 0, upserted: 0, skippedTotal: 0, startedAt: Date.now() });
     try {
       const res = await fetch("/api/nurture/sync", {
         method: "POST",
@@ -1047,7 +1049,7 @@ export default function NurturePage() {
   }
 
   function dismissSyncProgress() {
-    setSyncProgress({ status: "idle", instances: [], campaigns: [], found: 0, upserted: 0, startedAt: null });
+    setSyncProgress({ status: "idle", instances: [], campaigns: [], found: 0, upserted: 0, skippedTotal: 0, startedAt: null });
   }
 
   /**

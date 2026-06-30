@@ -196,8 +196,9 @@ export type SyncProgressEvent =
       name: string;
       status: string;
       totalLeads: number;
-      candidates: number; // sequence-finished leads found (not replied/bounced)
+      candidates: number; // NEW sequence-finished leads (not already in our system)
       upserted: number;   // rows written to the nurture queue
+      skipped?: number;   // finished leads already in the system (ready/waiting/added) — skipped
       esp: SyncEspBreakdown;
       error?: string;
     };
@@ -368,17 +369,44 @@ async function processCampaigns(
         return true;
       });
 
-      state.candidatesFound += candidates.length;
-      if (candidates.length === 0) {
+      const clientTag = extractTagFromCampaignName(campaign.name) || null;
+
+      // ── New-leads-only gate ──────────────────────────────────────────────
+      // Skip any finished lead already in our nurture system for this client —
+      // whether it's queued (ready / waiting) or already pushed (added), and
+      // whether it came from replies, legacy, or a prior sequence-finished
+      // sync. We dedupe by email so the same person is never re-synced, and we
+      // drop them BEFORE the expensive per-lead ESP lookups, so a re-run only
+      // pays for genuinely new arrivals.
+      let newCandidates = candidates;
+      let skipped = 0;
+      if (clientTag && candidates.length > 0) {
+        const uniqueEmails = [...new Set(candidates.map((l) => (l.email || "").toLowerCase()).filter(Boolean))];
+        const known = new Set<string>();
+        for (let i = 0; i < uniqueEmails.length; i += 300) {
+          const chunk = uniqueEmails.slice(i, i + 300);
+          const [seq, rep, leg] = await Promise.all([
+            supabase.from("nurture_sequence_finished").select("email").eq("client_tag", clientTag).in("email", chunk),
+            supabase.from("replies").select("lead_email").eq("client_tag", clientTag).in("lead_email", chunk),
+            supabase.from("nurture_legacy_leads").select("lead_email").eq("client_tag", clientTag).in("lead_email", chunk),
+          ]);
+          for (const r of seq.data || []) known.add(String((r as { email?: string }).email ?? "").toLowerCase());
+          for (const r of rep.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
+          for (const r of leg.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
+        }
+        newCandidates = candidates.filter((l) => !known.has((l.email || "").toLowerCase()));
+        skipped = candidates.length - newCandidates.length;
+      }
+
+      state.candidatesFound += newCandidates.length;
+      if (newCandidates.length === 0) {
         opts.onProgress?.({
           phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
           status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
-          candidates: 0, upserted: 0, esp: { google: 0, outlook: 0, segs: 0, other: 0 },
+          candidates: 0, upserted: 0, skipped, esp: { google: 0, outlook: 0, segs: 0, other: 0 },
         });
         return;
       }
-
-      const clientTag = extractTagFromCampaignName(campaign.name) || null;
 
       // Resolve ESP at INGESTION so every lead is routable the moment it lands:
       //   • Outlook / SEGs campaign → the placement IS the mailbox provider, so
@@ -393,30 +421,14 @@ async function processCampaigns(
       const campaignEsp = detectCampaignEsp(campaign.name);
       const directEsp = campaignEsp === "outlook" || campaignEsp === "segs" ? campaignEsp : null;
 
-      // For the google catch-all, resolve per-lead ESP from tags — but ONLY for
-      // leads we haven't already classified. Steady-state, a 2-hourly re-sync
-      // only looks up the small delta of newly-finished leads (not the whole
-      // table), so this stays well inside the Bison rate budget. A per-campaign
-      // cap bounds the worst case (e.g. a first run with a large unresolved set)
-      // — the remainder is picked up next sync / by the hourly backfill cron.
+      // For the google catch-all, resolve per-lead ESP from tags. newCandidates
+      // are all brand-new (the gate above dropped anything already in our system),
+      // so we resolve the whole set — capped per campaign to bound a large first
+      // run; any remainder is picked up next sync / by the hourly backfill cron.
       const espByLeadId = new Map<number, string>();
-      if (!directEsp && candidates.length > 0) {
+      if (!directEsp) {
         const MAX_LOOKUPS_PER_CAMPAIGN = 300;
-        const ids = candidates.map((l) => l.id);
-        const alreadyResolved = new Set<number>();
-        for (let i = 0; i < ids.length; i += 300) {
-          const { data } = await supabase
-            .from("nurture_sequence_finished")
-            .select("ob_lead_id")
-            .eq("ob_campaign_id", campaign.id)
-            .eq("bison_instance", instanceKey)
-            .not("esp", "is", null)
-            .in("ob_lead_id", ids.slice(i, i + 300));
-          for (const r of data || []) alreadyResolved.add(Number(r.ob_lead_id));
-        }
-        const toResolve = candidates
-          .filter((l) => !alreadyResolved.has(l.id))
-          .slice(0, MAX_LOOKUPS_PER_CAMPAIGN);
+        const toResolve = newCandidates.slice(0, MAX_LOOKUPS_PER_CAMPAIGN);
         await parallelForEach(toResolve, 5, async (lead) => {
           let esp: string;
           try {
@@ -429,7 +441,7 @@ async function processCampaigns(
         });
       }
 
-      const rows = candidates.map((lead: OutboundLead) => {
+      const rows = newCandidates.map((lead: OutboundLead) => {
         const base = {
           ob_lead_id: lead.id,
           ob_campaign_id: campaign.id,
@@ -486,7 +498,7 @@ async function processCampaigns(
       opts.onProgress?.({
         phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
         status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
-        candidates: candidates.length, upserted: error ? 0 : dedupedRows.length, esp,
+        candidates: newCandidates.length, upserted: error ? 0 : dedupedRows.length, skipped, esp,
         error: error ? error.message : undefined,
       });
       // ESP populated inline above from lead.tags — no more fire-and-
