@@ -489,13 +489,27 @@ export async function listCampaignLeadsCursor(
   const out: OutboundLead[] = [];
   let cursor: string | null = null;
   let guard = 0;
+  let retries = 0; // consecutive failures on the CURRENT cursor position
   for (;;) {
     const url = `${baseUrl}/api/campaigns/${campaignId}/leads?pagination_type=cursor&per_page=100${filter}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
-    const res = await fetchWithTimeout(url, { headers, timeoutMs: 15_000 });
-    if (!res.ok) {
-      if (res.status === 429) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(url, { headers, timeoutMs: 30_000 });
+    } catch {
+      // Timeout / network abort — retry the SAME cursor with backoff instead of
+      // throwing (an unhandled throw here would crash a whole bulk sweep). Give
+      // up on the remaining pages after several tries and return what we have.
+      if (++retries <= 6) { await new Promise((r) => setTimeout(r, 1500 * retries)); continue; }
       break;
     }
+    if (!res.ok) {
+      if (res.status === 429) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+      if ((res.status === 502 || res.status === 503 || res.status === 504) && ++retries <= 6) {
+        await new Promise((r) => setTimeout(r, 1500 * retries)); continue;
+      }
+      break;
+    }
+    retries = 0;
     const data = await res.json().catch(() => null);
     const rows = (data?.data ?? []) as OutboundLead[];
     if (rows.length) { out.push(...rows); opts.onProgress?.(out.length); }
@@ -541,12 +555,7 @@ export async function getCampaignLeadCount(
  * the count returned is lower than the count we sent, the caller MUST NOT
  * mark all leads as added — see app/api/nurture/mutate/route.ts.
  */
-export async function attachLeadsToCampaign(
-  instanceKey: string,
-  campaignId: number,
-  leadIds: number[],
-  allowParallelSending = true,
-): Promise<{
+interface AttachResult {
   ok: boolean;
   /** Number of leads OutboundHero confirmed as attached. null = unknown (response didn't include a count). */
   attachedCount: number | null;
@@ -556,11 +565,48 @@ export async function attachLeadsToCampaign(
   error?: string;
   /** Raw response body for diagnostics. */
   raw?: unknown;
-}> {
+}
+
+// Attaching too many lead_ids in one request makes Bison time out ("This
+// operation was aborted") — ~40k leads reliably aborts. Chunk so each request
+// stays small + fast.
+const ATTACH_CHUNK = 1000;
+
+/**
+ * Attach leads to a campaign. Large lists are split into chunks of ATTACH_CHUNK
+ * and attached sequentially, then aggregated — a single 40k-lead request aborts.
+ */
+export async function attachLeadsToCampaign(
+  instanceKey: string,
+  campaignId: number,
+  leadIds: number[],
+  allowParallelSending = true,
+): Promise<AttachResult> {
+  if (leadIds.length <= ATTACH_CHUNK) {
+    return attachLeadsBatch(instanceKey, campaignId, leadIds, allowParallelSending);
+  }
+  let attached = 0;
+  let allOk = true;
+  let firstErr: string | undefined;
+  for (let i = 0; i < leadIds.length; i += ATTACH_CHUNK) {
+    const r = await attachLeadsBatch(instanceKey, campaignId, leadIds.slice(i, i + ATTACH_CHUNK), allowParallelSending);
+    if (r.ok) attached += r.attachedCount ?? r.requestedCount;
+    else { allOk = false; if (!firstErr) firstErr = r.error; }
+  }
+  return { ok: allOk, attachedCount: attached, requestedCount: leadIds.length, error: firstErr };
+}
+
+async function attachLeadsBatch(
+  instanceKey: string,
+  campaignId: number,
+  leadIds: number[],
+  allowParallelSending = true,
+): Promise<AttachResult> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads/attach-leads`, {
     method: "POST",
     headers: buildHeaders(token),
+    timeoutMs: 120_000, // a 1k-lead attach can take a while server-side
     body: JSON.stringify({
       allow_parallel_sending: allowParallelSending,
       lead_ids: leadIds,
@@ -569,6 +615,15 @@ export async function attachLeadsToCampaign(
   const body = await res.json().catch(() => null);
 
   if (!res.ok) {
+    // Bison returns 422 "No leads were added because they are either in other
+    // sequences, have previously bounced, or unsubscribed" when EVERY lead in
+    // the batch is already placed (e.g. an idempotent re-run). The leads are
+    // already in nurture, so treat this as success-with-0-newly-added — callers
+    // (route engine) then still stamp/record them rather than erroring out.
+    const msg = JSON.stringify(body ?? "");
+    if (res.status === 422 && /in other sequences|already|existing|unsubscrib/i.test(msg)) {
+      return { ok: true, attachedCount: 0, requestedCount: leadIds.length, message: "already present", raw: body };
+    }
     return {
       ok: false,
       attachedCount: null,
