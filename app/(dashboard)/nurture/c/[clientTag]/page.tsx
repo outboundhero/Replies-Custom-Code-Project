@@ -1583,7 +1583,10 @@ export default function NurturePage() {
         <StatTile
           label="Added"
           sublabel="Already pushed to a campaign"
-          value={liveAddedTotal ?? counts?.added}
+          // Distinct leads added (counts.added) is the canonical headline — it
+          // matches the hub card and doesn't double-count or lag like the live
+          // Bison campaign sum (liveAddedTotal), which stays the per-campaign view.
+          value={counts?.added ?? liveAddedTotal ?? undefined}
           accent="text-violet-700"
           active={view === "added"}
           activeBorder="border-violet-500"
@@ -2562,12 +2565,14 @@ function NurturePipeline({
 
   const total = counts?.total ?? 0;
   const ready = readyCount ?? counts?.eligibleSafe ?? 0;
-  // "Routed" = leads actually in the mapped campaigns (live), so it reflects
-  // source-campaign routing too — not just the DB added_at count.
+  // "Routed" mirrors the ADDED tile: the distinct count of leads we've added
+  // (counts.added), so the pipeline and the tile agree. The live per-campaign
+  // Bison totals (liveAdded) are shown in the campaign cards below, where they
+  // can legitimately lag the DB as Bison's cache-then-sync catches up.
   const liveAdded = liveCounts.size > 0
     ? mapEntries.reduce((s, e) => s + (liveCounts.get(`${e.bison_instance}:${e.campaign_id}`) ?? 0), 0)
     : null;
-  const added = liveAdded ?? counts?.added ?? 0;
+  const added = counts?.added ?? liveAdded ?? 0;
   const waiting = counts?.waiting ?? 0;
   const anyActive = [...byInstance.values()].some((espMap) =>
     (["google", "outlook", "segs"] as Esp[]).some((e) => espMap[e]?.status === "active"),
