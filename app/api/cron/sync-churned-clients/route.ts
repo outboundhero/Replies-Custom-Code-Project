@@ -9,9 +9,7 @@
  * changes.
  */
 import { NextRequest, NextResponse } from "next/server";
-import db from "@/lib/db";
-import { fetchChurnedClientTags } from "@/lib/google-sheets";
-import { invalidateChurnCache } from "@/lib/churn";
+import { rebuildChurnedClients } from "@/lib/churn";
 
 export const maxDuration = 60;
 
@@ -24,23 +22,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let tags: Set<string>;
   try {
-    tags = await fetchChurnedClientTags();
+    const { count, tags } = await rebuildChurnedClients();
+    return NextResponse.json({ ok: true, churned: count, tags });
   } catch (e) {
     return NextResponse.json({ error: `sheet read failed: ${(e as Error).message}` }, { status: 502 });
   }
-
-  await db.execute(
-    "CREATE TABLE IF NOT EXISTS churned_clients (client_tag TEXT PRIMARY KEY, synced_at TEXT)",
-  );
-  const now = new Date().toISOString();
-  // Replace the whole set (a client can un-churn).
-  await db.execute("DELETE FROM churned_clients");
-  for (const tag of tags) {
-    await db.execute({ sql: "INSERT OR IGNORE INTO churned_clients (client_tag, synced_at) VALUES (?, ?)", args: [tag, now] });
-  }
-  invalidateChurnCache();
-
-  return NextResponse.json({ ok: true, churned: tags.size, tags: [...tags].sort() });
 }

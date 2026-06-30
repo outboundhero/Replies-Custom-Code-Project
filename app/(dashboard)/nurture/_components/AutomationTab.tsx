@@ -9,19 +9,22 @@
  */
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
-import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronRight, Sparkles, Loader2 } from "lucide-react";
+import { Search, Check, AlertTriangle, Zap, ZapOff, RefreshCw, ChevronRight, Sparkles, Loader2, UserX } from "lucide-react";
 import AutoMapPanel, { type AutoMapResultItem } from "./AutoMapPanel";
 
 type Esp = "google" | "outlook" | "segs";
 type Cell = { state: "ok" | "missing"; status?: string; draft?: boolean };
+type StatusFilter = "active" | "churned" | "all";
 interface ClientRow {
   clientTag: string; group: number | null; b2b: string | null; b2c: string | null;
   autoOn: boolean; lastRunAt: string | null; mappingMissing: boolean;
   matrix: Record<string, Record<Esp, Cell>>; configured: boolean;
   missingCells: Array<{ instance: string; esp: Esp }>;
   mapConfirmed: boolean; mapConfirmedAt: string | null;
+  hasMap: boolean; churned: boolean; churnDate: string | null;
 }
 interface Section { id: number; name: string; clients: ClientRow[] }
 
@@ -37,8 +40,31 @@ export default function AutomationTab() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [onlyUnmapped, setOnlyUnmapped] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
+  const [churnSyncing, setChurnSyncing] = useState(false);
   // local optimistic overrides: tag -> autoOn
   const [autoOverride, setAutoOverride] = useState<Map<string, boolean>>(new Map());
+
+  // Drag-to-select: hold left-click and sweep over rows to (de)select them.
+  const dragRef = useRef<{ value: boolean } | null>(null);
+  useEffect(() => {
+    const end = () => { dragRef.current = null; };
+    window.addEventListener("mouseup", end);
+    return () => window.removeEventListener("mouseup", end);
+  }, []);
+  const beginDrag = useCallback((tag: string, currentlySelected: boolean) => {
+    const value = !currentlySelected;
+    dragRef.current = { value };
+    setSelected((sel) => { const n = new Set(sel); value ? n.add(tag) : n.delete(tag); return n; });
+  }, []);
+  const dragOver = useCallback((tag: string) => {
+    const d = dragRef.current;
+    if (!d) return;
+    setSelected((sel) => {
+      if (d.value === sel.has(tag)) return sel; // no change → skip re-render
+      const n = new Set(sel); d.value ? n.add(tag) : n.delete(tag); return n;
+    });
+  }, []);
 
   const load = useCallback((fresh = false) => {
     setLoading(true);
@@ -60,15 +86,26 @@ export default function AutomationTab() {
         ...s,
         clients: s.clients.filter((c) =>
           (!q || c.clientTag.toLowerCase().includes(q)) &&
-          (!onlyUnmapped || !c.mapConfirmed),
+          (!onlyUnmapped || !c.mapConfirmed) &&
+          (statusFilter === "all" || (statusFilter === "churned" ? c.churned : !c.churned)),
         ),
       }))
       .filter((s) => s.clients.length > 0);
-  }, [sections, search, onlyUnmapped]);
+  }, [sections, search, onlyUnmapped, statusFilter]);
 
+  // Map tag → row for quick lookups (bulk-enable gating, etc.).
+  const clientByTag = useMemo(() => {
+    const m = new Map<string, ClientRow>();
+    for (const s of sections || []) for (const c of s.clients) m.set(c.clientTag, c);
+    return m;
+  }, [sections]);
+
+  // Headline tiles describe ACTIVE clients only (churned are excluded from the
+  // operational view); churnedCount feeds the filter chip.
   const stats = useMemo(() => {
-    let total = 0, on = 0, configured = 0, needCampaigns = 0, needMap = 0;
+    let total = 0, on = 0, configured = 0, needCampaigns = 0, needMap = 0, churnedCount = 0;
     for (const s of sections || []) for (const c of s.clients) {
+      if (c.churned) { churnedCount++; continue; }
       total++;
       // "Auto-route ON" = effectively running: opted-in AND map confirmed
       // (without a confirmed map, sending is gated off no matter the flag).
@@ -76,8 +113,30 @@ export default function AutomationTab() {
       if (c.configured) configured++; if (!c.configured) needCampaigns++;
       if (!c.mapConfirmed) needMap++;
     }
-    return { total, on, configured, needCampaigns, needMap };
+    return { total, on, configured, needCampaigns, needMap, churnedCount };
   }, [sections, autoOverride]);
+
+  async function syncChurn() {
+    setChurnSyncing(true);
+    try {
+      const res = await fetch("/api/nurture/churn-sync", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) { toast.success(`Churn synced — ${data.churned} churned client${data.churned === 1 ? "" : "s"}`); load(true); }
+      else toast.error(data.error || "Churn sync failed");
+    } catch (e) { toast.error((e as Error).message); }
+    setChurnSyncing(false);
+  }
+
+  // Bulk-enable, but only clients that have a nurture campaign map (draft OK).
+  // Unmapped clients can't auto-push, so they're skipped with a warning.
+  function enableSelected() {
+    const tags = [...selected];
+    const mapped = tags.filter((t) => clientByTag.get(t)?.hasMap);
+    const skipped = tags.length - mapped.length;
+    if (mapped.length) bulk(true, { clientTags: mapped });
+    if (skipped) toast.warning(`${skipped} client${skipped === 1 ? "" : "s"} skipped — nurture campaign map is not set`);
+    if (!mapped.length) setSelected(new Set());
+  }
 
   // Flat, globally-sorted client list (no section grouping): needs-attention
   // (un-mapped or campaign-gaps) first, then alphabetical.
@@ -195,6 +254,28 @@ export default function AutomationTab() {
         <button onClick={() => load(true)} disabled={loading} className="flex items-center gap-2 px-3 h-9 text-sm rounded-md border bg-white hover:bg-muted/50 disabled:opacity-50">
           <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} /> Refresh
         </button>
+
+        {/* Active / Churned / All filter */}
+        <div className="flex items-center rounded-md border p-0.5 text-xs bg-white">
+          {(["active", "churned", "all"] as StatusFilter[]).map((f) => (
+            <button
+              key={f}
+              onClick={() => setStatusFilter(f)}
+              className={`px-2.5 h-7 rounded capitalize transition-colors ${statusFilter === f ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted/60"}`}
+            >
+              {f}{f === "churned" && stats.churnedCount > 0 ? ` (${stats.churnedCount})` : ""}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={syncChurn}
+          disabled={churnSyncing}
+          title="Re-read the Client Tracker sheet and refresh which clients are churned (Status=Churned and Churn Date on/before today)"
+          className="flex items-center gap-2 px-3 h-9 text-sm rounded-md border bg-white hover:bg-muted/50 disabled:opacity-50"
+        >
+          {churnSyncing ? <Loader2 className="size-3.5 animate-spin" /> : <UserX className="size-3.5" />} Sync churned
+        </button>
         <label
           className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
           title="Preview what would be mapped without writing anything"
@@ -240,7 +321,7 @@ export default function AutomationTab() {
         <div className="sticky top-2 z-10 flex items-center gap-3 rounded-lg border bg-card shadow-sm px-4 py-2.5">
           <span className="text-sm font-medium">{selected.size} selected</span>
           <div className="ml-auto flex gap-2">
-            <button disabled={busy} onClick={() => bulk(true, { clientTags: [...selected] })} className="flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"><Zap className="size-3" /> Enable</button>
+            <button disabled={busy} onClick={enableSelected} className="flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"><Zap className="size-3" /> Enable</button>
             <button disabled={busy} onClick={() => bulk(false, { clientTags: [...selected] })} className="flex items-center gap-1.5 px-3 h-8 text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50"><ZapOff className="size-3" /> Disable</button>
             <button onClick={() => setSelected(new Set())} className="px-2 h-8 text-xs text-muted-foreground hover:underline">Clear</button>
           </div>
@@ -262,7 +343,8 @@ export default function AutomationTab() {
               {flatClients.map((c) => (
                 <ClientRowView
                   key={c.clientTag} c={c} autoOn={autoFor(c)} selected={selected.has(c.clientTag)}
-                  onSelect={(v) => setSelected((sel) => { const n = new Set(sel); v ? n.add(c.clientTag) : n.delete(c.clientTag); return n; })}
+                  onDragStart={() => beginDrag(c.clientTag, selected.has(c.clientTag))}
+                  onDragEnter={() => dragOver(c.clientTag)}
                   onToggle={(v) => toggleOne(c.clientTag, v)}
                 />
               ))}
@@ -311,8 +393,9 @@ function EspPill({ cell, label, title }: { cell: Cell | undefined; label: string
   return <span title={title} className={`inline-flex items-center justify-center size-5 rounded-md text-[10px] font-semibold ${cls}`}>{label}</span>;
 }
 
-function ClientRowView({ c, autoOn, selected, onSelect, onToggle }: {
-  c: ClientRow; autoOn: boolean; selected: boolean; onSelect: (v: boolean) => void; onToggle: (v: boolean) => void;
+function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle }: {
+  c: ClientRow; autoOn: boolean; selected: boolean;
+  onDragStart: () => void; onDragEnter: () => void; onToggle: (v: boolean) => void;
 }) {
   const router = useRouter();
   const danger = autoOn && !c.configured;
@@ -327,19 +410,36 @@ function ClientRowView({ c, autoOn, selected, onSelect, onToggle }: {
   return (
     <div
       onClick={() => router.push(`/nurture/c/${encodeURIComponent(c.clientTag)}`)}
+      onMouseEnter={onDragEnter}
       className={`group flex items-center gap-4 px-4 py-3 cursor-pointer transition-colors hover:bg-muted/40 ${danger ? "border-l-2 border-l-amber-400" : "border-l-2 border-l-transparent"}`}
     >
-      <input
-        type="checkbox" checked={selected} onClick={stop} onChange={(e) => onSelect(e.target.checked)}
-        className="size-3.5 rounded border-muted-foreground/40 cursor-pointer"
-      />
+      {/* Drag-select zone: click or press-and-drag across rows to (de)select. */}
+      <div
+        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onDragStart(); }}
+        onClick={stop}
+        title="Click or drag to select"
+        className="flex items-center -my-3 py-3 -ml-1 pl-1 pr-1 cursor-pointer select-none"
+      >
+        <input
+          type="checkbox" checked={selected} readOnly tabIndex={-1}
+          className="size-3.5 rounded border-muted-foreground/40 pointer-events-none"
+        />
+      </div>
 
       {/* Client identity */}
-      <div className="w-32 shrink-0 flex items-center gap-2">
+      <div className="w-36 shrink-0 flex items-center gap-2 flex-wrap">
         <span className="font-mono font-semibold text-sm truncate group-hover:text-foreground">{c.clientTag}</span>
         {c.group
           ? <span className="text-[9px] font-medium rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">G{c.group}</span>
           : <span className="text-[9px] font-medium rounded bg-amber-100 px-1.5 py-0.5 text-amber-700" title="No group mapping — run the group sheet sync">no group</span>}
+        {c.churned && (
+          <span
+            className="inline-flex items-center gap-0.5 text-[9px] font-medium rounded bg-rose-100 px-1.5 py-0.5 text-rose-700"
+            title={c.churnDate ? `Churned on ${c.churnDate}` : "Churned"}
+          >
+            <UserX className="size-2.5" /> churned{c.churnDate ? ` · ${c.churnDate}` : ""}
+          </span>
+        )}
       </div>
 
       {/* Matrix: per instance (lane), 3 ESP pills */}
@@ -378,24 +478,32 @@ function ClientRowView({ c, autoOn, selected, onSelect, onToggle }: {
           : <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600" title={c.missingCells.map((m) => `${ESP_FULL[m.esp]} @ ${getInstanceLabel(m.instance)}`).join("\n")}><AlertTriangle className="size-3.5" /> {c.missingCells.length} gap{c.missingCells.length === 1 ? "" : "s"}</span>}
       </div>
 
-      {/* Auto toggle — gated on a confirmed map: without one, auto-routing can't
-          run, so the control is disabled and shows the gated state rather than a
-          misleading "Auto ON". */}
-      {!c.mapConfirmed ? (
-        <span
-          title="Confirm this client's Target Campaigns to enable auto-routing"
-          className="shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-400 cursor-not-allowed"
-        >
-          <ZapOff className="size-3" /> Off
-        </span>
-      ) : (
-        <button
-          onClick={(e) => { stop(e); onToggle(!autoOn); }}
-          className={`shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold transition-colors ${autoOn ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200" : "bg-slate-100 text-slate-500 hover:bg-slate-200"}`}
-        >
-          {autoOn ? <Zap className="size-3" /> : <ZapOff className="size-3" />} {autoOn ? "Auto" : "Off"}
-        </button>
-      )}
+      {/* Auto toggle — enabling requires a nurture campaign map (draft OK). With
+          no map, clicking ON is blocked with a message; it never turns on. */}
+      <button
+        onClick={(e) => {
+          stop(e);
+          if (!autoOn && !c.hasMap) {
+            toast.warning(`${c.clientTag}: nurture campaign map is not set — map this client first`);
+            return;
+          }
+          onToggle(!autoOn);
+        }}
+        title={
+          !c.hasMap
+            ? "Nurture campaign map is not set — map this client to enable auto-push"
+            : autoOn ? "Auto-push ON — click to turn off" : "Click to turn auto-push on"
+        }
+        className={`shrink-0 inline-flex items-center gap-1.5 px-3 h-7 rounded-full text-[11px] font-semibold transition-colors ${
+          !c.hasMap
+            ? "bg-slate-100 text-slate-400 hover:bg-rose-50 hover:text-rose-500"
+            : autoOn
+              ? "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+              : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+        }`}
+      >
+        {autoOn && c.hasMap ? <Zap className="size-3" /> : <ZapOff className="size-3" />} {autoOn && c.hasMap ? "Auto" : "Off"}
+      </button>
 
       <ChevronRight className="size-4 text-muted-foreground/30 shrink-0 group-hover:text-muted-foreground/70 transition-colors" />
     </div>

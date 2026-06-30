@@ -15,7 +15,7 @@ import { requireAuth } from "@/lib/auth";
 import db from "@/lib/db";
 import { isCanonicalNurtureCampaign, detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
-import { getChurnedTags } from "@/lib/churn";
+import { getChurnedClients } from "@/lib/churn";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 
 export const dynamic = "force-dynamic";
@@ -38,13 +38,19 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...(cache.data as object), cached: true });
   }
 
-  const [tagRows, cfgRows, instances, churned, campRows] = await Promise.all([
+  const [tagRows, cfgRows, instances, churnedMap, campRows, mapRows] = await Promise.all([
     db.execute("SELECT ct.tag, ct.section_id, s.name AS section_name FROM client_tags ct JOIN sections s ON ct.section_id = s.id"),
     db.execute("SELECT client_tag, auto_nurture_disabled, auto_nurture_last_run_at, nurture_map_confirmed_at FROM client_config"),
     getAllClientInstances(),
-    getChurnedTags(),
+    getChurnedClients(),
     db.execute("SELECT name, status, client_tag, bison_instance, synced_at FROM nurture_campaigns_cache"),
+    db.execute("SELECT DISTINCT client_tag FROM nurture_campaign_map"),
   ]);
+
+  // Clients that have ANY nurture_campaign_map row (draft OR confirmed). Used to
+  // gate auto-push: enabling requires a map to exist (draft counts).
+  const hasMapSet = new Set<string>();
+  for (const r of mapRows.rows) hasMapSet.add(String(r.client_tag).toUpperCase());
 
   // Index canonical campaigns: TAG -> esp -> instance -> best status.
   const byTag = new Map<string, Map<Esp, Map<string, string>>>();
@@ -81,13 +87,17 @@ export async function GET(req: NextRequest) {
     matrix: Record<string, Record<Esp, Cell>>; configured: boolean;
     missingCells: Array<{ instance: string; esp: Esp }>;
     mapConfirmed: boolean; mapConfirmedAt: string | null;
+    hasMap: boolean; churned: boolean; churnDate: string | null;
   };
   const sections = new Map<number, { id: number; name: string; clients: ClientOut[] }>();
 
   for (const r of tagRows.rows) {
     const tag = String(r.tag);
     const TAG = tag.toUpperCase();
-    if (churned.has(TAG)) continue; // hide churned (mirror hub)
+    // Churned clients are INCLUDED now (the Automation tab filters them) — flag
+    // them + carry the churn date rather than hiding them.
+    const churned = churnedMap.has(TAG);
+    const churnDate = churnedMap.get(TAG) ?? null;
     const inst = instances.get(TAG);
     const cfg = cfgByTag.get(TAG);
     const autoOn = (cfg?.disabled ?? 0) !== 1;
@@ -113,6 +123,7 @@ export async function GET(req: NextRequest) {
       autoOn, lastRunAt: cfg?.lastRun ?? null, mappingMissing: !inst,
       matrix, configured, missingCells,
       mapConfirmed: !!cfg?.mapConfirmedAt, mapConfirmedAt: cfg?.mapConfirmedAt ?? null,
+      hasMap: hasMapSet.has(TAG), churned, churnDate,
     });
   }
 

@@ -84,18 +84,42 @@ export async function fetchClientTracker(): Promise<ClientTrackerRow[]> {
  * " & " / " and " into individual tags; an "&" WITHOUT surrounding spaces is
  * kept intact (so "JPC&A", "K&LCS" stay single tags). Tags are upper-cased.
  */
-export async function fetchChurnedClientTags(): Promise<Set<string>> {
+export interface ChurnedClient { tag: string; churnDate: string }
+
+/** Parse a Client-Tracker churn-date cell to a Date, or null if unparseable. */
+function parseChurnDate(s: string): Date | null {
+  const t = (s || "").trim();
+  if (!t) return null;
+  const d = new Date(t);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Clients CHURNED as of today — Status contains "Churn" AND the Churn Date is
+ * present and on/before today. A FUTURE churn date means the client is scheduled
+ * to churn but is still active, so it is NOT churned yet. An unparseable date is
+ * treated as churned (status says so and a date was entered).
+ * Combined abbreviations ("DBSM & DBSA") split like fetchChurnedClientTags.
+ */
+export async function fetchChurnedClients(): Promise<ChurnedClient[]> {
   const rows = await fetchClientTracker();
-  const churned = new Set<string>();
+  const endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999);
+  const out: ChurnedClient[] = [];
   for (const r of rows) {
     if (!/churn/i.test(r.status)) continue;
     if (!r.churnDate) continue; // status churned but no date → not actually churned
+    const d = parseChurnDate(r.churnDate);
+    if (d && d.getTime() > endOfToday.getTime()) continue; // future churn → still active
     for (const t of r.clientAbbreviation.split(/\s+&\s+|\s+and\s+/i)) {
       const tag = t.trim().toUpperCase();
-      if (tag) churned.add(tag);
+      if (tag) out.push({ tag, churnDate: r.churnDate.trim() });
     }
   }
-  return churned;
+  return out;
+}
+
+export async function fetchChurnedClientTags(): Promise<Set<string>> {
+  return new Set((await fetchChurnedClients()).map((c) => c.tag));
 }
 
 /**
