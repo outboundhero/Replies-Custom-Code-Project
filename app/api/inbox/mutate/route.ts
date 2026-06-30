@@ -194,6 +194,7 @@ export async function POST(req: NextRequest) {
               city: reply.city,
               state: reply.state,
               lead_category: category,
+              bison_instance: reply.bison_instance,
             });
             if (result.ok) {
               // Audit columns are optional; if they don't exist this is a

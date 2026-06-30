@@ -11,6 +11,7 @@
  * existing contact instead of creating a duplicate.
  */
 import db from "@/lib/db";
+import { findLeadByEmail } from "@/lib/outboundhero-api";
 
 /** Lead Category values that trigger a GHL push (exact `lead_category` strings). */
 export const GHL_PUSH_CATEGORIES = [
@@ -78,6 +79,33 @@ export function normalizePhoneE164(raw?: string | null): string | null {
   return null; // ambiguous length without a country code → omit
 }
 
+// Custom-variable names that may hold a phone, highest-priority first.
+const PHONE_VAR_PRIORITY = [
+  "company phone", "phone", "phone number", "mobile", "mobile phone",
+  "cell", "cell phone", "telephone", "direct phone", "work phone", "contact phone",
+];
+
+/**
+ * Pull the first VALID (E.164-able) phone out of a Bison lead's custom_variables.
+ * Tries known phone var names in priority order, then any var whose name mentions
+ * phone/mobile/cell/tel. Returns null if none normalize (→ push without phone).
+ */
+export function pickPhoneFromCustomVars(vars?: Array<{ name?: string; value?: string }>): string | null {
+  if (!vars || !vars.length) return null;
+  for (const key of PHONE_VAR_PRIORITY) {
+    const hit = vars.find((v) => (v?.name || "").toLowerCase().trim() === key);
+    const p = hit ? normalizePhoneE164(hit.value) : null;
+    if (p) return p;
+  }
+  for (const v of vars) {
+    if (/phone|mobile|cell|tel/i.test(v?.name || "")) {
+      const p = normalizePhoneE164(v.value);
+      if (p) return p;
+    }
+  }
+  return null;
+}
+
 export interface GhlConfig { apiKey: string; locationId: string }
 
 /** Per-client GHL creds from Turso, or null if not configured (→ no push). */
@@ -109,6 +137,9 @@ export interface GhlLead {
   city?: string | null;
   state?: string | null;
   lead_category?: string | null;
+  /** Bison instance — lets us re-resolve phone from the lead's custom variables
+   *  when the stored `phone` is missing/invalid. */
+  bison_instance?: string | null;
 }
 
 export interface GhlPushResult { ok: boolean; status?: number; created?: boolean; error?: string }
@@ -144,7 +175,17 @@ export async function pushToGhl(clientTag: string, lead: GhlLead): Promise<GhlPu
   };
   if (firstName) body.firstName = firstName;
   if (lastName) body.lastName = lastName;
-  const phone = normalizePhoneE164(lead.phone);
+
+  // Phone: prefer the stored value; if it's missing/invalid (e.g. junk like
+  // "there"), scan the Bison lead's custom variables for a real phone. Only omit
+  // when nothing valid is found anywhere.
+  let phone = normalizePhoneE164(lead.phone);
+  if (!phone && lead.bison_instance) {
+    try {
+      const bisonLead = await findLeadByEmail(lead.bison_instance, email);
+      phone = pickPhoneFromCustomVars(bisonLead?.custom_variables);
+    } catch { /* leave phone null — push without it */ }
+  }
   if (phone) body.phone = phone;
   if (lead.company_name) body.companyName = lead.company_name;
   if (lead.address) body.address1 = lead.address;

@@ -18,6 +18,7 @@
  *      leadName     → Lead Name
  *      companyName  → Company Name
  *      phone        → Phone
+ *      enrichedPhone→ Enriched Phone Number   (optional fallback phone)
  *      city         → City
  *      state        → State
  *      address      → Address
@@ -75,7 +76,7 @@ if (category) tags.unshift(category);
 const body = { locationId: GHL_LOCATION_ID, email, source: "OutboundHero", tags };
 if (firstName) body.firstName = firstName;
 if (lastName) body.lastName = lastName;
-const phone = normalizePhone(cfg.phone);
+const phone = normalizePhone(cfg.phone) || normalizePhone(cfg.enrichedPhone);
 if (phone) body.phone = phone;
 if (cfg.companyName) body.companyName = String(cfg.companyName);
 if (cfg.address) body.address1 = String(cfg.address);
