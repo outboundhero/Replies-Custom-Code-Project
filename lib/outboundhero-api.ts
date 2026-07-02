@@ -883,7 +883,10 @@ export async function createLeadsInInstance(
     const cv = normVars(l.custom_variables);
     return {
       email: l.email,
-      ...(l.first_name != null ? { first_name: l.first_name } : {}),
+      // Bison rejects a create without a first_name ("first_name field is
+      // required"). Default missing/blank names to "there" so the lead still
+      // routes — and the nurture copy reads a clean "Hi there,".
+      first_name: (l.first_name && l.first_name.trim()) ? l.first_name : "there",
       ...(l.last_name != null ? { last_name: l.last_name } : {}),
       ...(l.company != null ? { company: l.company } : {}),
       ...(l.title != null ? { title: l.title } : {}),
