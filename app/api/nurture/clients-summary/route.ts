@@ -88,6 +88,7 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import { getChurnedTags } from "@/lib/churn";
 
 export const maxDuration = 60;
 
@@ -117,6 +118,11 @@ export async function GET(req: Request) {
 
   try {
     const cutoffIso = new Date(now - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    // Churned clients are excluded from nurture everywhere — drop them from the
+    // hub so the tiles/cards reflect only nurture-able leads (the summary cache +
+    // RPC still compute for all clients).
+    const churned = await getChurnedTags();
+    const notChurned = (c: ClientSummary) => !churned.has(c.clientTag.toUpperCase());
 
     // Fast path: read the precomputed cache table (refreshed by the
     // refresh-nurture-summary cron). This is a sub-100ms indexed read vs the
@@ -134,7 +140,7 @@ export async function GET(req: Request) {
           waiting: Number(r.waiting) || 0,
           added: Number(r.added) || 0,
           total: (Number(r.ready) || 0) + (Number(r.waiting) || 0) + (Number(r.added) || 0),
-        }));
+        })).filter(notChurned);
         cache = { ts: now, data: out };
         return NextResponse.json({ clients: out, cached: true, source: "table" });
       }
@@ -170,7 +176,7 @@ export async function GET(req: Request) {
       waiting: Number(r.waiting) || 0,
       added: Number(r.added) || 0,
       total: (Number(r.ready) || 0) + (Number(r.waiting) || 0) + (Number(r.added) || 0),
-    }));
+    })).filter(notChurned);
 
     cache = { ts: now, data: out };
     return NextResponse.json({ clients: out, cached: false });
