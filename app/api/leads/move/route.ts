@@ -30,8 +30,12 @@ import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const WINDOW = 5000;       // leads copied per call before handing the cursor back
-const WINDOW_MS = 230_000; // …or this much wall-time, whichever comes first (< maxDuration)
+// Reads are ~1.6k leads/min per stream, so a big window nears the 300s route
+// ceiling → timeout → wasted re-read. Keep windows small: fast to return, so
+// progress updates ~every minute and nothing times out. Concurrency (not window
+// size) drives total throughput — reads scale cleanly with no rate-limiting.
+const WINDOW = 1200;       // leads copied per call before handing the cursor back
+const WINDOW_MS = 150_000; // …or this much wall-time, whichever comes first (< maxDuration 300)
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();

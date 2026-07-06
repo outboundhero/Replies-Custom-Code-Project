@@ -29,7 +29,6 @@ const INSTANCE_ACCENT: Record<string, string> = {
   outboundhero: "data-[on=true]:bg-emerald-600", facilityreach: "data-[on=true]:bg-sky-600",
   cleaningoutbound: "data-[on=true]:bg-amber-600", outboundclean: "data-[on=true]:bg-violet-600",
 };
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Bison locks reads to 15 leads/request, so throughput comes from running many
 // independent cursor streams at once. ≈ CLIENT × CAMPAIGN concurrent streams.
 const CLIENT_CONCURRENCY = 4;
@@ -53,6 +52,21 @@ export default function MigratePage() {
   const [migration, setMigration] = useState<MigrationState | null>(null);
   const [running, setRunning] = useState(false);
   const abortRef = useRef(false);
+  const abortCtlRef = useRef<AbortController | null>(null);
+
+  // Stop = flip the flag AND abort every in-flight request/backoff immediately,
+  // so the run halts within a second instead of after the current window.
+  const stopMigration = useCallback(() => {
+    abortRef.current = true;
+    abortCtlRef.current?.abort();
+  }, []);
+  // Sleep that resolves early when the run is aborted (so backoff waits don't
+  // hold Stop hostage).
+  const abortableSleep = useCallback((ms: number) => new Promise<void>((resolve) => {
+    if (abortRef.current) return resolve();
+    const t = setTimeout(resolve, ms);
+    abortCtlRef.current?.signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  }), []);
 
   useEffect(() => {
     fetch("/api/config/clients").then((r) => (r.ok ? r.json() : [])).then((rows) => {
@@ -129,15 +143,15 @@ export default function MigratePage() {
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
       try {
-        const res = await fetch("/api/leads/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const res = await fetch("/api/leads/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: abortCtlRef.current?.signal });
         if (res.ok) { patchRow(tag, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
         const err = await res.json().catch(() => ({}));
         if (res.status !== 429 && res.status < 500) return { ok: false, error: err.error || `HTTP ${res.status}` }; // hard 4xx → don't retry
-      } catch { /* network → retry */ }
+      } catch { if (abortRef.current) return { ok: false, error: "stopped" }; /* else network → retry */ }
       if (attempt < MAX) {
         const wait = Math.min(20000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
         patchRow(tag, (r) => ({ state: "retrying", retryAttempt: attempt, retries: r.retries + 1 }));
-        await sleep(wait);
+        await abortableSleep(wait);
       }
     }
     return { ok: false, error: "failed after 5 retries" };
@@ -169,22 +183,28 @@ export default function MigratePage() {
       patchRow(tag, { state: "skipped", skipReason: p.totalLeads === 0 ? "no leads in source" : `no ${p.unmatchedEsps.map((e) => ESP_LABEL[e]).join("/")} campaign in ${toLabel}` });
       return;
     }
-    const acc = { moved: 0, done: 0, errored: false };
+    const acc = { moved: 0, done: 0, failed: 0 };
+    let lastError = "";
     patchRow(tag, { state: "moving", campaignsTotal: camps.length, campaignsDone: 0, moved: 0, error: undefined });
+    // Campaigns are INDEPENDENT — one failing doesn't abandon the others. We drain
+    // every campaign, then settle the client's state from the tallies.
     await pool(camps, concurrency, async (c) => {
-      if (acc.errored || abortRef.current) return;
+      if (abortRef.current) return;
       const res = await drainCampaign(tag, c, p.match[c.esp]!.campaignId, (delta) => {
         acc.moved += delta;
         patchRow(tag, { moved: acc.moved, state: "moving" });
       });
       if (!res.ok) {
-        if (res.error !== "stopped") acc.errored = true;
-        patchRow(tag, { state: "error", error: res.error, moved: acc.moved });
+        if (res.error !== "stopped") { acc.failed++; lastError = res.error || "failed"; }
         return;
       }
       acc.done++;
-      patchRow(tag, (r) => ({ campaignsDone: acc.done, ...(acc.done === camps.length && !acc.errored && r.state !== "error" ? { state: "done" as const } : {}) }));
+      patchRow(tag, { campaignsDone: acc.done });
     });
+    // Settle: stopped → error("stopped"); any campaign failed → error; else done.
+    if (abortRef.current) patchRow(tag, { state: "error", error: "stopped", moved: acc.moved });
+    else if (acc.failed > 0) patchRow(tag, { state: "error", error: `${acc.failed}/${camps.length} campaign${acc.failed === 1 ? "" : "s"} failed — ${lastError}`, moved: acc.moved });
+    else patchRow(tag, { state: "done", moved: acc.moved });
   }
 
   async function runMigration(tags: string[]) {
@@ -199,6 +219,7 @@ export default function MigratePage() {
     setMigration({ status: "running", from, to, rows });
     setRunning(true);
     abortRef.current = false;
+    abortCtlRef.current = new AbortController();
     // Parallelise across CLIENTS; within each client its campaigns also run in
     // parallel. Total in-flight cursor streams ≈ CLIENT_CONCURRENCY × CAMPAIGN_CONCURRENCY,
     // capped so we hit Bison hard without tripping sustained rate-limits.
@@ -212,6 +233,7 @@ export default function MigratePage() {
   async function retryClient(tag: string) {
     const p = plan.get(tag); if (!p) return;
     abortRef.current = false;
+    abortCtlRef.current = new AbortController();
     setRunning(true);
     patchRow(tag, { state: "queued", moved: 0, campaignsDone: 0, error: undefined, retryAttempt: null });
     await migrateClientCampaigns(p, CAMPAIGN_CONCURRENCY);
@@ -293,7 +315,7 @@ export default function MigratePage() {
       {/* Sticky live panel */}
       {migration && (
         <div className="sticky top-2 z-20">
-          <MigrationPanel state={migration} running={running} onStop={() => { abortRef.current = true; }} onClose={() => setMigration(null)} onRetry={retryClient} />
+          <MigrationPanel state={migration} running={running} onStop={stopMigration} onClose={() => setMigration(null)} onRetry={retryClient} />
         </div>
       )}
 
