@@ -522,6 +522,58 @@ export async function listCampaignLeadsCursor(
 }
 
 /**
+ * Bounded, RESUMABLE cursor sweep — reads a campaign's leads starting from
+ * `startCursor` (null = from the beginning) and stops after `maxLeads` leads OR
+ * `maxMs` elapsed, returning the leads plus the `nextCursor` to resume from
+ * (null when the campaign is fully drained). Cursor pagination is the ONLY way
+ * past Bison's 1000-page (15,000-lead) wall on page pagination, but it's
+ * sequential (~15 rows/request), so a caller runs several campaigns' sweeps
+ * concurrently and re-invokes each with the returned cursor until `done`.
+ */
+export async function sweepCampaignLeadsCursor(
+  instanceKey: string,
+  campaignId: number,
+  startCursor: string | null,
+  opts: { maxLeads?: number; maxMs?: number; leadCampaignStatus?: string } = {},
+): Promise<{ leads: OutboundLead[]; nextCursor: string | null; done: boolean }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
+  const filter = opts.leadCampaignStatus ? `&filters[lead_campaign_status]=${opts.leadCampaignStatus}` : "";
+  const maxLeads = opts.maxLeads ?? 5000;
+  const deadline = Date.now() + (opts.maxMs ?? 220_000);
+  const out: OutboundLead[] = [];
+  let cursor: string | null = startCursor;
+  let retries = 0;
+  for (;;) {
+    const url = `${baseUrl}/api/campaigns/${campaignId}/leads?pagination_type=cursor&per_page=100${filter}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(url, { headers, timeoutMs: 30_000 });
+    } catch {
+      if (++retries <= 6) { await new Promise((r) => setTimeout(r, 1500 * retries)); continue; }
+      return { leads: out, nextCursor: cursor, done: false }; // give up this window; caller resumes
+    }
+    if (!res.ok) {
+      if (res.status === 429) { await new Promise((r) => setTimeout(r, 1500)); continue; }
+      if ((res.status === 502 || res.status === 503 || res.status === 504) && ++retries <= 6) {
+        await new Promise((r) => setTimeout(r, 1500 * retries)); continue;
+      }
+      return { leads: out, nextCursor: cursor, done: false };
+    }
+    retries = 0;
+    const data = await res.json().catch(() => null);
+    const rows = (data?.data ?? []) as OutboundLead[];
+    if (rows.length) out.push(...rows);
+    const next = (data?.meta?.next_cursor as string | null | undefined) ?? null;
+    if (!next || rows.length === 0) return { leads: out, nextCursor: null, done: true }; // fully drained
+    cursor = next;
+    if (out.length >= maxLeads || Date.now() >= deadline) {
+      return { leads: out, nextCursor: cursor, done: false }; // hit the window budget — resume next call
+    }
+  }
+}
+
+/**
  * Count of leads in a campaign, optionally filtered by lead_campaign_status
  * (e.g. "sequence_finished"). One cheap request — reads meta.total from page 1.
  */

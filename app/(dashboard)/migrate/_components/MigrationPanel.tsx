@@ -126,7 +126,9 @@ const ESP_SHORT: Record<string, string> = { google: "G", outlook: "O", segs: "S"
 
 function ClientCard({ r, onRetry }: { r: MoveClientRow; onRetry: (tag: string) => void }) {
   const active = r.state === "moving" || r.state === "matching" || r.state === "retrying";
-  const pct = r.totalLeads > 0 ? Math.min(100, Math.round((r.moved / r.totalLeads) * 100)) : r.state === "done" ? 100 : 0;
+  // A finished client shows a full bar — the summed source total can exceed the
+  // moved count (a lead in two source campaigns is created once), so done ≠ 100%.
+  const pct = r.state === "done" ? 100 : r.totalLeads > 0 ? Math.min(100, Math.round((r.moved / r.totalLeads) * 100)) : 0;
   const barColor = r.state === "error" ? "bg-rose-500" : r.state === "retrying" ? "bg-amber-500" : r.state === "done" ? "bg-emerald-500" : "bg-emerald-400";
   const icon = r.state === "retrying" ? <RotateCw className="size-3.5 text-amber-600 animate-spin shrink-0" />
     : active ? <Loader2 className="size-3.5 text-emerald-600 animate-spin shrink-0" />

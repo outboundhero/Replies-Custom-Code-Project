@@ -31,6 +31,10 @@ const INSTANCE_ACCENT: Record<string, string> = {
   cleaningoutbound: "data-[on=true]:bg-amber-600", outboundclean: "data-[on=true]:bg-violet-600",
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Bison locks reads to 15 leads/request, so throughput comes from running many
+// independent cursor streams at once. ≈ CLIENT × CAMPAIGN concurrent streams.
+const CLIENT_CONCURRENCY = 4;
+const CAMPAIGN_CONCURRENCY = 3;
 
 async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {
   let i = 0;
@@ -106,13 +110,14 @@ export default function MigratePage() {
     setMigration((m) => m && { ...m, rows: m.rows.map((r) => (r.tag === tag ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) });
   }, []);
 
-  async function postMoveWithRetry(tag: string, body: object): Promise<{ ok: boolean; data?: { moved: number; done: boolean; nextPage: number; truncated?: boolean }; error?: string }> {
+  // One /api/leads/move call (one cursor window), with exponential-backoff retry.
+  async function postMoveWithRetry(tag: string, body: object): Promise<{ ok: boolean; data?: { moved: number; done: boolean; nextCursor: string | null }; error?: string }> {
     const MAX = 5;
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
       try {
         const res = await fetch("/api/leads/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        if (res.ok) { patchRow(tag, { state: "moving", retryAttempt: null }); return { ok: true, data: await res.json() }; }
+        if (res.ok) { patchRow(tag, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
         const err = await res.json().catch(() => ({}));
         if (res.status !== 429 && res.status < 500) return { ok: false, error: err.error || `HTTP ${res.status}` }; // hard 4xx → don't retry
       } catch { /* network → retry */ }
@@ -125,37 +130,48 @@ export default function MigratePage() {
     return { ok: false, error: "failed after 5 retries" };
   }
 
-  async function migrateClient(p: ClientPlan) {
+  type SrcCampaign = ClientPlan["sourceCampaigns"][number];
+
+  // Drain ONE source campaign fully via cursor windows (no 15k page cap).
+  async function drainCampaign(tag: string, c: SrcCampaign, targetCampaignId: number, onMoved: (delta: number) => void): Promise<{ ok: boolean; error?: string }> {
+    let cursor: string | null = null;
+    for (;;) {
+      if (abortRef.current) return { ok: false, error: "stopped" };
+      const r = await postMoveWithRetry(tag, {
+        clientTag: tag, sourceInstance: from, sourceCampaignId: c.id, sourceCampaignName: c.name,
+        targetInstance: to, targetCampaignId, cursor,
+      });
+      if (!r.ok) return { ok: false, error: r.error };
+      onMoved(r.data!.moved || 0);
+      if (r.data!.done || !r.data!.nextCursor) return { ok: true };
+      cursor = r.data!.nextCursor;
+    }
+  }
+
+  // Run a client's matched campaigns concurrently, aggregating progress on its row.
+  async function migrateClientCampaigns(p: ClientPlan, concurrency: number) {
     const tag = p.tag;
-    if (abortRef.current) { patchRow(tag, { state: "error", error: "stopped" }); return; }
-    const campaigns = p.sourceCampaigns.filter((c) => p.match[c.esp]);
-    if (!campaigns.length) {
+    const camps = p.sourceCampaigns.filter((c) => p.match[c.esp]);
+    if (!camps.length) {
       patchRow(tag, { state: "skipped", skipReason: p.totalLeads === 0 ? "no leads in source" : `no ${p.unmatchedEsps.map((e) => ESP_LABEL[e]).join("/")} campaign in ${toLabel}` });
       return;
     }
-    patchRow(tag, { state: "moving", campaignsTotal: campaigns.length, campaignsDone: 0, moved: 0 });
-    let moved = 0, campaignsDone = 0;
-    for (const c of campaigns) {
-      if (abortRef.current) break;
-      patchRow(tag, { currentEsp: c.esp });
-      const targetCampaignId = p.match[c.esp]!.campaignId;
-      let page = 1;
-      for (;;) {
-        if (abortRef.current) break;
-        const r = await postMoveWithRetry(tag, {
-          clientTag: tag, sourceInstance: from, sourceCampaignId: c.id, sourceCampaignName: c.name,
-          targetInstance: to, targetCampaignId, page,
-        });
-        if (!r.ok) { patchRow(tag, { state: "error", error: r.error, moved }); return; }
-        moved += r.data!.moved || 0;
-        patchRow(tag, { moved });
-        if (r.data!.done) break;
-        page = r.data!.nextPage;
+    const acc = { moved: 0, done: 0, errored: false };
+    patchRow(tag, { state: "moving", campaignsTotal: camps.length, campaignsDone: 0, moved: 0, error: undefined });
+    await pool(camps, concurrency, async (c) => {
+      if (acc.errored || abortRef.current) return;
+      const res = await drainCampaign(tag, c, p.match[c.esp]!.campaignId, (delta) => {
+        acc.moved += delta;
+        patchRow(tag, { moved: acc.moved, state: "moving" });
+      });
+      if (!res.ok) {
+        if (res.error !== "stopped") acc.errored = true;
+        patchRow(tag, { state: "error", error: res.error, moved: acc.moved });
+        return;
       }
-      campaignsDone++;
-      patchRow(tag, { campaignsDone });
-    }
-    patchRow(tag, abortRef.current ? { state: "error", error: "stopped", moved } : { state: "done", moved });
+      acc.done++;
+      patchRow(tag, (r) => ({ campaignsDone: acc.done, ...(acc.done === camps.length && !acc.errored && r.state !== "error" ? { state: "done" as const } : {}) }));
+    });
   }
 
   async function runMigration(tags: string[]) {
@@ -170,7 +186,10 @@ export default function MigratePage() {
     setMigration({ status: "running", from, to, rows });
     setRunning(true);
     abortRef.current = false;
-    await pool(planned, 2, migrateClient);
+    // Parallelise across CLIENTS; within each client its campaigns also run in
+    // parallel. Total in-flight cursor streams ≈ CLIENT_CONCURRENCY × CAMPAIGN_CONCURRENCY,
+    // capped so we hit Bison hard without tripping sustained rate-limits.
+    await pool(planned, CLIENT_CONCURRENCY, (p) => migrateClientCampaigns(p, CAMPAIGN_CONCURRENCY));
     setMigration((m) => m && { ...m, status: "done" });
     setRunning(false);
     const total = rows.length;
@@ -182,7 +201,7 @@ export default function MigratePage() {
     abortRef.current = false;
     setRunning(true);
     patchRow(tag, { state: "queued", moved: 0, campaignsDone: 0, error: undefined, retryAttempt: null });
-    await migrateClient(p);
+    await migrateClientCampaigns(p, CAMPAIGN_CONCURRENCY);
     setRunning(false);
   }
 

@@ -1,11 +1,17 @@
 /**
  * POST /api/leads/move
  *
- * Lead Mover — one bounded batch: pull a page-window of a SOURCE campaign's
+ * Lead Mover — one bounded batch: cursor-sweep a window of a SOURCE campaign's
  * leads and copy them into a TARGET campaign (same or another Bison instance),
  * reusing the nurture routing core (routeCandidates: same-instance attach, or
- * cross-instance create+attach). The caller re-invokes with `page += PAGES` until
- * `done`. Copy-only — the source campaign is NOT modified (operator pauses it).
+ * cross-instance create+attach). The caller re-invokes with the returned
+ * `nextCursor` until `done`. Copy-only — the source campaign is NOT modified
+ * (operator pauses it).
+ *
+ * Cursor pagination (not page pagination) is used because Bison hard-caps page
+ * pagination at 1000 pages (= 15,000 leads/campaign, 15 rows/page locked). Cursor
+ * has no cap, so this reaches EVERY lead in campaigns larger than 15k. Each call
+ * sweeps up to WINDOW leads (or ~time budget) then hands back the cursor.
  *
  * Idempotent: createLeadsInInstance upserts by email, attach treats "already
  * present" as success, and lead_move_log rows use INSERT OR IGNORE — so a
@@ -16,7 +22,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
-import { getCampaignLeadsPage, type OutboundLead } from "@/lib/outboundhero-api";
+import { sweepCampaignLeadsCursor } from "@/lib/outboundhero-api";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
@@ -24,8 +30,8 @@ import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const PAGES_PER_BATCH = 40; // ~600 leads/call (Bison caps ~15/page) — well under maxDuration
-const PER_PAGE = 100;
+const WINDOW = 5000;       // leads copied per call before handing the cursor back
+const WINDOW_MS = 230_000; // …or this much wall-time, whichever comes first (< maxDuration)
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
@@ -33,7 +39,7 @@ export async function POST(req: NextRequest) {
 
   let body: {
     clientTag?: string; sourceInstance?: string; sourceCampaignId?: number;
-    sourceCampaignName?: string; targetInstance?: string; targetCampaignId?: number; page?: number;
+    sourceCampaignName?: string; targetInstance?: string; targetCampaignId?: number; cursor?: string | null;
   };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
@@ -43,7 +49,7 @@ export async function POST(req: NextRequest) {
   const sourceCampaignId = Number(body.sourceCampaignId);
   const targetCampaignId = Number(body.targetCampaignId);
   const sourceCampaignName = String(body.sourceCampaignName || "");
-  const page = Math.max(1, Number(body.page) || 1);
+  const cursor = body.cursor ? String(body.cursor) : null;
 
   if (!clientTag || !sourceInstance || !targetInstance || !sourceCampaignId || !targetCampaignId) {
     return NextResponse.json({ error: "clientTag, sourceInstance, targetInstance, sourceCampaignId, targetCampaignId required" }, { status: 400 });
@@ -53,16 +59,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `cannot detect ESP from source campaign name "${sourceCampaignName}"` }, { status: 400 });
   }
 
-  // Pull one page-window of ALL leads in the source campaign (no status filter).
-  let leads: OutboundLead[] = [];
-  let lastPage = page;
+  // Cursor-sweep one window of the source campaign's leads (no status filter = all).
+  let sweep: { leads: import("@/lib/outboundhero-api").OutboundLead[]; nextCursor: string | null; done: boolean };
   try {
-    const r = await getCampaignLeadsPage(sourceInstance, sourceCampaignId, page, PAGES_PER_BATCH, { perPage: PER_PAGE });
-    leads = r.leads;
-    lastPage = r.lastPage;
+    sweep = await sweepCampaignLeadsCursor(sourceInstance, sourceCampaignId, cursor, { maxLeads: WINDOW, maxMs: WINDOW_MS });
   } catch (e) {
     return NextResponse.json({ error: `fetch failed: ${(e as Error).message}` }, { status: 502 });
   }
+  const leads = sweep.leads;
 
   const candidates: Candidate[] = leads
     .filter((l) => (l.email || "").trim())
@@ -108,16 +112,12 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const nextPage = page + PAGES_PER_BATCH;
-  const done = nextPage > lastPage || leads.length === 0;
-  // Page pagination caps at ~1000 pages (~15k leads); flag if we hit it so the UI can warn.
-  const truncated = !done && lastPage >= 1000 && nextPage > 1000;
-
   return NextResponse.json({
     ok: true,
     fetched: leads.length,
     moved,
     perBucket: result.perBucket,
-    page, nextPage, lastPage, done, truncated,
+    nextCursor: sweep.nextCursor,
+    done: sweep.done,
   });
 }

@@ -21,6 +21,9 @@ const STATUSES = ["active", "paused", "completed", "stopped", "archived", "draft
 const ESPS: Esp[] = ["google", "outlook", "segs"];
 // Prefer active > draft > paused > everything else when auto-picking a destination.
 const rankStatus = (s: string) => (s === "active" ? 0 : s === "draft" ? 1 : s === "paused" ? 2 : 3);
+// Never move leads INTO a nurture campaign — matches "[Nurture]" and legacy
+// "(Nurture)" markers. Destinations are always the plain outreach campaigns.
+const isNurtureName = (name: string) => /\[nurture\]|\(nurture\)/i.test(name);
 
 async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -65,19 +68,20 @@ export async function POST(req: Request) {
       .map((c) => ({ id: c.id, name: c.name, status: c.status, esp: detectCampaignEsp(c.name)!, total_leads: c.total_leads ?? 0 }))
       .sort((a, b) => b.total_leads - a.total_leads);
 
-    // Auto-match one destination per ESP in the target instance.
+    // Auto-match one destination per ESP in the target instance — EXCLUDING
+    // nurture campaigns (leads must never be moved into a [Nurture] campaign).
     const match: Partial<Record<Esp, { campaignId: number; name: string; status: string }>> = {};
     for (const esp of ESPS) {
       const cands = tgtAll
-        .filter((c) => exact(c.name) && detectCampaignEsp(c.name) === esp)
+        .filter((c) => exact(c.name) && !isNurtureName(c.name) && detectCampaignEsp(c.name) === esp)
         .sort((a, b) => rankStatus(a.status) - rankStatus(b.status) || (b.total_leads ?? 0) - (a.total_leads ?? 0) || a.id - b.id);
       if (cands.length) match[esp] = { campaignId: cands[0].id, name: cands[0].name, status: cands[0].status };
     }
 
     // All destination options per ESP (for the override dropdown), restricted to
-    // this client's own tagged campaigns in the target instance.
+    // this client's own NON-nurture tagged campaigns in the target instance.
     const targetOptions = tgtAll
-      .filter((c) => exact(c.name) && detectCampaignEsp(c.name))
+      .filter((c) => exact(c.name) && !isNurtureName(c.name) && detectCampaignEsp(c.name))
       .map((c) => ({ id: c.id, name: c.name, status: c.status, esp: detectCampaignEsp(c.name)! }));
 
     const sourceEsps = [...new Set(sourceCampaigns.map((c) => c.esp))];
