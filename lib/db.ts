@@ -127,6 +127,21 @@ export async function initializeDatabase() {
       routed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (source_campaign_id, ob_lead_id)
     )`,
+    // Audit + resume for the Lead Mover (move a client's leads between Bison
+    // instances/campaigns). One row per lead attached to a destination campaign.
+    // The composite PK makes re-runs idempotent (INSERT OR IGNORE). See
+    // /api/leads/move.
+    `CREATE TABLE IF NOT EXISTS lead_move_log (
+      client_tag TEXT NOT NULL,
+      source_instance TEXT NOT NULL,
+      source_campaign_id INTEGER NOT NULL,
+      target_instance TEXT NOT NULL,
+      target_campaign_id INTEGER NOT NULL,
+      ob_lead_id INTEGER NOT NULL,
+      email TEXT,
+      moved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (ob_lead_id, source_campaign_id, target_campaign_id)
+    )`,
     // Audit + batch counter for auto-expanded nurture campaigns. One row per
     // expansion of a (client, instance, ESP) routing → the next batch number,
     // the old campaign, and the new (cloned) campaign. Drives the "Batch N"
