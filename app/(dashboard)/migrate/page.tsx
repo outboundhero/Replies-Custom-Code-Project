@@ -8,7 +8,6 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Input } from "@/components/ui/input";
 import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle } from "lucide-react";
 import { BISON_INSTANCES } from "@/lib/bison-instances-shared";
 import MigrationPanel, { type MigrationState, type MoveClientRow } from "./_components/MigrationPanel";
@@ -66,9 +65,23 @@ export default function MigratePage() {
   // Changing instances invalidates any loaded plan.
   useEffect(() => { setPlan(new Map()); }, [from, to]);
 
+  // Search behaves two ways:
+  //  • single term  → partial match (type "JP" to see every JP… tag)
+  //  • pasted list (≥2 tokens, newline/comma/space separated) → EXACT match per
+  //    token, so you can paste a batch of tags and Select-all exactly those.
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return q ? allTags.filter((t) => t.toLowerCase().includes(q)) : allTags;
+    const tokens = search.toLowerCase().split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    if (!tokens.length) return allTags;
+    if (tokens.length === 1) return allTags.filter((t) => t.toLowerCase().includes(tokens[0]));
+    const exact = new Set(tokens);
+    return allTags.filter((t) => exact.has(t.toLowerCase()));
+  }, [allTags, search]);
+  // Tokens the user typed/pasted that don't match any client (e.g. churned or typo'd).
+  const unknownTokens = useMemo(() => {
+    const tokens = [...new Set(search.toUpperCase().split(/[\s,]+/).map((s) => s.trim()).filter(Boolean))];
+    if (tokens.length < 2) return [] as string[];
+    const upper = new Set(allTags.map((t) => t.toUpperCase()));
+    return tokens.filter((tok) => !upper.has(tok));
   }, [allTags, search]);
 
   const allSelected = filtered.length > 0 && filtered.every((t) => selected.has(t));
@@ -286,15 +299,31 @@ export default function MigratePage() {
 
       {/* Client picker */}
       <div className="rounded-xl border bg-card overflow-hidden">
-        <div className="flex items-center gap-3 px-4 py-2.5 border-b">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="size-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
-            <Input placeholder="Search client tag…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9 h-8" />
+        <div className="px-4 py-2.5 border-b space-y-2">
+          <div className="flex items-start gap-3">
+            <div className="relative flex-1">
+              <Search className="size-4 text-muted-foreground absolute left-3 top-2.5" />
+              <textarea
+                placeholder="Search a tag, or paste a list (one per line, comma, or space) then Select all…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                rows={Math.min(8, Math.max(1, search.split(/\n/).length))}
+                className="w-full pl-9 pr-3 py-1.5 text-sm rounded-md border bg-background resize-y leading-6 focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+              />
+            </div>
+            <div className="flex items-center gap-3 shrink-0 pt-1.5">
+              <span className="text-xs text-muted-foreground whitespace-nowrap">{selected.size} selected · {filtered.length} shown</span>
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none whitespace-nowrap">
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} className="size-3.5 rounded border-muted-foreground/40" /> Select all
+              </label>
+            </div>
           </div>
-          <span className="text-xs text-muted-foreground">{selected.size} selected · {filtered.length} shown</span>
-          <label className="ml-auto flex items-center gap-1.5 text-xs cursor-pointer select-none">
-            <input type="checkbox" checked={allSelected} onChange={toggleAll} className="size-3.5 rounded border-muted-foreground/40" /> Select all
-          </label>
+          {unknownTokens.length > 0 && (
+            <p className="text-[11px] text-amber-700 flex items-start gap-1.5">
+              <AlertTriangle className="size-3 shrink-0 mt-0.5" />
+              <span>Not in the list (churned or misspelled): <span className="font-mono">{unknownTokens.join(", ")}</span></span>
+            </p>
+          )}
         </div>
         <div className="max-h-[46vh] overflow-auto divide-y">
           {filtered.map((tag) => {
