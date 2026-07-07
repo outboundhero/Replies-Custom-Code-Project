@@ -1,5 +1,5 @@
 /**
- * Auto-map nurture campaigns for active clients (DRAFT + gap-fill only).
+ * Auto-map nurture campaigns for active clients (gap-fill + confirm).
  *
  * GET  /api/nurture/auto-map[?needsMap=1]
  *   → { clients: [{ tag, group, b2b, b2c, mappedSlots, expectedSlots }] }
@@ -8,11 +8,13 @@
  *
  * POST /api/nurture/auto-map  { clientTag, dryRun? }
  *   → AutoMapReport for that ONE client (added / skippedAlreadyMapped /
- *     noCandidate / ambiguous). The UI loops this client-by-client for live
- *     progress. dryRun computes without writing.
+ *     noCandidate / ambiguous / confirmed / alreadyConfirmed). The UI loops this
+ *     client-by-client for live progress. dryRun computes without writing.
  *
- * Never stamps nurture_map_confirmed_at and never attaches inboxes / activates —
- * sending stays gated until the operator confirms each client's map.
+ * For an UNCONFIRMED client it gap-fills the map then CONFIRMS it (stamps
+ * nurture_map_confirmed_at → enables sending) if ≥1 campaign is mapped. An
+ * ALREADY-CONFIRMED client is left completely untouched. Does not attach inboxes
+ * or activate campaigns (that's the enable-sending flow).
  *
  * Auth: admin.
  */

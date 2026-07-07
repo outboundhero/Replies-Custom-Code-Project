@@ -26,7 +26,12 @@ interface Campaign { id: number; name: string; status: string; client_tag: strin
 interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: string | null }
 
 const ESPS: Esp[] = ["outlook", "google", "segs"];
-const LANE_LABEL: Record<string, string> = { b2b: "Business (B2B)", b2c: "Personal (B2C)" };
+const LANE_LABEL: Record<string, string> = { b2b: "Business", b2c: "Personal" };
+// Each instance's slot label — B2B/B2C #1 (Group 1) or #2 (Group 2).
+const INSTANCE_SLOT: Record<string, string> = {
+  outboundhero: "B2B 1", facilityreach: "B2B 2",
+  cleaningoutbound: "B2C 1", outboundclean: "B2C 2",
+};
 
 export default function TargetCampaigns({
   clientTag, campaigns, onConfirmedChange, onSendingEnabled,
@@ -161,6 +166,9 @@ export default function TargetCampaigns({
             <div key={instance} className="space-y-2">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-medium text-muted-foreground">{LANE_LABEL[lane]}</span>
+                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${lane === "b2b" ? "bg-indigo-50 text-indigo-700 border-indigo-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}>
+                  {INSTANCE_SLOT[instance] || lane.toUpperCase()}
+                </span>
                 <InstanceBadge instance={instance} size="xs" />
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">

@@ -226,6 +226,9 @@ export default function NurturePage() {
   // buttons + the pipeline display key off this — never off campaign names — so
   // duplicate canonical campaigns can't misroute or mis-display.
   const [mapEntries, setMapEntries] = useState<MapEntry[]>([]);
+  // Client's nurture group (1 or 2) — shown next to the tag; drives which
+  // B2B/B2C instances its leads route to. From the campaign-map endpoint.
+  const [clientGroup, setClientGroup] = useState<number | null>(null);
   // Persistent "Confirm & enable sending" progress (attach → route → activate).
   // Stays on screen until the operator dismisses it (no auto-hide).
   const [enableProgress, setEnableProgress] = useState<EnableSendingState | null>(null);
@@ -434,8 +437,8 @@ export default function NurturePage() {
     if (!clientFilter) { setMapEntries([]); return; }
     fetch(`/api/nurture/campaign-map?clientTag=${encodeURIComponent(clientFilter)}`)
       .then((r) => r.json())
-      .then((d) => setMapEntries((d.entries || []) as MapEntry[]))
-      .catch(() => setMapEntries([]));
+      .then((d) => { setMapEntries((d.entries || []) as MapEntry[]); setClientGroup(d.instances?.group ?? null); })
+      .catch(() => { setMapEntries([]); setClientGroup(null); });
   }, [clientFilter]);
   useEffect(() => { loadMap(); }, [loadMap, mapConfirmedAt]);
 
@@ -1603,6 +1606,14 @@ export default function NurturePage() {
             Nurture
             <span className="text-muted-foreground/50 font-light">/</span>
             <span className="font-mono text-emerald-700">{lockedClientTag || "—"}</span>
+            {clientGroup && (
+              <span
+                title={clientGroup === 1 ? "Group 1 → B2B outboundhero, B2C cleaningoutbound" : "Group 2 → B2B facilityreach, B2C outboundclean"}
+                className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${clientGroup === 1 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-sky-50 text-sky-700 border-sky-200"}`}
+              >
+                Group {clientGroup}
+              </span>
+            )}
           </h1>
           <p className="text-sm text-muted-foreground mt-1.5 max-w-2xl">
             Re-engage soft-negative, out-of-office, and sequence-finished leads for this client after the 45-day cooldown.

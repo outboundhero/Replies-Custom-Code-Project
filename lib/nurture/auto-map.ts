@@ -10,14 +10,16 @@
  *   • A canonical nurture campaign name contains "[Nurture]" AND
  *     "(Cleaning Client)" OR "(Non-Cleaning Client)" — see isCanonicalNurtureCampaign.
  *   • Batch 2+ clones ("… — Batch N") are skipped — only the original is mapped.
- *   • DRAFT only: we fill nurture_campaign_map but NEVER stamp
- *     nurture_map_confirmed_at (sending stays gated until the operator confirms).
- *   • GAP-FILL only: existing entries are never overwritten (INSERT OR IGNORE +
- *     an explicit already-mapped skip), so manual/confirmed choices are preserved.
+ *   • GAP-FILL: existing entries are never overwritten (INSERT OR IGNORE), so
+ *     re-running only fills newly-available cells for an unconfirmed client.
+ *   • CONFIRM: after gap-fill, a client with ≥1 mapped campaign is CONFIRMED
+ *     (stamps nurture_map_confirmed_at → enables sending). Partial maps included.
+ *   • ALREADY-CONFIRMED clients are left completely untouched (no gap-fill, no
+ *     re-confirm), so manual/confirmed choices are preserved.
  */
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
-import { getCampaignMap } from "@/lib/nurture/campaign-map";
+import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getAllClientInstances, type ClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedTags } from "@/lib/churn";
 import { listCampaigns } from "@/lib/outboundhero-api";
@@ -50,6 +52,10 @@ export interface AutoMapReport {
   noCandidate: Array<{ instance: string; lane: "b2b" | "b2c"; esp: Esp }>;
   ambiguous: Array<{ instance: string; esp: Esp; chosen: string; choices: string[] }>;
   noGroup?: boolean;
+  /** The client's map was already confirmed → left completely untouched. */
+  alreadyConfirmed?: boolean;
+  /** This run stamped nurture_map_confirmed_at (the map now has ≥1 campaign). */
+  confirmed?: boolean;
 }
 
 /** A campaign already filtered to canonical / non-batch-2+ / ESP-named, tagged. */
@@ -180,6 +186,12 @@ export async function autoMapClient(
     return report;
   }
 
+  // Already confirmed → leave the whole map untouched (no gap-fill, no re-confirm).
+  if (await getMapConfirmedAt(TAG)) {
+    report.alreadyConfirmed = true;
+    return report;
+  }
+
   const existing = await getCampaignMap(TAG);
   const mapped = new Set(existing.map((e) => `${e.bison_instance}:${e.esp}`));
 
@@ -216,18 +228,33 @@ export async function autoMapClient(
     }
   }
 
-  if (!opts.dryRun && toInsert.length > 0) {
-    // INSERT OR IGNORE on the PK (client_tag, bison_instance, esp) — never
-    // overwrites an existing entry. We do NOT touch nurture_map_confirmed_at:
-    // the map stays a DRAFT until the operator confirms per client.
-    await db.batch(
-      toInsert.map((a) => ({
-        sql: `INSERT OR IGNORE INTO nurture_campaign_map (client_tag, bison_instance, esp, campaign_id, campaign_name, lane, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-        args: [TAG, a.instance, a.esp, a.campaign_id, a.campaign_name, a.lane],
-      })),
-      "write",
-    );
+  if (!opts.dryRun) {
+    if (toInsert.length > 0) {
+      // INSERT OR IGNORE on the PK (client_tag, bison_instance, esp) — never
+      // overwrites an existing entry, so re-runs only gap-fill new cells.
+      await db.batch(
+        toInsert.map((a) => ({
+          sql: `INSERT OR IGNORE INTO nurture_campaign_map (client_tag, bison_instance, esp, campaign_id, campaign_name, lane, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+          args: [TAG, a.instance, a.esp, a.campaign_id, a.campaign_name, a.lane],
+        })),
+        "write",
+      );
+    }
+    // Confirm the map (enables sending via the route engine / auto-push) as long
+    // as it now has ≥1 mapped campaign — partial maps included. Already-confirmed
+    // clients returned earlier, so this only ever confirms unconfirmed ones.
+    const totalMapped = existing.length + toInsert.length;
+    if (totalMapped > 0) {
+      await db.batch(
+        [
+          { sql: "INSERT OR IGNORE INTO client_config (client_tag) VALUES (?)", args: [TAG] },
+          { sql: "UPDATE client_config SET nurture_map_confirmed_at = datetime('now'), updated_at = datetime('now') WHERE client_tag = ?", args: [TAG] },
+        ],
+        "write",
+      );
+      report.confirmed = true;
+    }
   }
 
   return report;
