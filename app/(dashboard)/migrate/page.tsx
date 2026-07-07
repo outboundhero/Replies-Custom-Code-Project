@@ -32,8 +32,9 @@ const INSTANCE_ACCENT: Record<string, string> = {
   cleaningoutbound: "data-[on=true]:bg-amber-600", outboundclean: "data-[on=true]:bg-violet-600",
 };
 // Bison locks reads to 15 leads/request, so throughput comes from running many
-// independent cursor streams at once. ≈ CLIENT × CAMPAIGN concurrent streams.
-const CLIENT_CONCURRENCY = 4;
+// independent cursor streams at once. ≈ CLIENT × CAMPAIGN concurrent streams;
+// reads scale cleanly with no rate-limiting up to ~a dozen streams.
+const CLIENT_CONCURRENCY = 6;
 const CAMPAIGN_CONCURRENCY = 3;
 
 async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {

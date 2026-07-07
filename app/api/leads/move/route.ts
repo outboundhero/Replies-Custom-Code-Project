@@ -24,19 +24,20 @@ import { requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
 import { sweepCampaignLeadsCursor, type OutboundLead } from "@/lib/outboundhero-api";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
-import { detectCampaignEsp } from "@/lib/nurture/esp";
+import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 import { getServiceArea, cityInServiceArea, cityFromCustomVars, stateFromCustomVars } from "@/lib/service-area";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-// Reads are ~1.6k leads/min per stream, so a big window nears the 300s route
-// ceiling → timeout → wasted re-read. Keep windows small: fast to return, so
-// progress updates ~every minute and nothing times out. Concurrency (not window
-// size) drives total throughput — reads scale cleanly with no rate-limiting.
-const WINDOW = 1200;       // leads copied per call before handing the cursor back
-const WINDOW_MS = 150_000; // …or this much wall-time, whichever comes first (< maxDuration 300)
+// Bison caps reads at 15 leads/request, so reads are the bottleneck. We read in
+// small SUB_WINDOW chunks and OVERLAP each chunk's write (create+attach+log)
+// with the NEXT chunk's read — so the write time is largely hidden behind reads.
+// A call returns after WINDOW leads or WINDOW_MS, handing back the cursor.
+const WINDOW = 2500;       // leads processed per call before handing the cursor back
+const SUB_WINDOW = 800;    // read chunk size; its write overlaps the next read
+const WINDOW_MS = 170_000; // …or this much wall-time, whichever comes first (< maxDuration 300)
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
@@ -55,7 +56,7 @@ export async function POST(req: NextRequest) {
   const sourceCampaignId = Number(body.sourceCampaignId);
   const targetCampaignId = Number(body.targetCampaignId);
   const sourceCampaignName = String(body.sourceCampaignName || "");
-  const cursor = body.cursor ? String(body.cursor) : null;
+  const startCursor = body.cursor ? String(body.cursor) : null;
   const serviceAreaFilter = body.serviceAreaFilter !== false; // default ON
   const runId = body.runId ? String(body.runId) : null;
 
@@ -67,59 +68,103 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `cannot detect ESP from source campaign name "${sourceCampaignName}"` }, { status: 400 });
   }
 
-  // Cursor-sweep one window of the source campaign's leads (no status filter = all).
-  let sweep: { leads: import("@/lib/outboundhero-api").OutboundLead[]; nextCursor: string | null; done: boolean };
-  try {
-    sweep = await sweepCampaignLeadsCursor(sourceInstance, sourceCampaignId, cursor, { maxLeads: WINDOW, maxMs: WINDOW_MS });
-  } catch (e) {
-    return NextResponse.json({ error: `fetch failed: ${(e as Error).message}` }, { status: 502 });
-  }
-  const leads = sweep.leads;
-
-  // ── Service-area gate ──
-  // Skip leads whose CITY isn't in the client's allowed area. Only applies when
-  // the filter is on AND the client has an area configured AND the lead has a
-  // city. Missing city / no area / filter off → the lead is moved.
+  // Service-area gate: skip leads whose CITY isn't in the client's allowed area.
+  // Only when the filter is on AND an area is configured AND the lead has a city.
   const area = serviceAreaFilter ? await getServiceArea(clientTag) : null;
-  let kept = leads;
-  const skippedLeads: OutboundLead[] = [];
-  if (area) {
-    kept = [];
-    for (const l of leads) {
-      const city = cityFromCustomVars(l.custom_variables);
-      if (city && !cityInServiceArea(city, area.tokens)) skippedLeads.push(l);
-      else kept.push(l);
+  const ctx = { runId, clientTag, sourceInstance, sourceCampaignId, sourceCampaignName, targetInstance };
+
+  // ── Pipelined sweep + write ──
+  // Read sub-windows sequentially (cursor), but overlap each sub-window's write
+  // with the NEXT sub-window's read. Writes are chained (one at a time), so
+  // counters never race; reads run ahead. This hides most of the write time.
+  let moved = 0, skippedCount = 0, fetched = 0;
+  let cursor: string | null = startCursor;
+  let done = false;
+  const w: { error: Error | null } = { error: null }; // object property so the async-closure assignment isn't narrowed away
+  let writeChain: Promise<void> = Promise.resolve();
+  const deadline = Date.now() + WINDOW_MS;
+
+  for (;;) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    let s: { leads: OutboundLead[]; nextCursor: string | null; done: boolean };
+    try {
+      s = await sweepCampaignLeadsCursor(sourceInstance, sourceCampaignId, cursor, { maxLeads: SUB_WINDOW, maxMs: Math.min(remainingMs, 60_000) });
+    } catch (e) {
+      await writeChain; // let queued writes finish
+      if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
+      if (fetched === 0) return NextResponse.json({ error: `fetch failed: ${(e as Error).message}` }, { status: 502 });
+      return NextResponse.json({ ok: true, fetched, moved, skipped: skippedCount, nextCursor: cursor, done: false }); // resume from cursor
     }
-    if (skippedLeads.length) {
-      await persistSkipped(skippedLeads, {
-        runId, clientTag, sourceInstance, sourceCampaignId, sourceCampaignName, targetInstance,
-      });
+    fetched += s.leads.length;
+    cursor = s.nextCursor;
+    done = s.done;
+
+    // Partition this sub-window by service area.
+    const kept: OutboundLead[] = [];
+    const skippedLeads: OutboundLead[] = [];
+    if (area) {
+      for (const l of s.leads) {
+        const city = cityFromCustomVars(l.custom_variables);
+        if (city && !cityInServiceArea(city, area.tokens)) skippedLeads.push(l);
+        else kept.push(l);
+      }
+    } else if (s.leads.length) {
+      kept.push(...s.leads);
     }
+
+    // Chain the write after the previous one; do NOT await here — loop back to
+    // read the next sub-window while this write runs.
+    const prev = writeChain;
+    writeChain = (async () => {
+      await prev;
+      if (w.error) return;
+      try {
+        moved += await routeAndLog(kept, esp, targetCampaignId, ctx);
+        if (skippedLeads.length) { await persistSkipped(skippedLeads, ctx); skippedCount += skippedLeads.length; }
+      } catch (e) { w.error = e as Error; }
+    })();
+
+    if (done || !cursor || fetched >= WINDOW) break;
   }
 
+  await writeChain;
+  if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
+
+  return NextResponse.json({
+    ok: true,
+    fetched,
+    moved,
+    skipped: skippedCount,
+    nextCursor: done ? null : cursor,
+    done,
+  });
+}
+
+/** Create+attach one batch of kept leads into the target campaign and record
+ *  lead_move_log. Returns how many were attached. */
+async function routeAndLog(
+  kept: OutboundLead[], esp: Esp, targetCampaignId: number,
+  ctx: { clientTag: string; sourceInstance: string; sourceCampaignId: number; targetInstance: string },
+): Promise<number> {
   const candidates: Candidate[] = kept
     .filter((l) => (l.email || "").trim())
     .map((l) => ({
       source: "campaign" as const,
-      rowId: l.id,
-      email: l.email,
-      esp,
-      first_name: l.first_name ?? null,
-      last_name: l.last_name ?? null,
-      company: l.company ?? null,
-      obLeadId: l.id,
-      sourceInstance,
+      rowId: l.id, email: l.email, esp,
+      first_name: l.first_name ?? null, last_name: l.last_name ?? null, company: l.company ?? null,
+      obLeadId: l.id, sourceInstance: ctx.sourceInstance,
       custom_variables: Array.isArray(l.custom_variables) ? l.custom_variables.filter((v) => v && v.name && v.value != null) : [],
-      instance: targetInstance, // route everything to the chosen destination
+      instance: ctx.targetInstance,
     }));
+  if (!candidates.length) return 0;
 
   const map: CampaignMapEntry[] = [
-    { bison_instance: targetInstance, esp, campaign_id: targetCampaignId, campaign_name: null, lane: null },
+    { bison_instance: ctx.targetInstance, esp, campaign_id: targetCampaignId, campaign_name: null, lane: null },
   ];
-
   let moved = 0;
   const nowIso = new Date().toISOString();
-  const result = await routeCandidates(clientTag, candidates, map, {
+  await routeCandidates(ctx.clientTag, candidates, map, {
     onAttached: async (campaignId, resolved) => {
       moved += resolved.length;
       const rows = resolved.filter((r) => typeof r.obLeadId === "number");
@@ -127,7 +172,7 @@ export async function POST(req: NextRequest) {
         const chunk = rows.slice(i, i + 200);
         const ph = chunk.map(() => "(?,?,?,?,?,?,?,?)").join(",");
         const args = chunk.flatMap((r) => [
-          clientTag, sourceInstance, sourceCampaignId, targetInstance, campaignId, r.obLeadId, r.email, nowIso,
+          ctx.clientTag, ctx.sourceInstance, ctx.sourceCampaignId, ctx.targetInstance, campaignId, r.obLeadId, r.email, nowIso,
         ]);
         try {
           await db.execute({
@@ -140,16 +185,7 @@ export async function POST(req: NextRequest) {
       }
     },
   });
-
-  return NextResponse.json({
-    ok: true,
-    fetched: leads.length,
-    moved,
-    skipped: skippedLeads.length,
-    perBucket: result.perBucket,
-    nextCursor: sweep.nextCursor,
-    done: sweep.done,
-  });
+  return moved;
 }
 
 /** Record service-area-skipped leads (full detail + reason) for the export.
