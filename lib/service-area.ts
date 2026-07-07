@@ -75,7 +75,11 @@ function stripTrailingState(entry: string): string {
 export function parseServiceArea(inclusion: string | null | undefined): string[] {
   if (!inclusion) return [];
   const out = new Set<string>();
-  for (const rawEntry of inclusion.split(/[,\n;]+/)) {
+  // Split on comma / newline / semicolon / period. Periods matter: freeform
+  // entries often glue a city to the end of a sentence ("…Johnston County North
+  // Carolina. Raleigh"), and without splitting there the county-drop rule below
+  // would take the real city (Raleigh) down with it.
+  for (const rawEntry of inclusion.split(/[,\n;.]+/)) {
     const entry = rawEntry.trim();
     if (!entry) continue;
     if (/\bcounty\b|\bcounties\b/i.test(entry)) continue; // drop counties
