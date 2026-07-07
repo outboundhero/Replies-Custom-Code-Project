@@ -142,6 +142,39 @@ export async function initializeDatabase() {
       moved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (ob_lead_id, source_campaign_id, target_campaign_id)
     )`,
+    // Per-client allowed service area for the Lead Mover, synced from the
+    // Onboarding Form sheet's "Inclusion Locations" every 12h. `cities` is a
+    // JSON array of normalized city/town tokens; `raw` is the original string
+    // (for display/export). See lib/service-area.ts.
+    `CREATE TABLE IF NOT EXISTS client_service_area (
+      client_tag TEXT PRIMARY KEY,
+      cities TEXT,
+      raw TEXT,
+      synced_at TEXT
+    )`,
+    // Leads SKIPPED by the Lead Mover's service-area gate (city not in the
+    // client's allowed area). Stores full lead detail + reason so the operator
+    // can export the misses. INSERT OR REPLACE on the PK → retried windows never
+    // duplicate. See /api/leads/move and /api/leads/move/skipped/export.
+    `CREATE TABLE IF NOT EXISTS lead_move_skipped (
+      run_id TEXT,
+      client_tag TEXT NOT NULL,
+      source_instance TEXT,
+      source_campaign_id INTEGER,
+      source_campaign_name TEXT,
+      target_instance TEXT,
+      ob_lead_id INTEGER NOT NULL,
+      email TEXT,
+      first_name TEXT,
+      last_name TEXT,
+      company TEXT,
+      city TEXT,
+      state TEXT,
+      reason TEXT,
+      custom_variables TEXT,
+      skipped_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (ob_lead_id, source_campaign_id)
+    )`,
     // Audit + batch counter for auto-expanded nurture campaigns. One row per
     // expansion of a (client, instance, ESP) routing → the next batch number,
     // the old campaign, and the new (cloned) campaign. Drives the "Batch N"
@@ -192,6 +225,8 @@ export async function initializeDatabase() {
     `CREATE INDEX IF NOT EXISTS idx_error_log_timestamp ON error_log(timestamp DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_activity_log_timestamp ON activity_log(timestamp DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_client_instances_key ON client_instances(instance_key)`,
+    `CREATE INDEX IF NOT EXISTS idx_lead_move_skipped_run ON lead_move_skipped(run_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_lead_move_skipped_tag ON lead_move_skipped(client_tag)`,
   ];
 
   for (const sql of statements) {

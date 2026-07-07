@@ -13,6 +13,7 @@ import { requireAdmin } from "@/lib/auth";
 import { listCampaigns } from "@/lib/outboundhero-api";
 import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
+import { getServiceArea } from "@/lib/service-area";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -89,6 +90,11 @@ export async function POST(req: Request) {
     const totalLeads = sourceCampaigns.reduce((s, c) => s + c.total_leads, 0);
     const targetTagCampaigns = targetOptions.length; // exact-tag campaigns of any ESP in the To instance
 
+    // Whether a service-area filter will apply to this client's migration.
+    const area = await getServiceArea(tag);
+    const hasServiceArea = !!area;
+    const serviceAreaCount = area?.tokens.length ?? 0;
+
     // Clean, single-word status the UI renders as a colored badge:
     //  empty   — no leads to move in the From instance (nothing to do)
     //  blocked — has leads, but the To instance has NO campaign for this tag at all
@@ -100,7 +106,7 @@ export async function POST(req: Request) {
     else if (unmatchedEsps.length > 0) status = "partial";
     else status = "ready";
 
-    return { tag, status, sourceCampaigns, match, targetOptions, sourceEsps, unmatchedEsps, totalLeads, targetTagCampaigns };
+    return { tag, status, sourceCampaigns, match, targetOptions, sourceEsps, unmatchedEsps, totalLeads, targetTagCampaigns, hasServiceArea, serviceAreaCount };
   });
 
   return NextResponse.json({ sourceInstance, targetInstance, clients: clients.filter(Boolean) });

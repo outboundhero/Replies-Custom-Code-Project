@@ -56,6 +56,10 @@
     {
       "path": "/api/cron/nurture-expand-campaigns",
       "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/cron/sync-service-areas",
+      "schedule": "0 */12 * * *"
     }
   ]
 }

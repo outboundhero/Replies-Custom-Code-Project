@@ -10,6 +10,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { rebuildChurnedClients } from "@/lib/churn";
+import { syncServiceAreas } from "@/lib/service-area";
 
 export const maxDuration = 60;
 
@@ -24,7 +25,9 @@ export async function GET(req: NextRequest) {
 
   try {
     const { count, tags } = await rebuildChurnedClients();
-    return NextResponse.json({ ok: true, churned: count, tags });
+    // Refresh the Lead Mover's service-area table on this sync too (non-fatal).
+    const serviceArea = await syncServiceAreas().catch(() => null);
+    return NextResponse.json({ ok: true, churned: count, tags, serviceArea: serviceArea?.withArea ?? null });
   } catch (e) {
     return NextResponse.json({ error: `sheet read failed: ${(e as Error).message}` }, { status: 502 });
   }

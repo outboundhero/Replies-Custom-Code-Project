@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle } from "lucide-react";
+import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown } from "lucide-react";
 import { BISON_INSTANCES } from "@/lib/bison-instances-shared";
 import MigrationPanel, { type MigrationState, type MoveClientRow } from "./_components/MigrationPanel";
 
@@ -23,6 +23,8 @@ interface ClientPlan {
   unmatchedEsps: Esp[];
   totalLeads: number;
   targetTagCampaigns: number;
+  hasServiceArea: boolean;
+  serviceAreaCount: number;
 }
 const ESP_LABEL: Record<string, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
 const INSTANCE_ACCENT: Record<string, string> = {
@@ -51,8 +53,10 @@ export default function MigratePage() {
   const [planning, setPlanning] = useState(false);
   const [migration, setMigration] = useState<MigrationState | null>(null);
   const [running, setRunning] = useState(false);
+  const [serviceAreaFilter, setServiceAreaFilter] = useState(true);
   const abortRef = useRef(false);
   const abortCtlRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
 
   // Stop = flip the flag AND abort every in-flight request/backoff immediately,
   // so the run halts within a second instead of after the current window.
@@ -138,7 +142,7 @@ export default function MigratePage() {
   }, []);
 
   // One /api/leads/move call (one cursor window), with exponential-backoff retry.
-  async function postMoveWithRetry(tag: string, body: object): Promise<{ ok: boolean; data?: { moved: number; done: boolean; nextCursor: string | null }; error?: string }> {
+  async function postMoveWithRetry(tag: string, body: object): Promise<{ ok: boolean; data?: { moved: number; skipped: number; done: boolean; nextCursor: string | null }; error?: string }> {
     const MAX = 5;
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
@@ -160,16 +164,17 @@ export default function MigratePage() {
   type SrcCampaign = ClientPlan["sourceCampaigns"][number];
 
   // Drain ONE source campaign fully via cursor windows (no 15k page cap).
-  async function drainCampaign(tag: string, c: SrcCampaign, targetCampaignId: number, onMoved: (delta: number) => void): Promise<{ ok: boolean; error?: string }> {
+  async function drainCampaign(tag: string, c: SrcCampaign, targetCampaignId: number, onProgress: (moved: number, skipped: number) => void): Promise<{ ok: boolean; error?: string }> {
     let cursor: string | null = null;
     for (;;) {
       if (abortRef.current) return { ok: false, error: "stopped" };
       const r = await postMoveWithRetry(tag, {
         clientTag: tag, sourceInstance: from, sourceCampaignId: c.id, sourceCampaignName: c.name,
         targetInstance: to, targetCampaignId, cursor,
+        serviceAreaFilter, runId: runIdRef.current,
       });
       if (!r.ok) return { ok: false, error: r.error };
-      onMoved(r.data!.moved || 0);
+      onProgress(r.data!.moved || 0, r.data!.skipped || 0);
       if (r.data!.done || !r.data!.nextCursor) return { ok: true };
       cursor = r.data!.nextCursor;
     }
@@ -183,16 +188,16 @@ export default function MigratePage() {
       patchRow(tag, { state: "skipped", skipReason: p.totalLeads === 0 ? "no leads in source" : `no ${p.unmatchedEsps.map((e) => ESP_LABEL[e]).join("/")} campaign in ${toLabel}` });
       return;
     }
-    const acc = { moved: 0, done: 0, failed: 0 };
+    const acc = { moved: 0, skipped: 0, done: 0, failed: 0 };
     let lastError = "";
-    patchRow(tag, { state: "moving", campaignsTotal: camps.length, campaignsDone: 0, moved: 0, error: undefined });
+    patchRow(tag, { state: "moving", campaignsTotal: camps.length, campaignsDone: 0, moved: 0, skipped: 0, error: undefined });
     // Campaigns are INDEPENDENT — one failing doesn't abandon the others. We drain
     // every campaign, then settle the client's state from the tallies.
     await pool(camps, concurrency, async (c) => {
       if (abortRef.current) return;
-      const res = await drainCampaign(tag, c, p.match[c.esp]!.campaignId, (delta) => {
-        acc.moved += delta;
-        patchRow(tag, { moved: acc.moved, state: "moving" });
+      const res = await drainCampaign(tag, c, p.match[c.esp]!.campaignId, (moved, skipped) => {
+        acc.moved += moved; acc.skipped += skipped;
+        patchRow(tag, { moved: acc.moved, skipped: acc.skipped, state: "moving" });
       });
       if (!res.ok) {
         if (res.error !== "stopped") { acc.failed++; lastError = res.error || "failed"; }
@@ -202,9 +207,9 @@ export default function MigratePage() {
       patchRow(tag, { campaignsDone: acc.done });
     });
     // Settle: stopped → error("stopped"); any campaign failed → error; else done.
-    if (abortRef.current) patchRow(tag, { state: "error", error: "stopped", moved: acc.moved });
-    else if (acc.failed > 0) patchRow(tag, { state: "error", error: `${acc.failed}/${camps.length} campaign${acc.failed === 1 ? "" : "s"} failed — ${lastError}`, moved: acc.moved });
-    else patchRow(tag, { state: "done", moved: acc.moved });
+    if (abortRef.current) patchRow(tag, { state: "error", error: "stopped", moved: acc.moved, skipped: acc.skipped });
+    else if (acc.failed > 0) patchRow(tag, { state: "error", error: `${acc.failed}/${camps.length} campaign${acc.failed === 1 ? "" : "s"} failed — ${lastError}`, moved: acc.moved, skipped: acc.skipped });
+    else patchRow(tag, { state: "done", moved: acc.moved, skipped: acc.skipped });
   }
 
   async function runMigration(tags: string[]) {
@@ -212,14 +217,15 @@ export default function MigratePage() {
     const planned = tags.map((t) => plan.get(t)).filter(Boolean) as ClientPlan[];
     if (!planned.length) { toast.error("Nothing planned — run Plan first."); return; }
     const rows: MoveClientRow[] = planned.map((p) => ({
-      tag: p.tag, state: "queued", totalLeads: p.totalLeads, moved: 0,
+      tag: p.tag, state: "queued", totalLeads: p.totalLeads, moved: 0, skipped: 0,
       campaignsTotal: p.sourceCampaigns.filter((c) => p.match[c.esp]).length, campaignsDone: 0,
-      retries: 0, unmatchedEsps: p.unmatchedEsps,
+      retries: 0, unmatchedEsps: p.unmatchedEsps, serviceArea: serviceAreaFilter ? p.hasServiceArea : false,
     }));
     setMigration({ status: "running", from, to, rows });
     setRunning(true);
     abortRef.current = false;
     abortCtlRef.current = new AbortController();
+    runIdRef.current = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}`;
     // Parallelise across CLIENTS; within each client its campaigns also run in
     // parallel. Total in-flight cursor streams ≈ CLIENT_CONCURRENCY × CAMPAIGN_CONCURRENCY,
     // capped so we hit Bison hard without tripping sustained rate-limits.
@@ -235,10 +241,17 @@ export default function MigratePage() {
     abortRef.current = false;
     abortCtlRef.current = new AbortController();
     setRunning(true);
-    patchRow(tag, { state: "queued", moved: 0, campaignsDone: 0, error: undefined, retryAttempt: null });
+    patchRow(tag, { state: "queued", moved: 0, skipped: 0, campaignsDone: 0, error: undefined, retryAttempt: null });
     await migrateClientCampaigns(p, CAMPAIGN_CONCURRENCY);
     setRunning(false);
   }
+
+  // Download the current run's skipped (out-of-area) leads as CSV.
+  const exportSkipped = useCallback(() => {
+    const rid = runIdRef.current;
+    if (!rid) return;
+    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(rid)}`, "_blank");
+  }, []);
 
   const plannedSelected = useMemo(() => [...selected].filter((t) => plan.get(t) && plan.get(t)!.totalLeads > 0), [selected, plan]);
   const toLabel = useMemo(() => BISON_INSTANCES.find((i) => i.key === to)?.label || to, [to]);
@@ -278,6 +291,19 @@ export default function MigratePage() {
             {running ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />} Migrate {plannedSelected.length || ""}
           </button>
         </div>
+        {/* Service-area gate */}
+        <div className="w-full flex items-center gap-2 pt-3 mt-1 border-t">
+          <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+            <input type="checkbox" checked={serviceAreaFilter} disabled={running} onChange={(e) => setServiceAreaFilter(e.target.checked)} className="size-4 rounded border-muted-foreground/40" />
+            <MapPin className="size-3.5 text-muted-foreground" />
+            <span className="font-medium">Service-area filter</span>
+          </label>
+          <span className="text-xs text-muted-foreground">
+            {serviceAreaFilter
+              ? "Leads whose city isn't in the client's service area are skipped (and exportable). Leads with no city, or clients with no area set, still move."
+              : "Off — every lead moves regardless of location."}
+          </span>
+        </div>
       </div>
 
       {/* Batch preview summary — shows what's ready vs flagged before you migrate */}
@@ -315,9 +341,12 @@ export default function MigratePage() {
       {/* Sticky live panel */}
       {migration && (
         <div className="sticky top-2 z-20">
-          <MigrationPanel state={migration} running={running} onStop={stopMigration} onClose={() => setMigration(null)} onRetry={retryClient} />
+          <MigrationPanel state={migration} running={running} onStop={stopMigration} onClose={() => setMigration(null)} onRetry={retryClient} onExportSkipped={exportSkipped} />
         </div>
       )}
+
+      {/* Skipped (out-of-area) leads viewer */}
+      {migration && <SkippedViewer runId={runIdRef.current} onExport={exportSkipped} />}
 
       {/* Client picker */}
       <div className="rounded-xl border bg-card overflow-hidden">
@@ -403,6 +432,76 @@ const STATUS_BADGE: Record<PlanStatus, { label: string; cls: string }> = {
 function StatusBadge({ status }: { status: PlanStatus }) {
   const b = STATUS_BADGE[status];
   return <span className={`px-1.5 h-5 grid place-items-center rounded text-[10px] font-semibold uppercase tracking-wide shrink-0 ${b.cls}`}>{b.label}</span>;
+}
+
+interface SkippedRow { client_tag: string; email: string; city: string | null; state: string | null; source_campaign_name: string; reason: string }
+function SkippedViewer({ runId, onExport }: { runId: string | null; onExport: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<SkippedRow[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!runId) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/leads/move/skipped?runId=${encodeURIComponent(runId)}&limit=500`);
+      const d = await res.json();
+      if (res.ok) { setRows((d.rows as SkippedRow[]) || []); setTotal(d.total ?? 0); }
+    } catch { /* ignore */ } finally { setLoading(false); }
+  }, [runId]);
+
+  useEffect(() => { if (open) load(); }, [open, load]);
+  if (!runId) return null;
+
+  return (
+    <div className="rounded-xl border bg-card overflow-hidden">
+      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-muted/30">
+        <MapPin className="size-4 text-amber-600" />
+        <span className="font-medium">Skipped — out of service area</span>
+        {total != null && <span className="text-xs text-muted-foreground tabular-nums">{total.toLocaleString()} lead{total === 1 ? "" : "s"}</span>}
+        <span className="ml-auto flex items-center gap-2">
+          {!!total && (
+            <span onClick={(e) => { e.stopPropagation(); onExport(); }} className="inline-flex items-center gap-1 px-2 h-7 text-xs rounded border hover:bg-muted/50"><Download className="size-3" /> Export CSV</span>
+          )}
+          <ChevronDown className={`size-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      {open && (
+        <div className="border-t">
+          <div className="flex items-center justify-between px-4 py-1.5 text-xs text-muted-foreground">
+            <span>{loading ? "Loading…" : `Showing ${rows.length}${total != null && total > rows.length ? ` of ${total.toLocaleString()}` : ""}`}</span>
+            <button onClick={load} className="hover:text-foreground">Refresh</button>
+          </div>
+          <div className="max-h-[40vh] overflow-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-card border-y text-muted-foreground">
+                <tr className="text-left">
+                  <th className="px-3 py-1.5 font-medium">Client</th>
+                  <th className="px-3 py-1.5 font-medium">Email</th>
+                  <th className="px-3 py-1.5 font-medium">City</th>
+                  <th className="px-3 py-1.5 font-medium">State</th>
+                  <th className="px-3 py-1.5 font-medium">Campaign</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {rows.map((r, i) => (
+                  <tr key={i} className="hover:bg-muted/30">
+                    <td className="px-3 py-1 font-mono">{r.client_tag}</td>
+                    <td className="px-3 py-1">{r.email}</td>
+                    <td className="px-3 py-1">{r.city || <span className="text-muted-foreground/50">—</span>}</td>
+                    <td className="px-3 py-1">{r.state || <span className="text-muted-foreground/50">—</span>}</td>
+                    <td className="px-3 py-1 text-muted-foreground truncate max-w-[240px]" title={r.source_campaign_name}>{r.source_campaign_name}</td>
+                  </tr>
+                ))}
+                {!loading && rows.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">No leads skipped by the service-area filter yet.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function InstancePick({ label, value, onChange, disabledKey }: { label: string; value: string; onChange: (v: string) => void; disabledKey?: string }) {

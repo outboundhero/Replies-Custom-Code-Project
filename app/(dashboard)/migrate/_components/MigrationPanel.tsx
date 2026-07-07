@@ -7,7 +7,7 @@
  * moving / retrying / done / error, with a per-client bar and ESP legend.
  */
 import { useMemo } from "react";
-import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, ArrowRight, RotateCw } from "lucide-react";
+import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, ArrowRight, RotateCw, Download, MapPin } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 
 export type MoveStep = "queued" | "matching" | "moving" | "retrying" | "done" | "error" | "skipped";
@@ -25,6 +25,12 @@ export interface MoveClientRow {
   unmatchedEsps: string[];
   error?: string;
   skipReason?: string;
+  /** Leads skipped by the service-area gate for this client (distinct from the
+   *  whole-client `state:"skipped"` = no destination). */
+  skipped: number;
+  /** Whether a service-area filter is configured for this client (false → the
+   *  filter was OFF for it, so ALL its leads move). */
+  serviceArea?: boolean;
 }
 
 export interface MigrationState {
@@ -40,13 +46,14 @@ const STEP_LABEL: Record<MoveStep, string> = {
 };
 
 export default function MigrationPanel({
-  state, running, onStop, onClose, onRetry,
+  state, running, onStop, onClose, onRetry, onExportSkipped,
 }: {
   state: MigrationState;
   running: boolean;
   onStop: () => void;
   onClose: () => void;
   onRetry: (tag: string) => void;
+  onExportSkipped?: () => void;
 }) {
   const { rows, from, to } = state;
   const total = rows.length;
@@ -54,14 +61,14 @@ export default function MigrationPanel({
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   const tally = useMemo(() => {
-    let moved = 0, retries = 0, skipped = 0, errored = 0, doneN = 0;
+    let moved = 0, retries = 0, skipped = 0, errored = 0, doneN = 0, skippedLeads = 0;
     for (const r of rows) {
-      moved += r.moved; retries += r.retries;
+      moved += r.moved; retries += r.retries; skippedLeads += r.skipped || 0;
       if (r.state === "skipped") skipped++;
       if (r.state === "error") errored++;
       if (r.state === "done") doneN++;
     }
-    return { moved, retries, skipped, errored, doneN };
+    return { moved, retries, skipped, errored, doneN, skippedLeads };
   }, [rows]);
 
   // Active/retrying first, then queued, then finished.
@@ -90,9 +97,13 @@ export default function MigrationPanel({
           <Stat n={tally.moved} label="leads moved" tone="emerald" />
           <Stat n={tally.doneN} label="done" tone="slate" />
           {tally.retries > 0 && <Stat n={tally.retries} label="retries" tone="amber" />}
-          {tally.skipped > 0 && <Stat n={tally.skipped} label="skipped" tone="amber" />}
+          {tally.skippedLeads > 0 && <Stat n={tally.skippedLeads} label="out of area" tone="amber" />}
+          {tally.skipped > 0 && <Stat n={tally.skipped} label="no dest" tone="amber" />}
           {tally.errored > 0 && <Stat n={tally.errored} label="errors" tone="rose" />}
         </div>
+        {tally.skippedLeads > 0 && onExportSkipped && (
+          <button onClick={onExportSkipped} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50" title="Download the out-of-area leads that were skipped"><Download className="size-3" /> Skipped CSV</button>
+        )}
         {running ? (
           <button onClick={onStop} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50"><Square className="size-3" /> Stop</button>
         ) : (
@@ -165,6 +176,8 @@ function ClientCard({ r, onRetry }: { r: MoveClientRow; onRetry: (tag: string) =
               {STEP_LABEL[r.state]}{r.state === "moving" && r.currentEsp ? ` ${ESP_SHORT[r.currentEsp] || r.currentEsp}` : ""}
             </span>
             {r.campaignsTotal > 0 && <span>· {r.campaignsDone}/{r.campaignsTotal} campaigns</span>}
+            {r.skipped > 0 && <span className="text-amber-600">· {r.skipped.toLocaleString()} out of area</span>}
+            {r.serviceArea === false && <span className="inline-flex items-center gap-0.5 text-muted-foreground/70" title="No service area configured — all leads move"><MapPin className="size-2.5" /> no area filter</span>}
             {r.unmatchedEsps.length > 0 && <span className="text-amber-600">· {r.unmatchedEsps.map((e) => ESP_SHORT[e] || e).join("")} unmatched</span>}
             {r.retries > 0 && r.state !== "done" && <span className="text-amber-600">· {r.retries} retries</span>}
           </>

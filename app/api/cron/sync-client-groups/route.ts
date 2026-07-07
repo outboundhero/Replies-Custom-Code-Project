@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { fetchClientGroups } from "@/lib/google-sheets";
 import { invalidateGroupCache } from "@/lib/nurture/group-routing";
+import { syncServiceAreas } from "@/lib/service-area";
 
 export const maxDuration = 60;
 
@@ -49,7 +50,10 @@ export async function GET(req: NextRequest) {
   }
   invalidateGroupCache();
 
+  // Refresh the Lead Mover's service-area table on this sync too (non-fatal).
+  const serviceArea = await syncServiceAreas().catch(() => null);
+
   const group1 = entries.filter(([, g]) => g === 1).map(([t]) => t).sort();
   const group2 = entries.filter(([, g]) => g === 2).map(([t]) => t).sort();
-  return NextResponse.json({ ok: true, count: groups.size, group1: group1.length, group2: group2.length, sampleG1: group1.slice(0, 5), sampleG2: group2.slice(0, 5) });
+  return NextResponse.json({ ok: true, count: groups.size, group1: group1.length, group2: group2.length, sampleG1: group1.slice(0, 5), sampleG2: group2.slice(0, 5), serviceArea: serviceArea?.withArea ?? null });
 }
