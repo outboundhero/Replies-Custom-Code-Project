@@ -98,8 +98,9 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   );
   const includeClientConfig = aiCategory !== null && CC_BCC_CATEGORIES.includes(aiCategory as typeof CC_BCC_CATEGORIES[number]);
 
-  // 3c. BBS-only AI routing — pick Nefi (Northern Utah) or Junior (NV/Southern UT)
-  // and override the CC fields + reply template before they get written downstream.
+  // 3c. BBS-only AI routing — pick Nefi (Northern Utah) or Junior (NV / AZ /
+  // Southern UT) and override the CC fields + reply template before they get
+  // written downstream. Mitch is CC'd on both.
   if (
     aiCategory &&
     BBS_TAGS.includes(campaignTag) &&
@@ -121,8 +122,8 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
         cc_email_1: route.cc_email_1,
         cc_name_2: route.cc_name_2,
         cc_email_2: route.cc_email_2,
-        // BBS template uses only Jake + (Nefi|Junior) — clear CC 3-6
-        cc_name_3: null, cc_email_3: null,
+        // CC 3 = Mitch (both routes). Clear 4-6 so no stale CCs leak in.
+        cc_name_3: route.cc_name_3, cc_email_3: route.cc_email_3,
         cc_name_4: null, cc_email_4: null,
         cc_name_5: null, cc_email_5: null,
         cc_name_6: null, cc_email_6: null,

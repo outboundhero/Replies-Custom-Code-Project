@@ -2,9 +2,9 @@
  * BBS-only AI lead router.
  *
  * For the BBS client (BluMont Building Services), classify each qualifying lead
- * into either "Nefi" (Northern Utah region) or "Junior" (Las Vegas / Nevada /
+ * into either "Nefi" (Northern Utah region) or "Junior" (Nevada / Arizona /
  * Southern Utah region) based on the company's location, then return the
- * matching CC config + reply template.
+ * matching CC config + reply template. Mitch is CC'd on both routes.
  *
  * The trigger is enforced in tracked.ts — this module assumes the caller has
  * already checked the client tag and AI category.
@@ -22,6 +22,8 @@ export interface BbsRouteResult {
   cc_email_1: string;
   cc_name_2: string;
   cc_email_2: string;
+  cc_name_3: string;
+  cc_email_3: string;
   reply_template: string;
 }
 
@@ -38,20 +40,26 @@ Our Phone: (801) 783-6923`;
 
 const JUNIOR_TEMPLATE = `Hi {FIRST_NAME},
 
-I'm CC'ing my bosses Jake and Junior since you're interested in {CONTEXT} for {COMPANY}.
+I'm CC'ing my bosses Junior, Jake, and Mitch since you're interested in {CONTEXT} for {COMPANY}.
 
-Jake or Junior, can you please take it from here? Looks like a good number to call is {PHONE}
+Junior, Jake, or Mitch, can you please take it from here? Looks like a good number to call is {PHONE}.
 
 Best,
 
-BluMont Building Services - Utah and Nevada
+{SENDER_NAME}
+
+BluMont Building Services - Arizona & Nevada
 Our Phone: (801) 783-6923`;
+
+// Mitch Banner is CC'd on BOTH routes.
+const MITCH_CC = { cc_name_3: "Mitch Banner", cc_email_3: "mitch@blumontservices.com" };
 
 const NEFI_CC = {
   cc_name_1: "Jake Hamilton",
   cc_email_1: "jake@blumontservices.com",
   cc_name_2: "Nefi at BluMont Building Services",
   cc_email_2: "nefi@blumontservices.com",
+  ...MITCH_CC,
 };
 
 const JUNIOR_CC = {
@@ -59,12 +67,13 @@ const JUNIOR_CC = {
   cc_email_1: "jake@blumontservices.com",
   cc_name_2: "Junior at BluMont Building Services",
   cc_email_2: "junior@blumontservices.com",
+  ...MITCH_CC,
 };
 
 const SYSTEM_PROMPT = `#CONTEXT#
 You are an AI-powered web researcher. Determine whether a company should be assigned to "Nefi" or "Junior" based on the company's location information provided in the input fields and any referenced Google Maps URL.
 Nefi = Salt Lake City and Northern Utah region (Utah County, Davis County, Tooele County, Salt Lake County, Summit County)
-Junior = Las Vegas & all of Nevada, and Southern Utah and Nevada regions (Washington County and Clark County)
+Junior = all of Nevada, all of Arizona, and Southern Utah (Washington County / St. George area)
 
 #OBJECTIVE#
 - Extract the company's location (city, state, county) from the provided inputs and linked Google Maps page if present.
@@ -77,12 +86,13 @@ Junior = Las Vegas & all of Nevada, and Southern Utah and Nevada regions (Washin
 3. Determine county when possible from the address and city/state. If county is not explicitly given, infer it from city/state knowledge.
 4. Classification rules (apply in this order):
    - If state is Nevada (NV) → "Junior".
+   - If state is Arizona (AZ) → "Junior".
    - Else if state is Utah (UT):
      - If county is one of [Utah, Davis, Tooele, Salt Lake, Summit] → "Nefi".
      - If county is Washington → "Junior".
      - If county unknown but city is in Northern Utah metros around Salt Lake City (Salt Lake City, Provo, Orem, Lehi, Draper, Sandy, Park City, Bountiful, Layton, Tooele, etc.) → "Nefi".
      - If city is in Southern Utah (St. George, Cedar City, etc.) → "Junior".
-   - If state unknown but the company is clearly in Las Vegas or any Nevada locality → "Junior".
+   - If state unknown but the company is clearly in Las Vegas / any Nevada locality, or in Arizona (Phoenix, Tucson, Scottsdale, Mesa, Tempe, etc.) → "Junior".
    - If ambiguous after best-effort extraction → "Not Sure" with reasons.
 5. Output a single JSON object: {"assignment": "Nefi" | "Junior" | "Not Sure", "reason": "<short explanation citing city/county/state>"}
 6. Constraints:
