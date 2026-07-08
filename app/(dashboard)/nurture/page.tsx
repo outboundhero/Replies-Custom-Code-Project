@@ -32,7 +32,7 @@ interface ClientSummary {
 type SortKey = "ready" | "waiting" | "added" | "tag";
 
 export default function NurtureHub() {
-  const [tab, setTab] = useState<"overview" | "automation" | "campaigns">("overview");
+  const [tab, setTab] = useState<"overview" | "automation" | "campaigns">("automation");
   const [allTags, setAllTags] = useState<string[] | null>(null);
   const [autoTags, setAutoTags] = useState<Set<string>>(new Set());
   const [summaryByTag, setSummaryByTag] = useState<Map<string, ClientSummary>>(new Map());
@@ -151,17 +151,17 @@ export default function NurtureHub() {
       <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
         <button
           type="button"
-          onClick={() => setTab("overview")}
-          className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "overview" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-        >
-          Overview
-        </button>
-        <button
-          type="button"
           onClick={() => setTab("automation")}
           className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "automation" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
         >
           Automation
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("overview")}
+          className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "overview" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+        >
+          Overview
         </button>
         <button
           type="button"

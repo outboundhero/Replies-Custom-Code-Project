@@ -9,7 +9,8 @@
  *   • Instance comes from the group sheet (client_groups → getClientInstances).
  *   • A canonical nurture campaign name contains "[Nurture]" AND
  *     "(Cleaning Client)" OR "(Non-Cleaning Client)" — see isCanonicalNurtureCampaign.
- *   • Batch 2+ clones ("… — Batch N") are skipped — only the original is mapped.
+ *   • Batch 2+ clones ("… [Nurture N]", or legacy "… — Batch N") are skipped —
+ *     only the original "[Nurture]" campaign is mapped.
  *   • GAP-FILL: existing entries are never overwritten (INSERT OR IGNORE), so
  *     re-running only fills newly-available cells for an unconfirmed client.
  *   • CONFIRM: after gap-fill, a client with ≥1 mapped campaign is CONFIRMED

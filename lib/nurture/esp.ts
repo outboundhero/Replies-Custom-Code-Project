@@ -134,20 +134,24 @@ export function isCanonicalNurtureCampaign(name: string): boolean {
   // (e.g. "SBCC: Outlook (Cleaning Client)") and legacy "(Nurture)" variants,
   // so the "[Nurture]" requirement is what disambiguates. Canonical names look
   // like "JPNNJ: Outlook [Nurture] (Cleaning Client)" / "… (Non-Cleaning
-  // Client)" / "… (Internal)".
-  return /\[nurture\]/i.test(name) && /\((?:(?:non-)?cleaning client|internal)\)/i.test(name);
+  // Client)" / "… (Internal)". Batch clones carry a number in the marker —
+  // "[Nurture 2]", "[Nurture 3]" — and are still canonical.
+  return /\[nurture(?:\s*\d+)?\]/i.test(name) && /\((?:(?:non-)?cleaning client|internal)\)/i.test(name);
 }
 
 /**
- * True when a nurture campaign is a Batch 2+ clone — its name ends with a
- * "— Batch N" (or "- Batch N") suffix where N >= 2. The original / batch-1
- * canonical campaign has NO suffix, so it passes through as `false`. Auto-map
- * uses this to skip batch clones and only map the original campaign.
- * (Mirrors the `baseName` suffix pattern in campaign-expansion.ts.)
+ * True when a nurture campaign is a Batch 2+ clone. Two naming schemes are
+ * recognized: the current marker form "… [Nurture N] …" (N >= 2), and the
+ * legacy trailing suffix "… — Batch N" (N >= 2) for clones made before the
+ * rename. The original / batch-1 campaign has the bare "[Nurture]" marker and no
+ * suffix, so it passes through as `false`. Auto-map uses this to skip batch
+ * clones and only map the original campaign.
  */
 export function isBatchTwoPlus(name: string): boolean {
-  const m = name.match(/[—-]\s*batch\s*(\d+)\s*$/i);
-  return m ? Number(m[1]) >= 2 : false;
+  const marker = name.match(/\[nurture\s*(\d+)\]/i);       // "[Nurture 2]"
+  if (marker && Number(marker[1]) >= 2) return true;
+  const suffix = name.match(/[—-]\s*batch\s*(\d+)\s*$/i);  // legacy "— Batch 2"
+  return suffix ? Number(suffix[1]) >= 2 : false;
 }
 
 /**

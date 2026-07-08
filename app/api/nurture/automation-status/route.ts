@@ -16,6 +16,7 @@ import db from "@/lib/db";
 import { isCanonicalNurtureCampaign, detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedClients } from "@/lib/churn";
+import { CONTACTED_MIN, COMBINED_LEADS_MIN } from "@/lib/nurture/campaign-expansion";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 
 export const dynamic = "force-dynamic";
@@ -38,13 +39,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...(cache.data as object), cached: true });
   }
 
-  const [tagRows, cfgRows, instances, churnedMap, campRows, mapRows] = await Promise.all([
+  const [tagRows, cfgRows, instances, churnedMap, campRows, mapRows, healthRows, expRows] = await Promise.all([
     db.execute("SELECT ct.tag, ct.section_id, s.name AS section_name FROM client_tags ct JOIN sections s ON ct.section_id = s.id"),
     db.execute("SELECT client_tag, auto_nurture_disabled, auto_nurture_last_run_at, nurture_map_confirmed_at FROM client_config"),
     getAllClientInstances(),
     getChurnedClients(),
     db.execute("SELECT name, status, client_tag, bison_instance, synced_at FROM nurture_campaigns_cache"),
     db.execute("SELECT DISTINCT client_tag FROM nurture_campaign_map"),
+    db.execute("SELECT client_tag, bison_instance, esp, completion_percentage, total_leads FROM nurture_routing_health").catch(() => ({ rows: [] as unknown[] })),
+    db.execute("SELECT client_tag, MAX(batch) AS batch FROM nurture_campaign_expansions GROUP BY client_tag").catch(() => ({ rows: [] as unknown[] })),
   ]);
 
   // Clients that have ANY nurture_campaign_map row (draft OR confirmed). Used to
@@ -72,6 +75,25 @@ export async function GET(req: NextRequest) {
     if (!cur || rankStatus(status) < rankStatus(cur)) instMap.set(inst, status);
   }
 
+  // Per-campaign completion snapshots (from the expansion evaluator): TAG ->
+  // instance -> esp -> { completion, total }. Drives the ">50% / ready to expand"
+  // signal using the SAME criterion as the expansion engine.
+  const healthByTag = new Map<string, Map<string, Map<Esp, { completion: number; total: number }>>>();
+  for (const r of (healthRows.rows as Array<Record<string, unknown>>)) {
+    const tag = String(r.client_tag || "").toUpperCase();
+    const inst = String(r.bison_instance || "");
+    const esp = String(r.esp || "") as Esp;
+    if (!tag || !inst || !ESPS.includes(esp)) continue;
+    if (!healthByTag.has(tag)) healthByTag.set(tag, new Map());
+    const instMap = healthByTag.get(tag)!;
+    if (!instMap.has(inst)) instMap.set(inst, new Map());
+    instMap.get(inst)!.set(esp, { completion: Number(r.completion_percentage) || 0, total: Number(r.total_leads) || 0 });
+  }
+  const batchByTag = new Map<string, number>();
+  for (const r of (expRows.rows as Array<Record<string, unknown>>)) {
+    batchByTag.set(String(r.client_tag || "").toUpperCase(), Number(r.batch) || 1);
+  }
+
   const cfgByTag = new Map<string, { disabled: number; lastRun: string | null; mapConfirmedAt: string | null }>();
   for (const r of cfgRows.rows) {
     cfgByTag.set(String(r.client_tag).toUpperCase(), {
@@ -88,6 +110,7 @@ export async function GET(req: NextRequest) {
     missingCells: Array<{ instance: string; esp: Esp }>;
     mapConfirmed: boolean; mapConfirmedAt: string | null;
     hasMap: boolean; churned: boolean; churnDate: string | null;
+    maxCompletion: number; readyToExpand: boolean; currentBatch: number;
   };
   const sections = new Map<number, { id: number; name: string; clients: ClientOut[] }>();
 
@@ -116,6 +139,29 @@ export async function GET(req: NextRequest) {
     }
     const configured = neededInstances.length > 0 && missingCells.length === 0;
 
+    // Completion / ready-to-expand from the health snapshots. maxCompletion =
+    // highest contacted-% across the client's mapped campaigns. readyToExpand =
+    // any instance whose full ESP trio is ≥50% AND >5k combined (the expansion
+    // engine's exact criterion).
+    let maxCompletion = 0;
+    let readyToExpand = false;
+    const instHealth = healthByTag.get(TAG);
+    if (instHealth) {
+      for (const [, espMapH] of instHealth) {
+        let combined = 0;
+        let allAbove = espMapH.size === ESPS.length;
+        for (const esp of ESPS) {
+          const h = espMapH.get(esp);
+          if (!h) { allAbove = false; continue; }
+          if (h.completion > maxCompletion) maxCompletion = h.completion;
+          combined += h.total;
+          if (h.completion < CONTACTED_MIN) allAbove = false;
+        }
+        if (allAbove && combined > COMBINED_LEADS_MIN) readyToExpand = true;
+      }
+    }
+    const currentBatch = batchByTag.get(TAG) ?? 1;
+
     const sid = Number(r.section_id);
     if (!sections.has(sid)) sections.set(sid, { id: sid, name: String(r.section_name || "—"), clients: [] });
     sections.get(sid)!.clients.push({
@@ -124,6 +170,7 @@ export async function GET(req: NextRequest) {
       matrix, configured, missingCells,
       mapConfirmed: !!cfg?.mapConfirmedAt, mapConfirmedAt: cfg?.mapConfirmedAt ?? null,
       hasMap: hasMapSet.has(TAG), churned, churnDate,
+      maxCompletion, readyToExpand, currentBatch,
     });
   }
 

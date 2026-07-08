@@ -15,7 +15,7 @@
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getChurnedTags } from "@/lib/churn";
 import {
-  getCampaignSenderEmails, attachSenderEmails, resumeCampaign,
+  getCampaignSenderEmails, attachSenderEmails, resumeCampaign, getCampaignLeadCount,
 } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
 import type { Esp } from "@/lib/nurture/esp";
@@ -143,4 +143,63 @@ export async function activateMappedCampaigns(clientTag: string): Promise<Activa
     client_tag: TAG, details: { total_activated: result.totalActivated, campaigns: result.campaigns },
   });
   return result;
+}
+
+// ── AUTO-ACTIVATE (guarded) ──────────────────────────────────────────────────
+
+export interface AutoActivateResult {
+  clientTag: string;
+  activated: Array<{ instance: string; esp: Esp; campaignId: number; campaignName: string | null }>;
+  skipped: Array<{ instance: string; esp: Esp; campaignId: number; reason: string }>;
+  error?: string;
+}
+
+/**
+ * Hands-off activation for a client's confirmed map, safe to run from the cron.
+ * Unlike activateMappedCampaigns (which resumes every mapped campaign), this
+ * only activates a campaign that is genuinely READY: it has ≥1 connected sender
+ * inbox AND ≥1 routed lead. It first attaches the client's connected inboxes
+ * (idempotent), then resumes only the campaigns that clear the gate. Campaigns
+ * already live are a no-op; ones missing senders/leads are left paused and
+ * reported. Gated on map-confirmed + not-churned.
+ */
+export async function autoActivateReadyCampaigns(clientTag: string): Promise<AutoActivateResult> {
+  const TAG = clientTag.toUpperCase();
+  const out: AutoActivateResult = { clientTag: TAG, activated: [], skipped: [] };
+
+  if (!(await getMapConfirmedAt(TAG))) { out.error = "map not confirmed"; return out; }
+  if ((await getChurnedTags()).has(TAG)) { out.error = "churned"; return out; }
+  const map = await getCampaignMap(TAG);
+  if (map.length === 0) { out.error = "no campaigns mapped"; return out; }
+
+  // Attach senders first (idempotent) so freshly-provisioned inboxes are on the
+  // campaign before we decide whether it can send.
+  try { await attachInboxesForClient(TAG); } catch { /* non-fatal — the per-campaign gate below still verifies senders */ }
+
+  for (const e of map) {
+    const inst = e.bison_instance, cid = e.campaign_id;
+    try {
+      const connected = (await getCampaignSenderEmails(inst, cid)).filter((s) => s.status.toLowerCase() === "connected").length;
+      if (connected === 0) { out.skipped.push({ instance: inst, esp: e.esp, campaignId: cid, reason: "no connected senders" }); continue; }
+      const leads = await getCampaignLeadCount(inst, cid);
+      if (leads <= 0) { out.skipped.push({ instance: inst, esp: e.esp, campaignId: cid, reason: "no leads routed yet" }); continue; }
+
+      const r = await resumeCampaign(inst, cid);
+      if (r.ok) {
+        out.activated.push({ instance: inst, esp: e.esp, campaignId: cid, campaignName: e.campaign_name });
+      } else if (/not paused|already (active|running|launched)|only paused or draft/i.test(`${r.error ?? ""} ${JSON.stringify(r.raw ?? "")}`)) {
+        // Already live — nothing to do (don't log; keeps the audit meaningful).
+      } else {
+        out.skipped.push({ instance: inst, esp: e.esp, campaignId: cid, reason: `resume failed: ${r.error}` });
+      }
+    } catch (err) {
+      out.skipped.push({ instance: inst, esp: e.esp, campaignId: cid, reason: (err as Error).message });
+      await logError("nurture-auto-activate", `${TAG}/${inst}/${e.esp}`, (err as Error).message);
+    }
+  }
+
+  if (out.activated.length) {
+    await logActivity("nurture-auto-activate", "campaigns-auto-activated", { client_tag: TAG, details: { activated: out.activated } });
+  }
+  return out;
 }

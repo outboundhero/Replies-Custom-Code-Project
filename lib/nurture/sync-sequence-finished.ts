@@ -242,7 +242,7 @@ export async function syncOneClient(
   // match on the "TAG:" convention we use everywhere.
   const exactCampaigns = matched.filter((c) => {
     const name = c.name?.toLowerCase() || "";
-    if (name.includes("[nurture]") || c.type === "nurture") return false;
+    if (/\[nurture\s*\d*\]/i.test(name) || c.type === "nurture") return false;
     const tag = (extractTagFromCampaignName(c.name) || "").toUpperCase();
     return tag === clientTag.toUpperCase();
   });
@@ -287,7 +287,7 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
   // Client-side filter for the remaining bits Bison can't filter for us.
   const outboundCampaigns = allCampaigns.filter((c) => {
     const name = c.name?.toLowerCase() || "";
-    if (name.includes("[nurture]") || c.type === "nurture") return false;
+    if (/\[nurture\s*\d*\]/i.test(name) || c.type === "nurture") return false;
     const total = c.total_leads ?? 0;
     if (total === 0) return false;
     const exhausted = (c.replied ?? 0) + (c.bounced ?? 0);

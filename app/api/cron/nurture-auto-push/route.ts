@@ -16,6 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { listAutoEnabledClients, runAutoPushForClient } from "@/lib/nurture/auto-push";
+import { autoActivateReadyCampaigns } from "@/lib/nurture/enable-sending";
 import { logActivity, logError } from "@/lib/errors";
 
 export const maxDuration = 300;
@@ -34,7 +35,10 @@ export async function GET(req: NextRequest) {
 
   const startedAt = Date.now();
   const tags = await listAutoEnabledClients();
-  const summary: Array<{ tag: string; scanned: number; attached: number; buckets: number; errors: number }> = [];
+  const summary: Array<{ tag: string; scanned: number; attached: number; buckets: number; errors: number; activated?: number }> = [];
+  // Auto-activate mapped campaigns once senders + leads are ready (kill-switch:
+  // set NURTURE_AUTO_ACTIVATE=off to disable). Runs per client after its push.
+  const autoActivateOn = process.env.NURTURE_AUTO_ACTIVATE !== "off";
 
   const PER_CLIENT_PAGES = 60;   // page past up to ~12k scanned/client/tick so an
                                  // unmappable-lane backlog can't block newer leads
@@ -71,7 +75,14 @@ export async function GET(req: NextRequest) {
         legAfterId = r.nextLegAfterId;
         if (r.error || r.exhausted || attached >= PER_CLIENT_ATTACH) break;
       }
-      summary.push({ tag, scanned, attached, buckets, errors });
+      // Once this tick's ready leads are routed, activate any mapped campaign
+      // that now has connected senders + leads (guarded inside the helper).
+      let activated = 0;
+      if (autoActivateOn) {
+        try { activated = (await autoActivateReadyCampaigns(tag)).activated.length; }
+        catch (e) { await logError("nurture-auto-push", `auto-activate:${tag}`, (e as Error).message); }
+      }
+      summary.push({ tag, scanned, attached, buckets, errors, activated });
     } catch (e) {
       await logError("nurture-auto-push", `fatal:${tag}`, (e as Error).message);
       summary.push({ tag, scanned, attached, buckets, errors: errors + 1 });

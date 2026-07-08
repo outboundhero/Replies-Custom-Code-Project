@@ -24,7 +24,7 @@ const ESPS: Esp[] = ["google", "outlook", "segs"];
 const rankStatus = (s: string) => (s === "active" ? 0 : s === "draft" ? 1 : s === "paused" ? 2 : 3);
 // Never move leads INTO a nurture campaign — matches "[Nurture]" and legacy
 // "(Nurture)" markers. Destinations are always the plain outreach campaigns.
-const isNurtureName = (name: string) => /\[nurture\]|\(nurture\)/i.test(name);
+const isNurtureName = (name: string) => /\[nurture\s*\d*\]|\(nurture\)/i.test(name);
 
 async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);

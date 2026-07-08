@@ -26,8 +26,17 @@ interface ClientRow {
   missingCells: Array<{ instance: string; esp: Esp }>;
   mapConfirmed: boolean; mapConfirmedAt: string | null;
   hasMap: boolean; churned: boolean; churnDate: string | null;
+  maxCompletion: number; readyToExpand: boolean; currentBatch: number;
 }
 interface Section { id: number; name: string; clients: ClientRow[] }
+
+// Which status tile is the active filter (null = all). Clicking a tile sets it;
+// clicking the active one clears back to "all".
+type RoutingStatus = "all" | "on" | "configured" | "needCampaigns" | "needMapping" | "readyToExpand";
+const ROUTING_LABEL: Record<Exclude<RoutingStatus, "all">, string> = {
+  on: "Auto-route ON", configured: "Fully configured", needCampaigns: "Need campaigns",
+  needMapping: "Need mapping", readyToExpand: "Ready to expand",
+};
 
 const ESPS: Esp[] = ["google", "outlook", "segs"];
 const ESP_SHORT: Record<Esp, string> = { google: "G", outlook: "O", segs: "S" };
@@ -40,8 +49,9 @@ export default function AutomationTab() {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  const [onlyUnmapped, setOnlyUnmapped] = useState(false);
+  const [routingStatus, setRoutingStatus] = useState<RoutingStatus>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
+  const [expandingTag, setExpandingTag] = useState<string | null>(null);
   const [churnSyncing, setChurnSyncing] = useState(false);
   const [enablePipeline, setEnablePipeline] = useState<EnablePipelineState | null>(null);
   const [enableRunning, setEnableRunning] = useState(false);
@@ -82,6 +92,20 @@ export default function AutomationTab() {
 
   const autoFor = (c: ClientRow) => autoOverride.has(c.clientTag) ? autoOverride.get(c.clientTag)! : c.autoOn;
 
+  // Predicate for the active status tile. Each matches its tile's count exactly,
+  // so clicking a tile shows precisely those clients.
+  const matchesRouting = useCallback((c: ClientRow) => {
+    switch (routingStatus) {
+      case "on": return autoFor(c) && c.mapConfirmed;
+      case "configured": return c.configured;
+      case "needCampaigns": return !c.configured;
+      case "needMapping": return !c.mapConfirmed;
+      case "readyToExpand": return c.readyToExpand;
+      default: return true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routingStatus, autoOverride]);
+
   const filtered = useMemo(() => {
     if (!sections) return null;
     const q = search.trim().toLowerCase();
@@ -90,12 +114,12 @@ export default function AutomationTab() {
         ...s,
         clients: s.clients.filter((c) =>
           (!q || c.clientTag.toLowerCase().includes(q)) &&
-          (!onlyUnmapped || !c.mapConfirmed) &&
+          matchesRouting(c) &&
           (statusFilter === "all" || (statusFilter === "churned" ? c.churned : !c.churned)),
         ),
       }))
       .filter((s) => s.clients.length > 0);
-  }, [sections, search, onlyUnmapped, statusFilter]);
+  }, [sections, search, matchesRouting, statusFilter]);
 
   // Map tag → row for quick lookups (bulk-enable gating, etc.).
   const clientByTag = useMemo(() => {
@@ -107,7 +131,7 @@ export default function AutomationTab() {
   // Headline tiles describe ACTIVE clients only (churned are excluded from the
   // operational view); churnedCount feeds the filter chip.
   const stats = useMemo(() => {
-    let total = 0, on = 0, configured = 0, needCampaigns = 0, needMap = 0, churnedCount = 0;
+    let total = 0, on = 0, configured = 0, needCampaigns = 0, needMap = 0, churnedCount = 0, readyToExpand = 0;
     for (const s of sections || []) for (const c of s.clients) {
       if (c.churned) { churnedCount++; continue; }
       total++;
@@ -116,8 +140,9 @@ export default function AutomationTab() {
       if (autoFor(c) && c.mapConfirmed) on++;
       if (c.configured) configured++; if (!c.configured) needCampaigns++;
       if (!c.mapConfirmed) needMap++;
+      if (c.readyToExpand) readyToExpand++;
     }
-    return { total, on, configured, needCampaigns, needMap, churnedCount };
+    return { total, on, configured, needCampaigns, needMap, churnedCount, readyToExpand };
   }, [sections, autoOverride]);
 
   async function syncChurn() {
@@ -335,25 +360,46 @@ export default function AutomationTab() {
     }
   }
 
+  // Expand a single client's ready trios now (live), instead of waiting for the
+  // daily cron. Clones each ≥50% trio → [Nurture N], re-attaches senders, activates.
+  async function runExpand(tag: string) {
+    setExpandingTag(tag);
+    try {
+      const res = await fetch("/api/nurture/expand-now", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientTag: tag, dryRun: false }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(d.error || `Expand failed (${res.status})`); return; }
+      const clones = (d.instances || []).flatMap((i: { clones?: unknown[] }) => i.clones || []).length;
+      if (clones > 0) toast.success(`${tag}: created ${clones} next-batch campaign${clones === 1 ? "" : "s"} ([Nurture N]) and re-pointed routing.`);
+      else toast.info(`${tag}: nothing to expand yet (needs all 3 ESPs ≥50% and >5k combined leads).`);
+      load(true);
+    } catch (e) { toast.error((e as Error).message); }
+    finally { setExpandingTag(null); }
+  }
+
   if (loading && !sections) return <div className="space-y-2">{Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-12 rounded-lg border bg-card animate-pulse" />)}</div>;
   if (error) return <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">Couldn&apos;t load automation status: {error}</div>;
 
   return (
     <div className="space-y-4">
-      {/* Summary tiles */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-        <Tile label="Clients" value={stats.total} accent="text-foreground" />
-        <Tile label="Auto-route ON" value={stats.on} accent="text-emerald-700" />
-        <Tile label="Fully configured" value={stats.configured} accent="text-emerald-700" />
-        <Tile label="Need campaigns" value={stats.needCampaigns} accent="text-rose-700" />
-        <Tile
-          label="Need mapping"
-          value={stats.needMap}
-          accent="text-amber-700"
-          active={onlyUnmapped}
-          onClick={() => setOnlyUnmapped((v) => !v)}
-        />
+      {/* Summary tiles — each is a filter. Click to show exactly those clients;
+          click again (or "Clients") to clear. */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <Tile label="Clients" value={stats.total} accent="text-foreground" active={routingStatus === "all"} onClick={() => setRoutingStatus("all")} />
+        <Tile label="Auto-route ON" value={stats.on} accent="text-emerald-700" active={routingStatus === "on"} onClick={() => setRoutingStatus((v) => v === "on" ? "all" : "on")} />
+        <Tile label="Fully configured" value={stats.configured} accent="text-emerald-700" active={routingStatus === "configured"} onClick={() => setRoutingStatus((v) => v === "configured" ? "all" : "configured")} />
+        <Tile label="Need campaigns" value={stats.needCampaigns} accent="text-rose-700" active={routingStatus === "needCampaigns"} onClick={() => setRoutingStatus((v) => v === "needCampaigns" ? "all" : "needCampaigns")} />
+        <Tile label="Need mapping" value={stats.needMap} accent="text-amber-700" active={routingStatus === "needMapping"} onClick={() => setRoutingStatus((v) => v === "needMapping" ? "all" : "needMapping")} />
+        <Tile label="Ready to expand" value={stats.readyToExpand} accent="text-violet-700" active={routingStatus === "readyToExpand"} onClick={() => setRoutingStatus((v) => v === "readyToExpand" ? "all" : "readyToExpand")} />
       </div>
+      {routingStatus !== "all" && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground -mt-1">
+          <span>Filtered to <span className="font-medium text-foreground">{ROUTING_LABEL[routingStatus]}</span></span>
+          <button onClick={() => setRoutingStatus("all")} className="inline-flex items-center gap-1 rounded border px-1.5 h-5 hover:bg-muted/50">clear ✕</button>
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-3">
@@ -451,7 +497,7 @@ export default function AutomationTab() {
       {/* Flat client list (no section grouping) */}
       <div className="rounded-lg border bg-card overflow-hidden">
         <div className="flex items-center gap-2 px-4 py-2 bg-muted/30 border-b text-xs text-muted-foreground">
-          <span>{flatClients.length} client{flatClients.length === 1 ? "" : "s"}{onlyUnmapped ? " · needing a map" : ""}</span>
+          <span>{flatClients.length} client{flatClients.length === 1 ? "" : "s"}{routingStatus !== "all" ? ` · ${ROUTING_LABEL[routingStatus]}` : ""}</span>
           <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none">
             <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="size-3.5 rounded border-muted-foreground/40" />
             Select all
@@ -466,6 +512,7 @@ export default function AutomationTab() {
                   onDragStart={() => beginDrag(c.clientTag, selected.has(c.clientTag))}
                   onDragEnter={() => dragOver(c.clientTag)}
                   onToggle={(v) => toggleClient(c, v)}
+                  onExpand={() => runExpand(c.clientTag)} expanding={expandingTag === c.clientTag}
                 />
               ))}
             </div>}
@@ -483,7 +530,7 @@ function Tile({ label, value, accent, active, onClick }: { label: string; value:
   );
   if (onClick) {
     return (
-      <button onClick={onClick} className={`text-left rounded-lg border px-4 py-3 transition-colors ${active ? "border-amber-400 bg-amber-50/60 ring-1 ring-amber-300" : "bg-card hover:bg-muted/40"}`}>
+      <button onClick={onClick} className={`text-left rounded-lg border px-4 py-3 transition-colors ${active ? "border-foreground/30 bg-muted/60 ring-1 ring-foreground/15" : "bg-card hover:bg-muted/40"}`}>
         {inner}
       </button>
     );
@@ -513,9 +560,10 @@ function EspPill({ cell, label, title }: { cell: Cell | undefined; label: string
   return <span title={title} className={`inline-flex items-center justify-center size-5 rounded-md text-[10px] font-semibold ${cls}`}>{label}</span>;
 }
 
-function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle }: {
+function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle, onExpand, expanding }: {
   c: ClientRow; autoOn: boolean; selected: boolean;
   onDragStart: () => void; onDragEnter: () => void; onToggle: (v: boolean) => void;
+  onExpand: () => void; expanding: boolean;
 }) {
   const router = useRouter();
   const danger = autoOn && !c.configured;
@@ -596,6 +644,23 @@ function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle
         {c.configured
           ? <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700"><Check className="size-3.5" /> Ready</span>
           : <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600" title={c.missingCells.map((m) => `${ESP_FULL[m.esp]} @ ${getInstanceLabel(m.instance)}`).join("\n")}><AlertTriangle className="size-3.5" /> {c.missingCells.length} gap{c.missingCells.length === 1 ? "" : "s"}</span>}
+      </div>
+
+      {/* Expansion status: current batch, highest completion %, and a live
+          "Expand" action when the trio is ≥50% + >5k (ready for [Nurture N]). */}
+      <div className="shrink-0 flex items-center justify-end gap-1.5 w-[132px]">
+        {c.currentBatch > 1 && <span title="Current nurture batch" className="text-[9px] font-medium rounded bg-violet-100 px-1.5 py-0.5 text-violet-700">Nurture {c.currentBatch}</span>}
+        {c.maxCompletion > 0 && <span title="Highest campaign completion (contacted %)" className="text-[10px] tabular-nums text-muted-foreground">{Math.round(c.maxCompletion)}%</span>}
+        {c.readyToExpand && (
+          <button
+            onClick={(e) => { stop(e); onExpand(); }}
+            disabled={expanding}
+            title="Create the next nurture campaign ([Nurture N]), re-attach senders, activate, and re-point routing"
+            className="inline-flex items-center gap-1 rounded-md bg-violet-600 text-white px-2 h-6 text-[10px] font-semibold hover:bg-violet-700 disabled:opacity-50"
+          >
+            {expanding ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />} Expand
+          </button>
+        )}
       </div>
 
       {/* Auto toggle — enabling requires a nurture campaign map (draft OK). With

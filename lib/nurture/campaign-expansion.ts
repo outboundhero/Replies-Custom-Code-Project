@@ -55,9 +55,18 @@ async function currentBatch(tag: string, instance: string, esp: string): Promise
   return Number((r.rows[0] as { b?: number })?.b) || 1;
 }
 
-/** Strip an existing "— Batch N" suffix so batches don't stack in the name. */
-function baseName(name: string): string {
-  return name.replace(/\s*[—-]\s*batch\s*\d+\s*$/i, "").trim();
+/**
+ * Name the next batch by stamping the number INTO the "[Nurture]" marker →
+ * "[Nurture N]". Drops any legacy trailing "— Batch N" suffix first so old
+ * clones migrate to the new scheme (and batches never stack), and replaces an
+ * existing "[Nurture k]" marker so re-expansion bumps the number cleanly.
+ * e.g. "JPNNJ: Google [Nurture] (Cleaning Client)" → "… [Nurture 2] (Cleaning Client)".
+ */
+function nextBatchName(name: string, n: number): string {
+  return name
+    .replace(/\s*[—-]\s*batch\s*\d+\s*$/i, "")            // drop legacy suffix
+    .replace(/\[nurture(?:\s*\d+)?\]/i, `[Nurture ${n}]`) // stamp the marker
+    .trim();
 }
 
 async function upsertHealth(
@@ -135,9 +144,10 @@ export async function expandCampaignsForClient(
         const pool = await getCampaignSenderEmails(instance, x.entry.campaign_id);
         const senderIds = pool.filter((s) => s.status.toLowerCase() === "connected").map((s) => s.id);
         if (senderIds.length) await attachSenderEmails(instance, clone.id, senderIds);
-        // Rename to canonical + next batch (markers preserved for detection).
+        // Rename to canonical + next batch → "[Nurture N]" (still canonical +
+        // detected as a batch clone by isBatchTwoPlus).
         const n = x.batch + 1;
-        const name = `${baseName(x.name)} — Batch ${n}`;
+        const name = nextBatchName(x.name, n);
         await updateCampaign(instance, clone.id, { name });
         // Activate so it sends, then re-point the routing map to the clone.
         await resumeCampaign(instance, clone.id);
