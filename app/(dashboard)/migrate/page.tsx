@@ -8,9 +8,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown } from "lucide-react";
+import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown, UserX } from "lucide-react";
 import { BISON_INSTANCES } from "@/lib/bison-instances-shared";
 import MigrationPanel, { type MigrationState, type MoveClientRow } from "./_components/MigrationPanel";
+import SameInstanceTab from "./_components/SameInstanceTab";
 
 type Esp = "google" | "outlook" | "segs";
 type PlanStatus = "ready" | "partial" | "blocked" | "empty";
@@ -44,8 +45,13 @@ async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {
   }));
 }
 
+type ClientRow = { tag: string; churned: boolean; churnDate: string | null };
+type MoveTab = "cross" | "same";
+
 export default function MigratePage() {
-  const [allTags, setAllTags] = useState<string[]>([]);
+  const [tab, setTab] = useState<MoveTab>("cross");
+  const [allClientRows, setAllClientRows] = useState<ClientRow[]>([]);
+  const [clientStatus, setClientStatus] = useState<"active" | "returning" | "all">("active");
   const [from, setFrom] = useState<string>("outboundhero");
   const [to, setTo] = useState<string>("facilityreach");
   const [search, setSearch] = useState("");
@@ -76,10 +82,24 @@ export default function MigratePage() {
   useEffect(() => {
     fetch("/api/config/clients").then((r) => (r.ok ? r.json() : [])).then((rows) => {
       if (!Array.isArray(rows)) return;
-      const tags = [...new Set((rows as Array<{ tag?: string; churned?: boolean }>).filter((r) => !r.churned).map((r) => r.tag).filter(Boolean))].sort() as string[];
-      setAllTags(tags);
+      const seen = new Set<string>();
+      const list: ClientRow[] = [];
+      for (const r of rows as Array<{ tag?: string; churned?: boolean; churnDate?: string | null }>) {
+        const tag = r.tag; if (!tag || seen.has(tag)) continue; seen.add(tag);
+        list.push({ tag, churned: !!r.churned, churnDate: r.churnDate ?? null });
+      }
+      list.sort((a, b) => a.tag.localeCompare(b.tag));
+      setAllClientRows(list);
     }).catch(() => {});
   }, []);
+
+  // Tag list for the picker, gated by the Active / Returning / All toggle
+  // (default "active" = churned hidden, the original behavior).
+  const allTags = useMemo(() => allClientRows
+    .filter((c) => clientStatus === "all" || (clientStatus === "returning" ? c.churned : !c.churned))
+    .map((c) => c.tag), [allClientRows, clientStatus]);
+  const clientRowByTag = useMemo(() => new Map(allClientRows.map((c) => [c.tag, c])), [allClientRows]);
+  const churnedCount = useMemo(() => allClientRows.filter((c) => c.churned).length, [allClientRows]);
 
   // Changing instances invalidates any loaded plan.
   useEffect(() => { setPlan(new Map()); }, [from, to]);
@@ -275,10 +295,20 @@ export default function MigratePage() {
       <div>
         <h1 className="text-[26px] font-semibold tracking-tight">Move Leads</h1>
         <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-          Migrate a client tag&apos;s leads from one Bison instance into the matching campaigns (by ESP) on another — no CSV. Copy-only: pause/archive the source campaigns afterward.
+          Move a client&apos;s leads between Bison instances (Cross Instance) or between campaigns within one instance (Same Instance), matched by ESP. Copy-only.
         </p>
       </div>
 
+      {/* Tabs */}
+      <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
+        <button type="button" onClick={() => setTab("cross")} className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "cross" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>Cross Instance</button>
+        <button type="button" onClick={() => setTab("same")} className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "same" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>Same Instance</button>
+      </div>
+
+      {tab === "same" && <SameInstanceTab />}
+
+      {tab === "cross" && (
+      <>
       {/* From → To */}
       <div className="flex flex-wrap items-end gap-4 rounded-xl border bg-card p-4">
         <InstancePick label="From instance" value={from} onChange={setFrom} disabledKey={to} />
@@ -364,6 +394,13 @@ export default function MigratePage() {
               />
             </div>
             <div className="flex items-center gap-3 shrink-0 pt-1.5">
+              <div className="flex items-center rounded-md border p-0.5 text-xs bg-white">
+                {(["active", "returning", "all"] as const).map((f) => (
+                  <button key={f} onClick={() => setClientStatus(f)} className={`px-2 h-6 rounded capitalize transition-colors ${clientStatus === f ? "bg-foreground text-background" : "text-muted-foreground hover:bg-muted/60"}`}>
+                    {f}{f === "returning" && churnedCount > 0 ? ` (${churnedCount})` : ""}
+                  </button>
+                ))}
+              </div>
               <span className="text-xs text-muted-foreground whitespace-nowrap">{selected.size} selected · {filtered.length} shown</span>
               <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none whitespace-nowrap">
                 <input type="checkbox" checked={allSelected} onChange={toggleAll} className="size-3.5 rounded border-muted-foreground/40" /> Select all
@@ -385,6 +422,9 @@ export default function MigratePage() {
               <div key={tag} className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40">
                 <input type="checkbox" checked={selected.has(tag)} onChange={() => toggleOne(tag)} className="size-3.5 rounded border-muted-foreground/40" />
                 <span className="font-mono text-sm font-semibold w-24 shrink-0">{tag}</span>
+                {clientRowByTag.get(tag)?.churned && (
+                  <span className="inline-flex items-center gap-0.5 text-[9px] font-medium rounded bg-rose-100 px-1.5 py-0.5 text-rose-700 shrink-0" title={clientRowByTag.get(tag)?.churnDate ? `Churned on ${clientRowByTag.get(tag)?.churnDate}` : "Returning/churned"}><UserX className="size-2.5" /> returning</span>
+                )}
                 {p ? (
                   <div className="flex items-center gap-2.5 text-xs text-muted-foreground flex-wrap">
                     <StatusBadge status={p.status} />
@@ -407,6 +447,8 @@ export default function MigratePage() {
           {filtered.length === 0 && <div className="px-4 py-10 text-center text-sm text-muted-foreground">No clients match.</div>}
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

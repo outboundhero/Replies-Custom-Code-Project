@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import db from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
-import { getChurnedTags } from "@/lib/churn";
+import { getChurnedClients } from "@/lib/churn";
+import { getAllClientInstances } from "@/lib/nurture/group-routing";
 
 // GET /api/config/clients — list all clients with section + config info.
 //
@@ -52,12 +53,23 @@ export async function GET() {
       // Table doesn't exist yet — every client renders as "default" in the UI.
     }
 
-    const churned = await getChurnedTags();
-    const rows = result.rows.map((r) => ({
-      ...r,
-      bison_instance: instanceMap.get(r.tag as string) ?? null,
-      churned: churned.has(String(r.tag).toUpperCase()),
-    }));
+    // Churn (tag → churn date) + group-native instances, for the Move Leads
+    // "Returning" toggle and the Same Instance default instance suggestion.
+    const churned = await getChurnedClients();
+    const groupInstances = await getAllClientInstances();
+    const rows = result.rows.map((r) => {
+      const TAG = String(r.tag).toUpperCase();
+      const inst = groupInstances.get(TAG);
+      return {
+        ...r,
+        bison_instance: instanceMap.get(r.tag as string) ?? null,
+        churned: churned.has(TAG),
+        churnDate: churned.get(TAG) ?? null,
+        group: inst?.group ?? null,
+        b2b: inst?.b2b ?? null,
+        b2c: inst?.b2c ?? null,
+      };
+    });
     return NextResponse.json(rows);
   } catch (error) {
     console.error("[api/config/clients] GET failed:", error);
