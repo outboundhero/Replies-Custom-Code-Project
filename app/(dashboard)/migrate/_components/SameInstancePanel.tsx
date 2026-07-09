@@ -1,27 +1,26 @@
 "use client";
 
 /**
- * Live panel for a Same Instance (lane-aware) move — one client, its source
- * campaigns split by email type into B2B (business) and B2C (personal)
- * destinations, matched by ESP. One row per SOURCE campaign shows the full
- * split: business → B2B campaign (count) and personal → B2C campaign (count).
+ * Live panel for a Same Instance (lane + per-lead-ESP) move. One client, its
+ * source campaigns split by email type (business→B2B, personal→B2C) AND by each
+ * lead's ESP into the chosen destinations. One row per SOURCE campaign shows a
+ * line per destination it fed, with live counts.
  */
 import { useMemo } from "react";
 import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, RotateCw } from "lucide-react";
 
 export type SameMoveStep = "queued" | "moving" | "retrying" | "done" | "error" | "skipped";
 
+export interface SameBucket { key: string; lane: "b2b" | "b2c"; esp: string; destName: string; moved: number }
 export interface SameSourceRow {
   campaignId: number;
   name: string;
-  esp: string;
-  sourceSlot: string;        // "B2B 1" / "B2C 1" — where the source campaign lives
+  esp: string;              // source campaign's own ESP (from name) — for display
+  sourceSlot: string;       // "B2B 1" / "B2C 1"
   totalLeads: number;
-  movedB2b: number;
-  movedB2c: number;
-  b2bDest: string | null;    // destination campaign name for business leads
-  b2cDest: string | null;    // destination campaign name for personal leads
-  skipped: number;           // leads whose lane had no destination
+  moved: number;            // total across buckets
+  skipped: number;          // leads whose (lane, ESP) had no destination
+  buckets: SameBucket[];    // one per destination fed
   state: SameMoveStep;
   retries: number;
   retryAttempt?: number | null;
@@ -58,7 +57,8 @@ export default function SameInstancePanel({
   const tally = useMemo(() => {
     let b2b = 0, b2c = 0, retries = 0, errored = 0, doneN = 0, skipped = 0;
     for (const r of rows) {
-      b2b += r.movedB2b; b2c += r.movedB2c; retries += r.retries; skipped += r.skipped;
+      retries += r.retries; skipped += r.skipped;
+      for (const bk of r.buckets) { if (bk.lane === "b2c") b2c += bk.moved; else b2b += bk.moved; }
       if (r.state === "error") errored++;
       if (r.state === "done") doneN++;
     }
@@ -123,8 +123,7 @@ function Stat({ n, label, tone }: { n: number; label: string; tone: string }) {
 
 function SourceCard({ r, onRetry }: { r: SameSourceRow; onRetry: (campaignId: number) => void }) {
   const active = r.state === "moving" || r.state === "retrying";
-  const moved = r.movedB2b + r.movedB2c;
-  const pct = r.state === "done" ? 100 : r.totalLeads > 0 ? Math.min(100, Math.round((moved / r.totalLeads) * 100)) : 0;
+  const pct = r.state === "done" ? 100 : r.totalLeads > 0 ? Math.min(100, Math.round((r.moved / r.totalLeads) * 100)) : 0;
   const barColor = r.state === "error" ? "bg-rose-500" : r.state === "retrying" ? "bg-amber-500" : r.state === "done" ? "bg-emerald-500" : "bg-emerald-400";
   const icon = r.state === "retrying" ? <RotateCw className="size-3.5 text-amber-600 animate-spin shrink-0" />
     : active ? <Loader2 className="size-3.5 text-emerald-600 animate-spin shrink-0" />
@@ -132,6 +131,8 @@ function SourceCard({ r, onRetry }: { r: SameSourceRow; onRetry: (campaignId: nu
     : r.state === "error" ? <AlertTriangle className="size-3.5 text-rose-500 shrink-0" />
     : r.state === "skipped" ? <CircleSlash className="size-3.5 text-amber-500 shrink-0" />
     : <span className="size-3.5 shrink-0 rounded-full border border-muted-foreground/30" />;
+
+  const buckets = [...r.buckets].filter((b) => b.moved > 0).sort((a, b) => (a.lane === b.lane ? a.esp.localeCompare(b.esp) : a.lane.localeCompare(b.lane)));
 
   return (
     <div className={`rounded-lg border px-3 py-2 ${active ? "bg-emerald-50/40 border-emerald-200" : r.state === "error" ? "bg-rose-50/40 border-rose-200" : "bg-card"}`}>
@@ -141,15 +142,22 @@ function SourceCard({ r, onRetry }: { r: SameSourceRow; onRetry: (campaignId: nu
         <span className="text-[9px] font-medium rounded bg-slate-100 px-1 py-0.5 text-slate-600 shrink-0">{r.sourceSlot}</span>
         <span className="text-xs font-medium truncate" title={r.name}>{r.name}</span>
         <span className="ml-auto text-[11px] tabular-nums text-muted-foreground shrink-0">
-          {moved.toLocaleString()}{r.totalLeads > 0 ? ` / ${r.totalLeads.toLocaleString()}` : ""}
+          {r.moved.toLocaleString()}{r.totalLeads > 0 ? ` / ${r.totalLeads.toLocaleString()}` : ""}
         </span>
       </div>
 
-      {/* Lane split — business → B2B, personal → B2C */}
-      <div className="mt-1 space-y-0.5 text-[10px]">
-        <LaneLine label="business → B2B" dest={r.b2bDest} n={r.movedB2b} tone="text-indigo-700" />
-        <LaneLine label="personal → B2C" dest={r.b2cDest} n={r.movedB2c} tone="text-amber-700" />
-      </div>
+      {/* Per-destination breakdown */}
+      {buckets.length > 0 && (
+        <div className="mt-1 space-y-0.5 text-[10px]">
+          {buckets.map((b) => (
+            <div key={b.key} className="flex items-center gap-1.5">
+              <span className={`shrink-0 font-medium ${b.lane === "b2c" ? "text-amber-700" : "text-indigo-700"}`}>{b.lane === "b2c" ? "B2C" : "B2B"} {ESP_SHORT[b.esp] || "?"}</span>
+              <span className="text-muted-foreground truncate" title={b.destName}>{b.destName}</span>
+              <span className="ml-auto tabular-nums font-medium text-foreground shrink-0">{b.moved.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="h-1 bg-muted rounded mt-1.5 overflow-hidden">
         <div className={`h-full transition-all duration-300 ${barColor}`} style={{ width: `${pct}%` }} />
@@ -170,18 +178,6 @@ function SourceCard({ r, onRetry }: { r: SameSourceRow; onRetry: (campaignId: nu
           </>
         )}
       </div>
-    </div>
-  );
-}
-
-function LaneLine({ label, dest, n, tone }: { label: string; dest: string | null; n: number; tone: string }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className={`shrink-0 ${tone}`}>{label}</span>
-      {dest
-        ? <span className="text-muted-foreground truncate" title={dest}>{dest}</span>
-        : <span className="text-muted-foreground/50 italic">no destination</span>}
-      {dest && <span className="ml-auto tabular-nums font-medium text-foreground shrink-0">{n.toLocaleString()}</span>}
     </div>
   );
 }

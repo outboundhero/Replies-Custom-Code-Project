@@ -1,15 +1,16 @@
 "use client";
 
 /**
- * Same Instance tab (lane-aware). Pick a client → auto-load its campaigns from
- * BOTH group instances (B2B1 + B2C1). Bulk-select SOURCE + DESTINATION campaigns.
- * On move, each source campaign's leads are split by email type — business →
- * the B2B destination, personal → the B2C destination — matched by ESP. Reuses
- * POST /api/leads/move/same-instance (routeCandidates: attach or create+attach).
+ * Same Instance tab (lane + per-lead-ESP). Pick a client → auto-load campaigns
+ * from BOTH group instances (B2B1 + B2C1). Bulk-select SOURCE + DESTINATION
+ * campaigns. On move, each source campaign's leads are split by email type
+ * (business→B2B, personal→B2C) AND by each lead's ESP (from its Bison tag for
+ * Google catch-all sources — so SEGs/Outlook leads hidden inside a "Google +
+ * Custom" campaign route correctly) into the chosen destinations.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, Loader2, Zap, AlertTriangle, ArrowRight, UserX } from "lucide-react";
+import { Search, Loader2, Zap, AlertTriangle, UserX } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 import SameInstancePanel, { type SameInstanceState, type SameSourceRow } from "./SameInstancePanel";
 
@@ -18,7 +19,8 @@ type Lane = "b2b" | "b2c";
 type ClientStatus = "active" | "returning" | "all";
 interface ClientRow { tag: string; churned: boolean; churnDate: string | null; group: number | null; b2b: string | null; b2c: string | null }
 interface PlanCampaign { id: number; name: string; status: string; esp: Esp; total_leads: number; isNurture: boolean; instance: string; lane: Lane }
-interface Job { campaignId: number; name: string; esp: Esp; sourceInstance: string; sourceSlot: string; totalLeads: number; b2bTargetCampaignId: number | null; b2cTargetCampaignId: number | null; b2bDest: string | null; b2cDest: string | null }
+interface Job { campaignId: number; name: string; esp: Esp; sourceInstance: string; sourceSlot: string; totalLeads: number }
+type DestMap = { b2b: Partial<Record<Esp, number>>; b2c: Partial<Record<Esp, number>> };
 
 const ESP_LABEL: Record<Esp, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
 const ESPS: Esp[] = ["google", "outlook", "segs"];
@@ -27,6 +29,9 @@ const INSTANCE_SLOT: Record<string, string> = {
   outboundhero: "B2B 1", facilityreach: "B2B 2", cleaningoutbound: "B2C 1", outboundclean: "B2C 2",
 };
 const slot = (instance: string) => INSTANCE_SLOT[instance] || instance;
+// A Google (catch-all) source can contain leads of ANY ESP → resolved per-lead.
+// Outlook/SEGs sources are trusted from the name → only that ESP.
+const reachableEsps = (sourceEsp: Esp): Esp[] => (sourceEsp === "google" ? ESPS : [sourceEsp]);
 
 async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {
   let i = 0;
@@ -54,6 +59,7 @@ export default function SameInstanceTab() {
   const abortRef = useRef(false);
   const abortCtlRef = useRef<AbortController | null>(null);
   const jobsRef = useRef<Map<number, Job>>(new Map());
+  const destRef = useRef<{ dest: DestMap; names: Map<string, string> }>({ dest: { b2b: {}, b2c: {} }, names: new Map() });
 
   const stopMove = useCallback(() => { abortRef.current = true; abortCtlRef.current?.abort(); }, []);
   const abortableSleep = useCallback((ms: number) => new Promise<void>((resolve) => {
@@ -108,9 +114,10 @@ export default function SameInstanceTab() {
   const toggleSource = (id: number) => setSources((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleDest = (id: number) => setDestinations((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  // Resolve one destination per (lane × ESP); build movable jobs / skipped / errors.
+  // Resolve destinations per (lane × ESP); build jobs / skipped / errors / warnings.
   const plan = useMemo(() => {
     const errors: string[] = [];
+    const warnings: string[] = [];
     for (const id of sources) if (destinations.has(id)) errors.push(`"${campMap.get(id)?.name}" is both source and destination.`);
 
     const destByKey = new Map<string, PlanCampaign>();
@@ -121,18 +128,24 @@ export default function SameInstanceTab() {
       else destByKey.set(k, cs[0]);
     }
 
+    // Which (lane, ESP) destinations CAN be fed by the selected sources? A Google
+    // source can feed any ESP; an Outlook/SEGs source only its own.
+    const feedableEsps = new Set<Esp>();
+    for (const id of sources) { const c = campMap.get(id); if (c) for (const e of reachableEsps(c.esp)) feedableEsps.add(e); }
+    for (const [k] of destByKey) { const [lane, esp] = k.split(":"); if (!feedableEsps.has(esp as Esp)) warnings.push(`${lane === "b2c" ? "B2C" : "B2B"} ${ESP_LABEL[esp as Esp]} destination selected, but no selected source can produce ${ESP_LABEL[esp as Esp]} leads — it will receive 0.`); }
+
     const jobs: Job[] = [];
     const skipped: PlanCampaign[] = [];
     let leadsToMove = 0;
     for (const id of sources) {
       const c = campMap.get(id); if (!c) continue;
-      const b2bDest = destByKey.get(`b2b:${c.esp}`) || null;
-      const b2cDest = destByKey.get(`b2c:${c.esp}`) || null;
-      if (!b2bDest && !b2cDest) { skipped.push(c); continue; } // no destination for this ESP at all
-      jobs.push({ campaignId: c.id, name: c.name, esp: c.esp, sourceInstance: c.instance, sourceSlot: slot(c.instance), totalLeads: c.total_leads, b2bTargetCampaignId: b2bDest?.id ?? null, b2cTargetCampaignId: b2cDest?.id ?? null, b2bDest: b2bDest?.name ?? null, b2cDest: b2cDest?.name ?? null });
+      // Movable if at least one reachable-ESP destination exists (either lane).
+      const hasDest = reachableEsps(c.esp).some((e) => destByKey.has(`b2b:${e}`) || destByKey.has(`b2c:${e}`));
+      if (!hasDest) { skipped.push(c); continue; }
+      jobs.push({ campaignId: c.id, name: c.name, esp: c.esp, sourceInstance: c.instance, sourceSlot: slot(c.instance), totalLeads: c.total_leads });
       leadsToMove += c.total_leads;
     }
-    return { errors, jobs, skipped, destByKey, leadsToMove };
+    return { errors, warnings, jobs, skipped, destByKey, leadsToMove };
   }, [sources, destinations, campMap]);
 
   // ── Driver ──
@@ -140,7 +153,7 @@ export default function SameInstanceTab() {
     setMigration((m) => m && { ...m, rows: m.rows.map((r) => (r.campaignId === campaignId ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) });
   }, []);
 
-  async function postMoveWithRetry(campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedB2b: number; movedB2c: number; skipped: number; done: boolean; nextCursor: string | null }; error?: string }> {
+  async function postMoveWithRetry(campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedByKey: Record<string, number>; skipped: number; done: boolean; nextCursor: string | null }; error?: string }> {
     const MAX = 5;
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
@@ -161,18 +174,22 @@ export default function SameInstanceTab() {
 
   async function moveOne(job: Job) {
     if (abortRef.current) return;
-    patchRow(job.campaignId, { state: "moving", movedB2b: 0, movedB2c: 0, skipped: 0, error: undefined });
-    let b2b = 0, b2c = 0, sk = 0;
+    patchRow(job.campaignId, { state: "moving", moved: 0, skipped: 0, buckets: [], error: undefined });
+    const acc: Record<string, number> = {};
+    let sk = 0;
     let cursor: string | null = null;
     for (;;) {
       if (abortRef.current) { patchRow(job.campaignId, { state: "error", error: "stopped" }); return; }
       const r = await postMoveWithRetry(job.campaignId, {
         clientTag: client!.tag, sourceInstance: job.sourceInstance, sourceCampaignId: job.campaignId, sourceCampaignName: job.name,
-        b2bInstance, b2cInstance, b2bCampaignId: job.b2bTargetCampaignId, b2cCampaignId: job.b2cTargetCampaignId, cursor,
+        b2bInstance, b2cInstance, dest: destRef.current.dest, cursor,
       });
       if (!r.ok) { patchRow(job.campaignId, { state: "error", error: r.error }); return; }
-      b2b += r.data!.movedB2b || 0; b2c += r.data!.movedB2c || 0; sk += r.data!.skipped || 0;
-      patchRow(job.campaignId, { movedB2b: b2b, movedB2c: b2c, skipped: sk, state: "moving" });
+      for (const [k, n] of Object.entries(r.data!.movedByKey || {})) acc[k] = (acc[k] || 0) + n;
+      sk += r.data!.skipped || 0;
+      const buckets = Object.entries(acc).map(([key, moved]) => { const [lane, esp] = key.split(":"); return { key, lane: lane as Lane, esp, destName: destRef.current.names.get(key) || "", moved }; });
+      const moved = Object.values(acc).reduce((a, b) => a + b, 0);
+      patchRow(job.campaignId, { moved, skipped: sk, buckets, state: "moving" });
       if (r.data!.done || !r.data!.nextCursor) break;
       cursor = r.data!.nextCursor;
     }
@@ -183,10 +200,17 @@ export default function SameInstanceTab() {
     if (running || !client) return;
     if (plan.errors.length) { toast.error(plan.errors[0]); return; }
     if (!plan.jobs.length) { toast.error("Select at least one source campaign that has a matching-ESP destination."); return; }
+
+    // Freeze the destination map + names for the run.
+    const dest: DestMap = { b2b: {}, b2c: {} };
+    const names = new Map<string, string>();
+    for (const [key, c] of plan.destByKey) { const [lane, esp] = key.split(":") as [Lane, Esp]; dest[lane][esp] = c.id; names.set(key, c.name); }
+    destRef.current = { dest, names };
+
     jobsRef.current = new Map(plan.jobs.map((j) => [j.campaignId, j]));
     const rows: SameSourceRow[] = [
-      ...plan.jobs.map((j) => ({ campaignId: j.campaignId, name: j.name, esp: j.esp, sourceSlot: j.sourceSlot, totalLeads: j.totalLeads, movedB2b: 0, movedB2c: 0, b2bDest: j.b2bDest, b2cDest: j.b2cDest, skipped: 0, state: "queued" as const, retries: 0 })),
-      ...plan.skipped.map((c) => ({ campaignId: c.id, name: c.name, esp: c.esp, sourceSlot: slot(c.instance), totalLeads: c.total_leads, movedB2b: 0, movedB2c: 0, b2bDest: null, b2cDest: null, skipped: c.total_leads, state: "skipped" as const, retries: 0 })),
+      ...plan.jobs.map((j) => ({ campaignId: j.campaignId, name: j.name, esp: j.esp, sourceSlot: j.sourceSlot, totalLeads: j.totalLeads, moved: 0, skipped: 0, buckets: [], state: "queued" as const, retries: 0 })),
+      ...plan.skipped.map((c) => ({ campaignId: c.id, name: c.name, esp: c.esp, sourceSlot: slot(c.instance), totalLeads: c.total_leads, moved: 0, skipped: c.total_leads, buckets: [], state: "skipped" as const, retries: 0 })),
     ];
     setMigration({ status: "running", clientTag: client.tag, b2bLabel: slot(b2bInstance), b2cLabel: slot(b2cInstance), rows });
     setRunning(true);
@@ -203,7 +227,7 @@ export default function SameInstanceTab() {
     abortRef.current = false;
     abortCtlRef.current = new AbortController();
     setRunning(true);
-    patchRow(campaignId, { state: "queued", movedB2b: 0, movedB2c: 0, skipped: 0, error: undefined, retryAttempt: null });
+    patchRow(campaignId, { state: "queued", moved: 0, skipped: 0, buckets: [], error: undefined, retryAttempt: null });
     await moveOne(job);
     setRunning(false);
   }
@@ -215,7 +239,7 @@ export default function SameInstanceTab() {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground max-w-2xl">
-        Move a client&apos;s leads between its own campaigns. Each source campaign&apos;s leads are split by email — <span className="font-medium text-foreground">business → B2B, personal → B2C</span> — and matched by ESP. Copy-only.
+        Move a client&apos;s leads between its own campaigns. Each lead is routed by <span className="font-medium text-foreground">email type (business→B2B, personal→B2C)</span> and by its <span className="font-medium text-foreground">ESP</span> — Google catch-all sources are split per-lead so Outlook/SEGs leads reach the right campaign. Copy-only.
       </p>
 
       {/* Client picker */}
@@ -260,7 +284,7 @@ export default function SameInstanceTab() {
         <div className="rounded-xl border bg-card overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-2.5 border-b text-xs text-muted-foreground">
             <span className="font-medium text-foreground">Pick source &amp; destination campaigns</span>
-            <span>· business leads → B2B destination, personal leads → B2C destination (same ESP)</span>
+            <span>· business → B2B, personal → B2C · per-lead ESP for Google sources</span>
           </div>
           <div className="max-h-[44vh] overflow-auto p-3 space-y-4">
             {lanes.map(({ lane, instance, label }) => {
@@ -301,22 +325,12 @@ export default function SameInstanceTab() {
 
           {/* Preview + Move */}
           <div className="border-t p-3 space-y-2">
-            {plan.errors.length > 0 && plan.errors.map((e, i) => <p key={i} className="text-xs text-rose-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {e}</p>)}
+            {plan.errors.map((e, i) => <p key={`e${i}`} className="text-xs text-rose-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {e}</p>)}
+            {plan.warnings.map((e, i) => <p key={`w${i}`} className="text-xs text-amber-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {e}</p>)}
             {plan.jobs.length > 0 && (
-              <div className="space-y-1 text-xs">
-                {ESPS.filter((esp) => plan.jobs.some((j) => j.esp === esp)).map((esp) => {
-                  const b2bDest = plan.destByKey.get(`b2b:${esp}`);
-                  const b2cDest = plan.destByKey.get(`b2c:${esp}`);
-                  const n = plan.jobs.filter((j) => j.esp === esp).length;
-                  return (
-                    <div key={esp} className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                      <span className="font-medium">{ESP_LABEL[esp]}</span>
-                      <span className="text-muted-foreground">{n} source{n === 1 ? "" : "s"}</span>
-                      <span className="inline-flex items-center gap-1 text-indigo-700"><ArrowRight className="size-3" /> business → {b2bDest ? <span className="truncate max-w-[200px]" title={b2bDest.name}>{b2bDest.name}</span> : <span className="text-amber-600">none (skipped)</span>}</span>
-                      <span className="inline-flex items-center gap-1 text-amber-700"><ArrowRight className="size-3" /> personal → {b2cDest ? <span className="truncate max-w-[200px]" title={b2cDest.name}>{b2cDest.name}</span> : <span className="text-amber-600">none (skipped)</span>}</span>
-                    </div>
-                  );
-                })}
+              <div className="text-xs text-muted-foreground">
+                Destinations by lane × ESP:{" "}
+                {[...plan.destByKey.entries()].map(([k, c]) => { const [lane, esp] = k.split(":"); return <span key={k} className="inline-flex items-center gap-1 mr-3"><span className={`font-medium ${lane === "b2c" ? "text-amber-700" : "text-indigo-700"}`}>{lane === "b2c" ? "B2C" : "B2B"} {ESP_LABEL[esp as Esp]}</span> → <span className="truncate max-w-[160px] align-bottom" title={c.name}>{c.name}</span></span>; })}
               </div>
             )}
             <div className="flex items-center gap-3">

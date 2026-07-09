@@ -2,32 +2,47 @@
  * POST /api/leads/move/same-instance
  *
  * Lane-aware mover for the Same Instance tab. Cursor-sweeps a SOURCE campaign's
- * leads and splits each by email type — personal → the client's B2C instance,
- * business → its B2B instance — routing to the chosen destination campaign at
- * (that lane's instance, the source's ESP). Reuses routeCandidates (attach for
- * same-instance leads, create+attach for cross-instance, idempotent).
+ * leads and routes each to the chosen destination at (its LANE instance, its
+ * ESP):
+ *   • lane  = isPersonalDomain(email) ? "b2c" : "b2b"  (personal→B2C, business→B2B)
+ *   • ESP   = per-lead, from the lead's Bison ESP tag (findLeadByEmail) when the
+ *             source is a Google/unknown catch-all campaign — so SEGs/Outlook
+ *             leads hidden inside a "Google + Custom" campaign route correctly.
+ *             Outlook/SEGs-named source campaigns are trusted from the name (no
+ *             per-lead lookup). Falls back to the email-domain heuristic.
  *
- * The caller re-invokes with `nextCursor` until `done`. Copy-only. Admin-gated.
+ * routeCandidates then attaches same-instance leads and create+attaches cross-
+ * instance ones (idempotent). Caller re-invokes with `nextCursor` until `done`.
+ * Copy-only. Admin-gated.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
-import { sweepCampaignLeadsCursor, type OutboundLead } from "@/lib/outboundhero-api";
+import { sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead } from "@/lib/outboundhero-api";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
-import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
+import { detectCampaignEsp, bucketEsp, detectEsp, pickEspFromTags, type Esp } from "@/lib/nurture/esp";
 import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const WINDOW = 2500;
-const SUB_WINDOW = 800;
-const WINDOW_MS = 170_000;
+const ESPS: Esp[] = ["google", "outlook", "segs"];
+const LANES = ["b2b", "b2c"] as const;
+type Lane = (typeof LANES)[number];
+type DestMap = { b2b: Partial<Record<Esp, number>>; b2c: Partial<Record<Esp, number>> };
+
+async function parallelForEach<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (i < items.length) { const idx = i++; await fn(items[idx]); }
+  }));
+}
 
 interface Ctx {
-  clientTag: string; esp: Esp; sourceInstance: string; sourceCampaignId: number;
-  b2bInstance: string; b2cInstance: string; b2bCampaignId: number | null; b2cCampaignId: number | null;
+  clientTag: string; sourceInstance: string; sourceCampaignId: number;
+  b2bInstance: string; b2cInstance: string; dest: DestMap;
+  campaignEsp: Esp | null; needsLookup: boolean;
 }
 
 export async function POST(req: NextRequest) {
@@ -36,8 +51,7 @@ export async function POST(req: NextRequest) {
 
   let body: {
     clientTag?: string; sourceInstance?: string; sourceCampaignId?: number; sourceCampaignName?: string;
-    b2bInstance?: string; b2cInstance?: string; b2bCampaignId?: number | null; b2cCampaignId?: number | null;
-    cursor?: string | null;
+    b2bInstance?: string; b2cInstance?: string; dest?: DestMap; cursor?: string | null;
   };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
@@ -47,23 +61,28 @@ export async function POST(req: NextRequest) {
   const sourceCampaignName = String(body.sourceCampaignName || "");
   const b2bInstance = String(body.b2bInstance || "").trim();
   const b2cInstance = String(body.b2cInstance || "").trim();
-  const b2bCampaignId = body.b2bCampaignId ? Number(body.b2bCampaignId) : null;
-  const b2cCampaignId = body.b2cCampaignId ? Number(body.b2cCampaignId) : null;
+  const dest: DestMap = { b2b: body.dest?.b2b || {}, b2c: body.dest?.b2c || {} };
   const startCursor = body.cursor ? String(body.cursor) : null;
 
   if (!clientTag || !sourceInstance || !sourceCampaignId || !b2bInstance || !b2cInstance) {
     return NextResponse.json({ error: "clientTag, sourceInstance, sourceCampaignId, b2bInstance, b2cInstance required" }, { status: 400 });
   }
-  if (!b2bCampaignId && !b2cCampaignId) {
-    return NextResponse.json({ error: "at least one of b2bCampaignId / b2cCampaignId required" }, { status: 400 });
-  }
-  const esp = detectCampaignEsp(sourceCampaignName);
-  if (!esp) return NextResponse.json({ error: `cannot detect ESP from "${sourceCampaignName}"` }, { status: 400 });
+  const anyDest = ESPS.some((e) => dest.b2b[e] || dest.b2c[e]);
+  if (!anyDest) return NextResponse.json({ error: "no destination campaigns selected" }, { status: 400 });
 
-  const ctx: Ctx = { clientTag, esp, sourceInstance, sourceCampaignId, b2bInstance, b2cInstance, b2bCampaignId, b2cCampaignId };
+  const campaignEsp = detectCampaignEsp(sourceCampaignName);
+  // Google (catch-all) or an un-ESP'd name → resolve each lead's ESP from its
+  // Bison tags. Outlook/SEGs names are specific enough to trust directly.
+  const needsLookup = campaignEsp !== "outlook" && campaignEsp !== "segs";
+  const ctx: Ctx = { clientTag, sourceInstance, sourceCampaignId, b2bInstance, b2cInstance, dest, campaignEsp, needsLookup };
 
-  // ── Pipelined sweep + write (mirrors /api/leads/move) ──
-  let movedB2b = 0, movedB2c = 0, skipped = 0, fetched = 0;
+  // Per-lead lookups make each call much heavier — use a smaller window there.
+  const WINDOW = needsLookup ? 800 : 2500;
+  const SUB_WINDOW = needsLookup ? 400 : 800;
+  const WINDOW_MS = 230_000;
+
+  const movedByKey: Record<string, number> = {};
+  let skipped = 0, fetched = 0;
   let cursor: string | null = startCursor;
   let done = false;
   const w: { error: Error | null } = { error: null };
@@ -79,7 +98,7 @@ export async function POST(req: NextRequest) {
       await writeChain;
       if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
       if (fetched === 0) return NextResponse.json({ error: `fetch failed: ${(e as Error).message}` }, { status: 502 });
-      return NextResponse.json({ ok: true, fetched, movedB2b, movedB2c, skipped, nextCursor: cursor, done: false });
+      return NextResponse.json({ ok: true, fetched, movedByKey, skipped, nextCursor: cursor, done: false });
     }
     fetched += s.leads.length;
     cursor = s.nextCursor;
@@ -92,7 +111,8 @@ export async function POST(req: NextRequest) {
       if (w.error) return;
       try {
         const r = await routeAndLogLane(chunk, ctx);
-        movedB2b += r.movedB2b; movedB2c += r.movedB2c; skipped += r.skipped;
+        for (const [k, n] of Object.entries(r.movedByKey)) movedByKey[k] = (movedByKey[k] || 0) + n;
+        skipped += r.skipped;
       } catch (e) { w.error = e as Error; }
     })();
 
@@ -102,22 +122,41 @@ export async function POST(req: NextRequest) {
   await writeChain;
   if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
 
-  return NextResponse.json({ ok: true, fetched, movedB2b, movedB2c, skipped, nextCursor: done ? null : cursor, done });
+  return NextResponse.json({ ok: true, fetched, movedByKey, skipped, nextCursor: done ? null : cursor, done });
 }
 
-/** Split a batch of leads by lane, route each to its lane's destination, record
- *  lead_move_log per bucket. Returns per-lane moved counts + skipped (no dest). */
-async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ movedB2b: number; movedB2c: number; skipped: number }> {
+/** Resolve each lead's ESP (per-lead tags for catch-all sources), split by lane,
+ *  route to the (lane, ESP) destination, record lead_move_log. */
+async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ movedByKey: Record<string, number>; skipped: number }> {
+  const withEmail = leads.filter((l) => (l.email || "").trim());
+
+  // ESP per lead.
+  const espByEmail = new Map<string, Esp>();
+  if (!ctx.needsLookup && ctx.campaignEsp) {
+    for (const l of withEmail) espByEmail.set(l.email, ctx.campaignEsp);
+  } else {
+    await parallelForEach(withEmail, 8, async (l) => {
+      let esp: Esp;
+      try {
+        const full = await findLeadByEmail(ctx.sourceInstance, l.email);
+        const tag = pickEspFromTags(full?.tags);
+        esp = tag ? bucketEsp(tag) : detectEsp(l.email);
+      } catch { esp = detectEsp(l.email); }
+      espByEmail.set(l.email, esp);
+    });
+  }
+
   const candidates: Candidate[] = [];
   let skipped = 0;
-  for (const l of leads) {
-    const email = (l.email || "").trim();
-    if (!email) continue;
-    const lane: "b2b" | "b2c" = isPersonalDomain(email) ? "b2c" : "b2b";
-    const targetCampaignId = lane === "b2c" ? ctx.b2cCampaignId : ctx.b2bCampaignId;
-    if (!targetCampaignId) { skipped++; continue; } // this lane has no destination selected
+  const usedKeys = new Set<string>();
+  for (const l of withEmail) {
+    const esp = espByEmail.get(l.email) || "google";
+    const lane: Lane = isPersonalDomain(l.email) ? "b2c" : "b2b";
+    const targetCampaignId = ctx.dest[lane][esp];
+    if (!targetCampaignId) { skipped++; continue; } // no destination for this (lane, ESP)
+    usedKeys.add(`${lane}:${esp}`);
     candidates.push({
-      source: "campaign", rowId: l.id, email, esp: ctx.esp,
+      source: "campaign", rowId: l.id, email: l.email, esp,
       first_name: l.first_name ?? null, last_name: l.last_name ?? null, company: l.company ?? null,
       obLeadId: l.id, sourceInstance: ctx.sourceInstance,
       custom_variables: Array.isArray(l.custom_variables) ? l.custom_variables.filter((v) => v && v.name && v.value != null) : [],
@@ -126,16 +165,23 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ moved
   }
 
   const map: CampaignMapEntry[] = [];
-  if (ctx.b2bCampaignId) map.push({ bison_instance: ctx.b2bInstance, esp: ctx.esp, campaign_id: ctx.b2bCampaignId, campaign_name: null, lane: "b2b" });
-  if (ctx.b2cCampaignId) map.push({ bison_instance: ctx.b2cInstance, esp: ctx.esp, campaign_id: ctx.b2cCampaignId, campaign_name: null, lane: "b2c" });
-  if (!candidates.length || !map.length) return { movedB2b: 0, movedB2c: 0, skipped };
+  for (const lane of LANES) {
+    const inst = lane === "b2c" ? ctx.b2cInstance : ctx.b2bInstance;
+    for (const esp of ESPS) {
+      const cid = ctx.dest[lane][esp];
+      if (cid && usedKeys.has(`${lane}:${esp}`)) map.push({ bison_instance: inst, esp, campaign_id: cid, campaign_name: null, lane });
+    }
+  }
+  if (!candidates.length || !map.length) return { movedByKey: {}, skipped };
 
-  let movedB2b = 0, movedB2c = 0;
+  const movedByKey: Record<string, number> = {};
   const nowIso = new Date().toISOString();
   await routeCandidates(ctx.clientTag, candidates, map, {
     onAttached: async (campaignId, resolved) => {
+      const lane = resolved[0]?.lane || "b2b";
+      const esp = resolved[0]?.esp || "google";
       const targetInstance = String(resolved[0]?.instance || "");
-      if (resolved[0]?.lane === "b2c") movedB2c += resolved.length; else movedB2b += resolved.length;
+      movedByKey[`${lane}:${esp}`] = (movedByKey[`${lane}:${esp}`] || 0) + resolved.length;
       const rows = resolved.filter((r) => typeof r.obLeadId === "number");
       for (let i = 0; i < rows.length; i += 200) {
         const c = rows.slice(i, i + 200);
@@ -152,5 +198,5 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ moved
       }
     },
   });
-  return { movedB2b, movedB2c, skipped };
+  return { movedByKey, skipped };
 }
