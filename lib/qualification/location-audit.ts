@@ -75,8 +75,9 @@ export async function auditLocation(
     const result = parsed.result?.toLowerCase() === "passed" ? "Passed" : "Failed";
     return { result, reason: parsed.reason || "No reason provided" };
   } catch (e) {
-    // On a Gemini failure, default to Failed (conservative — same as the old
-    // behavior) so an out-of-area lead is never silently passed.
-    return { result: "Failed", reason: `Location audit error (${(e as Error).message.slice(0, 80)})` };
+    // A Gemini/infra error is NOT a geographic decision — don't reject the lead
+    // for our API being down. Fail OPEN (default Passed), matching the industry
+    // audit, with a clear reason so it's auditable and can be re-run.
+    return { result: "Passed", reason: `Location audit unavailable — defaulted to Passed (${(e as Error).message.slice(0, 90)})` };
   }
 }
