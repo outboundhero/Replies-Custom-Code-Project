@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, getSession } from "@/lib/auth";
+import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { getView, type InboxView } from "@/lib/inbox-views";
@@ -44,11 +44,11 @@ function applyView(q: any, view: InboxView | null): any {
 }
 
 export async function GET(req: NextRequest) {
-  const denied = await requireAuth();
-  if (denied) return denied;
+  // Single session read (was requireAuth() + getSession() = two JWT verifies).
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const session = await getSession();
     const allowed = session?.allowedClientTags ?? null;
 
     const mode = req.nextUrl.searchParams.get("mode");

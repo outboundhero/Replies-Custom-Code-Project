@@ -76,6 +76,13 @@ CREATE INDEX IF NOT EXISTS idx_replies_master_counts
 CREATE INDEX IF NOT EXISTS idx_replies_cherry_counts_global
   ON replies (ai_categorized_lead_category) WHERE inbox_is_noise = false;
 
+-- Leads list ordered by recency for the ALL-CLIENTS view (no client_tag filter):
+-- lets a bucket's leads seek by lead_category and scan in created_at order with
+-- NO sort (the client_tag-leading indexes above can't help without a client
+-- filter). This is the "loading under each category" fix.
+CREATE INDEX IF NOT EXISTS idx_replies_leadcat_created
+  ON replies (lead_category, created_at DESC);
+
 -- 4) Refresh planner stats (fast) -------------------------------------------
 ANALYZE replies;
 
