@@ -5,6 +5,7 @@ import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { shouldFilter } from "./bounce-filter";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
+import { isNoiseReply } from "@/lib/inbox-noise";
 import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
 import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
@@ -344,6 +345,14 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     esp: pickEspFromTags((lead as { tags?: Array<{ id: number; name: string }> }).tags),
     lead_category: getLeadCategory(aiCategory),
     ai_categorized_lead_category: aiCategory,
+    // Precompute inbox "noise" (bounce/auto-reply junk) once at ingest so the
+    // curated views filter an indexed boolean instead of ~30 ILIKEs per read.
+    inbox_is_noise: isNoiseReply({
+      reply_we_got: cleanedReply,
+      lead_email: reply.from_email_address,
+      to_email: recipients.toEmails,
+      email_subject: reply.email_subject,
+    }),
     reply_status: replyStatus,
     airtable_record_id: recordId,
     airtable_base_id: section.airtable_base_id,

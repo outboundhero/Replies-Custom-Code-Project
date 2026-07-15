@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, getSession } from "@/lib/auth";
+import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
@@ -13,8 +13,9 @@ import { bumpCacheVersion } from "@/lib/inbox-cache";
 import { applyReallocate } from "@/lib/processing/apply-reallocate";
 
 export async function POST(req: NextRequest) {
-  const denied = await requireAuth();
-  if (denied) return denied;
+  // Single session read (was requireAuth() + a second getSession() below).
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
     const body = await req.json();
@@ -27,7 +28,6 @@ export async function POST(req: NextRequest) {
     // valid on.
     let rowInstance: string = DEFAULT_INSTANCE;
     if (id) {
-      const session = await getSession();
       const allowed = session?.allowedClientTags ?? null;
       const { data: row } = await supabase
         .from("replies")

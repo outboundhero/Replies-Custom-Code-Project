@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, getSession } from "@/lib/auth";
+import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { getSheetForClient } from "@/lib/google-sheets-registry";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const denied = await requireAuth();
-  if (denied) return denied;
+  // Single session read (was requireAuth() + getSession() = two JWT verifies).
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
     const { id } = await params;
@@ -21,7 +22,6 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     // Per-user client scoping: a scoped user can't open a reply that
     // belongs to a tag outside their allowed list. Return 404 (not 403)
     // so we don't leak the existence of the row.
-    const session = await getSession();
     const allowed = session?.allowedClientTags ?? null;
     if (allowed && allowed.length && (!data.client_tag || !allowed.includes(data.client_tag))) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });

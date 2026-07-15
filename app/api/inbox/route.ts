@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import db from "@/lib/db";
 import { getView, type InboxView } from "@/lib/inbox-views";
 import { getInboxCache, setInboxCache, getCacheVersion } from "@/lib/inbox-cache";
 
 // Counts + leads can be slow on the big replies table.
 export const maxDuration = 60;
 
-const BATCH_SIZE = 1000;
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 500;
 
@@ -29,51 +29,17 @@ const LEAD_CATEGORIES = [
   "Internally Forwarded",
 ];
 
-/** Fetch ALL rows for a lightweight column query by paginating through batches */
-async function fetchAllRows<T>(
-  buildQuery: (from: number, to: number) => ReturnType<typeof supabase.from>,
-): Promise<T[]> {
-  const allRows: T[] = [];
-  let offset = 0;
-  while (true) {
-    const { data, error } = await (buildQuery(offset, offset + BATCH_SIZE - 1) as any);
-    if (error) throw new Error(error.message);
-    if (!data || data.length === 0) break;
-    allRows.push(...data);
-    if (data.length < BATCH_SIZE) break;
-    offset += BATCH_SIZE;
-  }
-  return allRows;
-}
-
-/** Apply a view's filter rules to a Supabase query builder */
+/**
+ * Apply a view's filter rules to a Supabase query builder. Both clauses hit the
+ * precomputed `inbox_is_noise` flag + the exact-match AI-category index — no
+ * leading-wildcard ILIKEs, so this is index-friendly (see sql/2026-07_inbox_is_noise.sql).
+ */
 function applyView(q: any, view: InboxView | null): any {
   if (!view) return q;
-
-  // "Does not contain" filters — use NOT ILIKE
-  for (const term of view.replyExcludes || []) {
-    q = q.not("reply_we_got", "ilike", `%${term}%`);
+  if (view.excludeNoise) q = q.eq("inbox_is_noise", false);
+  if (view.aiCategoryAllowlist && view.aiCategoryAllowlist.length > 0) {
+    q = q.in("ai_categorized_lead_category", view.aiCategoryAllowlist);
   }
-  for (const term of view.leadEmailExcludes || []) {
-    q = q.not("lead_email", "ilike", `%${term}%`);
-  }
-  for (const term of view.toEmailExcludes || []) {
-    q = q.not("to_email", "ilike", `%${term}%`);
-  }
-  for (const term of view.emailSubjectExcludes || []) {
-    q = q.not("email_subject", "ilike", `%${term}%`);
-  }
-
-  // AI category OR group — must match at least one
-  if (view.aiCategoryAny && view.aiCategoryAny.length > 0) {
-    const orParts = view.aiCategoryAny.map((rule) => {
-      if (rule.equals !== undefined) return `ai_categorized_lead_category.eq.${rule.equals}`;
-      if (rule.contains !== undefined) return `ai_categorized_lead_category.ilike.%${rule.contains}%`;
-      return null;
-    }).filter(Boolean).join(",");
-    if (orParts) q = q.or(orParts);
-  }
-
   return q;
 }
 
@@ -117,11 +83,11 @@ export async function GET(req: NextRequest) {
         const hit = getInboxCache<{ tags: string[] }>(cacheKey, CLIENT_TAGS_TTL_MS);
         if (hit) return NextResponse.json(hit);
       }
-      const data = await fetchAllRows<{ client_tag: string }>((from, to) => {
-        let q = supabase.from("replies").select("client_tag").range(from, to);
-        return q as any;
-      });
-      const tags = [...new Set(data.map((r) => r.client_tag).filter(Boolean))].sort();
+      // Canonical client list from Turso `client_tags` — a tiny indexed table —
+      // instead of scanning all 245k `replies` rows (which timed out → empty
+      // dropdown). Kept behind the same 5-min cache.
+      const r = await db.execute("SELECT tag FROM client_tags ORDER BY tag");
+      const tags = r.rows.map((x) => String(x.tag)).filter(Boolean);
       const payload = { tags };
       setInboxCache(cacheKey, payload);
       return NextResponse.json(payload);
@@ -150,22 +116,28 @@ export async function GET(req: NextRequest) {
         if (hit) return NextResponse.json(hit);
       }
 
-      // Fast path: one RPC call.
+      // Negative buckets the active view hides from the sidebar.
+      const hidden = new Set(view?.hiddenLeadCategories ?? []);
+
+      // Fast path: one RPC call. Noise + AI-allowlist are index-backed params.
       const { data: rpcRows, error: rpcErr } = await supabase.rpc("inbox_category_counts", {
         p_client_tag: clientTag,
         p_allowed_tags: clientTag ? null : (allowed && allowed.length ? allowed : null),
         p_workflow: workflow,
         p_search: search,
-        p_view: viewParam,
+        p_exclude_noise: !!view?.excludeNoise,
+        p_ai_allowlist: view?.aiCategoryAllowlist ?? null,
       });
 
       if (!rpcErr && Array.isArray(rpcRows)) {
+        // Return only buckets that have rows, minus the view's hidden negatives;
+        // total reflects the visible leads so the header matches the sidebar.
         const counts: Record<string, number> = {};
-        LEAD_CATEGORIES.forEach((cat) => { counts[cat] = 0; });
         let total = 0;
         for (const row of rpcRows as Array<{ lead_category: string; n: number }>) {
+          if (hidden.has(row.lead_category)) continue;
           const n = Number(row.n) || 0;
-          if (row.lead_category in counts) counts[row.lead_category] = n;
+          counts[row.lead_category] = n;
           total += n;
         }
         const payload = { counts, total };
@@ -173,8 +145,9 @@ export async function GET(req: NextRequest) {
         return NextResponse.json(payload);
       }
 
-      // Slow-path fallback: legacy 20-query fan-out. Used only if the RPC
-      // isn't installed (one-time, until the SQL is applied) or if it errors.
+      // Slow-path fallback: per-category COUNT fan-out. Only if the RPC isn't
+      // installed yet or errors. Now cheap — applyView hits the indexed
+      // inbox_is_noise + exact AI-category match, not the old ILIKE chain.
       if (rpcErr) console.warn("[inbox/counts] RPC failed, falling back:", rpcErr.message);
 
       const baseQuery = () => {
@@ -190,10 +163,7 @@ export async function GET(req: NextRequest) {
       const runCount = async (label: string, q: ReturnType<typeof baseQuery>): Promise<number> => {
         try {
           const { count, error } = await q;
-          if (error) {
-            console.error(`[inbox/counts:${label}]`, JSON.stringify(error));
-            return 0;
-          }
+          if (error) { console.error(`[inbox/counts:${label}]`, JSON.stringify(error)); return 0; }
           return count ?? 0;
         } catch (e) {
           console.error(`[inbox/counts:${label}] threw:`, e);
@@ -201,19 +171,16 @@ export async function GET(req: NextRequest) {
         }
       };
 
-      const [totalCount, ...categoryCounts] = await Promise.all([
-        runCount("total", baseQuery()),
-        ...LEAD_CATEGORIES.map((cat) =>
-          runCount(`cat:${cat}`, baseQuery().eq("lead_category", cat))
-        ),
-      ]);
+      const visibleCats = LEAD_CATEGORIES.filter((c) => !hidden.has(c));
+      const categoryCounts = await Promise.all(
+        visibleCats.map((cat) => runCount(`cat:${cat}`, baseQuery().eq("lead_category", cat))),
+      );
 
       const counts: Record<string, number> = {};
-      LEAD_CATEGORIES.forEach((cat, i) => {
-        counts[cat] = categoryCounts[i];
-      });
+      let total = 0;
+      visibleCats.forEach((cat, i) => { counts[cat] = categoryCounts[i]; total += categoryCounts[i]; });
 
-      const payload = { counts, total: totalCount };
+      const payload = { counts, total };
       setInboxCache(cacheKey, payload);
       return NextResponse.json(payload);
     }

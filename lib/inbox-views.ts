@@ -1,26 +1,33 @@
 /**
- * Named inbox views — predefined filter combinations.
- * Each view applies a set of "does not contain" filters and category restrictions
- * so users can quickly switch to a curated lead list.
+ * Named inbox views — predefined filter combinations so operators can switch to
+ * a curated lead list.
+ *
+ * A view is data-driven and read in ONE place each by the counts RPC params and
+ * the leads query (`app/api/inbox/route.ts`) — changing a view here shifts
+ * counts, leads, AND which sidebar buckets show, with no SQL redeploy.
+ *
+ *   • excludeNoise        → only rows with `inbox_is_noise = false` (bounce/auto-
+ *                           reply junk hidden). Noise is precomputed at ingest
+ *                           from `lib/inbox-noise.ts` and stored on the row.
+ *   • aiCategoryAllowlist → the reply's `ai_categorized_lead_category` must be one
+ *                           of these EXACT values (index-friendly; no ILIKE). This
+ *                           is the eligibility filter — it decides which leads are
+ *                           counted/shown, so AI-negative leads can't hide inside a
+ *                           kept bucket like "Open Response".
+ *   • hiddenLeadCategories→ sidebar `lead_category` buckets to HIDE (negatives).
+ *                           Labels for the remaining buckets are kept as-is.
  */
 
 export interface InboxView {
   id: string;
   label: string;
   description?: string;
-  /** Substrings that reply_we_got must NOT contain (case-insensitive) */
-  replyExcludes?: string[];
-  /** Substrings that lead_email must NOT contain (case-insensitive) */
-  leadEmailExcludes?: string[];
-  /** Substrings that to_email must NOT contain (case-insensitive) */
-  toEmailExcludes?: string[];
-  /** Substrings that email_subject must NOT contain (case-insensitive) */
-  emailSubjectExcludes?: string[];
-  /**
-   * AI-categorized lead category must match one of these.
-   * Each rule is either { equals: "X" } (exact match) or { contains: "Y" } (substring).
-   */
-  aiCategoryAny?: Array<{ equals?: string; contains?: string }>;
+  /** Only include rows where inbox_is_noise = false. */
+  excludeNoise?: boolean;
+  /** Reply's ai_categorized_lead_category must be one of these EXACT values. */
+  aiCategoryAllowlist?: string[];
+  /** lead_category buckets to hide from the sidebar (negatives). */
+  hiddenLeadCategories?: string[];
 }
 
 export const INBOX_VIEWS: InboxView[] = [
@@ -32,50 +39,31 @@ export const INBOX_VIEWS: InboxView[] = [
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
-    description: "Curated qualified leads with bounce/auto-reply noise filtered out",
-    replyExcludes: [
-      "could not be delivered",
-      "DMARC",
-      "Error message",
-      "This is the mail system",
-      "automated message",
-      "I wasn't able to",
-      "Failed to deliver",
-      "Permanent fatal",
-      "Permanent error",
-      "couldn't be delivered",
-      "delivery has failed",
-      "temporary problem",
-      "not delivered",
-      "empty response",
-      "please try again",
-      "Error Type",
-      "undeliverable",
-      "address not found",
-      "to postmaster",
-      "message blocked",
-      "Address not reachable",
-      "Delivery Status Notification",
-      "sah28aj19",
+    description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden",
+    excludeNoise: true,
+    // EXACT values from VALID_CATEGORIES in lib/processing/lead-categorizer.ts.
+    aiCategoryAllowlist: [
+      "Interested",
+      "Meeting Request",
+      "Follow Up at a Later Date",
+      "Referral Given",
+      "Internally Forwarded",
+      "Unrecognizable by AI",
     ],
-    leadEmailExcludes: [
-      "inbox",
-      "dmarc",
-      "daemon",
-      "postmaster",
-      "alignable.com",
-      "hyperscale1.site",
-      "voltic",
-    ],
-    toEmailExcludes: ["inbox"],
-    emailSubjectExcludes: ["OutboundHero Cold"],
-    aiCategoryAny: [
-      { equals: "Interested" },
-      { equals: "Meeting Request" },
-      { contains: "Follow Up" },
-      { contains: "Unrecognizable" },
-      { contains: "Referral Given" },
-      { contains: "Quote" },
+    // Negative lead_category buckets hidden from the sidebar. Kept buckets:
+    // Open Response, Interested, Meeting Set, Meeting-Ready Lead, Follow Up,
+    // Referral Given, Internally Forwarded, Closed Won, Needs Review.
+    hiddenLeadCategories: [
+      "Not Interested",
+      "Not Interested (Send Reply)",
+      "Do Not Contact",
+      "Out Of Office",
+      "Wrong Person",
+      "Lost",
+      "Automated Reply",
+      "Mailbox No Longer Active",
+      "Change Of Target",
+      "Unqualified (Cleaning)",
     ],
   },
 ];

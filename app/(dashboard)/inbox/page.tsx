@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
-import { INBOX_VIEWS } from "@/lib/inbox-views";
+import { INBOX_VIEWS, getView } from "@/lib/inbox-views";
 // Pure / no server deps — must NOT import from domain-blacklist (which
 // pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
@@ -80,6 +80,10 @@ export default function InboxPage() {
   const [categoryLeads, setCategoryLeads] = useState<Record<string, ReplyListItem[]>>({});
   const [loadingCat, setLoadingCat] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Per-category pagination cursor for "Load more".
+  const [catPage, setCatPage] = useState<Record<string, { offset: number; hasMore: boolean }>>({});
+  // Guards the one-time auto-expand of the first bucket per filter set.
+  const autoExpandedRef = useRef(false);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
@@ -165,18 +169,22 @@ export default function InboxPage() {
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
-  // Load leads for a specific category
-  async function loadCategoryLeads(cat: string) {
+  // Load leads for a specific category (paginated). `append` pulls the next
+  // page and concatenates; otherwise it loads the first page.
+  async function loadCategoryLeads(cat: string, append = false) {
     setLoadingCat(cat);
     try {
-      const p = new URLSearchParams({ category: cat });
+      const offset = append ? (catPage[cat]?.offset ?? 0) : 0;
+      const p = new URLSearchParams({ category: cat, offset: String(offset), limit: "100" });
       if (search) p.set("search", search);
       if (filterClient) p.set("client_tag", filterClient);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.ok) {
         const d = await res.json();
-        setCategoryLeads((prev) => ({ ...prev, [cat]: d.replies }));
+        const rows: ReplyListItem[] = d.replies || [];
+        setCategoryLeads((prev) => ({ ...prev, [cat]: append ? [...(prev[cat] || []), ...rows] : rows }));
+        setCatPage((prev) => ({ ...prev, [cat]: { offset: offset + rows.length, hasMore: !!d.page?.hasMore } }));
       }
     } catch { /* */ }
     setLoadingCat(null);
@@ -202,22 +210,48 @@ export default function InboxPage() {
   // When filters or view change, clear loaded leads and re-collapse
   useEffect(() => {
     setCategoryLeads({});
+    setCatPage({});
     setExpanded(new Set());
+    autoExpandedRef.current = false;
   }, [search, filterClient, view]);
+
+  // Once counts land, auto-expand + preload the first non-empty bucket so leads
+  // show without a click. Positives are tried first, then whatever remains.
+  useEffect(() => {
+    if (autoExpandedRef.current) return;
+    const keys = Object.keys(counts);
+    if (!keys.length) return;
+    const order = [...POSITIVE_CATEGORIES, "Open Response", ...keys];
+    const first = order.find((c) => (counts[c] || 0) > 0);
+    if (!first) return;
+    autoExpandedRef.current = true;
+    setExpanded(new Set([first]));
+    if (!categoryLeads[first]) loadCategoryLeads(first);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [counts]);
 
   // Realtime: listen for new inserts. Realtime uses the anon key directly
   // (bypasses our /api/inbox auth), so for client-scoped users we MUST
   // drop any row whose client_tag isn't in their allowed list — otherwise
   // their counts and lists would silently leak other clients' inserts.
   useEffect(() => {
+    const activeView = getView(view);
     const channel = realtimeSupabase
       .channel("inbox-realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "replies" }, (payload) => {
-        const newRow = payload.new as ReplyListItem;
+        const newRow = payload.new as ReplyListItem & { inbox_is_noise?: boolean; ai_categorized_lead_category?: string | null };
         if (allowedClientTags && allowedClientTags.length) {
           if (!newRow.client_tag || !allowedClientTags.includes(newRow.client_tag)) return;
         }
+        // Mirror the active view's server-side filter so realtime doesn't add
+        // rows the view would hide (noise, non-allowlisted AI, negative bucket).
+        if (activeView) {
+          if (activeView.excludeNoise && newRow.inbox_is_noise) return;
+          if (activeView.aiCategoryAllowlist?.length &&
+              !activeView.aiCategoryAllowlist.includes(newRow.ai_categorized_lead_category || "")) return;
+        }
         const cat = newRow.lead_category || "Open Response";
+        if (activeView?.hiddenLeadCategories?.includes(cat)) return;
         // Update counts
         setCounts((prev) => ({ ...prev, [cat]: (prev[cat] || 0) + 1 }));
         setTotal((t) => t + 1);
@@ -231,7 +265,7 @@ export default function InboxPage() {
       .subscribe();
 
     return () => { realtimeSupabase.removeChannel(channel); };
-  }, [allowedClientTags]);
+  }, [allowedClientTags, view]);
 
   async function loadDetail(id: number) {
     setSelectedId(id);
@@ -574,6 +608,15 @@ export default function InboxPage() {
                       </div>
                     </button>
                   ))}
+                  {categoryLeads[cat] && catPage[cat]?.hasMore && (
+                    <button
+                      onClick={() => loadCategoryLeads(cat, true)}
+                      disabled={loadingCat === cat}
+                      className="w-full px-3 py-1.5 text-[10px] font-medium text-primary hover:bg-primary/5 border-b disabled:opacity-50"
+                    >
+                      {loadingCat === cat ? "Loading…" : "Load more"}
+                    </button>
+                  )}
                 </>
               )}
             </div>
