@@ -19,6 +19,7 @@ const links: NavLink[] = [
   { href: "/inbox", label: "Inbox (Beta)" },
   { href: "/nurture", label: "Nurture", adminOnly: true },
   { href: "/migrate", label: "Move Leads", adminOnly: true },
+  { href: "/blacklist", label: "Blacklist", adminOnly: true },
   { href: "/qualification", label: "Qualification" },
   { href: "/errors", label: "Error Log", adminOnly: true },
   { href: "/users", label: "User Management", adminOnly: true },
