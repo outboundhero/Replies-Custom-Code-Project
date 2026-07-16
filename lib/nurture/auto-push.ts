@@ -278,7 +278,8 @@ export async function listAutoEnabledClients(): Promise<string[]> {
     sql: `SELECT ct.tag AS client_tag
           FROM client_tags ct
           LEFT JOIN client_config cc ON cc.client_tag = ct.tag
-          WHERE COALESCE(cc.auto_nurture_disabled, 0) = 0`,
+          WHERE COALESCE(cc.auto_nurture_disabled, 0) = 0
+          ORDER BY ct.tag`,
     args: [],
   });
   const tags = res.rows.map((r) => r.client_tag as string);

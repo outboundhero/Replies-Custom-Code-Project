@@ -15,6 +15,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import db from "@/lib/db";
 import { listAutoEnabledClients, runAutoPushForClient } from "@/lib/nurture/auto-push";
 import { autoActivateReadyCampaigns } from "@/lib/nurture/enable-sending";
 import { logActivity, logError } from "@/lib/errors";
@@ -34,7 +35,25 @@ export async function GET(req: NextRequest) {
   }
 
   const startedAt = Date.now();
-  const tags = await listAutoEnabledClients();
+  const allTags = await listAutoEnabledClients();
+
+  // FAIR ROTATION — the 270s budget only covers ~15 clients/tick, but there are
+  // far more enabled. Without rotation the loop restarts from the top every tick,
+  // so the same first ~15 clients get served and everyone later (e.g. #76) starves.
+  // Resume AFTER the last tag we processed and wrap around, so every client gets a
+  // turn across ticks.
+  const CURSOR_KEY = "nurture-auto-push:cursor";
+  let cursor: string | null = null;
+  try {
+    await db.execute("CREATE TABLE IF NOT EXISTS cron_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)");
+    const c = await db.execute({ sql: "SELECT value FROM cron_state WHERE key=?", args: [CURSOR_KEY] });
+    cursor = (c.rows[0]?.value as string) ?? null;
+  } catch { /* first run / table missing → start from the top */ }
+  let start = 0;
+  if (cursor) { const i = allTags.indexOf(cursor); if (i >= 0) start = (i + 1) % allTags.length; }
+  const tags = start ? [...allTags.slice(start), ...allTags.slice(0, start)] : allTags;
+  let lastProcessed: string | null = null;
+
   const summary: Array<{ tag: string; scanned: number; attached: number; buckets: number; errors: number; activated?: number }> = [];
   // Auto-activate mapped campaigns once senders + leads are ready (kill-switch:
   // set NURTURE_AUTO_ACTIVATE=off to disable). Runs per client after its push.
@@ -87,11 +106,25 @@ export async function GET(req: NextRequest) {
       await logError("nurture-auto-push", `fatal:${tag}`, (e as Error).message);
       summary.push({ tag, scanned, attached, buckets, errors: errors + 1 });
     }
+    lastProcessed = tag; // advance the rotation cursor past every client we considered
+  }
+
+  // Persist where we stopped so the next tick resumes after it (wrapping around).
+  if (lastProcessed) {
+    try {
+      await db.execute({
+        sql: "INSERT INTO cron_state (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        args: [CURSOR_KEY, lastProcessed, new Date().toISOString()],
+      });
+    } catch { /* cursor persist is best-effort */ }
   }
 
   await logActivity("nurture-auto-push", "completed", {
     details: {
       clients_processed: summary.length,
+      total_enabled: allTags.length,
+      resumed_after: cursor,
+      stopped_at: lastProcessed,
       total_attached: summary.reduce((s, x) => s + x.attached, 0),
       summary,
     },
