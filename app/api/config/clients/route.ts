@@ -3,6 +3,9 @@ import db from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { getChurnedClients } from "@/lib/churn";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
+import { withCache, nsVersion } from "@/lib/server-cache";
+
+const TTL = 60_000;
 
 // GET /api/config/clients — list all clients with section + config info.
 //
@@ -14,7 +17,20 @@ export async function GET() {
   const denied = await requireAuth();
   if (denied) return denied;
   try {
-    const result = await db.execute(`
+    const rows = await withCache(`config:clients:v${nsVersion("config")}`, TTL, async () => {
+    // All four reads are independent → run them concurrently (Turso is remote,
+    // so 4 sequential awaits was ~4 round trips of latency).
+    const instancesPromise = db
+      .execute("SELECT client_tag, instance_key FROM client_instances")
+      .then((r) => {
+        const m = new Map<string, string>();
+        for (const row of r.rows) m.set(row.client_tag as string, row.instance_key as string);
+        return m;
+      })
+      .catch(() => new Map<string, string>()); // table may not exist pre-migration
+
+    const [result, instanceMap, churned, groupInstances] = await Promise.all([
+      db.execute(`
       SELECT
         ct.id,
         ct.tag,
@@ -39,25 +55,13 @@ export async function GET() {
       JOIN sections s ON ct.section_id = s.id
       LEFT JOIN client_config cc ON cc.client_tag = ct.tag
       ORDER BY s.name, ct.tag
-    `);
+    `),
+      instancesPromise,
+      getChurnedClients(),
+      getAllClientInstances(),
+    ]);
 
-    // Pull the client→instance mapping separately so a missing table
-    // (pre-migration) doesn't blow up the whole client list.
-    const instanceMap = new Map<string, string>();
-    try {
-      const instances = await db.execute("SELECT client_tag, instance_key FROM client_instances");
-      for (const row of instances.rows) {
-        instanceMap.set(row.client_tag as string, row.instance_key as string);
-      }
-    } catch {
-      // Table doesn't exist yet — every client renders as "default" in the UI.
-    }
-
-    // Churn (tag → churn date) + group-native instances, for the Move Leads
-    // "Returning" toggle and the Same Instance default instance suggestion.
-    const churned = await getChurnedClients();
-    const groupInstances = await getAllClientInstances();
-    const rows = result.rows.map((r) => {
+    return result.rows.map((r) => {
       const TAG = String(r.tag).toUpperCase();
       const inst = groupInstances.get(TAG);
       return {
@@ -69,6 +73,7 @@ export async function GET() {
         b2b: inst?.b2b ?? null,
         b2c: inst?.b2c ?? null,
       };
+    });
     });
     return NextResponse.json(rows);
   } catch (error) {

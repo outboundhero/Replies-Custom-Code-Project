@@ -11,10 +11,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
+import { bumpVersion } from "@/lib/server-cache";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
+  bumpVersion("config");
 
   let body: { enabled?: boolean; clientTags?: string[]; sectionIds?: number[] };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }

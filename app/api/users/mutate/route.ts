@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
+import { bumpVersion } from "@/lib/server-cache";
 import supabase from "@/lib/supabase";
 import bcrypt from "bcryptjs";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
+  bumpVersion("users");
 
   try {
     const body = await req.json();

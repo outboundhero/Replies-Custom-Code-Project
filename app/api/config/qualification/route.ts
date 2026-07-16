@@ -2,19 +2,25 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
+import { withCache, nsVersion } from "@/lib/server-cache";
 
 export async function GET() {
   const denied = await requireAuth();
   if (denied) return denied;
 
   try {
-    // Get all client tags with their sections from Turso
-    const sections = await db.execute("SELECT * FROM sections ORDER BY id");
-    const tags = await db.execute("SELECT * FROM client_tags ORDER BY tag");
-
-    // Get qualification data from Supabase
-    const { data: statuses } = await supabase.from("client_status").select("*");
-    const { data: qualifications } = await supabase.from("client_qualifications").select("*");
+    const result = await withCache(`config:qualification:v${nsVersion("config")}`, 60_000, async () => {
+    // Two Turso reads + two Supabase reads, all independent → run concurrently
+    // (was 4 sequential round trips across two backends). Project only the
+    // columns the merge uses instead of select("*").
+    const [sections, tags, statusRes, qualRes] = await Promise.all([
+      db.execute("SELECT id, name, airtable_base_id FROM sections ORDER BY id"),
+      db.execute("SELECT tag, section_id FROM client_tags ORDER BY tag"),
+      supabase.from("client_status").select("client_abbreviation, status, synced_at"),
+      supabase.from("client_qualifications").select("client_abbreviation, exclusion_industries, inclusion_locations, synced_at"),
+    ]);
+    const statuses = statusRes.data;
+    const qualifications = qualRes.data;
 
     const statusMap = new Map((statuses || []).map((s) => [s.client_abbreviation, s]));
     const qualMap = new Map((qualifications || []).map((q) => [q.client_abbreviation, q]));
@@ -44,12 +50,13 @@ export async function GET() {
       });
     }
 
-    const result = sections.rows.map((s) => ({
+    return sections.rows.map((s) => ({
       id: s.id,
       name: s.name,
       airtable_base_id: s.airtable_base_id,
       clients: tagsBySection.get(s.id as number) || [],
     }));
+    });
 
     return NextResponse.json(result);
   } catch (error) {

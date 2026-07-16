@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,24 +30,54 @@ export default function ErrorsPage() {
 
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  const loadErrors = useCallback(async () => {
+  // Highest error id currently shown — the cursor for incremental polling.
+  const lastErrorIdRef = useRef<number | null>(null);
+
+  // Initial (or filter-change) load: a bounded page, newest first.
+  const loadInitial = useCallback(async () => {
     try {
-      let url = "/api/errors?limit=5000";
+      let url = "/api/errors?limit=500";
       if (filter) url += `&workflow=${filter}`;
       const res = await fetch(url);
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
-      if (res.ok) { setErrors(await res.json()); setFetchError(null); }
-      else setFetchError(`Failed to load errors (${res.status})`);
+      if (res.ok) {
+        const rows: ErrorEntry[] = await res.json();
+        setErrors(rows);
+        lastErrorIdRef.current = rows.length ? rows[0].id : 0; // id DESC → first is max
+        setFetchError(null);
+      } else setFetchError(`Failed to load errors (${res.status})`);
     } catch (err) {
       setFetchError(`Network error: ${(err as Error).message}`);
     }
   }, [filter]);
 
+  // Poll: fetch only rows newer than the last one shown and prepend them, instead
+  // of re-downloading the whole list every 3s.
+  const pollErrors = useCallback(async () => {
+    if (lastErrorIdRef.current == null) return; // wait for the initial load
+    try {
+      let url = `/api/errors?limit=500&since=${lastErrorIdRef.current}`;
+      if (filter) url += `&workflow=${filter}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const rows: ErrorEntry[] = await res.json();
+      if (rows.length) {
+        lastErrorIdRef.current = rows[0].id; // new max (id DESC)
+        setErrors((prev) => {
+          const seen = new Set(prev.map((e) => e.id));
+          const fresh = rows.filter((r) => !seen.has(r.id));
+          return [...fresh, ...prev].slice(0, 2000);
+        });
+      }
+    } catch { /* transient — next tick retries */ }
+  }, [filter]);
+
   useEffect(() => {
-    loadErrors();
-    const interval = setInterval(loadErrors, 3000);
+    lastErrorIdRef.current = null; // reset the cursor when the filter changes
+    loadInitial();
+    const interval = setInterval(pollErrors, 3000);
     return () => clearInterval(interval);
-  }, [loadErrors]);
+  }, [loadInitial, pollErrors]);
 
   async function deleteError(id: number) {
     await fetch("/api/errors/mutate", {
@@ -55,7 +85,7 @@ export default function ErrorsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "delete", id }),
     });
-    loadErrors();
+    loadInitial();
   }
 
   async function clearAll() {
@@ -65,7 +95,7 @@ export default function ErrorsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "delete" }),
     });
-    loadErrors();
+    loadInitial();
   }
 
   async function retryError(id: number) {
@@ -80,7 +110,7 @@ export default function ErrorsPage() {
       const data = await res.json();
       if (res.ok) {
         setRetryResult({ id, success: true, message: "Retry successful!" });
-        loadErrors();
+        loadInitial();
       } else {
         setRetryResult({ id, success: false, message: data.error || "Retry failed" });
       }
@@ -134,7 +164,7 @@ export default function ErrorsPage() {
 
     setRetryingAll(false);
     setTimeout(() => setRetryAllProgress(null), 5000);
-    loadErrors();
+    loadInitial();
   }
 
   const retryableCount = errors.filter(hasRetryPayload).length;

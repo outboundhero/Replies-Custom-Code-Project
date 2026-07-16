@@ -10,7 +10,7 @@
  */
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
-import { listCampaigns } from "@/lib/outboundhero-api";
+import { listCampaignsCached as listCampaigns } from "@/lib/outboundhero-api";
 import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { getServiceArea } from "@/lib/service-area";

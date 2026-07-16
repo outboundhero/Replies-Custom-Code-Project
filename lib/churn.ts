@@ -8,6 +8,7 @@
 import db from "@/lib/db";
 
 let cache: { set: Set<string>; ts: number } | null = null;
+let clientsCache: { map: Map<string, string | null>; ts: number } | null = null;
 const TTL_MS = 5 * 60 * 1000;
 
 export async function getChurnedTags(): Promise<Set<string>> {
@@ -23,7 +24,7 @@ export async function getChurnedTags(): Promise<Set<string>> {
   return set;
 }
 
-export function invalidateChurnCache() { cache = null; }
+export function invalidateChurnCache() { cache = null; clientsCache = null; }
 
 /** True when this tag is a churned client (case-insensitive). */
 export async function isChurned(tag: string | null | undefined): Promise<boolean> {
@@ -38,10 +39,12 @@ export async function isChurned(tag: string | null | undefined): Promise<boolean
  * missing so it always returns the full churned set.
  */
 export async function getChurnedClients(): Promise<Map<string, string | null>> {
+  if (clientsCache && Date.now() - clientsCache.ts < TTL_MS) return clientsCache.map;
   const map = new Map<string, string | null>();
   try {
     const res = await db.execute("SELECT client_tag, churn_date FROM churned_clients");
     for (const r of res.rows) map.set(String(r.client_tag).toUpperCase(), (r.churn_date as string) ?? null);
+    clientsCache = { map, ts: Date.now() };
     return map;
   } catch {
     try {

@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
+import { bumpVersion } from "@/lib/server-cache";
 import { syncAll } from "@/lib/sync/sheets-to-supabase";
 
 export async function POST() {
   const denied = await requireAuth();
   if (denied) return denied;
+  bumpVersion("config");
 
   try {
     const result = await syncAll();

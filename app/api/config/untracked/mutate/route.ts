@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
+import { bumpVersion } from "@/lib/server-cache";
 
 // POST — update untracked config (action: "update")
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
   if (denied) return denied;
+  bumpVersion("config");
   try {
     const body = await req.json();
     const { action, airtable_base_id, airtable_table_id, clay_webhook_url } = body;

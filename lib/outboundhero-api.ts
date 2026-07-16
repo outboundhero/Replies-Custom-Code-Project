@@ -11,6 +11,7 @@
  */
 
 import { getInstanceConfig } from "@/lib/bison-instances";
+import { withCache } from "@/lib/server-cache";
 
 function buildHeaders(token: string) {
   return {
@@ -271,6 +272,21 @@ export async function listCampaigns(
     return Array.from(byId.values());
   }
   return listCampaignsForStatus(instanceKey, undefined, opts);
+}
+
+/**
+ * 60s-cached wrapper around listCampaigns. Bison campaign lists barely change
+ * within a planning session, but the Move Leads picker re-pulls them (6 statuses
+ * × 2 instances) on every Plan / client-select. This makes re-planning the same
+ * client instant while the first pull still hits Bison. Keyed by instance +
+ * search + statuses so different clients/instances don't collide.
+ */
+export function listCampaignsCached(
+  instanceKey: string,
+  opts?: { nameContains?: string; statuses?: string[]; search?: string },
+): Promise<OutboundCampaign[]> {
+  const key = `bison:campaigns:${instanceKey}:${opts?.search || ""}:${(opts?.statuses || []).join(",")}:${opts?.nameContains || ""}`;
+  return withCache(key, 60_000, () => listCampaigns(instanceKey, opts));
 }
 
 async function listCampaignsForStatus(

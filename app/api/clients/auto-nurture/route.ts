@@ -12,10 +12,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
+import { bumpVersion } from "@/lib/server-cache";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
+  bumpVersion("config");
 
   let body: { clientTag?: string; enabled?: boolean };
   try {

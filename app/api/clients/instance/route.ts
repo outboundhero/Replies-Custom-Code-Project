@@ -16,12 +16,16 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
-import { requireAdmin, getSession } from "@/lib/auth";
+import { getSession } from "@/lib/auth";
 import { isValidInstance, invalidateInstanceCache } from "@/lib/bison-instances";
+import { bumpVersion } from "@/lib/server-cache";
 
 export async function POST(req: NextRequest) {
-  const denied = await requireAdmin();
-  if (denied) return denied;
+  // Single session read (was requireAdmin() + getSession() = two JWT verifies).
+  const session = await getSession();
+  if (!session || session.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden — admin only" }, { status: 403 });
+  }
 
   try {
     const body = await req.json();
@@ -35,8 +39,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Unknown instance_key: ${instanceKey}` }, { status: 400 });
     }
 
-    const session = await getSession();
     const updatedBy = session?.email ?? "admin";
+    bumpVersion("config");
 
     await db.execute({
       sql: `INSERT INTO client_instances (client_tag, instance_key, updated_at, updated_by)

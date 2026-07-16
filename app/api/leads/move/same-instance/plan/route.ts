@@ -11,7 +11,7 @@
  */
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
-import { listCampaigns } from "@/lib/outboundhero-api";
+import { listCampaignsCached as listCampaigns } from "@/lib/outboundhero-api";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { getClientInstances } from "@/lib/nurture/group-routing";
