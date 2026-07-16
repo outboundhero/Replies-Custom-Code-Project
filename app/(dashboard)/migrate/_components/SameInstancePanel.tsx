@@ -7,7 +7,7 @@
  * line per destination it fed, with live counts.
  */
 import { useMemo } from "react";
-import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, RotateCw } from "lucide-react";
+import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, RotateCw, Clock } from "lucide-react";
 
 export type SameMoveStep = "queued" | "moving" | "retrying" | "done" | "error" | "skipped";
 
@@ -29,7 +29,7 @@ export interface SameSourceRow {
 }
 
 export interface SameInstanceState {
-  status: "running" | "done";
+  status: "queued" | "running" | "done";
   clientTag: string;
   b2bLabel: string;
   b2cLabel: string;
@@ -51,6 +51,7 @@ export default function SameInstancePanel({
   onRetry: (campaignId: number) => void;
 }) {
   const { rows, clientTag } = state;
+  const queued = state.status === "queued";
   const total = rows.length;
   const done = rows.filter((r) => r.state === "done" || r.state === "error" || r.state === "skipped").length;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -74,17 +75,17 @@ export default function SameInstancePanel({
   return (
     <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-3 border-b">
-        <span className={`grid place-items-center size-8 rounded-lg ${running ? "bg-emerald-100 text-emerald-700" : tally.errored ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
-          {running ? <Loader2 className="size-4 animate-spin" /> : tally.errored ? <AlertTriangle className="size-4" /> : <Check className="size-4" />}
+        <span className={`grid place-items-center size-8 rounded-lg ${queued ? "bg-slate-100 text-slate-500" : running ? "bg-emerald-100 text-emerald-700" : tally.errored ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
+          {queued ? <Clock className="size-4" /> : running ? <Loader2 className="size-4 animate-spin" /> : tally.errored ? <AlertTriangle className="size-4" /> : <Check className="size-4" />}
         </span>
         <div className="min-w-0">
           <p className="text-sm font-semibold flex items-center gap-1.5">
-            {running ? "Moving leads…" : "Move complete"}
+            {queued ? "Queued — waiting to start" : running ? "Moving leads…" : "Move complete"}
             <span className="text-muted-foreground font-normal text-xs">· <span className="font-mono">{clientTag}</span> · {state.b2bLabel} + {state.b2cLabel}</span>
           </p>
-          <p className="text-xs text-muted-foreground tabular-nums">{done} / {total} campaigns</p>
+          <p className="text-xs text-muted-foreground tabular-nums">{queued ? `${total} campaigns · waiting` : `${done} / ${total} campaigns`}</p>
         </div>
-        <div className="ml-auto hidden md:flex items-center gap-3 text-xs">
+        <div className={`ml-auto hidden md:flex items-center gap-3 text-xs ${queued ? "invisible" : ""}`}>
           <Stat n={tally.moved} label="moved" tone="emerald" />
           <Stat n={tally.b2b} label="→ B2B" tone="indigo" />
           <Stat n={tally.b2c} label="→ B2C" tone="amber2" />
@@ -95,12 +96,14 @@ export default function SameInstancePanel({
         </div>
         {running ? (
           <button onClick={onStop} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50"><Square className="size-3" /> Stop</button>
+        ) : queued ? (
+          <button onClick={onStop} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50" title="Remove from queue"><X className="size-3" /> Cancel</button>
         ) : (
           <button onClick={onClose} className="grid place-items-center size-8 rounded-md hover:bg-muted/50" title="Dismiss"><X className="size-4" /></button>
         )}
       </div>
       <div className="h-1 bg-muted">
-        <div className={`h-full transition-all duration-300 ${tally.errored ? "bg-rose-500" : running ? "bg-emerald-500" : "bg-slate-400"}`} style={{ width: `${pct}%` }} />
+        <div className={`h-full transition-all duration-300 ${queued ? "bg-slate-300" : tally.errored ? "bg-rose-500" : running ? "bg-emerald-500" : "bg-slate-400"}`} style={{ width: `${queued ? 0 : pct}%` }} />
       </div>
 
       <div className="max-h-[46vh] overflow-auto p-3 grid grid-cols-1 xl:grid-cols-2 gap-2">

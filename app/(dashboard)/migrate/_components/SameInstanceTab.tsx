@@ -23,6 +23,23 @@ interface PlanCampaign { id: number; name: string; status: string; esp: Esp; tot
 interface Job { campaignId: number; name: string; esp: Esp; sourceInstance: string; sourceSlot: string; totalLeads: number }
 type DestMap = { b2b: Partial<Record<Esp, number>>; b2c: Partial<Record<Esp, number>> };
 
+// One client move in the serial queue. Its run params (dest/names/jobs/instances/
+// serviceAreaFilter/runId) are FROZEN at enqueue time so nothing mixes between
+// clients, and `state` drives its own progress panel.
+type MoveStatus = "queued" | "running" | "done";
+interface MoveEntry {
+  runId: string;
+  status: MoveStatus;
+  clientTag: string;
+  b2bInstance: string;
+  b2cInstance: string;
+  dest: DestMap;
+  names: Map<string, string>;
+  jobs: Job[];
+  serviceAreaFilter: boolean;
+  state: SameInstanceState;
+}
+
 const ESP_LABEL: Record<Esp, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
 const ESPS: Esp[] = ["google", "outlook", "segs"];
 const CAMPAIGN_CONCURRENCY = 3;
@@ -55,16 +72,30 @@ export default function SameInstanceTab() {
 
   const [sources, setSources] = useState<Set<number>>(new Set());
   const [destinations, setDestinations] = useState<Set<number>>(new Set());
-  const [migration, setMigration] = useState<SameInstanceState | null>(null);
-  const [running, setRunning] = useState(false);
+  const [moves, setMoves] = useState<MoveEntry[]>([]);
   const [serviceAreaFilter, setServiceAreaFilter] = useState(true);
-  const abortRef = useRef(false);
+  const movesRef = useRef<MoveEntry[]>([]);                    // authoritative queue (state mirrors it)
+  const chainRef = useRef<Promise<void>>(Promise.resolve());   // serial executor — ONE move at a time
+  const abortRef = useRef(false);                              // aborts the currently-executing move
   const abortCtlRef = useRef<AbortController | null>(null);
-  const jobsRef = useRef<Map<number, Job>>(new Map());
-  const destRef = useRef<{ dest: DestMap; names: Map<string, string> }>({ dest: { b2b: {}, b2c: {} }, names: new Map() });
-  const runIdRef = useRef<string | null>(null);
 
-  const stopMove = useCallback(() => { abortRef.current = true; abortCtlRef.current?.abort(); }, []);
+  // Update the queue state + ref together so the serial executor always reads fresh data.
+  const setMovesSynced = useCallback((updater: (prev: MoveEntry[]) => MoveEntry[]) => {
+    movesRef.current = updater(movesRef.current);
+    setMoves(movesRef.current);
+  }, []);
+
+  // Stop a RUNNING move (abort in-flight requests) or cancel a QUEUED one (remove it).
+  const stopMove = useCallback((runId: string) => {
+    const entry = movesRef.current.find((m) => m.runId === runId);
+    if (!entry) return;
+    if (entry.status === "running") { abortRef.current = true; abortCtlRef.current?.abort(); }
+    else if (entry.status === "queued") setMovesSynced((prev) => prev.filter((m) => m.runId !== runId));
+  }, [setMovesSynced]);
+
+  const closeMove = useCallback((runId: string) => {
+    setMovesSynced((prev) => prev.filter((m) => m.runId !== runId));
+  }, [setMovesSynced]);
   const abortableSleep = useCallback((ms: number) => new Promise<void>((resolve) => {
     if (abortRef.current) return resolve();
     const t = setTimeout(resolve, ms);
@@ -151,104 +182,145 @@ export default function SameInstanceTab() {
     return { errors, warnings, jobs, skipped, destByKey, leadsToMove };
   }, [sources, destinations, campMap]);
 
-  // ── Driver ──
-  const patchRow = useCallback((campaignId: number, patch: Partial<SameSourceRow> | ((r: SameSourceRow) => Partial<SameSourceRow>)) => {
-    setMigration((m) => m && { ...m, rows: m.rows.map((r) => (r.campaignId === campaignId ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) });
-  }, []);
+  // ── Driver (serial queue: exactly one move executes at a time) ──
+  const patchRow = useCallback((runId: string, campaignId: number, patch: Partial<SameSourceRow> | ((r: SameSourceRow) => Partial<SameSourceRow>)) => {
+    setMovesSynced((prev) => prev.map((m) => (m.runId !== runId ? m : {
+      ...m,
+      state: { ...m.state, rows: m.state.rows.map((r) => (r.campaignId === campaignId ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) },
+    })));
+  }, [setMovesSynced]);
 
-  async function postMoveWithRetry(campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedByKey: Record<string, number>; skipped: number; skippedArea: number; done: boolean; nextCursor: string | null }; error?: string }> {
+  const setEntryStatus = useCallback((runId: string, status: MoveStatus) => {
+    setMovesSynced((prev) => prev.map((m) => (m.runId !== runId ? m : { ...m, status, state: { ...m.state, status } })));
+  }, [setMovesSynced]);
+
+  async function postMoveWithRetry(runId: string, campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedByKey: Record<string, number>; skipped: number; skippedArea: number; done: boolean; nextCursor: string | null }; error?: string }> {
     const MAX = 5;
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
       try {
         const res = await fetch("/api/leads/move/same-instance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: abortCtlRef.current?.signal });
-        if (res.ok) { patchRow(campaignId, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
+        if (res.ok) { patchRow(runId, campaignId, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
         const err = await res.json().catch(() => ({}));
         if (res.status !== 429 && res.status < 500) return { ok: false, error: err.error || `HTTP ${res.status}` };
       } catch { if (abortRef.current) return { ok: false, error: "stopped" }; }
       if (attempt < MAX) {
         const wait = Math.min(20000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
-        patchRow(campaignId, (r) => ({ state: "retrying", retryAttempt: attempt, retries: r.retries + 1 }));
+        patchRow(runId, campaignId, (r) => ({ state: "retrying", retryAttempt: attempt, retries: r.retries + 1 }));
         await abortableSleep(wait);
       }
     }
     return { ok: false, error: "failed after 5 retries" };
   }
 
-  async function moveOne(job: Job) {
+  async function moveOne(entry: MoveEntry, job: Job) {
     if (abortRef.current) return;
-    patchRow(job.campaignId, { state: "moving", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined });
+    patchRow(entry.runId, job.campaignId, { state: "moving", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined });
     const acc: Record<string, number> = {};
     let sk = 0, ska = 0;
     let cursor: string | null = null;
     for (;;) {
-      if (abortRef.current) { patchRow(job.campaignId, { state: "error", error: "stopped" }); return; }
-      const r = await postMoveWithRetry(job.campaignId, {
-        clientTag: client!.tag, sourceInstance: job.sourceInstance, sourceCampaignId: job.campaignId, sourceCampaignName: job.name,
-        b2bInstance, b2cInstance, dest: destRef.current.dest, cursor,
-        serviceAreaFilter, runId: runIdRef.current,
+      if (abortRef.current) { patchRow(entry.runId, job.campaignId, { state: "error", error: "stopped" }); return; }
+      const r = await postMoveWithRetry(entry.runId, job.campaignId, {
+        clientTag: entry.clientTag, sourceInstance: job.sourceInstance, sourceCampaignId: job.campaignId, sourceCampaignName: job.name,
+        b2bInstance: entry.b2bInstance, b2cInstance: entry.b2cInstance, dest: entry.dest, cursor,
+        serviceAreaFilter: entry.serviceAreaFilter, runId: entry.runId,
       });
-      if (!r.ok) { patchRow(job.campaignId, { state: "error", error: r.error }); return; }
+      if (!r.ok) { patchRow(entry.runId, job.campaignId, { state: "error", error: r.error }); return; }
       for (const [k, n] of Object.entries(r.data!.movedByKey || {})) acc[k] = (acc[k] || 0) + n;
       sk += r.data!.skipped || 0;
       ska += r.data!.skippedArea || 0;
-      const buckets = Object.entries(acc).map(([key, moved]) => { const [lane, esp] = key.split(":"); return { key, lane: lane as Lane, esp, destName: destRef.current.names.get(key) || "", moved }; });
+      const buckets = Object.entries(acc).map(([key, moved]) => { const [lane, esp] = key.split(":"); return { key, lane: lane as Lane, esp, destName: entry.names.get(key) || "", moved }; });
       const moved = Object.values(acc).reduce((a, b) => a + b, 0);
-      patchRow(job.campaignId, { moved, skipped: sk, skippedArea: ska, buckets, state: "moving" });
+      patchRow(entry.runId, job.campaignId, { moved, skipped: sk, skippedArea: ska, buckets, state: "moving" });
       if (r.data!.done || !r.data!.nextCursor) break;
       cursor = r.data!.nextCursor;
     }
-    patchRow(job.campaignId, { state: "done" });
+    patchRow(entry.runId, job.campaignId, { state: "done" });
   }
 
-  async function runMove() {
-    if (running || !client) return;
+  // Run ONE whole client move to completion. Called only from the serial chain,
+  // so exactly one runs at a time — no cross-client mixing.
+  async function executeMove(runId: string) {
+    const entry = movesRef.current.find((m) => m.runId === runId);
+    if (!entry) return; // cancelled while queued
+    abortRef.current = false;
+    abortCtlRef.current = new AbortController();
+    setEntryStatus(runId, "running");
+    try {
+      await pool(entry.jobs, CAMPAIGN_CONCURRENCY, (job) => moveOne(entry, job));
+    } finally {
+      setEntryStatus(runId, "done");
+    }
+    if (!abortRef.current) toast.success(`${entry.clientTag}: move finished — sources unchanged (copy-only).`);
+  }
+
+  // Append a unit of work to the serial chain — guarantees one-at-a-time ordering.
+  function runExclusive(fn: () => Promise<void>) {
+    chainRef.current = chainRef.current.then(fn, fn).catch(() => {});
+  }
+
+  function enqueueMove() {
+    if (!client) return;
     if (plan.errors.length) { toast.error(plan.errors[0]); return; }
     if (!plan.jobs.length) { toast.error("Select at least one source campaign that has a matching-ESP destination."); return; }
 
-    // New run id — tags this run's service-area-skipped leads for the viewer/export.
-    runIdRef.current = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}`;
-
-    // Freeze the destination map + names for the run.
+    // Freeze EVERY run parameter now, so later client selections can't leak in.
+    const runId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
     const dest: DestMap = { b2b: {}, b2c: {} };
     const names = new Map<string, string>();
     for (const [key, c] of plan.destByKey) { const [lane, esp] = key.split(":") as [Lane, Esp]; dest[lane][esp] = c.id; names.set(key, c.name); }
-    destRef.current = { dest, names };
 
-    jobsRef.current = new Map(plan.jobs.map((j) => [j.campaignId, j]));
     const rows: SameSourceRow[] = [
       ...plan.jobs.map((j) => ({ campaignId: j.campaignId, name: j.name, esp: j.esp, sourceSlot: j.sourceSlot, totalLeads: j.totalLeads, moved: 0, skipped: 0, skippedArea: 0, buckets: [], state: "queued" as const, retries: 0 })),
       ...plan.skipped.map((c) => ({ campaignId: c.id, name: c.name, esp: c.esp, sourceSlot: slot(c.instance), totalLeads: c.total_leads, moved: 0, skipped: c.total_leads, skippedArea: 0, buckets: [], state: "skipped" as const, retries: 0 })),
     ];
-    setMigration({ status: "running", clientTag: client.tag, b2bLabel: slot(b2bInstance), b2cLabel: slot(b2cInstance), rows });
-    setRunning(true);
-    abortRef.current = false;
-    abortCtlRef.current = new AbortController();
-    await pool(plan.jobs, CAMPAIGN_CONCURRENCY, moveOne);
-    setMigration((m) => m && { ...m, status: "done" });
-    setRunning(false);
-    toast.success("Move finished — source campaigns are unchanged (copy-only).");
+    const entry: MoveEntry = {
+      runId, status: "queued", clientTag: client.tag, b2bInstance, b2cInstance,
+      dest, names, jobs: plan.jobs.slice(), serviceAreaFilter,
+      state: { status: "queued", clientTag: client.tag, b2bLabel: slot(b2bInstance), b2cLabel: slot(b2cInstance), rows },
+    };
+    setMovesSynced((prev) => [...prev, entry]);
+    runExclusive(() => executeMove(runId));
+    const active = movesRef.current.filter((m) => m.status === "queued" || m.status === "running").length;
+    toast.success(active > 1 ? `${client.tag} queued — position ${active}.` : `${client.tag} started.`);
   }
 
-  async function retryCampaign(campaignId: number) {
-    const job = jobsRef.current.get(campaignId); if (!job) return;
-    abortRef.current = false;
-    abortCtlRef.current = new AbortController();
-    setRunning(true);
-    patchRow(campaignId, { state: "queued", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined, retryAttempt: null });
-    await moveOne(job);
-    setRunning(false);
+  // Retry one failed source campaign — also serialized through the chain so it
+  // never runs alongside another client's move.
+  function retryCampaign(runId: string, campaignId: number) {
+    runExclusive(async () => {
+      const entry = movesRef.current.find((m) => m.runId === runId);
+      if (!entry) return;
+      const job = entry.jobs.find((j) => j.campaignId === campaignId);
+      if (!job) return;
+      abortRef.current = false;
+      abortCtlRef.current = new AbortController();
+      setEntryStatus(runId, "running");
+      patchRow(runId, campaignId, { state: "queued", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined, retryAttempt: null });
+      try { await moveOne(entry, job); } finally { setEntryStatus(runId, "done"); }
+    });
   }
 
-  const exportSkipped = useCallback(() => {
-    const rid = runIdRef.current;
-    if (!rid) return;
-    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(rid)}`, "_blank");
+  const exportSkipped = useCallback((runId: string) => {
+    if (!runId) return;
+    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(runId)}`, "_blank");
   }, []);
 
   const lanes: Array<{ lane: Lane; instance: string; label: string }> = [];
   if (b2bInstance) lanes.push({ lane: "b2b", instance: b2bInstance, label: `${slot(b2bInstance)} · ${getInstanceLabel(b2bInstance)}` });
   if (b2cInstance) lanes.push({ lane: "b2c", instance: b2cInstance, label: `${slot(b2cInstance)} · ${getInstanceLabel(b2cInstance)}` });
+
+  // A move is queued or running → the button label flips to "Queue".
+  const anyActive = moves.some((m) => m.status === "running" || m.status === "queued");
+
+  // Show running first, then queued (in order), then done — active work stays on
+  // top. Stable sort keeps enqueue order within each group; keyed by runId so
+  // reordering never remounts a panel.
+  const orderedMoves = useMemo(() => {
+    const rank = (s: MoveStatus) => (s === "running" ? 0 : s === "queued" ? 1 : 2);
+    return [...moves].sort((a, b) => rank(a.status) - rank(b.status));
+  }, [moves]);
 
   return (
     <div className="space-y-4">
@@ -286,15 +358,24 @@ export default function SameInstanceTab() {
         {planError && <p className="text-xs text-amber-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {planError}</p>}
       </div>
 
-      {/* Live panel */}
-      {migration && (
-        <div className="sticky top-2 z-20">
-          <SameInstancePanel state={migration} running={running} onStop={stopMove} onClose={() => setMigration(null)} onRetry={retryCampaign} />
+      {/* Move queue — one panel per client. ONE runs at a time; the rest show
+          "queued" and auto-start in order (no cross-client mixing). */}
+      {orderedMoves.length > 0 && (
+        <div className="space-y-3">
+          {orderedMoves.map((m) => (
+            <div key={m.runId} className="space-y-2">
+              <SameInstancePanel
+                state={m.state}
+                running={m.status === "running"}
+                onStop={() => stopMove(m.runId)}
+                onClose={() => closeMove(m.runId)}
+                onRetry={(cid) => retryCampaign(m.runId, cid)}
+              />
+              {m.status !== "queued" && <SkippedViewer runId={m.runId} onExport={() => exportSkipped(m.runId)} />}
+            </div>
+          ))}
         </div>
       )}
-
-      {/* Service-area skipped viewer + CSV export for the current run */}
-      {migration && <SkippedViewer runId={runIdRef.current} onExport={exportSkipped} />}
 
       {/* Campaign selection */}
       {campaigns && campaigns.length > 0 && (
@@ -351,7 +432,7 @@ export default function SameInstanceTab() {
               </div>
             )}
             <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
-              <input type="checkbox" checked={serviceAreaFilter} disabled={running} onChange={(e) => setServiceAreaFilter(e.target.checked)} className="size-4 rounded border-muted-foreground/40" />
+              <input type="checkbox" checked={serviceAreaFilter} onChange={(e) => setServiceAreaFilter(e.target.checked)} className="size-4 rounded border-muted-foreground/40" />
               <MapPin className="size-3.5 text-muted-foreground" />
               <span className="font-medium">Service-area filter</span>
               <span className="text-xs text-muted-foreground font-normal">
@@ -365,8 +446,8 @@ export default function SameInstanceTab() {
                 {plan.jobs.length} source{plan.jobs.length === 1 ? "" : "s"} · <span className="text-foreground font-semibold">{plan.leadsToMove.toLocaleString()}</span> leads
                 {plan.skipped.length > 0 && <span className="text-amber-600"> · {plan.skipped.length} skipped (no ESP dest)</span>}
               </span>
-              <button onClick={runMove} disabled={running || plan.errors.length > 0 || plan.jobs.length === 0} className="ml-auto inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-                {running ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />} Move {plan.leadsToMove > 0 ? plan.leadsToMove.toLocaleString() : ""} leads
+              <button onClick={enqueueMove} disabled={plan.errors.length > 0 || plan.jobs.length === 0} className="ml-auto inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                <Zap className="size-3.5" /> {anyActive ? "Queue" : "Move"} {plan.leadsToMove > 0 ? plan.leadsToMove.toLocaleString() : ""} leads
               </button>
             </div>
           </div>
