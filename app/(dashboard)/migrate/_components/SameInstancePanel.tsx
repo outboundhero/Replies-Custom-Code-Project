@@ -20,6 +20,7 @@ export interface SameSourceRow {
   totalLeads: number;
   moved: number;            // total across buckets
   skipped: number;          // leads whose (lane, ESP) had no destination
+  skippedArea: number;      // leads skipped by the service-area filter
   buckets: SameBucket[];    // one per destination fed
   state: SameMoveStep;
   retries: number;
@@ -55,14 +56,14 @@ export default function SameInstancePanel({
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   const tally = useMemo(() => {
-    let b2b = 0, b2c = 0, retries = 0, errored = 0, doneN = 0, skipped = 0;
+    let b2b = 0, b2c = 0, retries = 0, errored = 0, doneN = 0, skipped = 0, skippedArea = 0;
     for (const r of rows) {
-      retries += r.retries; skipped += r.skipped;
+      retries += r.retries; skipped += r.skipped; skippedArea += r.skippedArea;
       for (const bk of r.buckets) { if (bk.lane === "b2c") b2c += bk.moved; else b2b += bk.moved; }
       if (r.state === "error") errored++;
       if (r.state === "done") doneN++;
     }
-    return { b2b, b2c, moved: b2b + b2c, retries, errored, doneN, skipped };
+    return { b2b, b2c, moved: b2b + b2c, retries, errored, doneN, skipped, skippedArea };
   }, [rows]);
 
   const ordered = useMemo(() => {
@@ -89,6 +90,7 @@ export default function SameInstancePanel({
           <Stat n={tally.b2c} label="→ B2C" tone="amber2" />
           {tally.retries > 0 && <Stat n={tally.retries} label="retries" tone="amber" />}
           {tally.skipped > 0 && <Stat n={tally.skipped} label="skipped" tone="amber" />}
+          {tally.skippedArea > 0 && <Stat n={tally.skippedArea} label="out of area" tone="amber" />}
           {tally.errored > 0 && <Stat n={tally.errored} label="errors" tone="rose" />}
         </div>
         {running ? (
@@ -174,6 +176,7 @@ function SourceCard({ r, onRetry }: { r: SameSourceRow; onRetry: (campaignId: nu
           <>
             <span className={active ? "text-emerald-700 font-medium" : ""}>{STEP_LABEL[r.state]}</span>
             {r.skipped > 0 && <span className="text-amber-600">· {r.skipped.toLocaleString()} skipped (no dest)</span>}
+            {r.skippedArea > 0 && <span className="text-amber-600">· {r.skippedArea.toLocaleString()} out of area</span>}
             {r.retries > 0 && r.state !== "done" && <span className="text-amber-600">· {r.retries} retries</span>}
           </>
         )}

@@ -10,9 +10,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, Loader2, Zap, AlertTriangle, UserX } from "lucide-react";
+import { Search, Loader2, Zap, AlertTriangle, UserX, MapPin } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 import SameInstancePanel, { type SameInstanceState, type SameSourceRow } from "./SameInstancePanel";
+import { SkippedViewer } from "./SkippedViewer";
 
 type Esp = "google" | "outlook" | "segs";
 type Lane = "b2b" | "b2c";
@@ -56,10 +57,12 @@ export default function SameInstanceTab() {
   const [destinations, setDestinations] = useState<Set<number>>(new Set());
   const [migration, setMigration] = useState<SameInstanceState | null>(null);
   const [running, setRunning] = useState(false);
+  const [serviceAreaFilter, setServiceAreaFilter] = useState(true);
   const abortRef = useRef(false);
   const abortCtlRef = useRef<AbortController | null>(null);
   const jobsRef = useRef<Map<number, Job>>(new Map());
   const destRef = useRef<{ dest: DestMap; names: Map<string, string> }>({ dest: { b2b: {}, b2c: {} }, names: new Map() });
+  const runIdRef = useRef<string | null>(null);
 
   const stopMove = useCallback(() => { abortRef.current = true; abortCtlRef.current?.abort(); }, []);
   const abortableSleep = useCallback((ms: number) => new Promise<void>((resolve) => {
@@ -153,7 +156,7 @@ export default function SameInstanceTab() {
     setMigration((m) => m && { ...m, rows: m.rows.map((r) => (r.campaignId === campaignId ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) });
   }, []);
 
-  async function postMoveWithRetry(campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedByKey: Record<string, number>; skipped: number; done: boolean; nextCursor: string | null }; error?: string }> {
+  async function postMoveWithRetry(campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedByKey: Record<string, number>; skipped: number; skippedArea: number; done: boolean; nextCursor: string | null }; error?: string }> {
     const MAX = 5;
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
@@ -174,22 +177,24 @@ export default function SameInstanceTab() {
 
   async function moveOne(job: Job) {
     if (abortRef.current) return;
-    patchRow(job.campaignId, { state: "moving", moved: 0, skipped: 0, buckets: [], error: undefined });
+    patchRow(job.campaignId, { state: "moving", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined });
     const acc: Record<string, number> = {};
-    let sk = 0;
+    let sk = 0, ska = 0;
     let cursor: string | null = null;
     for (;;) {
       if (abortRef.current) { patchRow(job.campaignId, { state: "error", error: "stopped" }); return; }
       const r = await postMoveWithRetry(job.campaignId, {
         clientTag: client!.tag, sourceInstance: job.sourceInstance, sourceCampaignId: job.campaignId, sourceCampaignName: job.name,
         b2bInstance, b2cInstance, dest: destRef.current.dest, cursor,
+        serviceAreaFilter, runId: runIdRef.current,
       });
       if (!r.ok) { patchRow(job.campaignId, { state: "error", error: r.error }); return; }
       for (const [k, n] of Object.entries(r.data!.movedByKey || {})) acc[k] = (acc[k] || 0) + n;
       sk += r.data!.skipped || 0;
+      ska += r.data!.skippedArea || 0;
       const buckets = Object.entries(acc).map(([key, moved]) => { const [lane, esp] = key.split(":"); return { key, lane: lane as Lane, esp, destName: destRef.current.names.get(key) || "", moved }; });
       const moved = Object.values(acc).reduce((a, b) => a + b, 0);
-      patchRow(job.campaignId, { moved, skipped: sk, buckets, state: "moving" });
+      patchRow(job.campaignId, { moved, skipped: sk, skippedArea: ska, buckets, state: "moving" });
       if (r.data!.done || !r.data!.nextCursor) break;
       cursor = r.data!.nextCursor;
     }
@@ -201,6 +206,9 @@ export default function SameInstanceTab() {
     if (plan.errors.length) { toast.error(plan.errors[0]); return; }
     if (!plan.jobs.length) { toast.error("Select at least one source campaign that has a matching-ESP destination."); return; }
 
+    // New run id — tags this run's service-area-skipped leads for the viewer/export.
+    runIdRef.current = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}`;
+
     // Freeze the destination map + names for the run.
     const dest: DestMap = { b2b: {}, b2c: {} };
     const names = new Map<string, string>();
@@ -209,8 +217,8 @@ export default function SameInstanceTab() {
 
     jobsRef.current = new Map(plan.jobs.map((j) => [j.campaignId, j]));
     const rows: SameSourceRow[] = [
-      ...plan.jobs.map((j) => ({ campaignId: j.campaignId, name: j.name, esp: j.esp, sourceSlot: j.sourceSlot, totalLeads: j.totalLeads, moved: 0, skipped: 0, buckets: [], state: "queued" as const, retries: 0 })),
-      ...plan.skipped.map((c) => ({ campaignId: c.id, name: c.name, esp: c.esp, sourceSlot: slot(c.instance), totalLeads: c.total_leads, moved: 0, skipped: c.total_leads, buckets: [], state: "skipped" as const, retries: 0 })),
+      ...plan.jobs.map((j) => ({ campaignId: j.campaignId, name: j.name, esp: j.esp, sourceSlot: j.sourceSlot, totalLeads: j.totalLeads, moved: 0, skipped: 0, skippedArea: 0, buckets: [], state: "queued" as const, retries: 0 })),
+      ...plan.skipped.map((c) => ({ campaignId: c.id, name: c.name, esp: c.esp, sourceSlot: slot(c.instance), totalLeads: c.total_leads, moved: 0, skipped: c.total_leads, skippedArea: 0, buckets: [], state: "skipped" as const, retries: 0 })),
     ];
     setMigration({ status: "running", clientTag: client.tag, b2bLabel: slot(b2bInstance), b2cLabel: slot(b2cInstance), rows });
     setRunning(true);
@@ -227,10 +235,16 @@ export default function SameInstanceTab() {
     abortRef.current = false;
     abortCtlRef.current = new AbortController();
     setRunning(true);
-    patchRow(campaignId, { state: "queued", moved: 0, skipped: 0, buckets: [], error: undefined, retryAttempt: null });
+    patchRow(campaignId, { state: "queued", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined, retryAttempt: null });
     await moveOne(job);
     setRunning(false);
   }
+
+  const exportSkipped = useCallback(() => {
+    const rid = runIdRef.current;
+    if (!rid) return;
+    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(rid)}`, "_blank");
+  }, []);
 
   const lanes: Array<{ lane: Lane; instance: string; label: string }> = [];
   if (b2bInstance) lanes.push({ lane: "b2b", instance: b2bInstance, label: `${slot(b2bInstance)} · ${getInstanceLabel(b2bInstance)}` });
@@ -278,6 +292,9 @@ export default function SameInstanceTab() {
           <SameInstancePanel state={migration} running={running} onStop={stopMove} onClose={() => setMigration(null)} onRetry={retryCampaign} />
         </div>
       )}
+
+      {/* Service-area skipped viewer + CSV export for the current run */}
+      {migration && <SkippedViewer runId={runIdRef.current} onExport={exportSkipped} />}
 
       {/* Campaign selection */}
       {campaigns && campaigns.length > 0 && (
@@ -333,6 +350,16 @@ export default function SameInstanceTab() {
                 {[...plan.destByKey.entries()].map(([k, c]) => { const [lane, esp] = k.split(":"); return <span key={k} className="inline-flex items-center gap-1 mr-3"><span className={`font-medium ${lane === "b2c" ? "text-amber-700" : "text-indigo-700"}`}>{lane === "b2c" ? "B2C" : "B2B"} {ESP_LABEL[esp as Esp]}</span> → <span className="truncate max-w-[160px] align-bottom" title={c.name}>{c.name}</span></span>; })}
               </div>
             )}
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input type="checkbox" checked={serviceAreaFilter} disabled={running} onChange={(e) => setServiceAreaFilter(e.target.checked)} className="size-4 rounded border-muted-foreground/40" />
+              <MapPin className="size-3.5 text-muted-foreground" />
+              <span className="font-medium">Service-area filter</span>
+              <span className="text-xs text-muted-foreground font-normal">
+                {serviceAreaFilter
+                  ? "Leads whose city isn't in the client's service area are skipped (and exportable). No city, or client with no area set → still move."
+                  : "Off — every lead moves regardless of location."}
+              </span>
+            </label>
             <div className="flex items-center gap-3">
               <span className="text-xs text-muted-foreground tabular-nums">
                 {plan.jobs.length} source{plan.jobs.length === 1 ? "" : "s"} · <span className="text-foreground font-semibold">{plan.leadsToMove.toLocaleString()}</span> leads

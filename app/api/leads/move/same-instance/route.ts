@@ -23,6 +23,7 @@ import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates"
 import { detectCampaignEsp, bucketEsp, detectEsp, pickEspFromTags, type Esp } from "@/lib/nurture/esp";
 import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
+import { getServiceArea, cityInServiceArea, cityFromCustomVars, stateFromCustomVars } from "@/lib/service-area";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -40,9 +41,10 @@ async function parallelForEach<T>(items: T[], concurrency: number, fn: (item: T)
 }
 
 interface Ctx {
-  clientTag: string; sourceInstance: string; sourceCampaignId: number;
+  clientTag: string; sourceInstance: string; sourceCampaignId: number; sourceCampaignName: string;
   b2bInstance: string; b2cInstance: string; dest: DestMap;
   campaignEsp: Esp | null; needsLookup: boolean;
+  area: Awaited<ReturnType<typeof getServiceArea>>; runId: string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -52,6 +54,7 @@ export async function POST(req: NextRequest) {
   let body: {
     clientTag?: string; sourceInstance?: string; sourceCampaignId?: number; sourceCampaignName?: string;
     b2bInstance?: string; b2cInstance?: string; dest?: DestMap; cursor?: string | null;
+    serviceAreaFilter?: boolean; runId?: string;
   };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
@@ -63,6 +66,8 @@ export async function POST(req: NextRequest) {
   const b2cInstance = String(body.b2cInstance || "").trim();
   const dest: DestMap = { b2b: body.dest?.b2b || {}, b2c: body.dest?.b2c || {} };
   const startCursor = body.cursor ? String(body.cursor) : null;
+  const serviceAreaFilter = body.serviceAreaFilter !== false; // default ON
+  const runId = body.runId ? String(body.runId) : null;
 
   if (!clientTag || !sourceInstance || !sourceCampaignId || !b2bInstance || !b2cInstance) {
     return NextResponse.json({ error: "clientTag, sourceInstance, sourceCampaignId, b2bInstance, b2cInstance required" }, { status: 400 });
@@ -74,7 +79,10 @@ export async function POST(req: NextRequest) {
   // Google (catch-all) or an un-ESP'd name → resolve each lead's ESP from its
   // Bison tags. Outlook/SEGs names are specific enough to trust directly.
   const needsLookup = campaignEsp !== "outlook" && campaignEsp !== "segs";
-  const ctx: Ctx = { clientTag, sourceInstance, sourceCampaignId, b2bInstance, b2cInstance, dest, campaignEsp, needsLookup };
+  // Service-area gate: skip leads whose CITY isn't in the client's allowed area.
+  // Only when the filter is on AND an area is configured (else move all).
+  const area = serviceAreaFilter ? await getServiceArea(clientTag) : null;
+  const ctx: Ctx = { clientTag, sourceInstance, sourceCampaignId, sourceCampaignName, b2bInstance, b2cInstance, dest, campaignEsp, needsLookup, area, runId };
 
   // Per-lead lookups make each call much heavier — use a smaller window there.
   const WINDOW = needsLookup ? 800 : 2500;
@@ -82,7 +90,7 @@ export async function POST(req: NextRequest) {
   const WINDOW_MS = 230_000;
 
   const movedByKey: Record<string, number> = {};
-  let skipped = 0, fetched = 0;
+  let skipped = 0, skippedArea = 0, fetched = 0;
   let cursor: string | null = startCursor;
   let done = false;
   const w: { error: Error | null } = { error: null };
@@ -98,7 +106,7 @@ export async function POST(req: NextRequest) {
       await writeChain;
       if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
       if (fetched === 0) return NextResponse.json({ error: `fetch failed: ${(e as Error).message}` }, { status: 502 });
-      return NextResponse.json({ ok: true, fetched, movedByKey, skipped, nextCursor: cursor, done: false });
+      return NextResponse.json({ ok: true, fetched, movedByKey, skipped, skippedArea, nextCursor: cursor, done: false });
     }
     fetched += s.leads.length;
     cursor = s.nextCursor;
@@ -113,6 +121,7 @@ export async function POST(req: NextRequest) {
         const r = await routeAndLogLane(chunk, ctx);
         for (const [k, n] of Object.entries(r.movedByKey)) movedByKey[k] = (movedByKey[k] || 0) + n;
         skipped += r.skipped;
+        skippedArea += r.skippedArea;
       } catch (e) { w.error = e as Error; }
     })();
 
@@ -122,13 +131,31 @@ export async function POST(req: NextRequest) {
   await writeChain;
   if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
 
-  return NextResponse.json({ ok: true, fetched, movedByKey, skipped, nextCursor: done ? null : cursor, done });
+  return NextResponse.json({ ok: true, fetched, movedByKey, skipped, skippedArea, nextCursor: done ? null : cursor, done });
 }
 
 /** Resolve each lead's ESP (per-lead tags for catch-all sources), split by lane,
  *  route to the (lane, ESP) destination, record lead_move_log. */
-async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ movedByKey: Record<string, number>; skipped: number }> {
-  const withEmail = leads.filter((l) => (l.email || "").trim());
+async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ movedByKey: Record<string, number>; skipped: number; skippedArea: number }> {
+  // Service-area gate FIRST — partition the WHOLE chunk exactly like the Cross
+  // Instance mover: every lead is gated by city, out-of-area leads are logged +
+  // counted (email presence is only checked later when building candidates), and
+  // it runs before the expensive per-lead ESP lookup. Missing city → keep (move);
+  // no area configured → ctx.area is null → keep all.
+  let gated = leads;
+  let skippedArea = 0;
+  if (ctx.area) {
+    const inArea: OutboundLead[] = [];
+    const outArea: OutboundLead[] = [];
+    for (const l of leads) {
+      const city = cityFromCustomVars(l.custom_variables);
+      if (city && !cityInServiceArea(city, ctx.area.tokens)) outArea.push(l);
+      else inArea.push(l);
+    }
+    if (outArea.length) { await persistSkipped(outArea, ctx); skippedArea += outArea.length; }
+    gated = inArea;
+  }
+  const withEmail = gated.filter((l) => (l.email || "").trim());
 
   // ESP per lead.
   const espByEmail = new Map<string, Esp>();
@@ -172,7 +199,7 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ moved
       if (cid && usedKeys.has(`${lane}:${esp}`)) map.push({ bison_instance: inst, esp, campaign_id: cid, campaign_name: null, lane });
     }
   }
-  if (!candidates.length || !map.length) return { movedByKey: {}, skipped };
+  if (!candidates.length || !map.length) return { movedByKey: {}, skipped, skippedArea };
 
   const movedByKey: Record<string, number> = {};
   const nowIso = new Date().toISOString();
@@ -198,5 +225,37 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: Ctx): Promise<{ moved
       }
     },
   });
-  return { movedByKey, skipped };
+  return { movedByKey, skipped, skippedArea };
+}
+
+/** Record service-area-skipped leads (full detail + reason) for the export.
+ *  INSERT OR REPLACE on (ob_lead_id, source_campaign_id) → idempotent on retries.
+ *  Same shape as the Cross Instance mover; target_instance = source instance
+ *  (same-instance moves keep leads within their own instance). Never throws. */
+async function persistSkipped(leads: OutboundLead[], ctx: Ctx) {
+  const nowIso = new Date().toISOString();
+  const COLS = 16;
+  for (let i = 0; i < leads.length; i += 200) {
+    const chunk = leads.slice(i, i + 200);
+    const ph = chunk.map(() => `(${Array(COLS).fill("?").join(",")})`).join(",");
+    const args = chunk.flatMap((l) => {
+      const city = cityFromCustomVars(l.custom_variables);
+      const state = stateFromCustomVars(l.custom_variables);
+      return [
+        ctx.runId, ctx.clientTag, ctx.sourceInstance, ctx.sourceCampaignId, ctx.sourceCampaignName, ctx.sourceInstance,
+        l.id, l.email ?? null, l.first_name ?? null, l.last_name ?? null, l.company ?? null,
+        city, state, `out of service area${city ? ` (city: ${city})` : ""}`,
+        JSON.stringify(Array.isArray(l.custom_variables) ? l.custom_variables : []), nowIso,
+      ];
+    });
+    try {
+      await db.execute({
+        sql: `INSERT OR REPLACE INTO lead_move_skipped
+          (run_id, client_tag, source_instance, source_campaign_id, source_campaign_name, target_instance,
+           ob_lead_id, email, first_name, last_name, company, city, state, reason, custom_variables, skipped_at)
+          VALUES ${ph}`,
+        args,
+      });
+    } catch { /* audit only — never fail the move on a skip-log write */ }
+  }
 }
