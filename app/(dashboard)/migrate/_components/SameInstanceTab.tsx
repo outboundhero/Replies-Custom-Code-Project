@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, Loader2, Zap, AlertTriangle, UserX, MapPin } from "lucide-react";
+import { Search, Loader2, Zap, AlertTriangle, UserX, MapPin, RefreshCw } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 import SameInstancePanel, { type SameInstanceState, type SameSourceRow } from "./SameInstancePanel";
 import { SkippedViewer } from "./SkippedViewer";
@@ -127,12 +127,13 @@ export default function SameInstanceTab() {
   }, [allClients, clientSearch, clientStatus]);
   const churnedCount = useMemo(() => allClients.filter((c) => c.churned).length, [allClients]);
 
-  const loadCampaigns = useCallback(async (tag: string) => {
-    setLoadingCampaigns(true); setCampaigns(null); setPlanError(null);
-    setSources(new Set()); setDestinations(new Set());
+  const loadCampaigns = useCallback(async (tag: string, opts?: { fresh?: boolean }) => {
+    const fresh = opts?.fresh ?? false;
+    setLoadingCampaigns(true); setPlanError(null);
+    if (!fresh) setCampaigns(null); // on refresh keep the current list visible while re-pulling
     try {
       const res = await fetch("/api/leads/move/same-instance/plan", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientTag: tag }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientTag: tag, fresh }),
       });
       const d = await res.json();
       if (!res.ok) { setPlanError(d.error || "Failed to load campaigns"); return; }
@@ -142,7 +143,10 @@ export default function SameInstanceTab() {
     } catch (e) { setPlanError((e as Error).message); } finally { setLoadingCampaigns(false); }
   }, []);
 
-  function pickClient(c: ClientRow) { setClient(c); loadCampaigns(c.tag); }
+  function pickClient(c: ClientRow) { setClient(c); setSources(new Set()); setDestinations(new Set()); loadCampaigns(c.tag); }
+  // Re-pull the client's campaigns from Bison, bypassing the 60s cache (for
+  // just-created / still-processing campaigns). Keeps current selections.
+  function refreshCampaigns() { if (client) loadCampaigns(client.tag, { fresh: true }); }
 
   const campMap = useMemo(() => new Map((campaigns || []).map((c) => [c.id, c])), [campaigns]);
   const toggleSource = (id: number) => setSources((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -354,6 +358,14 @@ export default function SameInstanceTab() {
           ))}
           {filteredClients.length === 0 && <div className="px-3 py-4 text-center text-xs text-muted-foreground">No clients match.</div>}
         </div>
+        {client && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={refreshCampaigns} disabled={loadingCampaigns} className="inline-flex items-center gap-1.5 px-2.5 h-7 text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50">
+              <RefreshCw className={`size-3 ${loadingCampaigns ? "animate-spin" : ""}`} /> Refresh campaigns
+            </button>
+            <span className="text-[11px] text-muted-foreground">Pulls the latest from Bison — use if a just-created campaign isn&apos;t showing yet.</span>
+          </div>
+        )}
         {loadingCampaigns && <p className="text-xs text-muted-foreground flex items-center gap-1.5"><Loader2 className="size-3 animate-spin" /> Loading {client?.tag} campaigns from both instances…</p>}
         {planError && <p className="text-xs text-amber-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {planError}</p>}
       </div>

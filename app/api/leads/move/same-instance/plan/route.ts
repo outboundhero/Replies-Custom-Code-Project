@@ -11,7 +11,7 @@
  */
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
-import { listCampaignsCached as listCampaigns } from "@/lib/outboundhero-api";
+import { listCampaigns, listCampaignsCached } from "@/lib/outboundhero-api";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { getClientInstances } from "@/lib/nurture/group-routing";
@@ -26,11 +26,15 @@ export async function POST(req: Request) {
   const denied = await requireAdmin();
   if (denied) return denied;
 
-  let body: { clientTag?: string };
+  let body: { clientTag?: string; fresh?: boolean };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
   const clientTag = String(body.clientTag || "").trim().toUpperCase();
   if (!clientTag) return NextResponse.json({ error: "clientTag is required" }, { status: 400 });
+
+  // Manual "Refresh campaigns" bypasses the 60s Bison cache so a just-created /
+  // still-processing campaign shows up once Bison returns it.
+  const fetchCampaigns = body.fresh === true ? listCampaigns : listCampaignsCached;
 
   const instances = await getClientInstances(clientTag);
   if (!instances) {
@@ -44,7 +48,7 @@ export async function POST(req: Request) {
   const exact = (name: string) => (extractTagFromCampaignName(name) || "").toUpperCase() === clientTag;
   try {
     const perLane = await Promise.all(lanes.map(async ({ instance, lane }) => {
-      const all = await listCampaigns(instance, { search: clientTag, statuses: STATUSES });
+      const all = await fetchCampaigns(instance, { search: clientTag, statuses: STATUSES });
       return all
         .filter((c) => exact(c.name) && detectCampaignEsp(c.name))
         .map((c) => ({
