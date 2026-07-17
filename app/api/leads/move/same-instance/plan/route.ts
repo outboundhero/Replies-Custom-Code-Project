@@ -15,6 +15,7 @@ import { listCampaigns, listCampaignsCached } from "@/lib/outboundhero-api";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { getClientInstances } from "@/lib/nurture/group-routing";
+import { getServiceArea } from "@/lib/service-area";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -57,7 +58,14 @@ export async function POST(req: Request) {
         }));
     }));
     const campaigns = perLane.flat().sort((a, b) => b.total_leads - a.total_leads);
-    return NextResponse.json({ clientTag, group, b2bInstance: b2b, b2cInstance: b2c, campaigns });
+    // The client's active service area (inclusion locations) so the UI can show
+    // exactly what the service-area filter will match against. null = none set
+    // (or too few parsed cities) → the filter moves everything.
+    const area = await getServiceArea(clientTag);
+    return NextResponse.json({
+      clientTag, group, b2bInstance: b2b, b2cInstance: b2c, campaigns,
+      serviceArea: area ? { raw: area.raw, cities: area.tokens } : null,
+    });
   } catch (e) {
     return NextResponse.json({ error: `campaign fetch failed: ${(e as Error).message}` }, { status: 502 });
   }

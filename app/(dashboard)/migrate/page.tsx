@@ -50,6 +50,9 @@ type MoveTab = "cross" | "same";
 
 export default function MigratePage() {
   const [tab, setTab] = useState<MoveTab>("cross");
+  // Slot (above the tabs) where the Same Instance progress panels portal, so a
+  // running/queued move stays visible when switching between Cross and Same.
+  const [samePanelSlot, setSamePanelSlot] = useState<HTMLElement | null>(null);
   const [allClientRows, setAllClientRows] = useState<ClientRow[]>([]);
   const [clientStatus, setClientStatus] = useState<"active" | "returning" | "all">("active");
   const [from, setFrom] = useState<string>("outboundhero");
@@ -299,16 +302,26 @@ export default function MigratePage() {
         </p>
       </div>
 
+      {/* Persistent progress panels — ABOVE the tabs, always visible so a running
+          move (Cross or Same) stays shown when you switch tabs. */}
+      {migration && <MigrationPanel state={migration} running={running} onStop={stopMigration} onClose={() => setMigration(null)} onRetry={retryClient} onExportSkipped={exportSkipped} />}
+      {migration && <SkippedViewer runId={runIdRef.current} onExport={exportSkipped} />}
+      <div ref={setSamePanelSlot} className="empty:hidden" />
+
       {/* Tabs */}
       <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
         <button type="button" onClick={() => setTab("cross")} className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "cross" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>Cross Instance</button>
         <button type="button" onClick={() => setTab("same")} className={`px-3.5 h-8 text-sm font-medium rounded-md transition-colors ${tab === "same" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>Same Instance</button>
       </div>
 
-      {tab === "same" && <SameInstanceTab />}
+      {/* Same Instance — always mounted (hidden when inactive) so its move queue
+          keeps running while you're on the Cross tab. */}
+      <div className={tab === "same" ? "" : "hidden"}>
+        <SameInstanceTab panelSlot={samePanelSlot} />
+      </div>
 
-      {tab === "cross" && (
-      <>
+      {/* Cross Instance — always mounted (hidden when inactive). */}
+      <div className={tab === "cross" ? "space-y-4" : "hidden"}>
       {/* From → To */}
       <div className="flex flex-wrap items-end gap-4 rounded-xl border bg-card p-4">
         <InstancePick label="From instance" value={from} onChange={setFrom} disabledKey={to} />
@@ -368,16 +381,6 @@ export default function MigratePage() {
           )}
         </div>
       )}
-
-      {/* Sticky live panel */}
-      {migration && (
-        <div className="sticky top-2 z-20">
-          <MigrationPanel state={migration} running={running} onStop={stopMigration} onClose={() => setMigration(null)} onRetry={retryClient} onExportSkipped={exportSkipped} />
-        </div>
-      )}
-
-      {/* Skipped (out-of-area) leads viewer */}
-      {migration && <SkippedViewer runId={runIdRef.current} onExport={exportSkipped} />}
 
       {/* Client picker */}
       <div className="rounded-xl border bg-card overflow-hidden">
@@ -447,8 +450,7 @@ export default function MigratePage() {
           {filtered.length === 0 && <div className="px-4 py-10 text-center text-sm text-muted-foreground">No clients match.</div>}
         </div>
       </div>
-      </>
-      )}
+      </div>
     </div>
   );
 }

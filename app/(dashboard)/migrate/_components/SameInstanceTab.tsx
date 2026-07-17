@@ -9,6 +9,7 @@
  * Custom" campaign route correctly) into the chosen destinations.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { Search, Loader2, Zap, AlertTriangle, UserX, MapPin, RefreshCw } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
@@ -58,7 +59,7 @@ async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {
   }));
 }
 
-export default function SameInstanceTab() {
+export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement | null }) {
   const [allClients, setAllClients] = useState<ClientRow[]>([]);
   const [clientStatus, setClientStatus] = useState<ClientStatus>("active");
   const [clientSearch, setClientSearch] = useState("");
@@ -69,6 +70,7 @@ export default function SameInstanceTab() {
   const [b2cInstance, setB2cInstance] = useState<string>("");
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
+  const [serviceArea, setServiceArea] = useState<{ raw: string; cities: string[] } | null>(null);
 
   const [sources, setSources] = useState<Set<number>>(new Set());
   const [destinations, setDestinations] = useState<Set<number>>(new Set());
@@ -139,6 +141,7 @@ export default function SameInstanceTab() {
       if (!res.ok) { setPlanError(d.error || "Failed to load campaigns"); return; }
       setCampaigns((d.campaigns as PlanCampaign[]) || []);
       setB2bInstance(d.b2bInstance); setB2cInstance(d.b2cInstance);
+      setServiceArea((d.serviceArea as { raw: string; cities: string[] }) ?? null);
       if (!d.campaigns?.length) setPlanError(`No ${tag} campaigns found in ${getInstanceLabel(d.b2bInstance)} or ${getInstanceLabel(d.b2cInstance)}.`);
     } catch (e) { setPlanError((e as Error).message); } finally { setLoadingCampaigns(false); }
   }, []);
@@ -326,6 +329,23 @@ export default function SameInstanceTab() {
     return [...moves].sort((a, b) => rank(a.status) - rank(b.status));
   }, [moves]);
 
+  const panelsUI = orderedMoves.length > 0 ? (
+    <div className="space-y-3">
+      {orderedMoves.map((m) => (
+        <div key={m.runId} className="space-y-2">
+          <SameInstancePanel
+            state={m.state}
+            running={m.status === "running"}
+            onStop={() => stopMove(m.runId)}
+            onClose={() => closeMove(m.runId)}
+            onRetry={(cid) => retryCampaign(m.runId, cid)}
+          />
+          {m.status !== "queued" && <SkippedViewer runId={m.runId} onExport={() => exportSkipped(m.runId)} />}
+        </div>
+      ))}
+    </div>
+  ) : null;
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground max-w-2xl">
@@ -370,24 +390,10 @@ export default function SameInstanceTab() {
         {planError && <p className="text-xs text-amber-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {planError}</p>}
       </div>
 
-      {/* Move queue — one panel per client. ONE runs at a time; the rest show
-          "queued" and auto-start in order (no cross-client mixing). */}
-      {orderedMoves.length > 0 && (
-        <div className="space-y-3">
-          {orderedMoves.map((m) => (
-            <div key={m.runId} className="space-y-2">
-              <SameInstancePanel
-                state={m.state}
-                running={m.status === "running"}
-                onStop={() => stopMove(m.runId)}
-                onClose={() => closeMove(m.runId)}
-                onRetry={(cid) => retryCampaign(m.runId, cid)}
-              />
-              {m.status !== "queued" && <SkippedViewer runId={m.runId} onExport={() => exportSkipped(m.runId)} />}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Progress panels render into the page-level slot (above the tabs) so a
+          running/queued move stays visible across Cross/Same tab switches.
+          Falls back to inline if no slot is provided. */}
+      {panelSlot ? createPortal(panelsUI, panelSlot) : panelsUI}
 
       {/* Campaign selection */}
       {campaigns && campaigns.length > 0 && (
@@ -453,6 +459,21 @@ export default function SameInstanceTab() {
                   : "Off — every lead moves regardless of location."}
               </span>
             </label>
+            {serviceAreaFilter && client && (
+              <div className="rounded-md border bg-amber-50/40 px-3 py-2 text-xs">
+                {serviceArea ? (
+                  <>
+                    <p className="font-medium text-muted-foreground mb-1 flex flex-wrap items-center gap-1">
+                      <MapPin className="size-3 text-amber-600" /> {client.tag} inclusion locations — leads outside this area are skipped
+                      <span className="text-[10px] text-muted-foreground/70">· {serviceArea.cities.length} {serviceArea.cities.length === 1 ? "city" : "cities"} matched</span>
+                    </p>
+                    <p className="text-foreground max-h-24 overflow-auto leading-relaxed">{(serviceArea.raw || serviceArea.cities.join(", ")).split(/\n+/).map((s) => s.trim()).filter(Boolean).join(", ")}</p>
+                  </>
+                ) : (
+                  <p className="text-amber-700 flex items-center gap-1"><AlertTriangle className="size-3 shrink-0" /> No service area set for {client.tag} — all leads will move (nothing skipped).</p>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <span className="text-xs text-muted-foreground tabular-nums">
                 {plan.jobs.length} source{plan.jobs.length === 1 ? "" : "s"} · <span className="text-foreground font-semibold">{plan.leadsToMove.toLocaleString()}</span> leads
