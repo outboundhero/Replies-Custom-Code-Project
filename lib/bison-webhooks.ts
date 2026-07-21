@@ -160,7 +160,7 @@ function extractContext(ev: RawEvent): { contact: string | null; subject: string
  */
 export async function fetchWebhookActivity(
   instanceKey: string,
-  opts: { cursor?: string | null; type?: string | null; onlyFailed?: boolean; sinceDays?: number; target?: number; maxPages?: number } = {}
+  opts: { cursor?: string | null; type?: string | null; status?: string | null; sinceDays?: number; target?: number; maxPages?: number } = {}
 ): Promise<WebhookActivityPage> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const sinceDays = opts.sinceDays ?? 3;
@@ -176,6 +176,7 @@ export async function fetchWebhookActivity(
   end.setUTCDate(end.getUTCDate() + 1);
   const endDate = ymd(end);
 
+  const wantStatus = opts.status && opts.status !== "all" ? opts.status : null;
   const items: WebhookDeliveryItem[] = [];
   let cursor: string | null = opts.cursor ?? null;
   let scannedEvents = 0;
@@ -212,7 +213,7 @@ export async function fetchWebhookActivity(
           }))
           .sort((x, y) => (y.at || "").localeCompare(x.at || "")); // newest first
         const status = normStatus(d.status);
-        if (opts.onlyFailed && status !== "failed") continue;
+        if (wantStatus && status !== wantStatus) continue;
         const latest = attempts[0] ?? null;
         items.push({
           instance: instanceKey,

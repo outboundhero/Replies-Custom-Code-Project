@@ -2,7 +2,7 @@
  * GET /api/webhooks/activity
  *   ?instance=<key>        (required — one Bison workspace)
  *   &cursor=<next_cursor>  (optional — from a previous page)
- *   &status=failed|all     (optional — default all)
+ *   &status=succeeded|failed|pending|unknown|all  (optional — default all)
  *   &type=<event_type>     (optional — Bison event type filter)
  *
  * Returns the last 3 days of webhook deliveries for that instance, flattened
@@ -27,11 +27,12 @@ export async function GET(req: NextRequest) {
   }
 
   const cursor = sp.get("cursor");
-  const onlyFailed = sp.get("status") === "failed";
+  const statusParam = sp.get("status") || "all";
+  const status = ["succeeded", "failed", "pending", "unknown", "all"].includes(statusParam) ? statusParam : "all";
   const type = sp.get("type");
 
   try {
-    const page = await fetchWebhookActivity(instance, { cursor, onlyFailed, type, sinceDays: 3 });
+    const page = await fetchWebhookActivity(instance, { cursor, status, type, sinceDays: 3 });
     return NextResponse.json(page);
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 502 });

@@ -18,14 +18,19 @@ import { BISON_INSTANCES } from "@/lib/bison-instances-shared";
 import { cn } from "@/lib/utils";
 
 type DeliveryStatus = "succeeded" | "failed" | "pending" | "unknown";
+const STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: "all", label: "All statuses" },
+  { value: "succeeded", label: "Succeeded" },
+  { value: "failed", label: "Failed" },
+  { value: "pending", label: "Pending" },
+  { value: "unknown", label: "Unknown" },
+];
 interface Attempt { id: number; status: DeliveryStatus; responseCode: number | null; at: string | null }
 interface Delivery {
   instance: string; deliveryId: number; eventId: number; eventType: string; eventName: string;
   webhookUrl: string; status: DeliveryStatus; attemptCount: number; latestResponseCode: number | null;
   latestAttemptId: number | null; attempts: Attempt[]; at: string | null; contact: string | null; subject: string | null;
 }
-type StatusFilter = "all" | "failed";
-
 const STATUS_META: Record<DeliveryStatus, { label: string; dot: string; chip: string; Icon: typeof CheckCircle2 }> = {
   succeeded: { label: "Succeeded", dot: "bg-emerald-500", chip: "bg-emerald-50 text-emerald-700 border-emerald-200", Icon: CheckCircle2 },
   failed:    { label: "Failed",    dot: "bg-rose-500",    chip: "bg-rose-50 text-rose-700 border-rose-200",       Icon: XCircle },
@@ -53,9 +58,51 @@ function codeChip(code: number | null): string {
   return "bg-rose-50 text-rose-700 border-rose-200";
 }
 
+// Bison event types (from /api/events `type` enum) — filtered server-side so
+// pagination stays correct.
+const EVENT_TYPES: { value: string; label: string }[] = [
+  { value: "", label: "All events" },
+  { value: "lead_replied", label: "Contact Replied" },
+  { value: "untracked_reply_received", label: "Untracked Reply Received" },
+  { value: "lead_interested", label: "Contact Interested" },
+  { value: "lead_first_contacted", label: "Contact First Emailed" },
+  { value: "lead_unsubscribed", label: "Contact Unsubscribed" },
+  { value: "email_sent", label: "Email Sent" },
+  { value: "email_send_failed", label: "Email Send Failed" },
+  { value: "manual_email_sent", label: "Manual Email Sent" },
+  { value: "manual_email_send_failed", label: "Manual Email Send Failed" },
+  { value: "email_opened", label: "Email Opened" },
+  { value: "email_bounced", label: "Email Bounced" },
+  { value: "email_account_added", label: "Email Account Added" },
+  { value: "email_account_removed", label: "Email Account Removed" },
+  { value: "email_account_disconnected", label: "Email Account Disconnected" },
+  { value: "email_account_reconnected", label: "Email Account Reconnected" },
+  { value: "tag_attached", label: "Tag Attached" },
+  { value: "tag_removed", label: "Tag Removed" },
+  { value: "warmup_disabled_causing_bounces", label: "Warmup Disabled (Causing Bounces)" },
+  { value: "warmup_disabled_receiving_bounces", label: "Warmup Disabled (Receiving Bounces)" },
+  { value: "blacklisted_email_added", label: "Blacklisted Email Added" },
+  { value: "blacklisted_email_removed", label: "Blacklisted Email Removed" },
+  { value: "blacklisted_domain_added", label: "Blacklisted Domain Added" },
+  { value: "blacklisted_domain_removed", label: "Blacklisted Domain Removed" },
+];
+
+// Minimum-attempts thresholds — applied client-side to the loaded rows (Bison
+// has no attempt-count filter). Higher thresholds surface the problem
+// deliveries that got retried repeatedly.
+const ATTEMPT_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: "Any attempts" },
+  { value: 1, label: "1+ attempts" },
+  { value: 2, label: "2+ attempts" },
+  { value: 3, label: "3+ attempts" },
+  { value: 5, label: "5+ attempts" },
+];
+
 export default function WebhooksPage() {
   const [instance, setInstance] = useState<string>(BISON_INSTANCES[0].key);
-  const [filter, setFilter] = useState<StatusFilter>("all");
+  const [status, setStatus] = useState<string>("all");
+  const [eventType, setEventType] = useState<string>("");
+  const [minAttempts, setMinAttempts] = useState<number>(0);
   const [items, setItems] = useState<Delivery[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -71,7 +118,9 @@ export default function WebhooksPage() {
     opts.append ? setLoadingMore(true) : setLoading(true);
     setError(null);
     try {
-      const qs = new URLSearchParams({ instance, status: filter });
+      const qs = new URLSearchParams({ instance });
+      if (status !== "all") qs.set("status", status);
+      if (eventType) qs.set("type", eventType);
       if (opts.cur) qs.set("cursor", opts.cur);
       const res = await fetch(`/api/webhooks/activity?${qs.toString()}`);
       const data = await res.json();
@@ -90,18 +139,24 @@ export default function WebhooksPage() {
     } finally {
       if (mine === reqId.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [instance, filter]);
+  }, [instance, status, eventType]);
 
-  // Reset + reload whenever the instance or status filter changes.
+  // Reset + reload whenever the instance / status / event-type filter changes.
   useEffect(() => { setItems([]); setCursor(null); setExpanded(new Set()); load({ append: false, cur: null }); }, [load]);
 
+  // Client-side min-attempts filter over what's loaded (Bison has no such filter).
+  const visibleItems = useMemo(
+    () => (minAttempts <= 0 ? items : items.filter((d) => d.attemptCount >= minAttempts)),
+    [items, minAttempts]
+  );
+
   const stats = useMemo(() => {
-    const total = items.length;
-    const ok = items.filter((d) => d.status === "succeeded").length;
-    const fail = items.filter((d) => d.status === "failed").length;
+    const total = visibleItems.length;
+    const ok = visibleItems.filter((d) => d.status === "succeeded").length;
+    const fail = visibleItems.filter((d) => d.status === "failed").length;
     const rate = total ? Math.round((ok / total) * 100) : null;
     return { total, ok, fail, rate };
-  }, [items]);
+  }, [visibleItems]);
 
   async function retry(d: Delivery) {
     if (d.latestAttemptId == null) { toast.error("No attempt id to retry for this delivery."); return; }
@@ -180,23 +235,22 @@ export default function WebhooksPage() {
         <StatCard icon={ArrowUpRight} tint="from-indigo-50 to-white text-indigo-700"   label="Success rate"         value={stats.rate == null ? "—" : `${stats.rate}%`} />
       </div>
 
-      {/* Toolbar */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
-          {(["all", "failed"] as StatusFilter[]).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={cn(
-                "px-3.5 h-8 text-sm font-medium rounded-md transition-colors capitalize",
-                filter === f ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {f === "all" ? "All deliveries" : "Failed only"}
-            </button>
-          ))}
+      {/* Toolbar — status / event / attempts filters */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <FilterSelect label="Status" value={status} onChange={setStatus}>
+            {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </FilterSelect>
+          <FilterSelect label="Event" value={eventType} onChange={setEventType}>
+            {EVENT_TYPES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </FilterSelect>
+          <FilterSelect label="Attempts" value={String(minAttempts)} onChange={(v) => setMinAttempts(Number(v))}>
+            {ATTEMPT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </FilterSelect>
         </div>
-        <span className="text-xs text-muted-foreground">{items.length} loaded</span>
+        <span className="text-xs text-muted-foreground pb-2">
+          {minAttempts > 0 ? `${visibleItems.length} shown · ` : ""}{items.length} loaded
+        </span>
       </div>
 
       {/* List */}
@@ -220,15 +274,23 @@ export default function WebhooksPage() {
               <RefreshCw className="h-4 w-4" /> Try again
             </button>
           </div>
-        ) : items.length === 0 ? (
+        ) : visibleItems.length === 0 ? (
           <div className="px-4 py-16 text-center">
             <Webhook className="mx-auto h-8 w-8 text-muted-foreground/50" />
-            <p className="mt-2 text-sm font-medium">No {filter === "failed" ? "failed " : ""}deliveries in the last 3 days</p>
-            <p className="mt-1 text-xs text-muted-foreground">for {BISON_INSTANCES.find((i) => i.key === instance)?.label}.</p>
+            <p className="mt-2 text-sm font-medium">
+              {items.length > 0 && minAttempts > 0
+                ? `No deliveries with ${minAttempts}+ attempts in view`
+                : `No ${status !== "all" ? status + " " : ""}deliveries in the last 3 days`}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {items.length > 0 && minAttempts > 0
+                ? "Try a lower attempts threshold or load more."
+                : `for ${BISON_INSTANCES.find((i) => i.key === instance)?.label}.`}
+            </p>
           </div>
         ) : (
           <div className="divide-y">
-            {items.map((d) => {
+            {visibleItems.map((d) => {
               const meta = STATUS_META[d.status];
               const isOpen = expanded.has(d.deliveryId);
               const isRetrying = retrying.has(d.deliveryId);
@@ -322,6 +384,21 @@ export default function WebhooksPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function FilterSelect({ label, value, onChange, children }: { label: string; value: string; onChange: (v: string) => void; children: React.ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-9 rounded-lg border bg-white px-2.5 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 hover:bg-muted/30 transition-colors"
+      >
+        {children}
+      </select>
+    </label>
   );
 }
 
