@@ -170,6 +170,11 @@ export async function fetchWebhookActivity(
   const start = new Date();
   start.setUTCDate(start.getUTCDate() - sinceDays);
   const startDate = ymd(start);
+  // Bison validates start_date <= end_date and rejects start_date sent alone,
+  // so we always send end_date too. Use tomorrow so all of today is included.
+  const end = new Date();
+  end.setUTCDate(end.getUTCDate() + 1);
+  const endDate = ymd(end);
 
   const items: WebhookDeliveryItem[] = [];
   let cursor: string | null = opts.cursor ?? null;
@@ -177,7 +182,7 @@ export async function fetchWebhookActivity(
   let pages = 0;
 
   for (; pages < maxPages; pages++) {
-    const qs = new URLSearchParams({ pagination_type: "cursor", per_page: "100", start_date: startDate });
+    const qs = new URLSearchParams({ pagination_type: "cursor", per_page: "100", start_date: startDate, end_date: endDate });
     if (opts.type) qs.set("type", opts.type);
     if (cursor) qs.set("cursor", cursor);
 
