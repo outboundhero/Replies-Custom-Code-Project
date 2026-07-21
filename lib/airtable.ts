@@ -7,13 +7,25 @@ function getHeaders() {
   };
 }
 
+// Only retry on rate-limit / transient server errors or network faults. A
+// permanent 4xx (e.g. 422 INVALID_MULTIPLE_CHOICE_OPTIONS, 404 missing base)
+// will never succeed on retry, so failing fast avoids burning the whole
+// backoff budget (~30s) on an error that's guaranteed to keep failing — which
+// used to stall the reply webhooks. The fetch helpers below throw
+// `Error("Airtable … failed (<status>): <body>")`, so we sniff the status.
+function isRetryableAirtableError(error: unknown): boolean {
+  const msg = (error as Error)?.message || "";
+  if (/\((429|500|502|503|504)\)/.test(msg)) return true;      // throttle / server
+  return /fetch failed|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|aborted|socket hang up/i.test(msg);
+}
+
 async function withRetry<T>(fn: () => Promise<T>, retries = 5): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      if (attempt === retries) throw error;
-      const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
+      if (attempt === retries || !isRetryableAirtableError(error)) throw error;
+      const delay = Math.min(Math.pow(2, attempt) * 1000, 8000); // 1s,2s,4s,8s,8s (cap 8s)
       await new Promise((r) => setTimeout(r, delay));
     }
   }

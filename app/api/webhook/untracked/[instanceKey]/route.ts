@@ -3,13 +3,18 @@
  *
  * URL: POST /api/webhook/untracked/<instanceKey>
  *
- * Same shape as the tracked variant — see that file's header for why.
+ * Same shape as the tracked variant — see that file's header for why,
+ * including the FAST-ACK rationale (validate → 200 → process in the
+ * background via `after()`).
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { processUntrackedReply } from "@/lib/processing/untracked";
 import { logError } from "@/lib/errors";
 import { isValidInstance } from "@/lib/bison-instances";
+
+// Headroom for the deferred pipeline; the response itself returns in ms.
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ instanceKey: string }> }) {
   const { instanceKey } = await params;
@@ -22,21 +27,28 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ ins
   let payload: any;
   try {
     payload = await req.json();
-
-    if (!payload?.data?.reply || !payload?.data?.sender_email) {
-      return NextResponse.json(
-        { error: "Missing required fields: data.{reply, sender_email}" },
-        { status: 400 }
-      );
-    }
-
-    await processUntrackedReply(payload, instanceKey);
-    return NextResponse.json({ ok: true, instance: instanceKey });
-  } catch (error) {
-    await logError("untracked", "webhook", (error as Error).message, {
-      _webhook_payload: payload,
-      bison_instance: instanceKey,
-    });
-    return NextResponse.json({ error: "Processing failed" }, { status: 500 });
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
+
+  if (!payload?.data?.reply || !payload?.data?.sender_email) {
+    return NextResponse.json(
+      { error: "Missing required fields: data.{reply, sender_email}" },
+      { status: 400 }
+    );
+  }
+
+  // ACK Bison now; process after the response is flushed.
+  after(async () => {
+    try {
+      await processUntrackedReply(payload, instanceKey);
+    } catch (error) {
+      await logError("untracked", "webhook", (error as Error).message, {
+        _webhook_payload: payload,
+        bison_instance: instanceKey,
+      });
+    }
+  });
+
+  return NextResponse.json({ ok: true, instance: instanceKey });
 }
