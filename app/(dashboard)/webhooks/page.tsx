@@ -98,51 +98,65 @@ const ATTEMPT_OPTIONS: { value: number; label: string }[] = [
   { value: 5, label: "5+ attempts" },
 ];
 
+// Safety rail on auto-load (protects the browser on huge windows) and a render
+// cap so a very large list stays snappy — stats always reflect the full load.
+const MAX_ITEMS = 8000;
+const RENDER_CAP = 1000;
+
 export default function WebhooksPage() {
   const [instance, setInstance] = useState<string>(BISON_INSTANCES[0].key);
   const [status, setStatus] = useState<string>("all");
   const [eventType, setEventType] = useState<string>("");
   const [minAttempts, setMinAttempts] = useState<number>(0);
   const [items, setItems] = useState<Delivery[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [streaming, setStreaming] = useState(false);
+  const [capped, setCapped] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [retrying, setRetrying] = useState<Set<number>>(new Set());
   const [retried, setRetried] = useState<Set<number>>(new Set());
   const reqId = useRef(0);
 
-  const load = useCallback(async (opts: { append: boolean; cur: string | null }) => {
+  // Auto-load the ENTIRE 3-day window for the current filters — no "load more".
+  // We page Bison's cursor server-side in large batches and stream each batch
+  // into the list as it arrives, so the table + stats fill on their own and
+  // stay responsive. Capped at MAX_ITEMS as a safety rail; filters narrow the
+  // set so the relevant view (e.g. failed, or a single event type) loads fully.
+  const loadAll = useCallback(async () => {
     const mine = ++reqId.current;
-    opts.append ? setLoadingMore(true) : setLoading(true);
-    setError(null);
+    setItems([]); setExpanded(new Set()); setError(null); setCapped(false);
+    setInitialLoading(true); setStreaming(false);
+    const acc: Delivery[] = [];
+    const seen = new Set<number>();
+    let cur: string | null = null;
     try {
-      const qs = new URLSearchParams({ instance });
-      if (status !== "all") qs.set("status", status);
-      if (eventType) qs.set("type", eventType);
-      if (opts.cur) qs.set("cursor", opts.cur);
-      const res = await fetch(`/api/webhooks/activity?${qs.toString()}`);
-      const data = await res.json();
-      if (mine !== reqId.current) return; // a newer request superseded this one
-      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
-      setCursor(data.nextCursor ?? null);
-      setItems((prev) => {
-        const base = opts.append ? prev : [];
-        const seen = new Set(base.map((d) => d.deliveryId));
-        const merged = [...base];
-        for (const d of data.items as Delivery[]) if (!seen.has(d.deliveryId)) { seen.add(d.deliveryId); merged.push(d); }
-        return merged;
-      });
+      for (;;) {
+        const qs = new URLSearchParams({ instance });
+        if (status !== "all") qs.set("status", status);
+        if (eventType) qs.set("type", eventType);
+        if (cur) qs.set("cursor", cur);
+        const res = await fetch(`/api/webhooks/activity?${qs.toString()}`);
+        const data = await res.json();
+        if (mine !== reqId.current) return; // superseded by a newer filter change
+        if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+        for (const d of data.items as Delivery[]) if (!seen.has(d.deliveryId)) { seen.add(d.deliveryId); acc.push(d); }
+        setItems(acc.slice());
+        setInitialLoading(false);
+        cur = data.nextCursor ?? null;
+        if (!cur) break;                       // reached the end of the window
+        if (acc.length >= MAX_ITEMS) { setCapped(true); break; }
+        setStreaming(true);
+      }
     } catch (e) {
       if (mine === reqId.current) setError((e as Error).message);
     } finally {
-      if (mine === reqId.current) { setLoading(false); setLoadingMore(false); }
+      if (mine === reqId.current) { setStreaming(false); setInitialLoading(false); }
     }
   }, [instance, status, eventType]);
 
-  // Reset + reload whenever the instance / status / event-type filter changes.
-  useEffect(() => { setItems([]); setCursor(null); setExpanded(new Set()); load({ append: false, cur: null }); }, [load]);
+  // Kick off (and restart) whenever the instance / status / event-type changes.
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   // Client-side min-attempts filter over what's loaded (Bison has no such filter).
   const visibleItems = useMemo(
@@ -157,6 +171,9 @@ export default function WebhooksPage() {
     const rate = total ? Math.round((ok / total) * 100) : null;
     return { total, ok, fail, rate };
   }, [visibleItems]);
+
+  // Cap DOM rows for responsiveness; stats above still reflect everything.
+  const renderItems = visibleItems.length > RENDER_CAP ? visibleItems.slice(0, RENDER_CAP) : visibleItems;
 
   async function retry(d: Delivery) {
     if (d.latestAttemptId == null) { toast.error("No attempt id to retry for this delivery."); return; }
@@ -199,11 +216,11 @@ export default function WebhooksPage() {
           </div>
         </div>
         <button
-          onClick={() => load({ append: false, cur: null })}
-          disabled={loading}
+          onClick={loadAll}
+          disabled={initialLoading || streaming}
           className="inline-flex items-center gap-2 rounded-lg border bg-white px-3 h-9 text-sm font-medium shadow-sm hover:bg-muted/50 transition-colors disabled:opacity-50"
         >
-          <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+          <RefreshCw className={cn("h-4 w-4", (initialLoading || streaming) && "animate-spin")} />
           Refresh
         </button>
       </div>
@@ -229,7 +246,7 @@ export default function WebhooksPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard icon={Activity}     tint="from-slate-50 to-white text-slate-700"    label="Deliveries (in view)" value={stats.total} />
+        <StatCard icon={Activity}     tint="from-slate-50 to-white text-slate-700"    label={streaming ? "Deliveries (loading…)" : "Deliveries"} value={stats.total} />
         <StatCard icon={CheckCircle2} tint="from-emerald-50 to-white text-emerald-700" label="Succeeded"            value={stats.ok} />
         <StatCard icon={XCircle}      tint="from-rose-50 to-white text-rose-700"       label="Failed"               value={stats.fail} />
         <StatCard icon={ArrowUpRight} tint="from-indigo-50 to-white text-indigo-700"   label="Success rate"         value={stats.rate == null ? "—" : `${stats.rate}%`} />
@@ -248,14 +265,16 @@ export default function WebhooksPage() {
             {ATTEMPT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </FilterSelect>
         </div>
-        <span className="text-xs text-muted-foreground pb-2">
-          {minAttempts > 0 ? `${visibleItems.length} shown · ` : ""}{items.length} loaded
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground pb-2">
+          {streaming && <Loader2 className="h-3 w-3 animate-spin" />}
+          {minAttempts > 0 ? `${visibleItems.length} shown · ` : ""}
+          {items.length.toLocaleString()} {streaming ? "loaded so far" : "deliveries"}
         </span>
       </div>
 
       {/* List */}
       <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-        {loading ? (
+        {initialLoading ? (
           <div className="divide-y">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="flex items-center gap-4 px-4 py-3.5 animate-pulse">
@@ -270,7 +289,7 @@ export default function WebhooksPage() {
             <XCircle className="mx-auto h-8 w-8 text-rose-400" />
             <p className="mt-2 text-sm font-medium text-foreground">Couldn&apos;t load webhook activity</p>
             <p className="mt-1 text-xs text-muted-foreground max-w-md mx-auto break-words">{error}</p>
-            <button onClick={() => load({ append: false, cur: null })} className="mt-4 inline-flex items-center gap-2 rounded-lg border bg-white px-3 h-9 text-sm font-medium shadow-sm hover:bg-muted/50">
+            <button onClick={loadAll} className="mt-4 inline-flex items-center gap-2 rounded-lg border bg-white px-3 h-9 text-sm font-medium shadow-sm hover:bg-muted/50">
               <RefreshCw className="h-4 w-4" /> Try again
             </button>
           </div>
@@ -284,13 +303,13 @@ export default function WebhooksPage() {
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {items.length > 0 && minAttempts > 0
-                ? "Try a lower attempts threshold or load more."
+                ? "Try a lower attempts threshold."
                 : `for ${BISON_INSTANCES.find((i) => i.key === instance)?.label}.`}
             </p>
           </div>
         ) : (
           <div className="divide-y">
-            {visibleItems.map((d) => {
+            {renderItems.map((d) => {
               const meta = STATUS_META[d.status];
               const isOpen = expanded.has(d.deliveryId);
               const isRetrying = retrying.has(d.deliveryId);
@@ -370,17 +389,20 @@ export default function WebhooksPage() {
         )}
       </div>
 
-      {/* Load more */}
-      {!loading && !error && cursor && (
-        <div className="flex justify-center">
-          <button
-            onClick={() => load({ append: true, cur: cursor })}
-            disabled={loadingMore}
-            className="inline-flex items-center gap-2 rounded-lg border bg-white px-4 h-9 text-sm font-medium shadow-sm hover:bg-muted/50 transition-colors disabled:opacity-50"
-          >
-            {loadingMore ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronDown className="h-4 w-4" />}
-            Load more
-          </button>
+      {/* Footer — auto-load progress / caps (no manual paging) */}
+      {!initialLoading && !error && (
+        <div className="flex flex-col items-center gap-1 text-center text-xs text-muted-foreground">
+          {streaming ? (
+            <span className="inline-flex items-center gap-1.5">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading all deliveries from the last 3 days… {items.length.toLocaleString()} so far
+            </span>
+          ) : capped ? (
+            <span>Reached the {MAX_ITEMS.toLocaleString()}-delivery view limit — use the filters above to narrow to what you need.</span>
+          ) : visibleItems.length > RENDER_CAP ? (
+            <span>Showing the first {RENDER_CAP.toLocaleString()} of {visibleItems.length.toLocaleString()} — the stats above cover all of them. Filter to see specific deliveries.</span>
+          ) : items.length > 0 ? (
+            <span>All {items.length.toLocaleString()} deliveries from the last 3 days loaded.</span>
+          ) : null}
         </div>
       )}
     </div>

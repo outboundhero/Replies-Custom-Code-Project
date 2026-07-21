@@ -164,8 +164,11 @@ export async function fetchWebhookActivity(
 ): Promise<WebhookActivityPage> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const sinceDays = opts.sinceDays ?? 3;
-  const target = opts.target ?? 40;
-  const maxPages = opts.maxPages ?? 8;
+  // Larger batches per request → far fewer client round-trips when the UI
+  // auto-loads the whole window. Bounded by maxPages so one request stays well
+  // inside the 60s route budget.
+  const target = opts.target ?? 400;
+  const maxPages = opts.maxPages ?? 10;
 
   const start = new Date();
   start.setUTCDate(start.getUTCDate() - sinceDays);
