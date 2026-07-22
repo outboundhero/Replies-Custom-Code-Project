@@ -11,6 +11,7 @@ import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
 import { applyReallocate } from "@/lib/processing/apply-reallocate";
+import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
 
 export async function POST(req: NextRequest) {
   // Single session read (was requireAuth() + a second getSession() below).
@@ -27,11 +28,13 @@ export async function POST(req: NextRequest) {
     // instance this row's IDs (sender_id, reply_id, campaign_id) are
     // valid on.
     let rowInstance: string = DEFAULT_INSTANCE;
+    let rowReplyId: number | null = null;
+    let rowClientTag: string | null = null;
     if (id) {
       const allowed = session?.allowedClientTags ?? null;
       const { data: row } = await supabase
         .from("replies")
-        .select("client_tag, bison_instance")
+        .select("client_tag, bison_instance, reply_id")
         .eq("id", id)
         .single();
       if (allowed && allowed.length) {
@@ -40,6 +43,8 @@ export async function POST(req: NextRequest) {
         }
       }
       rowInstance = coerceInstance(row?.bison_instance);
+      rowReplyId = (row?.reply_id as number | null) ?? null;
+      rowClientTag = (row?.client_tag as string | null) ?? null;
     }
 
     switch (action) {
@@ -209,6 +214,23 @@ export async function POST(req: NextRequest) {
             }
           }
         }
+
+        // Mirror the mark to the ORIGINATING Bison instance:
+        //   Interested / Meeting-Ready Lead / Follow Up → mark-as-interested
+        //   Do Not Contact                              → unsubscribe
+        // Best-effort — a Bison hiccup never blocks the category change.
+        const bisonSync = await syncReplyStatusToBison({
+          instance: rowInstance,
+          replyId: rowReplyId,
+          category,
+          source: "inbox",
+          clientTag: rowClientTag,
+        });
+        if (bisonSync.action) {
+          extras.bison_action = bisonSync.action;
+          if (!bisonSync.ok) extras.bison_error = bisonSync.error;
+        }
+
         return NextResponse.json({ ok: true, ...extras });
       }
 

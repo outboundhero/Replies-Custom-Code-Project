@@ -121,6 +121,46 @@ export async function sendReply(
   return { ok: false, error: `${res.status}: ${body}` };
 }
 
+/**
+ * Mark a reply as INTERESTED in Bison (PATCH /api/replies/{id}/mark-as-interested).
+ * Idempotent on Bison's side — if the lead is already interested in the
+ * campaign, it's a no-op. `skip_webhooks:false` mirrors the documented default
+ * so Bison still fires its own downstream events.
+ */
+export async function markReplyInterested(
+  instanceKey: string,
+  replyId: number,
+): Promise<{ ok: boolean; error?: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/${replyId}/mark-as-interested`, {
+    method: "PATCH",
+    headers: buildHeaders(token),
+    body: JSON.stringify({ skip_webhooks: false }),
+  });
+  if (res.ok) return { ok: true };
+  const body = await res.text();
+  return { ok: false, error: `${res.status}: ${body}` };
+}
+
+/**
+ * Unsubscribe the contact behind a reply in Bison
+ * (PATCH /api/replies/{id}/unsubscribe) — used when a lead is marked
+ * "Do Not Contact". No request body per the Bison spec.
+ */
+export async function unsubscribeReplyLead(
+  instanceKey: string,
+  replyId: number,
+): Promise<{ ok: boolean; error?: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/${replyId}/unsubscribe`, {
+    method: "PATCH",
+    headers: buildHeaders(token),
+  });
+  if (res.ok) return { ok: true };
+  const body = await res.text();
+  return { ok: false, error: `${res.status}: ${body}` };
+}
+
 export async function forwardReply(
   instanceKey: string,
   params: {
