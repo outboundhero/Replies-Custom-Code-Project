@@ -29,7 +29,7 @@
 
 // EDIT THESE TWO:
 const REPLY_ROUTER_URL = "https://YOUR-REPLY-ROUTER-DOMAIN"; // e.g. https://replies.outboundhero.co
-const SECRET = "YOUR_AIRTABLE_SYNC_SECRET"; // = AIRTABLE_SYNC_SECRET (or CRON_SECRET) in Vercel
+const SECRET = "YOUR_AIRTABLE_SYNC_SECRET"; // = AIRTABLE_SYNC_SECRET in Vercel
 
 const { replyId, instance, category } = input.config();
 

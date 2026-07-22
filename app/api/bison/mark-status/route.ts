@@ -14,8 +14,8 @@
  *   - category = the record's "Lead Category"
  *
  * Auth: shared secret in the `x-webhook-secret` header (or ?secret=), matched
- * against AIRTABLE_SYNC_SECRET (falls back to CRON_SECRET so it works out of the
- * box). Bison tokens never leave the server — Airtable only holds this secret.
+ * against AIRTABLE_SYNC_SECRET. Bison tokens never leave the server — Airtable
+ * only holds this secret.
  */
 import { NextRequest, NextResponse } from "next/server";
 import supabase from "@/lib/supabase";
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-webhook-secret") ||
     req.nextUrl.searchParams.get("secret") ||
     (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-  const expected = process.env.AIRTABLE_SYNC_SECRET || process.env.CRON_SECRET;
+  const expected = process.env.AIRTABLE_SYNC_SECRET;
   if (!expected || provided !== expected) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
