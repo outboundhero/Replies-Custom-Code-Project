@@ -122,10 +122,51 @@ export async function sendReply(
 }
 
 /**
+ * Fetch a single reply (GET /api/replies/{id}) — we read `lead_id` to tell
+ * whether the reply has an attached contact. Bison's mark-as-interested /
+ * unsubscribe only work on replies WITH a lead; untracked replies and bounces
+ * (lead_id null) can't be marked, so callers check this first.
+ */
+export async function getReply(
+  instanceKey: string,
+  replyId: number,
+): Promise<{ ok: boolean; status: number; leadId: number | null; fromEmail: string | null; type: string | null; error?: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/${replyId}`, { headers: buildHeaders(token) });
+  if (!res.ok) {
+    const t = await res.text();
+    return { ok: false, status: res.status, leadId: null, fromEmail: null, type: null, error: `${res.status}: ${t.slice(0, 160)}` };
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const j: any = await res.json().catch(() => null);
+  const d = (j && (j.data ?? j)) || {};
+  return {
+    ok: true,
+    status: res.status,
+    leadId: d.lead_id ?? null,
+    fromEmail: d.from_email_address ?? null,
+    type: d.type ?? null,
+  };
+}
+
+// Bison sometimes returns HTTP 200 with a body of { data: { success: "false",
+// message } } instead of an error status (e.g. "Replies without an attached
+// contact can not be marked as interested."). Treat that as a failure so the
+// caller doesn't think the mark succeeded.
+function readBisonAck(text: string): { declined: boolean; message?: string } {
+  try {
+    const j = JSON.parse(text);
+    const s = j?.data?.success;
+    if (s === false || s === "false") return { declined: true, message: j?.data?.message };
+  } catch { /* non-JSON body → treat as fine */ }
+  return { declined: false };
+}
+
+/**
  * Mark a reply as INTERESTED in Bison (PATCH /api/replies/{id}/mark-as-interested).
  * Idempotent on Bison's side — if the lead is already interested in the
  * campaign, it's a no-op. `skip_webhooks:false` mirrors the documented default
- * so Bison still fires its own downstream events.
+ * so Bison still fires its own downstream events. Requires an attached contact.
  */
 export async function markReplyInterested(
   instanceKey: string,
@@ -137,15 +178,18 @@ export async function markReplyInterested(
     headers: buildHeaders(token),
     body: JSON.stringify({ skip_webhooks: false }),
   });
-  if (res.ok) return { ok: true };
   const body = await res.text();
-  return { ok: false, error: `${res.status}: ${body}` };
+  if (!res.ok) return { ok: false, error: `${res.status}: ${body.slice(0, 200)}` };
+  const ack = readBisonAck(body);
+  if (ack.declined) return { ok: false, error: ack.message || "Bison declined (success:false)" };
+  return { ok: true };
 }
 
 /**
  * Unsubscribe the contact behind a reply in Bison
  * (PATCH /api/replies/{id}/unsubscribe) — used when a lead is marked
- * "Do Not Contact". No request body per the Bison spec.
+ * "Do Not Contact". No request body per the Bison spec. Requires an attached
+ * contact (untracked replies 500).
  */
 export async function unsubscribeReplyLead(
   instanceKey: string,
@@ -156,9 +200,11 @@ export async function unsubscribeReplyLead(
     method: "PATCH",
     headers: buildHeaders(token),
   });
-  if (res.ok) return { ok: true };
   const body = await res.text();
-  return { ok: false, error: `${res.status}: ${body}` };
+  if (!res.ok) return { ok: false, error: `${res.status}: ${body.slice(0, 200)}` };
+  const ack = readBisonAck(body);
+  if (ack.declined) return { ok: false, error: ack.message || "Bison declined (success:false)" };
+  return { ok: true };
 }
 
 export async function forwardReply(

@@ -14,7 +14,7 @@
  *
  * Both Bison endpoints are idempotent, so a repeated mark is a safe no-op.
  */
-import { markReplyInterested, unsubscribeReplyLead } from "@/lib/outboundhero-api";
+import { markReplyInterested, unsubscribeReplyLead, getReply } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
 
 /** `lead_category` values that map to Bison "interested". */
@@ -36,7 +36,8 @@ export function bisonActionForCategory(category: string | null | undefined): Bis
 export interface BisonSyncResult {
   ok: boolean;
   action: BisonReplyAction | null;
-  skipped?: boolean; // category isn't one we sync
+  skipped?: boolean; // category isn't one we sync, or reply has no attached contact
+  note?: string;     // human-readable reason for a skip
   error?: string;
 }
 
@@ -61,6 +62,26 @@ export async function syncReplyStatusToBison(params: {
   }
 
   try {
+    // Bison can only mark a reply that has an ATTACHED CONTACT (a lead).
+    // Untracked replies and bounces have lead_id === null, where
+    // mark-as-interested returns success:false and unsubscribe 500s. Detect
+    // that up front and skip cleanly so the caller (inbox / Airtable) never errors.
+    const info = await getReply(params.instance, replyId);
+    if (!info.ok) {
+      await logError(params.source, `bison-${action}`, info.error || "reply lookup failed", {
+        reply_id: replyId, category: params.category, bison_instance: params.instance,
+      });
+      return { ok: false, action, error: info.error };
+    }
+    if (info.leadId == null) {
+      const note = "reply has no attached contact in Bison (untracked reply or bounce) — nothing to mark";
+      await logActivity(params.source, `bison-${action}-skipped`, {
+        client_tag: params.clientTag || undefined,
+        details: { reply_id: replyId, category: params.category, bison_instance: params.instance, reason: note },
+      });
+      return { ok: true, action, skipped: true, note };
+    }
+
     const res =
       action === "interested"
         ? await markReplyInterested(params.instance, replyId)
