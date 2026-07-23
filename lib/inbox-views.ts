@@ -72,3 +72,28 @@ export function getView(id: string | null | undefined): InboxView | null {
   if (!id) return null;
   return INBOX_VIEWS.find((v) => v.id === id) || null;
 }
+
+/**
+ * The positive-engagement lead_category buckets, in priority order. Shared by
+ * the inbox sidebar and the server bootstrap so both agree on which bucket to
+ * auto-open first. Browser-safe (no server deps).
+ */
+export const POSITIVE_CATEGORIES = [
+  "Interested",
+  "Meeting Set",
+  "Meeting-Ready Lead",
+  "Follow Up",
+  "Referral Given",
+  "Internally Forwarded",
+];
+
+/**
+ * Pick the first non-empty bucket to auto-expand: positives first, then Open
+ * Response, then whatever else has rows. MUST match the client's auto-expand so
+ * the server-prefetched leads land in the bucket the UI opens.
+ */
+export function pickFirstCategory(counts: Record<string, number>): string | null {
+  const keys = Object.keys(counts);
+  const order = [...POSITIVE_CATEGORIES, "Open Response", ...keys];
+  return order.find((c) => (counts[c] || 0) > 0) ?? null;
+}

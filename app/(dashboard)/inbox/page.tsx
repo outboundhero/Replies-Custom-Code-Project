@@ -9,7 +9,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
-import { INBOX_VIEWS, getView } from "@/lib/inbox-views";
+import { INBOX_VIEWS, getView, POSITIVE_CATEGORIES } from "@/lib/inbox-views";
+import { useSession } from "@/components/session-provider";
+import { peekFreshBootstrap, DEFAULT_VIEW, type InboxBootstrap } from "@/lib/inbox-prefetch";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 // Pure / no server deps — must NOT import from domain-blacklist (which
 // pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
@@ -59,8 +62,6 @@ const LEAD_CATEGORIES = [
   "Wrong Person",
 ];
 
-const POSITIVE_CATEGORIES = ["Interested", "Meeting Set", "Meeting-Ready Lead", "Follow Up", "Referral Given", "Internally Forwarded"];
-
 const catDot: Record<string, string> = {
   "Interested": "bg-green-500", "Meeting Set": "bg-green-600", "Meeting-Ready Lead": "bg-green-600",
   "Follow Up": "bg-blue-500", "Not Interested": "bg-gray-400", "Do Not Contact": "bg-red-500",
@@ -72,32 +73,53 @@ const catDot: Record<string, string> = {
 };
 
 export default function InboxPage() {
-  // Category counts (loaded once, lightweight)
-  const [counts, setCounts] = useState<Record<string, number>>({});
-  const [total, setTotal] = useState(0);
+  // Per-user scope comes from the server session (context) — no /api/auth fetch.
+  const session = useSession();
+  const scopedTags = session?.allowedClientTags && session.allowedClientTags.length
+    ? session.allowedClientTags : null;
+  const initialClient = scopedTags && scopedTags.length === 1 ? scopedTags[0] : "";
+  const initialView = DEFAULT_VIEW;
 
-  // Leads loaded per-category on expand
-  const [categoryLeads, setCategoryLeads] = useState<Record<string, ReplyListItem[]>>({});
+  // One-time synchronous hydrate from the app-load prefetch (fresh data only).
+  // When present we paint the counts + first bucket instantly and skip the
+  // initial fetch below.
+  const bootRef = useRef<InboxBootstrap | null | undefined>(undefined);
+  if (bootRef.current === undefined) bootRef.current = peekFreshBootstrap(initialView, initialClient);
+  const boot = bootRef.current;
+
+  // Category counts
+  const [counts, setCounts] = useState<Record<string, number>>(boot?.counts ?? {});
+  const [total, setTotal] = useState(boot?.total ?? 0);
+
+  // Leads loaded per-category on expand (first bucket seeded from bootstrap)
+  const [categoryLeads, setCategoryLeads] = useState<Record<string, ReplyListItem[]>>(
+    boot?.firstCategory ? { [boot.firstCategory]: boot.leads as unknown as ReplyListItem[] } : {}
+  );
   const [loadingCat, setLoadingCat] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(
+    boot?.firstCategory ? new Set([boot.firstCategory]) : new Set()
+  );
   // Per-category pagination cursor for "Load more".
-  const [catPage, setCatPage] = useState<Record<string, { offset: number; hasMore: boolean }>>({});
-  // Guards the one-time auto-expand of the first bucket per filter set.
-  const autoExpandedRef = useRef(false);
+  const [catPage, setCatPage] = useState<Record<string, { offset: number; hasMore: boolean }>>(
+    boot?.firstCategory ? { [boot.firstCategory]: { offset: boot.leads.length, hasMore: boot.hasMore } } : {}
+  );
+  // False until the first bootstrap (or prefetch hydrate) resolves — drives skeletons.
+  const [booted, setBooted] = useState(!!boot);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
   const [search, setSearch] = useState("");
+  // Fetches run off the debounced value so typing doesn't fire a request/char.
+  const debouncedSearch = useDebouncedValue(search, 300);
   const [filterCategory, setFilterCategory] = useState("");
-  const [filterClient, setFilterClient] = useState("");
+  const [filterClient, setFilterClient] = useState(initialClient);
   // Default to the curated Cherry view — that's where the team lives day-to-day.
   // Master Inbox ("all") is still selectable from the dropdown.
-  const [view, setView] = useState<string>("base-clients-cherry");
-  const [clientTags, setClientTags] = useState<string[]>([]);
-  // Per-user client scoping. When non-null + non-empty, this user can
-  // only see leads whose client_tag is in this list — the API enforces
-  // it server-side; we mirror it in the UI so the controls don't lie.
-  const [allowedClientTags, setAllowedClientTags] = useState<string[] | null>(null);
+  const [view, setView] = useState<string>(initialView);
+  const [clientTags, setClientTags] = useState<string[]>(boot?.clientTags ?? []);
+  // Per-user client scoping mirrored from the session so the controls don't lie
+  // (the API enforces it server-side regardless).
+  const [allowedClientTags] = useState<string[] | null>(scopedTags);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -113,61 +135,38 @@ export default function InboxPage() {
   const [reallocTag, setReallocTag] = useState("");
   const [sending, setSending] = useState<string | null>(null);
 
-  // Load client tags for filter dropdown
-  useEffect(() => {
-    fetch("/api/inbox?mode=client_tags")
-      .then((r) => r.ok ? r.json() : null)
-      .then((d) => { if (d?.tags) setClientTags(d.tags); })
-      .catch(() => {});
-  }, []);
-
-  // Load the current user's session so we know their per-user scope.
-  // The inbox API will enforce this regardless, but we mirror it in the
-  // UI so the dropdowns and counts only show what the user can see.
-  useEffect(() => {
-    fetch("/api/auth", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "session" }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (Array.isArray(d?.allowedClientTags) && d.allowedClientTags.length) {
-          setAllowedClientTags(d.allowedClientTags);
-          // If the user is scoped to exactly one tag, lock the filter
-          // to it. With multiple, leave the filter at "All" (which the
-          // API still constrains to the allowed list via `IN (...)`).
-          if (d.allowedClientTags.length === 1) {
-            setFilterClient(d.allowedClientTags[0]);
-          }
-        } else {
-          setAllowedClientTags(null);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  // Load category counts
-  const loadCounts = useCallback(async () => {
+  // One request for the whole inbox: counts + the first non-empty bucket's
+  // leads + client tags. Resets per-category expansion (matches the old
+  // reset-on-filter-change behavior).
+  const loadBootstrap = useCallback(async () => {
     try {
-      const p = new URLSearchParams({ mode: "counts" });
-      if (search) p.set("search", search);
+      const p = new URLSearchParams({ mode: "bootstrap" });
+      if (debouncedSearch) p.set("search", debouncedSearch);
       if (filterClient) p.set("client_tag", filterClient);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
-      if (res.ok) {
-        const d = await res.json();
-        setCounts(d.counts);
-        setTotal(d.total);
-        setFetchError(null);
-      } else {
-        setFetchError(`Failed (${res.status})`);
-      }
-    } catch (e) { setFetchError((e as Error).message); }
-  }, [search, filterClient, view]);
+      if (!res.ok) { setFetchError(`Failed (${res.status})`); setBooted(true); return; }
+      const d = await res.json();
+      const first: string | null = d.firstCategory ?? null;
+      setCounts(d.counts || {});
+      setTotal(d.total || 0);
+      if (Array.isArray(d.clientTags)) setClientTags(d.clientTags);
+      setCategoryLeads(first ? { [first]: (d.leads || []) as ReplyListItem[] } : {});
+      setCatPage(first ? { [first]: { offset: (d.leads || []).length, hasMore: !!d.hasMore } } : {});
+      setExpanded(first ? new Set([first]) : new Set());
+      setFetchError(null);
+      setBooted(true);
+    } catch (e) {
+      setFetchError((e as Error).message);
+      setBooted(true);
+    }
+  }, [debouncedSearch, filterClient, view]);
 
-  useEffect(() => { loadCounts(); }, [loadCounts]);
+  // Run on mount + whenever view / client / (debounced) search change. When we
+  // hydrated from the app-load prefetch the UI is already painted (booted), so
+  // this becomes a silent background revalidate — instant AND fresh.
+  useEffect(() => { loadBootstrap(); }, [loadBootstrap]);
 
   // Load leads for a specific category (paginated). `append` pulls the next
   // page and concatenates; otherwise it loads the first page.
@@ -176,7 +175,7 @@ export default function InboxPage() {
     try {
       const offset = append ? (catPage[cat]?.offset ?? 0) : 0;
       const p = new URLSearchParams({ category: cat, offset: String(offset), limit: "100" });
-      if (search) p.set("search", search);
+      if (debouncedSearch) p.set("search", debouncedSearch);
       if (filterClient) p.set("client_tag", filterClient);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
@@ -207,28 +206,8 @@ export default function InboxPage() {
     });
   }
 
-  // When filters or view change, clear loaded leads and re-collapse
-  useEffect(() => {
-    setCategoryLeads({});
-    setCatPage({});
-    setExpanded(new Set());
-    autoExpandedRef.current = false;
-  }, [search, filterClient, view]);
-
-  // Once counts land, auto-expand + preload the first non-empty bucket so leads
-  // show without a click. Positives are tried first, then whatever remains.
-  useEffect(() => {
-    if (autoExpandedRef.current) return;
-    const keys = Object.keys(counts);
-    if (!keys.length) return;
-    const order = [...POSITIVE_CATEGORIES, "Open Response", ...keys];
-    const first = order.find((c) => (counts[c] || 0) > 0);
-    if (!first) return;
-    autoExpandedRef.current = true;
-    setExpanded(new Set([first]));
-    if (!categoryLeads[first]) loadCategoryLeads(first);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [counts]);
+  // (Filter/view resets + first-bucket auto-expand are handled inside
+  // loadBootstrap, which re-runs whenever view / client / debounced search change.)
 
   // Realtime: listen for new inserts. Realtime uses the anon key directly
   // (bypasses our /api/inbox auth), so for client-scoped users we MUST
@@ -475,7 +454,7 @@ export default function InboxPage() {
     if (!detail || !reallocTag) return;
     const tag = reallocTag.toUpperCase();
     const d = await mutate({ action: "reallocate", id: detail.id, client_tag: tag });
-    if (d.ok) { toast.success(`Reallocated to ${tag}`); setReallocTag(""); loadCounts(); loadDetail(detail.id); }
+    if (d.ok) { toast.success(`Reallocated to ${tag}`); setReallocTag(""); loadBootstrap(); loadDetail(detail.id); }
     else toast.error(d.error);
   }
 
@@ -622,9 +601,21 @@ export default function InboxPage() {
             </div>
           ))}
 
-          {displayCategories.length === 0 && (
+          {!booted ? (
+            <div className="p-2 space-y-1">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="flex items-center justify-between px-3 py-2 animate-pulse">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted" />
+                    <span className="h-3 rounded bg-muted" style={{ width: `${5 + (i % 4) * 2}rem` }} />
+                  </div>
+                  <span className="h-3 w-5 rounded bg-muted" />
+                </div>
+              ))}
+            </div>
+          ) : displayCategories.length === 0 ? (
             <div className="px-3 py-4 text-xs text-muted-foreground text-center">No leads found</div>
-          )}
+          ) : null}
         </div>
       </div>
 

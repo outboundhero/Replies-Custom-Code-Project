@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface NavLink {
@@ -26,31 +26,26 @@ const links: NavLink[] = [
   { href: "/users", label: "User Management", adminOnly: true },
 ];
 
-export function Nav() {
+export function Nav({
+  initialRole = null,
+  initialEmail = null,
+  initialAllowedClientTags = null,
+}: {
+  initialRole?: string | null;
+  initialEmail?: string | null;
+  initialAllowedClientTags?: string[] | null;
+} = {}) {
   const pathname = usePathname();
   const router = useRouter();
-  const [role, setRole] = useState<string | null>(null);
-  const [email, setEmail] = useState<string | null>(null);
+  // Seeded from the server render (dashboard layout) so the correct link set is
+  // present on the very first paint — no `role=null` flash, no admin-link pop-in.
+  const [role] = useState<string | null>(initialRole);
+  const [email] = useState<string | null>(initialEmail);
   // Scoped users (allowed_client_tags non-empty) get an inbox-only nav —
   // no Clients, no Qualification. Mirrors the middleware's hard block.
-  const [isScoped, setIsScoped] = useState(false);
-
-  useEffect(() => {
-    fetch("/api/auth", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "session" }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d) {
-          setRole(d.role);
-          setEmail(d.email);
-          setIsScoped(Array.isArray(d.allowedClientTags) && d.allowedClientTags.length > 0);
-        }
-      })
-      .catch(() => {});
-  }, []);
+  const [isScoped] = useState(
+    Array.isArray(initialAllowedClientTags) && initialAllowedClientTags.length > 0
+  );
 
   async function handleLogout() {
     await fetch("/api/auth", {
