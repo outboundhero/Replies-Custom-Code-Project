@@ -20,15 +20,16 @@ import { useDebouncedValue } from "@/lib/use-debounced-value";
 
 const LEAD_CATEGORIES = [
   "Open Response", "Interested", "Meeting Request", "Meeting Set", "Automated Reply",
-  "Change Of Target", "Closed Won", "Do Not Contact", "Follow Up", "Internally Forwarded",
-  "Lost", "Mailbox No Longer Active", "Meeting-Ready Lead", "Needs Review", "Not Interested",
-  "Not Interested (Send Reply)", "Out Of Office", "Referral Given",
-  "Request for Primary Point of Contact (Send Reply)", "Unqualified (Cleaning)", "Wrong Person",
+  "Change Of Target", "Closed Won", "Do Not Contact", "Email Address Changed", "Follow Up",
+  "Internally Forwarded", "Lost", "Mailbox No Longer Active", "Meeting-Ready Lead", "Needs Review",
+  "Not Interested", "Not Interested (Send Reply)", "Out Of Office", "Person No Longer Employed",
+  "Referral Given", "Request for Primary Point of Contact (Send Reply)", "Unqualified (Cleaning)", "Wrong Person",
 ];
 const AI_CATEGORIES = [
   "Interested", "Meeting Request", "Follow Up at a Later Date", "Not Interested", "Out Of Office",
   "Wrong Person", "Mailbox No Longer Active", "Automated Error Message", "Automated Catch-All Message",
   "Wrong Person (Change of Target)", "Do Not Contact", "Referral Given", "Internally Forwarded",
+  "Person No Longer Employed", "Email Address Changed", "Request for Primary Point of Contact",
   "Unrecognizable by AI",
 ];
 
