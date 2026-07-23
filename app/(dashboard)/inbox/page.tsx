@@ -177,6 +177,8 @@ export default function InboxPage() {
   // Bottom-right "previous reply processed" popup after an auto-advance.
   const [prevLead, setPrevLead] = useState<{ id: number; name: string; email: string } | null>(null);
   const prevTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const detailReqRef = useRef(0);
+  const sheetCache = useRef<Record<string, string | null>>({});
 
   // Reply form
   type Recipient = { name: string; email: string };
@@ -301,16 +303,45 @@ export default function InboxPage() {
     return () => { realtimeSupabase.removeChannel(channel); };
   }, [allowedClientTags, view]);
 
-  async function loadDetail(id: number) {
+  // Non-blocking Google-Sheet URL (cached per client tag) — pops the Sheet
+  // button in once it resolves, without ever blocking the detail render.
+  async function loadSheetUrl(tag: string) {
+    if (!tag || tag === "N/A") return;
+    if (tag in sheetCache.current) {
+      const url = sheetCache.current[tag];
+      setDetail((prev) => (prev && prev.client_tag === tag ? { ...prev, sheet_url: url } : prev));
+      return;
+    }
+    try {
+      const res = await fetch(`/api/client-sheet?tag=${encodeURIComponent(tag)}`);
+      if (!res.ok) return;
+      const { sheet_url } = await res.json();
+      sheetCache.current[tag] = sheet_url ?? null;
+      setDetail((prev) => (prev && prev.client_tag === tag ? { ...prev, sheet_url } : prev));
+    } catch { /* */ }
+  }
+
+  async function loadDetail(id: number, partial?: ReplyListItem) {
+    const mine = ++detailReqRef.current;
     setSelectedId(id);
-    setLoading(true);
     // Reflect the open reply in the URL so it can be shared / deep-linked.
     try { window.history.replaceState(null, "", `${window.location.pathname}?reply=${id}`); } catch { /* */ }
+    // Optimistic: paint the header/basics instantly from the row we already
+    // have, so clicking a lead never shows a blank "Loading…".
+    if (partial) {
+      setDetail({ ...partial } as ReplyDetail);
+      setLoading(false);
+      loadSheetUrl(partial.client_tag);
+    } else {
+      setLoading(true);
+    }
     try {
       const res = await fetch(`/api/inbox/${id}`);
+      if (mine !== detailReqRef.current) return; // a newer lead was opened
       if (res.ok) {
         const d = await res.json();
-        setDetail(d);
+        // Merge the full row over the optimistic partial (same lead only).
+        setDetail((prev) => (prev && prev.id === id ? { ...prev, ...d } : d));
         // Primary-contact category pre-fills the composer with the templated ask.
         setReplyMsg(d.lead_category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || ""));
         const ccs: Recipient[] = ([1, 2, 3, 4, 5, 6] as const)
@@ -322,9 +353,10 @@ export default function InboxPage() {
         setReplyCc(ccs);
         setReplyBcc(bccs);
         setOoCc([]);
+        if (!partial && d.client_tag) loadSheetUrl(d.client_tag);
       }
     } catch { /* */ }
-    setLoading(false);
+    if (mine === detailReqRef.current) setLoading(false);
   }
 
   // Deep-link: if the URL carries ?reply=<id> (a shared link), open that reply.
@@ -661,7 +693,7 @@ export default function InboxPage() {
                     <div className="px-3 py-2 text-[10px] text-muted-foreground">Loading...</div>
                   )}
                   {categoryLeads[cat]?.map((r) => (
-                    <button key={r.id} onClick={() => loadDetail(r.id)}
+                    <button key={r.id} onClick={() => loadDetail(r.id, r)}
                       className={`w-full text-left px-3 py-2 border-b border-muted/30 transition-colors ${selectedId === r.id ? "bg-primary/5 border-l-2 border-l-primary" : "hover:bg-muted/10 border-l-2 border-l-transparent"}`}>
                       <p className="text-xs font-medium truncate">{r.lead_email}</p>
                       <div className="flex items-center gap-1 mt-0.5">
@@ -786,7 +818,15 @@ export default function InboxPage() {
                 <p className="text-xs text-muted-foreground truncate flex-1">{detail.email_subject}</p>
                 <span className="text-[10px] text-muted-foreground ml-2 shrink-0">{detail.reply_time && new Date(detail.reply_time).toLocaleString()}</span>
               </div>
-              <div className="px-4 py-3 text-[13px] whitespace-pre-wrap leading-relaxed max-h-52 overflow-y-auto">{detail.reply_we_got || "No content"}</div>
+              <div className="px-4 py-3 text-[13px] whitespace-pre-wrap leading-relaxed max-h-52 overflow-y-auto">
+                {detail.reply_we_got === undefined ? (
+                  <div className="space-y-2 animate-pulse">
+                    <div className="h-3 w-full rounded bg-muted" />
+                    <div className="h-3 w-11/12 rounded bg-muted" />
+                    <div className="h-3 w-3/5 rounded bg-muted" />
+                  </div>
+                ) : (detail.reply_we_got || "No content")}
+              </div>
             </div>
 
             {/* Audit */}
