@@ -244,8 +244,6 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     to_name: recipients.toNames,
     prospect_cc_email: recipients.ccEmails,
     prospect_cc_name: recipients.ccNames,
-    prospect_bcc_email: recipients.bccEmails,
-    prospect_bcc_name: recipients.bccNames,
     lead_category: leadCategoryValue,
     ai_categorized_lead_category: aiCategory,
     inbox_is_noise: isNoiseReply({
@@ -286,6 +284,13 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     }
     // Invalidate inbox cache so the next page load sees the new row.
     bumpCacheVersion();
+    // Best-effort BCC capture (see tracked.ts) — never breaks the upsert.
+    if (recipients.bccEmails) {
+      supabase.from("replies")
+        .update({ prospect_bcc_email: recipients.bccEmails, prospect_bcc_name: recipients.bccNames })
+        .eq("reply_id", reply.id).eq("campaign_id", 0).eq("bison_instance", bisonInstance)
+        .then(({ error: bErr }) => { if (bErr) console.warn("[untracked] bcc capture skipped:", bErr.message); });
+    }
     // ESP intentionally not set here. Untracked replies have no `lead`
     // object on the webhook payload — only the reply sender email —
     // so we can't extract a Bison tag inline. The

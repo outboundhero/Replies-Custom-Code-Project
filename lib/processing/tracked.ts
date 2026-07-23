@@ -342,8 +342,6 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     to_name: recipients.toNames,
     prospect_cc_email: recipients.ccEmails,
     prospect_cc_name: recipients.ccNames,
-    prospect_bcc_email: recipients.bccEmails,
-    prospect_bcc_name: recipients.bccNames,
     phone: String(customVars.phone || ""),
     linkedin_url: String(customVars.linkedin || ""),
     address: String(customVars.address || ""),
@@ -396,6 +394,15 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     // Invalidate the inbox counts/tags cache so the next page load sees
     // the new row immediately (instead of waiting up to 60s for TTL).
     bumpCacheVersion();
+    // Capture the reply's BCC (almost always empty) as a best-effort follow-up
+    // so a missing prospect_bcc_* column (pre-migration) can never break the
+    // main upsert above. Only fires when a BCC is actually present.
+    if (recipients.bccEmails) {
+      supabase.from("replies")
+        .update({ prospect_bcc_email: recipients.bccEmails, prospect_bcc_name: recipients.bccNames })
+        .eq("reply_id", reply.id).eq("campaign_id", campaign.id).eq("bison_instance", bisonInstance)
+        .then(({ error: bErr }) => { if (bErr) console.warn("[tracked] bcc capture skipped:", bErr.message); });
+    }
     // Fire-and-forget ESP detection. Looks up the recipient's mailbox
     // provider via EmailGuard and writes it back. Non-blocking so the
     // webhook keeps responding fast; the cron / backfill catches any
