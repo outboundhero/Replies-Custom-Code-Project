@@ -27,14 +27,20 @@ export const CC_BCC_CATEGORIES: LeadCategory[] = [
   "Unrecognizable by AI",
 ];
 
-/** Maps AI category → Lead Category (overrides "Open Response") */
+/**
+ * Maps AI category → final Lead Category (overrides "Open Response").
+ *
+ * Referral Given is intentionally NOT here (spec §19): the AI only *suggests*
+ * it (via ai_categorized_lead_category) while the reply stays in Open Response
+ * for a human to confirm — because a confirmed Referral Given pushes the new
+ * contact to the client's lead sheet, so it must never auto-finalize.
+ */
 const LEAD_CATEGORY_MAP: Partial<Record<LeadCategory, string>> = {
   "Out Of Office": "Out Of Office",
   "Do Not Contact": "Do Not Contact",
   "Mailbox No Longer Active": "Mailbox No Longer Active",
   "Automated Error Message": "Automated Reply",
   "Automated Catch-All Message": "Automated Reply",
-  "Referral Given": "Referral Given",
   "Internally Forwarded": "Internally Forwarded",
 };
 

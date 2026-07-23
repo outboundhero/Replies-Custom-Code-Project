@@ -10,7 +10,7 @@ import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
-import { isCcBccSender } from "./cc-bcc-match";
+import { isKnownClientReply } from "./cc-bcc-match";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
@@ -130,11 +130,12 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     // Skip client config gracefully if table is missing
   }
 
-  // If the reply's sender is one of this client's configured CC/BCC recipients,
-  // hard-mark the lead as Meeting-Ready Lead (see tracked.ts). Untracked replies
-  // have no attached Bison lead, so we categorize only — no Bison mark. Bounces
-  // are already filtered out above.
-  const ccBccMeetingReady = isCcBccSender(clientConfig, reply.from_email_address);
+  // Known-client detection (§5): known contact anywhere on From/To/CC/BCC →
+  // Meeting-Ready Lead (overrides the AI read). If a client tag resolved we
+  // match that client's contacts; if not (companyCode N/A → clientConfig null)
+  // we match against ALL clients' contacts. No Bison mark (untracked has no
+  // attached lead). Bounces are already filtered out above.
+  const ccBccMeetingReady = await isKnownClientReply(clientConfig, reply);
   const leadCategoryValue = ccBccMeetingReady ? "Meeting-Ready Lead" : getLeadCategory(aiCategory);
 
   // 6. Build Airtable fields

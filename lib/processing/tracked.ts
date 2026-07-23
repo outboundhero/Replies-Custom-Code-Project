@@ -13,7 +13,7 @@ import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
-import { isCcBccSender } from "./cc-bcc-match";
+import { isKnownClientReply } from "./cc-bcc-match";
 import { markReplyInterested } from "@/lib/outboundhero-api";
 import { resolveTemplate } from "./template-resolver";
 import { BBS_TAGS, BBS_TRIGGER_CATEGORIES, routeLeadBbs } from "./bbs-router";
@@ -101,11 +101,11 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   );
   const includeClientConfig = aiCategory !== null && CC_BCC_CATEGORIES.includes(aiCategory as typeof CC_BCC_CATEGORIES[number]);
 
-  // If the reply's sender is one of THIS client's configured CC/BCC recipients
-  // (their own team engaging on the thread), hard-mark the lead as Meeting-Ready
-  // Lead regardless of the AI read (bounces excluded). Matched against the
-  // original client_config, before any BBS CC override below.
-  const ccBccMeetingReady = !isBounce && isCcBccSender(clientConfig, reply.from_email_address);
+  // Known-client detection (§5): if any From/To/CC/BCC address on the reply is
+  // one of this client's approved contacts (their team on the thread), hard-mark
+  // Meeting-Ready Lead regardless of the AI read (bounces excluded). Tracked
+  // replies always carry a tag, so we match against that client's contacts.
+  const ccBccMeetingReady = !isBounce && (await isKnownClientReply(clientConfig, reply));
   const leadCategoryValue = ccBccMeetingReady ? "Meeting-Ready Lead" : getLeadCategory(aiCategory);
 
   // 3c. BBS-only AI routing — pick Nefi (Northern Utah) or Junior (NV / AZ /
