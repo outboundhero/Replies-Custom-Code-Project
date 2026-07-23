@@ -58,6 +58,7 @@ const LEAD_CATEGORIES = [
   "Not Interested (Send Reply)",
   "Out Of Office",
   "Referral Given",
+  "Request for Primary Point of Contact (Send Reply)",
   "Unqualified (Cleaning)",
   "Wrong Person",
 ];
@@ -71,6 +72,82 @@ const catDot: Record<string, string> = {
   "Referral Given": "bg-blue-600", "Internally Forwarded": "bg-blue-600",
   "Closed Won": "bg-emerald-600", "Lost": "bg-gray-500",
 };
+
+// Categories that trigger a send/approval flow — do NOT auto-advance to the
+// next lead after these (the user must review/send the outgoing email).
+const PRIMARY_CONTACT_CATEGORY = "Request for Primary Point of Contact (Send Reply)";
+function isSendCategory(cat: string): boolean {
+  return cat === "Change Of Target" || /\(send reply\)/i.test(cat);
+}
+
+// Canned reply for the primary-contact category — {FIRST_NAME} filled from the
+// lead. The team reviews/sends it manually from the Send Reply composer.
+const PRIMARY_CONTACT_TEMPLATE =
+  "Thank you, {FIRST_NAME}. I appreciate you letting me know. Would you be able to provide the email address of your primary contact at the property management company? I'm asking because I'd like to see if they are currently in the market for the services we provide.";
+
+function leadFirstName(d: ReplyDetail): string {
+  const first = (d.first_name && String(d.first_name).trim()) || "";
+  if (first) return first;
+  const name = String(d.lead_name || d.from_name || "").trim();
+  return name ? name.split(/\s+/)[0] : "there";
+}
+function resolvePrimaryContactTemplate(d: ReplyDetail): string {
+  return PRIMARY_CONTACT_TEMPLATE.replaceAll("{FIRST_NAME}", leadFirstName(d));
+}
+
+function fmtDuration(secs: number): string {
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Live, continuously-ticking speed-to-lead timer for a reply in Open Response.
+function LiveTimer({ startIso }: { startIso: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const secs = Math.max(0, Math.floor((now - Date.parse(startIso)) / 1000));
+  const mm = String(Math.floor(secs / 60)).padStart(2, "0");
+  const ss = String(secs % 60).padStart(2, "0");
+  const over = secs - 15 * 60;
+  const past = over > 0;
+  const pm = Math.floor(Math.abs(over) / 60), ps = String(Math.abs(over) % 60).padStart(2, "0");
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-[11px] font-semibold tabular-nums px-2 py-0.5 rounded ${past ? "bg-red-50 text-red-600" : "bg-amber-50 text-amber-700"}`}
+      title="Time this reply has been waiting in Open Response (standard: 15 min)"
+    >
+      ⚡ {mm}:{ss} waiting{past ? ` — ${pm}:${ps} past standard` : ""}
+    </span>
+  );
+}
+
+// Split the stored comma-joined name/email strings back into paired recipients.
+function pairRecipients(names?: string | null, emails?: string | null): { name: string; email: string }[] {
+  const es = String(emails || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const ns = String(names || "").split(",").map((s) => s.trim());
+  if (!es.length) return ns.filter(Boolean).map((name) => ({ name, email: "" }));
+  return es.map((email, i) => ({ name: ns[i] || "", email }));
+}
+function EmailRow({ label, name, email }: { label: string; name?: string | null; email?: string | null }) {
+  const people = pairRecipients(name, email);
+  if (!people.length) return null;
+  return (
+    <div className="flex gap-2">
+      <span className="w-9 shrink-0 text-muted-foreground font-medium">{label}</span>
+      <span className="flex-1 break-all">
+        {people.map((p, i) => (
+          <span key={i}>
+            {i > 0 && "; "}
+            {p.name ? <span className="font-medium">{p.name} </span> : null}
+            {p.email ? <span className="text-muted-foreground">&lt;{p.email}&gt;</span> : null}
+          </span>
+        ))}
+      </span>
+    </div>
+  );
+}
 
 export default function InboxPage() {
   // Per-user scope comes from the server session (context) — no /api/auth fetch.
@@ -122,6 +199,9 @@ export default function InboxPage() {
   const [allowedClientTags] = useState<string[] | null>(scopedTags);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Bottom-right "previous reply processed" popup after an auto-advance.
+  const [prevLead, setPrevLead] = useState<{ id: number; name: string; email: string } | null>(null);
+  const prevTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reply form
   type Recipient = { name: string; email: string };
@@ -249,12 +329,15 @@ export default function InboxPage() {
   async function loadDetail(id: number) {
     setSelectedId(id);
     setLoading(true);
+    // Reflect the open reply in the URL so it can be shared / deep-linked.
+    try { window.history.replaceState(null, "", `${window.location.pathname}?reply=${id}`); } catch { /* */ }
     try {
       const res = await fetch(`/api/inbox/${id}`);
       if (res.ok) {
         const d = await res.json();
         setDetail(d);
-        setReplyMsg(d.our_reply || "");
+        // Primary-contact category pre-fills the composer with the templated ask.
+        setReplyMsg(d.lead_category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || ""));
         const ccs: Recipient[] = ([1, 2, 3, 4, 5, 6] as const)
           .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
           .filter((r) => r.name || r.email);
@@ -268,6 +351,13 @@ export default function InboxPage() {
     } catch { /* */ }
     setLoading(false);
   }
+
+  // Deep-link: if the URL carries ?reply=<id> (a shared link), open that reply.
+  useEffect(() => {
+    const rid = new URLSearchParams(window.location.search).get("reply");
+    if (rid && Number(rid) > 0) loadDetail(Number(rid));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function mutate(body: Record<string, unknown>) {
     const res = await fetch("/api/inbox/mutate", {
@@ -341,6 +431,15 @@ export default function InboxPage() {
     const oldCat = detail.lead_category || "Open Response";
     if (oldCat === cat) return;
 
+    // Auto-advance target: the next lead in the bucket we're working (captured
+    // BEFORE the optimistic patch removes the current one). Send/approval
+    // categories don't advance (the user must review the outgoing email).
+    const isSend = isSendCategory(cat);
+    const bucket = categoryLeads[oldCat] || [];
+    const idx = bucket.findIndex((r) => r.id === detail.id);
+    const nextLead = idx >= 0 ? (bucket[idx + 1] || bucket[idx - 1] || null) : null;
+    const prev = { id: detail.id, name: String(detail.lead_name || detail.from_name || detail.lead_email || ""), email: String(detail.lead_email || "") };
+
     // ── Optimistic local-state patch — NO refetches, NO page flash ──
     // The detail panel updates instantly, the sidebar tile counts shift, and
     // the lead row moves between category buckets in place. The reply
@@ -393,6 +492,16 @@ export default function InboxPage() {
         } else {
           toast.error(`Change of Target: ${cot.reason || "send failed"}`);
         }
+      }
+      // Primary-contact category → fill the composer with the templated ask.
+      if (cat === PRIMARY_CONTACT_CATEGORY) setReplyMsg(resolvePrimaryContactTemplate(detail));
+      // Auto-advance to the next lead for non-send categories; send/approval
+      // categories stay put so the user can review the outgoing email.
+      if (!isSend) {
+        setPrevLead(prev);
+        if (prevTimerRef.current) clearTimeout(prevTimerRef.current);
+        prevTimerRef.current = setTimeout(() => setPrevLead(null), 5000);
+        if (nextLead) loadDetail(nextLead.id);
       }
     } else {
       // Rollback on failure
@@ -634,6 +743,13 @@ export default function InboxPage() {
                 <p className="text-xs text-muted-foreground">{detail.lead_email}</p>
               </div>
               <div className="flex gap-1.5 items-center">
+                {(detail.lead_category || "Open Response") === "Open Response" ? (
+                  <LiveTimer startIso={detail.open_response_at || detail.created_at} />
+                ) : detail.time_to_categorize_seconds != null ? (
+                  <span className="text-[11px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700" title="Time from Open Response to categorization">
+                    ✓ moved in {fmtDuration(Number(detail.time_to_categorize_seconds))}
+                  </span>
+                ) : null}
                 {detail.sheet_url && (
                   <a
                     href={detail.sheet_url as string}
@@ -650,6 +766,14 @@ export default function InboxPage() {
                 <InstanceBadge instance={detail.bison_instance} />
                 <span className="text-[11px] bg-muted px-2 py-0.5 rounded">{detail.workflow}</span>
               </div>
+            </div>
+
+            {/* Email participants — From / To / CC. The reply's own BCC is not
+                delivered by Bison's webhook, so it can't be shown here. */}
+            <div className="rounded border bg-white px-4 py-2.5 space-y-1 text-xs">
+              <EmailRow label="From" name={detail.from_name} email={detail.from_email || detail.lead_email} />
+              <EmailRow label="To" name={detail.to_name} email={detail.to_email} />
+              <EmailRow label="CC" name={detail.prospect_cc_name} email={detail.prospect_cc_email} />
             </div>
 
             {/* Lead Details - compact */}
@@ -829,6 +953,23 @@ export default function InboxPage() {
           </div>
         )}
       </div>
+
+      {/* Auto-advance: "previous reply processed" popup with a way back (~5s). */}
+      {prevLead && (
+        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-3 rounded-lg border bg-white px-4 py-2.5 shadow-lg animate-in fade-in slide-in-from-bottom-2">
+          <div className="min-w-0">
+            <p className="text-[10px] text-muted-foreground">Previous reply processed</p>
+            <p className="text-xs font-medium truncate max-w-[220px]">{prevLead.name || prevLead.email}</p>
+            {prevLead.email && prevLead.name && <p className="text-[10px] text-muted-foreground truncate max-w-[220px]">{prevLead.email}</p>}
+          </div>
+          <button
+            onClick={() => { loadDetail(prevLead.id); setPrevLead(null); }}
+            className="shrink-0 text-xs font-medium text-primary hover:underline"
+          >
+            ← Back to previous
+          </button>
+        </div>
+      )}
     </div>
   );
 }

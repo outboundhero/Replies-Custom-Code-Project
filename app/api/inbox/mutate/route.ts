@@ -30,11 +30,13 @@ export async function POST(req: NextRequest) {
     let rowInstance: string = DEFAULT_INSTANCE;
     let rowReplyId: number | null = null;
     let rowClientTag: string | null = null;
+    let rowLeadCategory: string | null = null;
+    let rowCreatedAt: string | null = null;
     if (id) {
       const allowed = session?.allowedClientTags ?? null;
       const { data: row } = await supabase
         .from("replies")
-        .select("client_tag, bison_instance, reply_id")
+        .select("client_tag, bison_instance, reply_id, lead_category, created_at")
         .eq("id", id)
         .single();
       if (allowed && allowed.length) {
@@ -45,18 +47,58 @@ export async function POST(req: NextRequest) {
       rowInstance = coerceInstance(row?.bison_instance);
       rowReplyId = (row?.reply_id as number | null) ?? null;
       rowClientTag = (row?.client_tag as string | null) ?? null;
+      rowLeadCategory = (row?.lead_category as string | null) ?? null;
+      rowCreatedAt = (row?.created_at as string | null) ?? null;
     }
 
     switch (action) {
       case "update-category": {
         const { category } = body;
+        const nowIso = new Date().toISOString();
         const { error } = await supabase
           .from("replies")
-          .update({ lead_category: category, updated_at: new Date().toISOString() })
+          .update({ lead_category: category, updated_at: nowIso })
           .eq("id", id);
         if (error) throw new Error(error.message);
         // Counts cache stale now — category moved between buckets.
         bumpCacheVersion();
+
+        // ── Speed-to-Lead timing (best-effort; columns may not exist until the
+        // sql/2026-07_speed_to_lead.sql migration is run, so a failure here must
+        // never break categorization). "Open Response" == null/that label.
+        const oldCat = rowLeadCategory || "Open Response";
+        const newCat = String(category || "Open Response");
+        if (oldCat !== newCat) {
+          const timing: Record<string, unknown> = {};
+          if (newCat === "Open Response") {
+            // Restored to Open Response → restart the clock.
+            timing.open_response_at = nowIso;
+            timing.categorized_at = null;
+            timing.time_to_categorize_seconds = null;
+            timing.categorized_by = null;
+          } else {
+            // Categorized out of Open Response (first time or re-categorized).
+            timing.categorized_at = nowIso;
+            timing.categorized_by = session.email;
+            if (oldCat === "Open Response") {
+              // Stamp the final Open-Response duration ONCE, on first exit.
+              // Fetch open_response_at separately so a missing column (pre-
+              // migration) can't fail the row lookup above.
+              let startIso = rowCreatedAt;
+              const { data: orRow } = await supabase
+                .from("replies").select("open_response_at").eq("id", id).single();
+              if (orRow && (orRow as { open_response_at?: string }).open_response_at) {
+                startIso = (orRow as { open_response_at?: string }).open_response_at!;
+              }
+              if (startIso) {
+                const secs = Math.max(0, Math.round((Date.parse(nowIso) - Date.parse(startIso)) / 1000));
+                if (Number.isFinite(secs)) timing.time_to_categorize_seconds = secs;
+              }
+            }
+          }
+          const { error: tErr } = await supabase.from("replies").update(timing).eq("id", id);
+          if (tErr) console.warn("[inbox/update-category] timing update skipped:", tErr.message);
+        }
 
         // Side-effect outputs accumulated below, then merged into the
         // single final response so the client can show one toast.
