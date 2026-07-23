@@ -202,6 +202,9 @@ export default function InboxPage() {
   const [cotPreview, setCotPreview] = useState<CotState | null>(null);
   const detailReqRef = useRef(0);
   const sheetCache = useRef<Record<string, string | null>>({});
+  // Hover-prefetched full details, so a click paints instantly.
+  const detailCache = useRef<Map<number, ReplyDetail>>(new Map());
+  const detailInflight = useRef<Set<number>>(new Set());
 
   // Reply form
   type Recipient = { name: string; email: string };
@@ -344,39 +347,51 @@ export default function InboxPage() {
     } catch { /* */ }
   }
 
+  // Apply a full reply row to the detail pane + composer.
+  function applyDetail(d: ReplyDetail, mergeById?: number) {
+    setDetail((prev) => (mergeById && prev && prev.id === mergeById ? { ...prev, ...d } : d));
+    setReplyMsg(d.lead_category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || ""));
+    const ccs: Recipient[] = ([1, 2, 3, 4, 5, 6] as const)
+      .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
+      .filter((r) => r.name || r.email);
+    const bccs: Recipient[] = ([1, 2] as const)
+      .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
+      .filter((r) => r.name || r.email);
+    setReplyCc(ccs);
+    setReplyBcc(bccs);
+    setOoCc([]);
+    if (d.client_tag) loadSheetUrl(d.client_tag);
+  }
+
+  // Prefetch a reply's full detail on hover so the click paints instantly.
+  function prefetchDetail(id: number) {
+    if (detailCache.current.has(id) || detailInflight.current.has(id)) return;
+    detailInflight.current.add(id);
+    fetch(`/api/inbox/${id}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) detailCache.current.set(id, d); })
+      .catch(() => {})
+      .finally(() => detailInflight.current.delete(id));
+  }
+
   async function loadDetail(id: number, partial?: ReplyListItem) {
     const mine = ++detailReqRef.current;
     setSelectedId(id);
     // Reflect the open reply in the URL so it can be shared / deep-linked.
     try { window.history.replaceState(null, "", `${window.location.pathname}?reply=${id}`); } catch { /* */ }
-    // Optimistic: paint the header/basics instantly from the row we already
-    // have, so clicking a lead never shows a blank "Loading…".
-    if (partial) {
-      setDetail({ ...partial } as ReplyDetail);
-      setLoading(false);
-      loadSheetUrl(partial.client_tag);
-    } else {
-      setLoading(true);
-    }
+    // Instant when we've hover-prefetched this reply's full detail.
+    const cached = detailCache.current.get(id);
+    if (cached) { applyDetail(cached); setLoading(false); return; }
+    // Else paint the header/basics from the clicked row, fetch the rest.
+    if (partial) { setDetail({ ...partial } as ReplyDetail); setLoading(false); loadSheetUrl(partial.client_tag); }
+    else setLoading(true);
     try {
       const res = await fetch(`/api/inbox/${id}`);
       if (mine !== detailReqRef.current) return; // a newer lead was opened
       if (res.ok) {
         const d = await res.json();
-        // Merge the full row over the optimistic partial (same lead only).
-        setDetail((prev) => (prev && prev.id === id ? { ...prev, ...d } : d));
-        // Primary-contact category pre-fills the composer with the templated ask.
-        setReplyMsg(d.lead_category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || ""));
-        const ccs: Recipient[] = ([1, 2, 3, 4, 5, 6] as const)
-          .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
-          .filter((r) => r.name || r.email);
-        const bccs: Recipient[] = ([1, 2] as const)
-          .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
-          .filter((r) => r.name || r.email);
-        setReplyCc(ccs);
-        setReplyBcc(bccs);
-        setOoCc([]);
-        if (!partial && d.client_tag) loadSheetUrl(d.client_tag);
+        detailCache.current.set(id, d);
+        applyDetail(d, id);
       }
     } catch { /* */ }
     if (mine === detailReqRef.current) setLoading(false);
@@ -390,6 +405,8 @@ export default function InboxPage() {
   }, []);
 
   async function mutate(body: Record<string, unknown>) {
+    // The row may change — drop its prefetch cache so a re-open re-fetches fresh.
+    if (typeof body.id === "number") detailCache.current.delete(body.id);
     const res = await fetch("/api/inbox/mutate", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
@@ -749,7 +766,7 @@ export default function InboxPage() {
                     <div className="px-3 py-2 text-[10px] text-muted-foreground">Loading...</div>
                   )}
                   {categoryLeads[cat]?.map((r) => (
-                    <button key={r.id} onClick={() => loadDetail(r.id, r)}
+                    <button key={r.id} onClick={() => loadDetail(r.id, r)} onMouseEnter={() => prefetchDetail(r.id)}
                       className={`w-full text-left px-3 py-2 border-b border-muted/30 transition-colors ${selectedId === r.id ? "bg-primary/5 border-l-2 border-l-primary" : "hover:bg-muted/10 border-l-2 border-l-transparent"}`}>
                       <p className="text-xs font-medium truncate">{r.lead_email}</p>
                       <div className="flex items-center gap-1 mt-0.5">
@@ -1065,7 +1082,7 @@ export default function InboxPage() {
 
                   <div className="space-y-1">
                     <label className="text-[11px] font-medium text-muted-foreground">Send to</label>
-                    {cotPreview.candidates.length > 1 && (
+                    {cotPreview.candidates.length > 0 && (
                       <Select value={cotPreview.toEmail} onValueChange={cotSelectRecipient}>
                         <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Choose recipient" /></SelectTrigger>
                         <SelectContent>
@@ -1079,7 +1096,7 @@ export default function InboxPage() {
                       <Input value={cotPreview.toName} onChange={(e) => cotPatch({ toName: e.target.value, message: cotPreview.messageDirty ? cotPreview.message : cotPreview.messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(e.target.value)) })} placeholder="Name" className="h-8 text-xs flex-1" />
                       <Input value={cotPreview.toEmail} onChange={(e) => cotPatch({ toEmail: e.target.value })} placeholder="email@example.com" className="h-8 text-xs flex-[2]" />
                     </div>
-                    {cotPreview.candidates.length > 1 && <p className="text-[10px] text-muted-foreground">{cotPreview.candidates.length} contacts found in the reply — pick which one to pitch.</p>}
+                    {cotPreview.candidates.length > 0 && <p className="text-[10px] text-muted-foreground">{cotPreview.candidates.length} contact{cotPreview.candidates.length > 1 ? "s" : ""} found in the reply — pick which one to pitch (or edit above).</p>}
                     {cotPreview.candidates.length === 0 && !cotPreview.error && <p className="text-[10px] text-muted-foreground">No contact auto-detected — enter the destination email above.</p>}
                   </div>
 

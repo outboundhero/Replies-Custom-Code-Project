@@ -112,7 +112,7 @@ export async function extractRedirectEmails(
     "  - List each DISTINCT alternative contact's address the lead asks us to reach instead of them, in the order mentioned (first = most likely).",
     "  - DO NOT include the lead's own address (told below) — omit it.",
     `  - DO NOT pull addresses from quoted history (lines starting with ">" or after "-----Original Message-----").`,
-    "  - DO NOT invent or correct emails — only addresses that appear verbatim in the body.",
+    "  - Never invent a username or domain. BUT if a contact is clearly given with their email and only the '@' is missing (e.g. \"Pat (pat.richter1.com)\", especially when another contact shares that same domain), reconstruct it by inserting a SINGLE '@' so it becomes valid (→ pat@richter1.com). Insert only the '@' — change no other characters, and only when the intent is unambiguous.",
     "  - Pair each email with the contact's name if mentioned alongside it, else null.",
     `  - If none, return { "contacts": [] }.`,
   ].join("\n");
