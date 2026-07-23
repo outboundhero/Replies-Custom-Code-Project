@@ -126,6 +126,25 @@ function LiveTimer({ startIso }: { startIso: string }) {
   );
 }
 
+interface CotState {
+  replyId: number;
+  loading: boolean;
+  error?: string;
+  candidates: { email: string; name: string | null }[];
+  toEmail: string;
+  toName: string;
+  subject: string;
+  messageTemplate: string;
+  message: string;
+  messageDirty: boolean;
+  senderEmailId: number | null;
+  sending: boolean;
+}
+function firstNameOf(name: string): string {
+  const n = (name || "").trim();
+  return n ? n.split(/\s+/)[0] : "there";
+}
+
 export default function InboxPage() {
   // Per-user scope comes from the server session (context) — no /api/auth fetch.
   const session = useSession();
@@ -179,6 +198,8 @@ export default function InboxPage() {
   // Bottom-right "previous reply processed" popup after an auto-advance.
   const [prevLead, setPrevLead] = useState<{ id: number; name: string; email: string } | null>(null);
   const prevTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Change-of-Target preview (spec §22): prepared candidates + editable message.
+  const [cotPreview, setCotPreview] = useState<CotState | null>(null);
   const detailReqRef = useRef(0);
   const sheetCache = useRef<Record<string, string | null>>({});
 
@@ -375,6 +396,46 @@ export default function InboxPage() {
     return res.json();
   }
 
+  // ── Change-of-Target preview (§22): prepare candidates, pick + edit, approve ──
+  async function openCot(replyId: number) {
+    setCotPreview({ replyId, loading: true, candidates: [], toEmail: "", toName: "", subject: "", messageTemplate: "", message: "", messageDirty: false, senderEmailId: null, sending: false });
+    const d = await mutate({ action: "prepare-change-of-target", id: replyId });
+    const cands = (d.candidates || []) as { email: string; name: string | null }[];
+    const first = cands[0];
+    const toName = first?.name || "";
+    const messageTemplate = d.messageTemplate || "";
+    setCotPreview((prev) => (prev && prev.replyId === replyId ? {
+      ...prev, loading: false,
+      error: d.ok ? undefined : (d.reason || "Could not prepare Change of Target"),
+      candidates: cands, toEmail: first?.email || "", toName,
+      subject: d.subject || "", messageTemplate,
+      message: messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(toName)),
+      senderEmailId: d.senderEmailId ?? null,
+    } : prev));
+  }
+  function cotPatch(patch: Partial<CotState>) {
+    setCotPreview((prev) => (prev ? { ...prev, ...patch } : prev));
+  }
+  function cotSelectRecipient(email: string) {
+    setCotPreview((prev) => {
+      if (!prev) return prev;
+      const c = prev.candidates.find((x) => x.email === email);
+      const toName = c?.name || "";
+      const message = prev.messageDirty ? prev.message : prev.messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(toName));
+      return { ...prev, toEmail: email, toName, message };
+    });
+  }
+  async function sendCot() {
+    if (!cotPreview?.toEmail || !cotPreview.senderEmailId) { toast.error("Pick a destination email first"); return; }
+    cotPatch({ sending: true });
+    const d = await mutate({
+      action: "send-change-of-target", id: cotPreview.replyId, senderEmailId: cotPreview.senderEmailId,
+      toEmail: cotPreview.toEmail, toName: cotPreview.toName, subject: cotPreview.subject, message: cotPreview.message,
+    });
+    if (d.ok) { toast.success(`Change of Target sent to ${cotPreview.toEmail}`); setCotPreview(null); }
+    else { toast.error(d.error || "Send failed"); cotPatch({ sending: false }); }
+  }
+
   function recipientsToApi(recipients: Recipient[]) {
     return recipients
       .filter((r) => r.email.trim())
@@ -492,16 +553,9 @@ export default function InboxPage() {
           toast.warning(d.out_of_office_reason);
         }
       }
-      // Change-of-Target re-pitch outcome (server fetched the first
-      // cold email + sent it to the AI-extracted new contact).
-      if (d.change_of_target) {
-        const cot = d.change_of_target as { ok: boolean; reason?: string; new_email?: string; first_email_subject?: string };
-        if (cot.ok) {
-          toast.success(`Re-pitched original cold email to ${cot.new_email}${cot.first_email_subject ? ` ("${cot.first_email_subject}")` : ""}`);
-        } else {
-          toast.error(`Change of Target: ${cot.reason || "send failed"}`);
-        }
-      }
+      // Change of Target → open the review/preview (pick destination + approve)
+      // instead of auto-sending (spec §22).
+      if (cat === "Change Of Target") openCot(detail.id);
       // Primary-contact category → fill the composer with the templated ask.
       if (cat === PRIMARY_CONTACT_CATEGORY) setReplyMsg(resolvePrimaryContactTemplate(detail));
       // Auto-advance to the next lead for non-send categories; send/approval
@@ -987,6 +1041,74 @@ export default function InboxPage() {
           >
             ← Back to previous
           </button>
+        </div>
+      )}
+
+      {/* Change-of-Target review (§22): pick the destination + edit + approve. */}
+      {cotPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !cotPreview.sending && setCotPreview(null)}>
+          <div className="w-full max-w-2xl rounded-xl border bg-white shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold">Change of Target — review before sending</h3>
+                <p className="text-[11px] text-muted-foreground">Re-pitch the original cold email to the new contact.</p>
+              </div>
+              <button onClick={() => !cotPreview.sending && setCotPreview(null)} className="text-lg leading-none text-muted-foreground hover:text-foreground">×</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {cotPreview.loading ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">Finding contacts &amp; preparing the email…</p>
+              ) : (
+                <>
+                  {cotPreview.error && <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{cotPreview.error}</div>}
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-muted-foreground">Send to</label>
+                    {cotPreview.candidates.length > 1 && (
+                      <Select value={cotPreview.toEmail} onValueChange={cotSelectRecipient}>
+                        <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Choose recipient" /></SelectTrigger>
+                        <SelectContent>
+                          {cotPreview.candidates.map((c, i) => (
+                            <SelectItem key={c.email} value={c.email}>{c.name ? `${c.name} — ` : ""}{c.email}{i === 0 ? "  ·  recommended" : ""}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <div className="flex gap-2">
+                      <Input value={cotPreview.toName} onChange={(e) => cotPatch({ toName: e.target.value, message: cotPreview.messageDirty ? cotPreview.message : cotPreview.messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(e.target.value)) })} placeholder="Name" className="h-8 text-xs flex-1" />
+                      <Input value={cotPreview.toEmail} onChange={(e) => cotPatch({ toEmail: e.target.value })} placeholder="email@example.com" className="h-8 text-xs flex-[2]" />
+                    </div>
+                    {cotPreview.candidates.length > 1 && <p className="text-[10px] text-muted-foreground">{cotPreview.candidates.length} contacts found in the reply — pick which one to pitch.</p>}
+                    {cotPreview.candidates.length === 0 && !cotPreview.error && <p className="text-[10px] text-muted-foreground">No contact auto-detected — enter the destination email above.</p>}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-muted-foreground">Subject</label>
+                    <Input value={cotPreview.subject} onChange={(e) => cotPatch({ subject: e.target.value })} className="h-8 text-xs" />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-muted-foreground">Preview</label>
+                    <div className="rounded border bg-muted/20 px-3 py-2 text-[13px] max-h-52 overflow-y-auto" dangerouslySetInnerHTML={{ __html: cotPreview.message }} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-muted-foreground">Message (HTML — edit if needed)</label>
+                    <Textarea value={cotPreview.message} onChange={(e) => cotPatch({ message: e.target.value, messageDirty: true })} rows={6} className="text-[11px] font-mono" />
+                  </div>
+                </>
+              )}
+            </div>
+
+            {!cotPreview.loading && (
+              <div className="flex justify-end gap-2 border-t px-4 py-3">
+                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setCotPreview(null)} disabled={cotPreview.sending}>Cancel</Button>
+                <Button size="sm" className="h-8 text-xs" onClick={sendCot} disabled={cotPreview.sending || !cotPreview.toEmail || !cotPreview.senderEmailId}>
+                  {cotPreview.sending ? "Sending…" : "Approve & Send"}
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

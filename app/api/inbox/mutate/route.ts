@@ -5,7 +5,7 @@ import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/l
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
-import { extractRedirectEmail } from "@/lib/processing/extract-redirect-email";
+import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
 import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
@@ -124,12 +124,9 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Change Of Target → re-pitch the original cold email to the
-        // contact the lead redirected us to (extract new email from the
-        // reply, fetch the first sent email, send it via /replies/new).
-        if (category === "Change Of Target") {
-          extras.change_of_target = await handleChangeOfTarget(id, rowInstance);
-        }
+        // Change Of Target does NOT auto-send anymore — the inbox opens a
+        // preview (prepare-change-of-target) so the user picks the destination
+        // and approves before anything goes out (spec §22).
 
         // Not Interested (Send Reply) → schedule a polite acknowledgment
         // for 5–10 minutes from now. The /api/cron/auto-reply job (every
@@ -397,6 +394,30 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(result);
       }
 
+      case "prepare-change-of-target": {
+        const prep = await prepareChangeOfTarget(id, rowInstance);
+        return NextResponse.json(prep);
+      }
+
+      case "send-change-of-target": {
+        const { senderEmailId, toEmail, toName, subject, message } = body;
+        if (!toEmail || !senderEmailId || !message) {
+          return NextResponse.json({ ok: false, error: "Missing recipient, sender, or message" }, { status: 400 });
+        }
+        const result = await sendOneOffReply(rowInstance, {
+          senderEmailId, subject: subject || "(no subject)", message, toEmail, toName: toName || "",
+        });
+        if (result.ok) {
+          await logActivity("inbox", "change-of-target-sent", {
+            client_tag: rowClientTag || undefined,
+            details: { reply_id: id, new_email: toEmail, new_name: toName, sender_email_id: senderEmailId, bison_instance: rowInstance },
+          });
+        } else {
+          await logError("inbox", "change-of-target", result.error || "send failed", { reply_id: id, new_email: toEmail });
+        }
+        return NextResponse.json(result);
+      }
+
       case "archive": {
         const { error } = await supabase
           .from("replies")
@@ -446,83 +467,57 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-interface ChangeOfTargetResult {
+interface ChangeOfTargetPrep {
   ok: boolean;
-  reason?: string;       // why it didn't ok (no lead_id, no email in reply, etc.)
-  new_email?: string;
-  new_name?: string;
-  first_email_subject?: string;
-  first_email_sent_at?: string;
+  reason?: string;
+  candidates?: RedirectCandidate[];   // all alternative emails found (first = recommended)
+  subject?: string;
+  messageTemplate?: string;           // greeting uses {FIRST_NAME} — the client resolves it per recipient
+  senderEmailId?: number;
+  senderName?: string;
+  originalLeadDisplayName?: string;
 }
 
 /**
- * Re-pitch the original cold email to the contact a Change-of-Target
- * reply directs us to. Pure side-effect — never throws; the caller
- * surfaces the result to the inbox UI.
- *
- * Failures are logged to error_log so the user sees them on /errors and
- * can retry manually if needed.
+ * PREPARE a Change-of-Target re-pitch WITHOUT sending (spec §22): extract every
+ * alternative contact from the reply and build the wrapped original cold email
+ * for the inbox preview. The user then picks the destination + approves, and
+ * the `send-change-of-target` action does the actual send. Never throws.
  */
-async function handleChangeOfTarget(replyId: number, instanceKey: string): Promise<ChangeOfTargetResult> {
+async function prepareChangeOfTarget(replyId: number, instanceKey: string): Promise<ChangeOfTargetPrep> {
   try {
     const { data: reply, error } = await supabase
       .from("replies")
-      .select("lead_id, lead_email, lead_name, reply_we_got, client_tag, workflow, campaign_id")
+      .select("lead_id, lead_email, lead_name, reply_we_got, campaign_id")
       .eq("id", replyId)
       .single();
-
-    if (error || !reply) {
-      return { ok: false, reason: "Reply not found in Supabase" };
-    }
+    if (error || !reply) return { ok: false, reason: "Reply not found" };
 
     const leadId = reply.lead_id as number | null;
     const campaignId = (reply.campaign_id as number | null) ?? null;
     const originalLeadEmail = (reply.lead_email as string | null) || "";
     const replyBody = (reply.reply_we_got as string | null) || "";
 
-    if (!leadId) {
-      return { ok: false, reason: "No lead_id on this reply — was an untracked reply?" };
-    }
-    if (!campaignId) {
-      return { ok: false, reason: "No campaign_id on this reply — can't scope the cold email lookup to the correct campaign" };
-    }
-    if (!replyBody.trim()) {
-      return { ok: false, reason: "Reply body is empty — nothing to extract from" };
-    }
+    if (!leadId) return { ok: false, reason: "No lead_id on this reply (untracked?) — you can still send a One-Off Reply." };
+    if (!campaignId) return { ok: false, reason: "No campaign_id — can't scope the original cold email." };
+    if (!replyBody.trim()) return { ok: false, reason: "Reply body is empty — nothing to extract from." };
 
-    // 1. AI extracts the new contact email + name from the reply.
-    const extracted = await extractRedirectEmail(replyBody, originalLeadEmail);
-    if (!extracted.email) {
-      return { ok: false, reason: "Could not find an alternative contact email in the reply" };
-    }
+    // Extract ALL alternative contacts for the picker.
+    const candidates = await extractRedirectEmails(replyBody, originalLeadEmail);
 
-    // 2. Fetch the FIRST cold email we sent to this lead within the SAME
-    // campaign the reply belongs to. A lead can sit in multiple
-    // campaigns over time and we need to mirror the cold email from the
-    // exact one this reply came from — not some unrelated older outreach.
+    // Original cold email from the SAME campaign this reply came from.
     const firstEmail = await getFirstSentEmail(instanceKey, leadId, campaignId);
-    if (!firstEmail) {
-      return { ok: false, reason: `No sent emails found for lead ${leadId} in campaign ${campaignId}` };
-    }
-    if (!firstEmail.sender_email?.id) {
-      return { ok: false, reason: "First sent email has no sender_email — cannot re-send" };
-    }
+    if (!firstEmail) return { ok: false, reason: `No sent emails found for lead ${leadId} in campaign ${campaignId}`, candidates };
+    if (!firstEmail.sender_email?.id) return { ok: false, reason: "Original email has no sender — cannot re-send.", candidates };
 
-    // 3. Wrap the original cold email with context so the new contact
-    //    knows why they're getting it, and send to them via /replies/new.
-    //
-    //    Earlier version blasted the raw cold body — the new contact had
-    //    no idea where it came from or why. Now we frame it: who pointed
-    //    us to them (original lead's name), then quote the original
-    //    email below, signed off with the original sender's name.
-    const newContactFirstName =
-      (extracted.name || "").trim().split(/\s+/)[0] || "there";
     const originalLeadDisplayName =
       ((reply.lead_name as string | null) || "").trim() || originalLeadEmail || "the lead we contacted";
     const senderName = (firstEmail.sender_email.name || "").trim() || "the team";
 
-    const wrappedMessage =
-      `<p>Hi ${escapeHtml(newContactFirstName)},</p>` +
+    // Greeting keeps a {FIRST_NAME} placeholder so the client can re-resolve it
+    // when the user changes the selected recipient.
+    const messageTemplate =
+      `<p>Hi {FIRST_NAME},</p>` +
       `<p>We received your email from ${escapeHtml(originalLeadDisplayName)} — here's the email we sent them:</p>` +
       `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
       (firstEmail.email_body || "") +
@@ -530,68 +525,17 @@ async function handleChangeOfTarget(replyId: number, instanceKey: string): Promi
       `<p>Let me know,</p>` +
       `<p>${escapeHtml(senderName)}</p>`;
 
-    const send = await sendOneOffReply(instanceKey, {
-      senderEmailId: firstEmail.sender_email.id,
-      subject: firstEmail.email_subject || "(no subject)",
-      message: wrappedMessage,
-      toEmail: extracted.email,
-      toName: extracted.name || "",
-    });
-
-    if (!send.ok) {
-      await logError(
-        (reply.workflow as string) || "inbox",
-        "change-of-target",
-        send.error || "sendOneOffReply returned !ok",
-        {
-          reply_id: replyId,
-          lead_id: leadId,
-          original_lead_email: originalLeadEmail,
-          new_email: extracted.email,
-          first_sent_email_id: firstEmail.id,
-        },
-      );
-      return {
-        ok: false,
-        reason: `Send failed: ${send.error || "unknown"}`,
-        new_email: extracted.email,
-        new_name: extracted.name || undefined,
-        first_email_subject: firstEmail.email_subject,
-        first_email_sent_at: firstEmail.sent_at || undefined,
-      };
-    }
-
-    await logActivity(
-      (reply.workflow as string) || "inbox",
-      "change-of-target-sent",
-      {
-        client_tag: (reply.client_tag as string | undefined) || undefined,
-        lead_email: originalLeadEmail,
-        details: {
-          reply_id: replyId,
-          campaign_id: campaignId,
-          new_email: extracted.email,
-          new_name: extracted.name,
-          first_email_id: firstEmail.id,
-          first_email_subject: firstEmail.email_subject,
-          first_email_sent_at: firstEmail.sent_at,
-          sender_email_id: firstEmail.sender_email.id,
-          bison_instance: instanceKey,
-        },
-      },
-    );
-
     return {
       ok: true,
-      new_email: extracted.email,
-      new_name: extracted.name || undefined,
-      first_email_subject: firstEmail.email_subject,
-      first_email_sent_at: firstEmail.sent_at || undefined,
+      candidates,
+      subject: firstEmail.email_subject || "(no subject)",
+      messageTemplate,
+      senderEmailId: firstEmail.sender_email.id,
+      senderName,
+      originalLeadDisplayName,
     };
   } catch (e) {
-    await logError("inbox", "change-of-target", (e as Error).message || "unknown", {
-      reply_id: replyId,
-    });
+    await logError("inbox", "change-of-target-prepare", (e as Error).message || "unknown", { reply_id: replyId });
     return { ok: false, reason: (e as Error).message || "unknown error" };
   }
 }
