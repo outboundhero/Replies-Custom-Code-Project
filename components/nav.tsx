@@ -17,6 +17,7 @@ const links: NavLink[] = [
   { href: "/sections", label: "Sections & Tags", adminOnly: true },
   { href: "/untracked", label: "Untracked Config", adminOnly: true },
   { href: "/inbox", label: "Inbox (Beta)" },
+  { href: "/archive", label: "Archive", adminOnly: true },
   { href: "/nurture", label: "Nurture", adminOnly: true },
   { href: "/migrate", label: "Move Leads", adminOnly: true },
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
