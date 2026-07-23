@@ -15,6 +15,7 @@ import { SearchableCombobox } from "@/components/ui/searchable-combobox";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { InstanceBadge } from "@/components/instance-badge";
+import { EmailParticipants, initials } from "@/components/email-participants";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 
 const LEAD_CATEGORIES = [
@@ -193,23 +194,24 @@ export default function ArchivePage() {
         {loadingDetail && <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading…</div>}
         {detail && !loadingDetail && (
           <div className="p-5 max-w-2xl mx-auto space-y-3 pb-16">
-            <div className="flex items-start justify-between pb-2 border-b">
-              <div>
-                <h2 className="text-base font-semibold">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
-                <p className="text-xs text-muted-foreground">{detail.lead_email}</p>
+            <div className="flex items-start justify-between gap-3 pb-3 border-b">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-10 w-10 shrink-0 rounded-full bg-gradient-to-br from-slate-400 to-slate-600 text-white flex items-center justify-center text-sm font-semibold shadow-sm">
+                  {initials(detail.from_name || detail.lead_name, detail.lead_email)}
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold truncate">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
+                  <p className="text-xs text-muted-foreground truncate">{detail.lead_email}</p>
+                </div>
               </div>
-              <div className="flex gap-1.5 items-center">
+              <div className="flex flex-wrap gap-1.5 items-center justify-end">
                 <span className="text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-600">Archived{detail.archived_at ? ` ${new Date(detail.archived_at).toLocaleDateString()}` : ""}</span>
                 <span className="text-[11px] font-mono font-bold bg-primary/10 text-primary px-2 py-0.5 rounded">{detail.client_tag || "N/A"}</span>
                 <InstanceBadge instance={detail.bison_instance} />
               </div>
             </div>
 
-            <div className="rounded border bg-white px-4 py-2.5 space-y-1 text-xs">
-              <div className="flex gap-2"><span className="w-9 shrink-0 text-muted-foreground font-medium">From</span><span className="flex-1 break-all">{detail.from_name} {detail.from_email ? `<${detail.from_email}>` : ""}</span></div>
-              {detail.to_email && <div className="flex gap-2"><span className="w-9 shrink-0 text-muted-foreground font-medium">To</span><span className="flex-1 break-all">{detail.to_email}</span></div>}
-              {detail.prospect_cc_email && <div className="flex gap-2"><span className="w-9 shrink-0 text-muted-foreground font-medium">CC</span><span className="flex-1 break-all">{detail.prospect_cc_email}</span></div>}
-            </div>
+            <EmailParticipants detail={detail} />
 
             <div className="rounded border bg-white overflow-hidden">
               <div className="px-4 py-2 border-b bg-muted/20 flex justify-between items-center">

@@ -17,7 +17,7 @@ import { useDebouncedValue } from "@/lib/use-debounced-value";
 // pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { InstanceBadge } from "@/components/instance-badge";
-import { cn } from "@/lib/utils";
+import { EmailParticipants, initials } from "@/components/email-participants";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -121,44 +121,6 @@ function LiveTimer({ startIso }: { startIso: string }) {
     >
       ⚡ {mm}:{ss} waiting{past ? ` — ${pm}:${ps} past standard` : ""}
     </span>
-  );
-}
-
-// Split the stored comma-joined name/email strings back into paired recipients.
-function pairRecipients(names?: string | null, emails?: string | null): { name: string; email: string }[] {
-  const es = String(emails || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const ns = String(names || "").split(",").map((s) => s.trim());
-  if (!es.length) return ns.filter(Boolean).map((name) => ({ name, email: "" }));
-  return es.map((email, i) => ({ name: ns[i] || "", email }));
-}
-function initials(name?: string | null, email?: string | null): string {
-  const n = String(name || "").trim();
-  if (n) return n.split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
-  return (String(email || "?").trim()[0] || "?").toUpperCase();
-}
-
-// One participant row (From / To / CC / BCC): a small label + recipient pills.
-function EmailRow({ label, name, email, accent }: { label: string; name?: string | null; email?: string | null; accent?: boolean }) {
-  const people = pairRecipients(name, email);
-  if (!people.length) return null;
-  return (
-    <div className="flex items-start gap-3 px-3.5 py-2">
-      <span className="w-9 shrink-0 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">{label}</span>
-      <div className="flex flex-wrap gap-1.5 min-w-0">
-        {people.map((p, i) => (
-          <span
-            key={i}
-            className={cn(
-              "inline-flex items-baseline gap-1.5 rounded-md border px-2 py-1 text-xs max-w-full leading-tight",
-              accent ? "border-primary/20 bg-primary/5" : "border-border/60 bg-muted/40"
-            )}
-          >
-            {p.name ? <span className="font-medium text-foreground truncate">{p.name}</span> : null}
-            {p.email ? <span className="text-muted-foreground truncate">{p.email}</span> : null}
-          </span>
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -787,16 +749,11 @@ export default function InboxPage() {
             </div>
 
             {/* Email participants — From / To / CC / BCC */}
-            <div className="rounded-lg border bg-white divide-y divide-border/50 overflow-hidden">
-              <EmailRow label="From" name={detail.from_name} email={detail.from_email || detail.lead_email} accent />
-              <EmailRow label="To" name={detail.to_name} email={detail.to_email} />
-              <EmailRow label="CC" name={detail.prospect_cc_name} email={detail.prospect_cc_email} />
-              <EmailRow label="BCC" name={detail.prospect_bcc_name} email={detail.prospect_bcc_email} />
-            </div>
+            <EmailParticipants detail={detail} />
 
-            {/* Lead Details - compact */}
-            <div className="rounded border bg-white px-4 py-3">
-              <div className="grid grid-cols-3 gap-x-4 gap-y-1.5 text-xs">
+            {/* Lead Details — compact label-on-top grid, theme-matched */}
+            <div className="rounded-lg border bg-white px-3.5 py-3">
+              <div className="grid grid-cols-3 gap-x-4 gap-y-2.5 text-xs">
                 {[
                   { l: "Company", v: detail.company_name },
                   { l: "Phone", v: detail.phone },
@@ -809,12 +766,14 @@ export default function InboxPage() {
                   { l: "Google Maps", v: detail.google_maps_url ? "View" : null },
                   { l: "Lead ID", v: detail.lead_id },
                 ].filter((f) => f.v).map((f) => (
-                  <div key={f.l}>
-                    <span className="text-muted-foreground">{f.l}: </span>
+                  <div key={f.l} className="min-w-0">
+                    <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60 mb-0.5">{f.l}</p>
                     {f.l === "Google Maps" && detail.google_maps_url ? (
-                      <a href={detail.google_maps_url as string} target="_blank" rel="noopener noreferrer" className="text-primary underline">View</a>
+                      <a href={detail.google_maps_url as string} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Open map ↗</a>
+                    ) : f.l === "LinkedIn" && detail.linkedin_url ? (
+                      <a href={detail.linkedin_url as string} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-all">Profile ↗</a>
                     ) : (
-                      <span className="break-all">{String(f.v)}</span>
+                      <p className="text-foreground break-words">{String(f.v)}</p>
                     )}
                   </div>
                 ))}
