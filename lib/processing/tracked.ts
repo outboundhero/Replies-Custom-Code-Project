@@ -81,7 +81,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
 
   // 3. Extract data
   const customVars = extractCustomVars(lead.custom_variables);
-  const recipients = extractRecipients(reply.to, reply.cc);
+  const recipients = extractRecipients(reply.to, reply.cc, reply.bcc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
   let clientConfig: ClientConfig | null = await getClientConfig(campaignTag);
 
@@ -342,6 +342,8 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     to_name: recipients.toNames,
     prospect_cc_email: recipients.ccEmails,
     prospect_cc_name: recipients.ccNames,
+    prospect_bcc_email: recipients.bccEmails,
+    prospect_bcc_name: recipients.bccNames,
     phone: String(customVars.phone || ""),
     linkedin_url: String(customVars.linkedin || ""),
     address: String(customVars.address || ""),

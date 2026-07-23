@@ -20,6 +20,9 @@ export interface EmailBisonWebhookPayload {
       from_email_address: string;
       to: Array<{ name: string; address: string }> | null;
       cc: Array<{ name: string; address: string }> | null;
+      // Bison delivers a `bcc` field, though for inbound replies it's almost
+      // always null (BCC is hidden from recipients).
+      bcc?: Array<{ name: string; address: string }> | null;
     };
     campaign: {
       id: number;
@@ -45,6 +48,9 @@ export interface EmailBisonUntrackedPayload {
       from_email_address: string;
       to: Array<{ name: string; address: string }> | null;
       cc: Array<{ name: string; address: string }> | null;
+      // Bison delivers a `bcc` field, though for inbound replies it's almost
+      // always null (BCC is hidden from recipients).
+      bcc?: Array<{ name: string; address: string }> | null;
     };
     sender_email: {
       id: number;
@@ -142,6 +148,8 @@ export interface ExtractedRecipients {
   toNames: string;
   ccEmails: string;
   ccNames: string;
+  bccEmails: string;
+  bccNames: string;
   replyTime: string;
 }
 

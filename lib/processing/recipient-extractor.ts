@@ -6,13 +6,17 @@ import type { ExtractedRecipients } from "@/lib/types";
  */
 export function extractRecipients(
   to: Array<{ name: string; address: string }> | null | undefined,
-  cc: Array<{ name: string; address: string }> | null | undefined
+  cc: Array<{ name: string; address: string }> | null | undefined,
+  bcc?: Array<{ name: string; address: string }> | null | undefined
 ): ExtractedRecipients {
   const toEmails = to?.map((p) => p.address).join(", ") || "";
   const toNames = to?.map((p) => p.name).join(", ") || "";
   const ccEmails = cc?.map((p) => p.address).join(", ") || "";
   const ccNames = cc?.map((p) => p.name).join(", ") || "";
+  // Bison sends a bcc field, though inbound replies almost never populate it.
+  const bccEmails = bcc?.map((p) => p.address).join(", ") || "";
+  const bccNames = bcc?.map((p) => p.name).join(", ") || "";
   const replyTime = new Date().toISOString();
 
-  return { toEmails, toNames, ccEmails, ccNames, replyTime };
+  return { toEmails, toNames, ccEmails, ccNames, bccEmails, bccNames, replyTime };
 }

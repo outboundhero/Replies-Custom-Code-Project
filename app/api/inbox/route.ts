@@ -36,6 +36,17 @@ const LEAD_CATEGORIES = [
  * precomputed `inbox_is_noise` flag + the exact-match AI-category index — no
  * leading-wildcard ILIKEs, so this is index-friendly (see sql/2026-07_inbox_is_noise.sql).
  */
+// The active inbox only ever reads NON-archived rows. Feature-detected once per
+// lambda so the code is safe both before and after the archiving migration runs
+// (a missing `archived` column just means "don't filter yet").
+let _archivedCol: boolean | null = null;
+async function hasArchivedColumn(): Promise<boolean> {
+  if (_archivedCol !== null) return _archivedCol;
+  const { error } = await supabase.from("replies").select("id").eq("archived", false).limit(1);
+  _archivedCol = !error;
+  return _archivedCol;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyView(q: any, view: InboxView | null): any {
   if (!view) return q;
@@ -108,8 +119,10 @@ async function computeCounts(args: {
   // exact AI-category match, not the old ILIKE chain.
   if (rpcErr) console.warn("[inbox/counts] RPC failed, falling back:", rpcErr.message);
 
+  const archivedOk = await hasArchivedColumn();
   const baseQuery = () => {
     let q = supabase.from("replies").select("id", { count: "estimated", head: true });
+    if (archivedOk) q = q.eq("archived", false); // active inbox only
     if (clientTag) q = q.eq("client_tag", clientTag);
     else if (allowed && allowed.length) q = q.in("client_tag", allowed);
     if (workflow) q = q.eq("workflow", workflow);
@@ -154,6 +167,7 @@ async function fetchLeads(args: {
     .select(LEADS_SELECT)
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
+  if (await hasArchivedColumn()) q = q.eq("archived", false); // active inbox only
   if (clientTag) q = q.eq("client_tag", clientTag);
   else if (allowed && allowed.length) q = q.in("client_tag", allowed);
   if (category) q = q.eq("lead_category", category);

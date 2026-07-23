@@ -774,6 +774,7 @@ export default function InboxPage() {
               <EmailRow label="From" name={detail.from_name} email={detail.from_email || detail.lead_email} />
               <EmailRow label="To" name={detail.to_name} email={detail.to_email} />
               <EmailRow label="CC" name={detail.prospect_cc_name} email={detail.prospect_cc_email} />
+              <EmailRow label="BCC" name={detail.prospect_bcc_name} email={detail.prospect_bcc_email} />
             </div>
 
             {/* Lead Details - compact */}

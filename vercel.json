@@ -60,6 +60,10 @@
     {
       "path": "/api/cron/sync-service-areas",
       "schedule": "0 */12 * * *"
+    },
+    {
+      "path": "/api/cron/archive-cleanup",
+      "schedule": "0 5 * * 6"
     }
   ]
 }

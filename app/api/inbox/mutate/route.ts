@@ -397,6 +397,35 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(result);
       }
 
+      case "archive": {
+        const { error } = await supabase
+          .from("replies")
+          .update({ archived: true, archived_at: new Date().toISOString() })
+          .eq("id", id);
+        if (error) throw new Error(error.message);
+        bumpCacheVersion();
+        return NextResponse.json({ ok: true });
+      }
+
+      case "restore": {
+        // Restore an archived reply to the ACTIVE inbox in Open Response, which
+        // restarts the speed-to-lead clock (spec §3).
+        const nowIso = new Date().toISOString();
+        const { error } = await supabase
+          .from("replies")
+          .update({
+            archived: false, archived_at: null,
+            lead_category: "Open Response",
+            open_response_at: nowIso, categorized_at: null,
+            time_to_categorize_seconds: null, categorized_by: null,
+            updated_at: nowIso,
+          })
+          .eq("id", id);
+        if (error) throw new Error(error.message);
+        bumpCacheVersion();
+        return NextResponse.json({ ok: true });
+      }
+
       default:
         return NextResponse.json({ error: "Unknown action" }, { status: 400 });
     }

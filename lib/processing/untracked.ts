@@ -106,7 +106,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
   const lastName = nameParts.slice(1).join(" ") || "";
 
   // 5. Extract recipients + clean reply
-  const recipients = extractRecipients(reply.to, reply.cc);
+  const recipients = extractRecipients(reply.to, reply.cc, reply.bcc);
   const cleanedReply = cleanReply(reply.text_body, reply.html_body);
 
   // 5b. AI categorization (bounce already filtered above)
@@ -244,6 +244,8 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     to_name: recipients.toNames,
     prospect_cc_email: recipients.ccEmails,
     prospect_cc_name: recipients.ccNames,
+    prospect_bcc_email: recipients.bccEmails,
+    prospect_bcc_name: recipients.bccNames,
     lead_category: leadCategoryValue,
     ai_categorized_lead_category: aiCategory,
     inbox_is_noise: isNoiseReply({
