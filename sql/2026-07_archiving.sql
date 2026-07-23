@@ -6,10 +6,11 @@
 -- (< 15 days out of Open Response). Everything older is archived (same table,
 -- out of the hot path) and stays fully searchable/restorable in the Archive UI.
 --
--- Run steps 1–4 first (instant + index builds). Run step 5 (the initial
--- backfill) only once the Archive UI is live, since it hides rows from the
--- active inbox. CONCURRENTLY index builds must run as single statements over a
--- DIRECT connection (not inside the Supabase editor's implicit transaction).
+-- Run steps 1–4 first (these run in the Supabase SQL editor; the index builds
+-- take a few seconds and briefly lock writes at this table size). If any single
+-- statement hits the editor's ~2-min timeout, run that statement on its own.
+-- Run step 5 (the initial backfill) only once the Archive UI is live, since it
+-- hides rows from the active inbox.
 -- ============================================================================
 
 -- 1) Flags + reply-BCC capture ----------------------------------------------
@@ -22,22 +23,22 @@ ALTER TABLE replies ADD COLUMN IF NOT EXISTS prospect_bcc_name text;
 
 -- 2) Active partial indexes (mirror the inbox indexes, scoped to archived=false)
 --    so counts + leads over the active set are index-only, exact, and fast.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_replies_active_cherry_leads
+CREATE INDEX IF NOT EXISTS idx_replies_active_cherry_leads
   ON replies (client_tag, ai_categorized_lead_category, created_at DESC)
   WHERE archived = false AND inbox_is_noise = false;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_replies_active_master_leads
+CREATE INDEX IF NOT EXISTS idx_replies_active_master_leads
   ON replies (client_tag, lead_category, created_at DESC)
   WHERE archived = false;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_replies_active_leadcat
+CREATE INDEX IF NOT EXISTS idx_replies_active_leadcat
   ON replies (lead_category)
   WHERE archived = false;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_replies_active_cherry_leadcat
+CREATE INDEX IF NOT EXISTS idx_replies_active_cherry_leadcat
   ON replies (lead_category)
   WHERE archived = false AND inbox_is_noise = false
     AND ai_categorized_lead_category IN
       ('Interested','Meeting Request','Follow Up at a Later Date','Referral Given','Internally Forwarded','Unrecognizable by AI');
 -- Archive-view search: date-ordered over archived rows.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_replies_archived_created
+CREATE INDEX IF NOT EXISTS idx_replies_archived_created
   ON replies (created_at DESC)
   WHERE archived = true;
 

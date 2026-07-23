@@ -7,12 +7,13 @@
 -- Cherry view exactly lets the planner do a small index-only grouped scan
 -- instead of a full-table aggregate.
 --
--- Run as a SINGLE statement over a DIRECT connection (CONCURRENTLY cannot run
--- inside the Supabase SQL editor's implicit transaction). Keep the allowlist in
--- sync with base-clients-cherry in lib/inbox-views.ts.
+-- Runs in the Supabase SQL editor (plain CREATE INDEX; a few-second write lock
+-- at this table size). For a very large table / a live rebuild, prefer a DIRECT
+-- connection and add CONCURRENTLY. Keep the allowlist in sync with
+-- base-clients-cherry in lib/inbox-views.ts.
 -- ============================================================================
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_replies_cherry_leadcat
+CREATE INDEX IF NOT EXISTS idx_replies_cherry_leadcat
   ON replies (lead_category)
   WHERE inbox_is_noise = false
     AND ai_categorized_lead_category IN (
