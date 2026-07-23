@@ -10,14 +10,27 @@ interface NavLink {
   label: string;
   adminOnly?: boolean;
 }
+interface NavGroup {
+  label: string;
+  children: NavLink[];
+}
+type NavItem = NavLink | NavGroup;
+function isGroup(i: NavItem): i is NavGroup {
+  return (i as NavGroup).children !== undefined;
+}
 
-const links: NavLink[] = [
+const items: NavItem[] = [
   { href: "/", label: "Dashboard", adminOnly: true },
   { href: "/clients", label: "Clients" },
   { href: "/sections", label: "Sections & Tags", adminOnly: true },
   { href: "/untracked", label: "Untracked Config", adminOnly: true },
-  { href: "/inbox", label: "Inbox (Beta)" },
-  { href: "/archive", label: "Archive", adminOnly: true },
+  {
+    label: "Inbox",
+    children: [
+      { href: "/inbox", label: "Inbox (Beta)" },
+      { href: "/archive", label: "Archive", adminOnly: true },
+    ],
+  },
   { href: "/nurture", label: "Nurture", adminOnly: true },
   { href: "/migrate", label: "Move Leads", adminOnly: true },
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
@@ -57,13 +70,18 @@ export function Nav({
     router.push("/login");
   }
 
-  const visibleLinks = links.filter((link) => {
+  const canSee = (link: NavLink) => {
     if (role === "admin") return true;
-    // Scoped inbox managers only see /inbox — every other link is hidden,
-    // even the ones non-scoped inbox managers can normally visit.
+    // Scoped inbox managers only ever see /inbox.
     if (isScoped) return link.href === "/inbox";
     return !link.adminOnly;
-  });
+  };
+
+  const linkClass = (active: boolean) =>
+    cn(
+      "block px-3 py-2 rounded-md text-sm transition-colors",
+      active ? "bg-primary text-primary-foreground" : "hover:bg-muted text-muted-foreground hover:text-foreground"
+    );
 
   return (
     <aside className="w-56 border-r bg-muted/30 flex flex-col min-h-screen">
@@ -72,20 +90,19 @@ export function Nav({
         <p className="text-xs text-muted-foreground">Reply Router</p>
       </div>
       <nav className="flex-1 p-2 space-y-1">
-        {visibleLinks.map((link) => (
-          <Link
-            key={link.href}
-            href={link.href}
-            className={cn(
-              "block px-3 py-2 rounded-md text-sm transition-colors",
-              pathname === link.href
-                ? "bg-primary text-primary-foreground"
-                : "hover:bg-muted text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {link.label}
-          </Link>
-        ))}
+        {items.map((item) => {
+          if (isGroup(item)) {
+            const kids = item.children.filter(canSee);
+            if (!kids.length) return null;
+            return <NavGroupEl key={item.label} label={item.label} kids={kids} pathname={pathname} linkClass={linkClass} />;
+          }
+          if (!canSee(item)) return null;
+          return (
+            <Link key={item.href} href={item.href} className={linkClass(pathname === item.href)}>
+              {item.label}
+            </Link>
+          );
+        })}
       </nav>
       <div className="p-2 border-t">
         {email && (
@@ -102,5 +119,50 @@ export function Nav({
         </button>
       </div>
     </aside>
+  );
+}
+
+function NavGroupEl({
+  label, kids, pathname, linkClass,
+}: {
+  label: string;
+  kids: NavLink[];
+  pathname: string;
+  linkClass: (active: boolean) => string;
+}) {
+  const anyActive = kids.some((k) => pathname === k.href);
+  // Open by default (Inbox (Beta) shown); stays open while a child is active.
+  const [open, setOpen] = useState(true);
+  const isOpen = open || anyActive;
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          "w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors",
+          anyActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-muted"
+        )}
+      >
+        <span>{label}</span>
+        <svg
+          className={cn("w-3.5 h-3.5 text-muted-foreground transition-transform duration-200", isOpen ? "" : "-rotate-90")}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {/* grid-rows 0fr↔1fr animates height smoothly without a fixed max-height. */}
+      <div className={cn("grid transition-all duration-200 ease-in-out", isOpen ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}>
+        <div className="overflow-hidden">
+          <div className="ml-3 mt-1 pl-2 border-l border-border space-y-1">
+            {kids.map((k) => (
+              <Link key={k.href} href={k.href} className={linkClass(pathname === k.href)}>
+                {k.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
