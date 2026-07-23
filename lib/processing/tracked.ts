@@ -13,6 +13,8 @@ import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
+import { isCcBccSender } from "./cc-bcc-match";
+import { markReplyInterested } from "@/lib/outboundhero-api";
 import { resolveTemplate } from "./template-resolver";
 import { BBS_TAGS, BBS_TRIGGER_CATEGORIES, routeLeadBbs } from "./bbs-router";
 import supabase from "@/lib/supabase";
@@ -98,6 +100,13 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     cleanedReply,
   );
   const includeClientConfig = aiCategory !== null && CC_BCC_CATEGORIES.includes(aiCategory as typeof CC_BCC_CATEGORIES[number]);
+
+  // If the reply's sender is one of THIS client's configured CC/BCC recipients
+  // (their own team engaging on the thread), hard-mark the lead as Meeting-Ready
+  // Lead regardless of the AI read (bounces excluded). Matched against the
+  // original client_config, before any BBS CC override below.
+  const ccBccMeetingReady = !isBounce && isCcBccSender(clientConfig, reply.from_email_address);
+  const leadCategoryValue = ccBccMeetingReady ? "Meeting-Ready Lead" : getLeadCategory(aiCategory);
 
   // 3c. BBS-only AI routing — pick Nefi (Northern Utah) or Junior (NV / AZ /
   // Southern UT) and override the CC fields + reply template before they get
@@ -186,7 +195,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     "City": customVars.city,
     "State": customVars.state,
     "Google Maps URL": customVars.google_maps_url,
-    "Lead Category": getLeadCategory(aiCategory),
+    "Lead Category": leadCategoryValue,
     ...(aiCategory && { "AI Categorized Lead Category": aiCategory }),
     // Client config fields — only for actionable AI categories
     ...(includeClientConfig && clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),
@@ -343,7 +352,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     // lead.tags (typical case) we get the routing bucket inline; if it
     // doesn't, the backfill script picks the row up later.
     esp: pickEspFromTags((lead as { tags?: Array<{ id: number; name: string }> }).tags),
-    lead_category: getLeadCategory(aiCategory),
+    lead_category: leadCategoryValue,
     ai_categorized_lead_category: aiCategory,
     // Precompute inbox "noise" (bounce/auto-reply junk) once at ingest so the
     // curated views filter an indexed boolean instead of ~30 ILIKEs per read.
@@ -558,6 +567,29 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       client_tag: campaignTag,
       section_name: section.name,
     });
+  }
+
+  // 6e. CC/BCC-sender auto-mark → also mark the lead interested in Bison
+  // (tracked replies always have an attached contact). Idempotent; best-effort.
+  if (ccBccMeetingReady) {
+    try {
+      const r = await markReplyInterested(bisonInstance, reply.id);
+      if (r.ok) {
+        await logActivity("tracked", "cc-bcc-meeting-ready", {
+          client_tag: campaignTag,
+          lead_email: reply.from_email_address,
+          details: { reply_id: reply.id, bison_instance: bisonInstance },
+        });
+      } else {
+        await logError("tracked", "cc-bcc-meeting-ready-bison", r.error || "unknown", {
+          reply_id: reply.id, client_tag: campaignTag, bison_instance: bisonInstance,
+        });
+      }
+    } catch (e) {
+      await logError("tracked", "cc-bcc-meeting-ready-bison", (e as Error).message, {
+        reply_id: reply.id, client_tag: campaignTag, bison_instance: bisonInstance,
+      });
+    }
   }
 
   // 7. Log activity

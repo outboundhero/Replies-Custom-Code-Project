@@ -10,6 +10,7 @@ import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
+import { isCcBccSender } from "./cc-bcc-match";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
@@ -129,6 +130,13 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     // Skip client config gracefully if table is missing
   }
 
+  // If the reply's sender is one of this client's configured CC/BCC recipients,
+  // hard-mark the lead as Meeting-Ready Lead (see tracked.ts). Untracked replies
+  // have no attached Bison lead, so we categorize only — no Bison mark. Bounces
+  // are already filtered out above.
+  const ccBccMeetingReady = isCcBccSender(clientConfig, reply.from_email_address);
+  const leadCategoryValue = ccBccMeetingReady ? "Meeting-Ready Lead" : getLeadCategory(aiCategory);
+
   // 6. Build Airtable fields
   const baseFields: Record<string, unknown> = {
     "Lead Email": reply.from_email_address,
@@ -153,7 +161,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     "Prospect CC name": recipients.ccNames,
     "Reply Time": recipients.replyTime,
     "Client Tag": companyCode,
-    "Lead Category": getLeadCategory(aiCategory),
+    "Lead Category": leadCategoryValue,
     "AI Categorized Lead Category": aiCategory,
     // Client config fields — only for actionable AI categories
     ...(includeClientConfig && clientConfig?.cc_name_1 && { "CC name 1": clientConfig.cc_name_1 }),
@@ -236,7 +244,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     to_name: recipients.toNames,
     prospect_cc_email: recipients.ccEmails,
     prospect_cc_name: recipients.ccNames,
-    lead_category: getLeadCategory(aiCategory),
+    lead_category: leadCategoryValue,
     ai_categorized_lead_category: aiCategory,
     inbox_is_noise: isNoiseReply({
       reply_we_got: cleanedReply,
