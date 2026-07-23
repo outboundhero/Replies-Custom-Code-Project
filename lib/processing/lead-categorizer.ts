@@ -15,11 +15,12 @@ const VALID_CATEGORIES = [
   "Referral Given",
   // New: lead said they passed our email along internally (no contact info)
   "Internally Forwarded",
-  // Split-out look-alikes (spec §20) + the primary-contact ask (§23). These
-  // are AI SUGGESTIONS only — the reply stays in Open Response for review.
+  // Split-out automated/redirect look-alikes (spec §20). AI SUGGESTIONS only —
+  // the reply stays in Open Response for review. ("Request for Primary Point of
+  // Contact" is a MANUAL category, not an AI one — the team marks it to load the
+  // send-reply template.)
   "Person No Longer Employed",
   "Email Address Changed",
-  "Request for Primary Point of Contact",
 ] as const;
 
 export type LeadCategory = (typeof VALID_CATEGORIES)[number];
@@ -82,7 +83,6 @@ Categorize each email reply into ONE of these categories:
 14. Internally Forwarded
 15. Person No Longer Employed
 16. Email Address Changed
-17. Request for Primary Point of Contact
 
 Most of the time, the prospect/lead's email will be above the "-----Original Message-----" line and this is what I want you to analyze. Our email or multiple email outreach is underneath that text. Sometimes though, there will not be a "-----Original Message-----", so please evaluate the email accordingly.
 
@@ -105,20 +105,19 @@ B. Did the human lead give us a USABLE contact for the right person? Specificall
 C. Did the human say a SPECIFIC person no longer works at the company (e.g. "John no longer works here", "She has left"), WITHOUT giving a usable alternative contact?
    → "Person No Longer Employed"
 
-D. Did the human indicate that ANOTHER person/organization controls the decision but gave NO usable contact — e.g. they "forwarded it internally" / "passed it along"; named someone by FIRST NAME ONLY ("Bob handles this"); or pointed to a property-management company, landlord, corporate office, another department, or a city department, without a full email/phone/CC?
-   → "Request for Primary Point of Contact"  (we will reply to ask for the right person's email)
+D. Did the human just say they "forwarded" / "passed it along", or name someone internal by FIRST NAME ONLY, with no full contact info and no CC?
+   → "Internally Forwarded"
 
-E. Otherwise (human says they're not the right person but gives no useful info and none of the above applies) → "Wrong Person"
+E. Otherwise (human says they're not the right person but gives no useful info) → "Wrong Person"
 
-CRITICAL: "Wrong Person (Change of Target)" is RESERVED for AUTOMATED emails only. If a human types out the redirect themselves, it is NEVER "Wrong Person (Change of Target)" — it is "Referral Given", "Person No Longer Employed", "Request for Primary Point of Contact", or "Wrong Person" per the tree above.
+CRITICAL: "Wrong Person (Change of Target)" is RESERVED for AUTOMATED emails only. If a human types out the redirect themselves, it is NEVER "Wrong Person (Change of Target)" — it is "Referral Given", "Person No Longer Employed", "Internally Forwarded", or "Wrong Person" per the tree above.
 
-#DISTINGUISHING SIMILAR REPLIES — do NOT lump these together (spec §20/§23)#
+#DISTINGUISHING SIMILAR REPLIES — do NOT lump these together (spec §20)#
 
 - "Person No Longer Employed" — a HUMAN says a specific person no longer works there, with NO usable alternative contact. If a usable contact IS given, it's "Referral Given". If the reply is AUTOMATED, use the Wrong Person rules instead.
 - "Email Address Changed" — the LEAD THEMSELVES says their OWN email address changed and gives the NEW address for themselves ("My email has changed, contact me at new@company.com"). Same person, new address — NOT a referral to someone else.
 - "Out Of Office" — a temporary away/vacation/travel autoreply, with or without a return date ("I am traveling and will return July 23").
 - "Automated Error Message" / "Automated Catch-All Message" — machine-generated support/ticket/form autoreplies ("Thank you for contacting customer support, please rate your experience"; "a technician will call you, fill out this form").
-- "Request for Primary Point of Contact" — a HUMAN says another person/org controls the decision but gives NO usable contact, so we should reply to ask for it (tenant→property management, landlord, corporate/city/department, "forwarded internally" with no contact, first-name-only, "someone else handles it" but not in the thread). If they DO provide a usable contact, it's "Referral Given" instead.
 
 #OTHER NOTES#
 
@@ -203,10 +202,10 @@ Example 8 — REFERRAL GIVEN (full email, human-written):
   Reply Body: "Please direct your correspondence to our USA office usa@driftwooddrilling.com"
 Expected Output: "Referral Given" — full email address of the right contact.
 
-Example 9 — REQUEST FOR PRIMARY POINT OF CONTACT (first name + department, no usable contact):
+Example 9 — INTERNALLY FORWARDED (just first name, no contact info):
   Reply Subject: "RE: Independence cleaning"
   Reply Body: "Hi Jenny, We do not manage that property. You would need to contact Sonja with the Clay County DDRB."
-Expected Output: "Request for Primary Point of Contact" — first name only + a department, no email/phone/CC, so we reply to ask for Sonja's email.
+Expected Output: "Internally Forwarded" — first name only, no email/phone, no CC.
 
 Example 10:
   Reply Subject: "Re: Quick question"
@@ -323,10 +322,10 @@ Example 32:
   Reply Body: "We have a full time maintenance person on staff."
 Expected Output: "Not Interested"
 
-Example 33 — REQUEST FOR PRIMARY POINT OF CONTACT (forwarded internally, no contact):
+Example 33 — INTERNALLY FORWARDED (passed it along, no specifics):
   Reply Subject: "Re: cleaning question"
   Reply Body: "Forwarded this to our facilities team. They'll reach out if interested."
-Expected Output: "Request for Primary Point of Contact" — forwarded internally with no contact info, so we reply to ask for the person's email.
+Expected Output: "Internally Forwarded" — said they forwarded internally, no contact info, no CC.
 
 Example 34 — REFERRAL GIVEN via CC:
   Reply Subject: "Re: cleaning question"
@@ -368,21 +367,6 @@ Example 41 — EMAIL ADDRESS CHANGED (lead's own new address):
   Reply Subject: "Re: cleaning question"
   Reply Body: "My email address has changed. Please contact me at mynewemail@company.com."
 Expected Output: "Email Address Changed" — the lead gives their OWN new address, staying reachable.
-
-Example 42 — REQUEST FOR PRIMARY POINT OF CONTACT (property management):
-  Reply Subject: "Re: cleaning question"
-  Reply Body: "We are tenants in the building. Our property management company handles the cleaning contract."
-Expected Output: "Request for Primary Point of Contact" — a third party controls the service, no usable contact given.
-
-Example 43 — REQUEST FOR PRIMARY POINT OF CONTACT (city department):
-  Reply Subject: "Re: cleaning question"
-  Reply Body: "The City of Bellevue Parks Department handles this."
-Expected Output: "Request for Primary Point of Contact" — points to a department with no usable contact.
-
-Example 44 — REQUEST FOR PRIMARY POINT OF CONTACT (first name only):
-  Reply Subject: "Re: cleaning question"
-  Reply Body: "Bob handles this."
-Expected Output: "Request for Primary Point of Contact" — first name only, no email/phone/CC.
 
 #OUTPUT FORMAT#
 

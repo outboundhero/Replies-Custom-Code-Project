@@ -29,7 +29,7 @@ const AI_CATEGORIES = [
   "Interested", "Meeting Request", "Follow Up at a Later Date", "Not Interested", "Out Of Office",
   "Wrong Person", "Mailbox No Longer Active", "Automated Error Message", "Automated Catch-All Message",
   "Wrong Person (Change of Target)", "Do Not Contact", "Referral Given", "Internally Forwarded",
-  "Person No Longer Employed", "Email Address Changed", "Request for Primary Point of Contact",
+  "Person No Longer Employed", "Email Address Changed",
   "Unrecognizable by AI",
 ];
 
