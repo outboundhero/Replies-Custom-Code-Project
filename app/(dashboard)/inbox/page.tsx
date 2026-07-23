@@ -17,6 +17,7 @@ import { useDebouncedValue } from "@/lib/use-debounced-value";
 // pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { InstanceBadge } from "@/components/instance-badge";
+import { cn } from "@/lib/utils";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -130,21 +131,33 @@ function pairRecipients(names?: string | null, emails?: string | null): { name: 
   if (!es.length) return ns.filter(Boolean).map((name) => ({ name, email: "" }));
   return es.map((email, i) => ({ name: ns[i] || "", email }));
 }
-function EmailRow({ label, name, email }: { label: string; name?: string | null; email?: string | null }) {
+function initials(name?: string | null, email?: string | null): string {
+  const n = String(name || "").trim();
+  if (n) return n.split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+  return (String(email || "?").trim()[0] || "?").toUpperCase();
+}
+
+// One participant row (From / To / CC / BCC): a small label + recipient pills.
+function EmailRow({ label, name, email, accent }: { label: string; name?: string | null; email?: string | null; accent?: boolean }) {
   const people = pairRecipients(name, email);
   if (!people.length) return null;
   return (
-    <div className="flex gap-2">
-      <span className="w-9 shrink-0 text-muted-foreground font-medium">{label}</span>
-      <span className="flex-1 break-all">
+    <div className="flex items-start gap-3 px-3.5 py-2">
+      <span className="w-9 shrink-0 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">{label}</span>
+      <div className="flex flex-wrap gap-1.5 min-w-0">
         {people.map((p, i) => (
-          <span key={i}>
-            {i > 0 && "; "}
-            {p.name ? <span className="font-medium">{p.name} </span> : null}
-            {p.email ? <span className="text-muted-foreground">&lt;{p.email}&gt;</span> : null}
+          <span
+            key={i}
+            className={cn(
+              "inline-flex items-baseline gap-1.5 rounded-md border px-2 py-1 text-xs max-w-full leading-tight",
+              accent ? "border-primary/20 bg-primary/5" : "border-border/60 bg-muted/40"
+            )}
+          >
+            {p.name ? <span className="font-medium text-foreground truncate">{p.name}</span> : null}
+            {p.email ? <span className="text-muted-foreground truncate">{p.email}</span> : null}
           </span>
         ))}
-      </span>
+      </div>
     </div>
   );
 }
@@ -737,12 +750,17 @@ export default function InboxPage() {
         {detail && !loading && (
           <div className="p-5 max-w-2xl mx-auto space-y-3 pb-16">
             {/* Header */}
-            <div className="flex items-start justify-between pb-2 border-b">
-              <div>
-                <h2 className="text-base font-semibold">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
-                <p className="text-xs text-muted-foreground">{detail.lead_email}</p>
+            <div className="flex items-start justify-between gap-3 pb-3 border-b">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-10 w-10 shrink-0 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center text-sm font-semibold shadow-sm">
+                  {initials(detail.from_name || detail.lead_name, detail.lead_email)}
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold truncate">{detail.from_name || detail.lead_name || detail.lead_email}</h2>
+                  <p className="text-xs text-muted-foreground truncate">{detail.lead_email}</p>
+                </div>
               </div>
-              <div className="flex gap-1.5 items-center">
+              <div className="flex flex-wrap gap-1.5 items-center justify-end">
                 {(detail.lead_category || "Open Response") === "Open Response" ? (
                   <LiveTimer startIso={detail.open_response_at || detail.created_at} />
                 ) : detail.time_to_categorize_seconds != null ? (
@@ -768,10 +786,9 @@ export default function InboxPage() {
               </div>
             </div>
 
-            {/* Email participants — From / To / CC. The reply's own BCC is not
-                delivered by Bison's webhook, so it can't be shown here. */}
-            <div className="rounded border bg-white px-4 py-2.5 space-y-1 text-xs">
-              <EmailRow label="From" name={detail.from_name} email={detail.from_email || detail.lead_email} />
+            {/* Email participants — From / To / CC / BCC */}
+            <div className="rounded-lg border bg-white divide-y divide-border/50 overflow-hidden">
+              <EmailRow label="From" name={detail.from_name} email={detail.from_email || detail.lead_email} accent />
               <EmailRow label="To" name={detail.to_name} email={detail.to_email} />
               <EmailRow label="CC" name={detail.prospect_cc_name} email={detail.prospect_cc_email} />
               <EmailRow label="BCC" name={detail.prospect_bcc_name} email={detail.prospect_bcc_email} />
