@@ -16,7 +16,7 @@ Status legend: ✅ done · 🟡 partial · ❌ not started · ⚠️ diverges fr
 | 6 | Complete Email Visibility | ✅ | From/To/CC/BCC shown in main reply view, Archive, Send-Reply preview, COT, Data View (row expander), and Bulk-review cards. | One-off reply surface uses single To only (minor). |
 | 7 | Reply-All Recipient Logic | ✅ | To = replier; other To → CC; original CC kept; our account excluded; name-or-email display. | — |
 | 8 | Client CC & BCC Contacts | ✅ | Positive categories only; up to 6 CC + 2 BCC from client template; editable before send. | — |
-| 9 | Live Speed-to-Lead Timer | ✅ | Ticking MM:SS in Open Response; freezes with "moved in Nm Ns"; past-standard shown. | — |
+| 9 | Live Speed-to-Lead Timer | 🟡 | Ticking MM:SS in Open Response; freezes with "moved in Nm Ns"; past-standard shown. All completed-record data STORED (entered/left OR, total, categorized_by). | Completed record should DISPLAY entered/left times + team member, not just "moved in Nm Ns". |
 | 10 | Speed-to-Lead Reporting Rules | ❌ | Timing columns captured; report aggregation not built. | Phase 5. |
 | 11 | Daily Report (5pm PT, Slack) | ❌ | — | Phase 5. |
 | 12 | Weekly Report + roundup DM | ❌ | — | Phase 5 (Spencer/Madison/Nick). |
@@ -25,18 +25,18 @@ Status legend: ✅ done · 🟡 partial · ❌ not started · ⚠️ diverges fr
 | 15 | Send Reply Categories (review) | ✅ | Preview: edit / regenerate / add-AI-instructions / change recipients / decline→non-send / approve+confirm. | — |
 | 16 | Reply Navigation | 🟡 | Auto-advance + ~5s "return to previous" done. | Prev/next arrows + keyboard nav (Phase 7). |
 | 17 | Individual Reply URLs | ✅ | `?reply=<id>` deep-link opens the exact reply. | — |
-| 18 | AI Suggested Lead Categories | 🟡 | Categorizer overhaul: uncertain→Open Response; new categories added; filterable in Master Inbox. | Filterable in Data View pending (§13). |
+| 18 | AI Suggested Lead Categories | 🟡 | Categorizer overhaul: uncertain→Open Response; new categories added; AI-category filter in Data View. | Master Inbox has NO AI-category filter (Data View does). Spec lists Meeting-Ready Lead + Unqualified as AI suggestions — not AI-suggestible today (Meeting-Ready comes only from known-client detection; user made Primary-Contact manual-only). Needs a decision. |
 | 19 | Referral Given (suggest, not finalize) | 🟡 | Suggests not finalizes; stays Open Response; excludes OOO/no-longer-employed/etc. | Step 3 "load client-tag reply template" ties to §25 (parked). |
 | 20 | Separate Similar Automated Replies | ✅ | Person-No-Longer-Employed / Email-Changed / OOO / Automated distinguished. | — |
 | 21 | Out-of-Office Automation | ✅ | Extract return date; requeue at return+1 (9am PT); default 7-day requeue when no date (no longer skipped); banner shows next eligible send date. | Written OOO explanation + example email deliverable still owed. |
-| 22 | Change of Target | ✅ | Extracts all options, dropdown, preselect first, confirm, name-or-email. | Example COT email deliverable pending. |
+| 22 | Change of Target | 🟡 | Extracts all options, dropdown, preselect first, confirm, name-or-email. | Inbox COT modal doesn't show the ORIGINAL REPLY (spec: review shows it; Data View card does). Example COT email deliverable pending. "Create/update the lead" ties to deferred §26. |
 | 23 | Request for Primary Point of Contact | 🟡 | Category exists (manual). Preview now generates **scenario-specific** replies (property-mgmt / first-name / forwarded / department) via AI, verified against the spec examples. | AI-*suggest* of this category still disabled per your earlier instruction — reconcile with §18/§23 if you want the AI to propose it. |
 | 24 | Review Primary Contact Reply | 🟡 | Covered by the Send-Reply preview (review/edit/regenerate/add-context/decline). | "Once contact provided → suggest Referral Given, keep Open Response" chain not built (ties to §25). |
 | 25 | Referral Reply Template | ❌ | Parked pending your flow + copy. Spec now clarifies: thank sender + greet referred contact + keep sender copied + client-template contacts + client-tag template + review. Example: "Thank you, Erica. Nice to meet you, Michelle. I'm copying my team…". | Build once confirmed. |
 | 26 | Missing Lead ID | ⏸️ | Graceful COT fallback draft shipped. Full create-lead/attach workflow **deferred by user (2026-07-24)** — creating Bison leads has side effects; revisit later. | Deferred. |
 | 27 | City Wide Routing (CWSJ/CWSV) | ✅ | Left intact (requirement is "keep existing"). | Confirm untouched. |
 | 28 | Master Inbox & Base Client Views | 🟡 | Positive categories visible in both; Master surfaces review items. | Data View visibility pending (§13). |
-| 29 | Confirmation Before Send/Redirect | ✅ | Send-Reply + COT show category/reply/To/CC/BCC/account/draft/action + confirm. | — |
+| 29 | Confirmation Before Send/Redirect | 🟡 | Send-Reply preview + COT + Data View panel composer all confirm. | Inbox INLINE composer (Send Reply / Forward / One-Off) still sends on first click with no confirm step. |
 | 30 | Highest-Priority list | — | Meta / cross-references the above. | — |
 
 ## Non-code deliverables still owed
