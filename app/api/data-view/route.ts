@@ -21,13 +21,16 @@ const SELECT =
   "sender_id, sender_name, sender_email, our_reply, lead_category, ai_categorized_lead_category, " +
   "reply_we_got, reply_status, created_at, categorized_at";
 
-const SORTS: Record<string, { col: string; asc: boolean }> = {
-  newest: { col: "created_at", asc: false },
-  oldest: { col: "created_at", asc: true },
-  recently_categorized: { col: "categorized_at", asc: false },
-  name_az: { col: "lead_name", asc: true },
-  company_az: { col: "company_name", asc: true },
-};
+// Column sorts for the click-a-header UI. `sort=<col>.<asc|desc>`.
+// IMPORTANT: never pass a NULLS option that fights the index — a plain btree
+// serves ASC NULLS LAST and (scanned backward) DESC NULLS FIRST. Forcing
+// DESC NULLS LAST on created_at is what caused the original 8s timeout.
+// categorized_at is the one exception: it's often null, so it has a dedicated
+// DESC NULLS LAST partial index (sql/2026-07_data_view_indexes.sql).
+const SORTABLE = new Set([
+  "created_at", "categorized_at", "lead_name", "company_name",
+  "lead_category", "ai_categorized_lead_category", "client_tag",
+]);
 
 let _archivedCol: boolean | null = null;
 async function hasArchivedColumn(): Promise<boolean> {
@@ -49,20 +52,25 @@ export async function GET(req: NextRequest) {
     const search = (sp.get("search") || "").trim();
     const dateFrom = sp.get("date_from") || null;   // YYYY-MM-DD
     const dateTo = sp.get("date_to") || null;
-    const sortKey = sp.get("sort") || "newest";
+    const [sortColRaw, sortDirRaw] = (sp.get("sort") || "created_at.desc").split(".");
+    const sortCol = SORTABLE.has(sortColRaw) ? sortColRaw : "created_at";
+    const sortAsc = sortDirRaw === "asc";
     const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(sp.get("limit")) || PAGE_SIZE));
     const offset = Math.max(0, Number(sp.get("offset")) || 0);
-    const sort = SORTS[sortKey] || SORTS.newest;
 
     const allowed = session?.allowedClientTags ?? null;
 
     // NO count() — an exact/estimated count over the ~127k-row table blows the
     // Postgres statement timeout (8s+). We fetch limit+1 rows instead and infer
-    // hasMore from the overflow; the data query alone is ~350ms.
+    // hasMore from the overflow; the data query alone is ~250ms.
+    const orderOpts: { ascending: boolean; nullsFirst?: boolean } = { ascending: sortAsc };
+    // categorized_at rides its dedicated (DESC NULLS LAST) partial index:
+    // desc = forward scan (NULLS LAST), asc = backward scan (NULLS FIRST).
+    if (sortCol === "categorized_at") orderOpts.nullsFirst = sortAsc;
     let q = supabase
       .from("replies")
       .select(SELECT)
-      .order(sort.col, { ascending: sort.asc, nullsFirst: false })
+      .order(sortCol, orderOpts)
       .range(offset, offset + limit); // limit+1 rows
 
     if (await hasArchivedColumn()) q = q.eq("archived", false); // active only
