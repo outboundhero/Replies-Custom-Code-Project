@@ -28,6 +28,29 @@ export default function QualificationPage() {
   const [expandedTag, setExpandedTag] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
+  // "Find perfect client" matcher
+  const [matchQuery, setMatchQuery] = useState("");
+  const [matching, setMatching] = useState(false);
+  interface MatchResp { match: { tag: string; reason: string } | null; reason: string; alternatives?: string[]; viaCache?: boolean; aiUsed?: boolean; candidatesConsidered?: number }
+  const [matchResult, setMatchResult] = useState<MatchResp | null>(null);
+
+  async function runMatch() {
+    const q = matchQuery.trim();
+    if (!q || matching) return;
+    setMatching(true); setMatchResult(null);
+    try {
+      const res = await fetch("/api/qualification/match", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }),
+      });
+      const d = await res.json();
+      if (res.ok) setMatchResult(d);
+      else setMatchResult({ match: null, reason: d.error || "Lookup failed" });
+    } catch (e) {
+      setMatchResult({ match: null, reason: (e as Error).message });
+    } finally {
+      setMatching(false);
+    }
+  }
 
   const loadData = useCallback(async () => {
     try {
@@ -101,6 +124,51 @@ export default function QualificationPage() {
           {syncing ? "Syncing..." : "Sync from Google Sheets"}
         </Button>
       </div>
+
+      {/* ── Find the perfect client for a location + industry ── */}
+      <Card className="border-primary/20 bg-gradient-to-br from-primary/[0.03] to-transparent">
+        <CardContent className="pt-5">
+          <div className="flex items-center gap-2 mb-1">
+            <svg className="h-4 w-4 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M12 21s-6-5.686-6-10a6 6 0 1 1 12 0c0 4.314-6 10-6 10z" /><circle cx="12" cy="11" r="2" /></svg>
+            <h3 className="text-sm font-semibold">Find the perfect client</h3>
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">Enter a location (and optionally an industry) — e.g. <span className="font-medium">Mt Airy MD</span> or <span className="font-medium">Chicago IL, dental</span>. Matches against every client&apos;s location + industry rules.</p>
+          <div className="flex gap-2 max-w-2xl">
+            <Input
+              placeholder="e.g. Mt Airy MD"
+              value={matchQuery}
+              onChange={(e) => setMatchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }}
+              className="h-10"
+            />
+            <Button onClick={runMatch} disabled={matching || !matchQuery.trim()} className="h-10 px-5 shrink-0">
+              {matching ? "Finding…" : "Find client"}
+            </Button>
+          </div>
+
+          {matchResult && (
+            <div className="mt-3 max-w-2xl">
+              {matchResult.match ? (
+                <div className="rounded-lg border border-green-300 bg-green-50 px-4 py-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-green-700 font-medium">Best match:</span>
+                    <span className="inline-flex items-center rounded-md bg-green-600 px-2.5 py-1 text-sm font-mono font-bold text-white">{matchResult.match.tag}</span>
+                    {matchResult.viaCache && <span className="text-[10px] text-green-700/70 bg-green-100 px-1.5 py-0.5 rounded">cached</span>}
+                  </div>
+                  <p className="mt-2 text-sm text-green-900">{matchResult.match.reason}</p>
+                  {matchResult.alternatives && matchResult.alternatives.length > 0 && (
+                    <p className="mt-1.5 text-xs text-green-700">Also covers this area: {matchResult.alternatives.map((a) => <span key={a} className="font-mono font-medium">{a} </span>)}</p>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+                  <p className="text-sm text-amber-800">{matchResult.reason}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {syncResult && (
         <div className={`rounded-md border px-4 py-3 text-sm ${syncResult.includes("failed") ? "border-destructive/50 bg-destructive/10 text-destructive" : "border-green-200 bg-green-50 text-green-700"}`}>
