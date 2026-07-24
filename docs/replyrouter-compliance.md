@@ -13,15 +13,15 @@ Status legend: ✅ done · 🟡 partial · ❌ not started · ⚠️ diverges fr
 | 3 | Archiving Rules | ✅ | >15 days out of Open Response; never archive Open Response; restore→active + restart clock; cron every other Fri 10pm PT. | — |
 | 4 | Initial Inbox Cleanup | ✅ | 147,686 completed replies archived, Open Response kept active, nothing deleted. | — |
 | 5 | Known Client Email Detection | ✅ | From/To/CC/BCC match; works with no tag / no lead ID; overrides AI → Meeting-Ready Lead. | — |
-| 6 | Complete Email Visibility | 🟡 | Main reply view + Archive + Send-Reply preview + COT show From/To/CC/BCC. | Data View + Bulk-review queue don't exist yet (§13/§14). |
+| 6 | Complete Email Visibility | ✅ | From/To/CC/BCC shown in main reply view, Archive, Send-Reply preview, COT, Data View (row expander), and Bulk-review cards. | One-off reply surface uses single To only (minor). |
 | 7 | Reply-All Recipient Logic | ✅ | To = replier; other To → CC; original CC kept; our account excluded; name-or-email display. | — |
 | 8 | Client CC & BCC Contacts | ✅ | Positive categories only; up to 6 CC + 2 BCC from client template; editable before send. | — |
 | 9 | Live Speed-to-Lead Timer | ✅ | Ticking MM:SS in Open Response; freezes with "moved in Nm Ns"; past-standard shown. | — |
 | 10 | Speed-to-Lead Reporting Rules | ❌ | Timing columns captured; report aggregation not built. | Phase 5. |
 | 11 | Daily Report (5pm PT, Slack) | ❌ | — | Phase 5. |
 | 12 | Weekly Report + roundup DM | ❌ | — | Phase 5 (Spencer/Madison/Nick). |
-| 13 | Data View (Airtable-style) | ❌ | — | Phase 6. |
-| 14 | Bulk Action Review Queue | ❌ | — | Phase 6. |
+| 13 | Data View (Airtable-style) | ✅ | New `/data-view` under Inbox nav: row-based table, wider/taller rows, readable reply content, filter (search/client/category/AI/date), sort, multi-select + drag-select, row expander for full recipients, bulk category / Send Reply / Change of Target. | Column-level sort-by-click + inline edit could be added later. |
+| 14 | Bulk Action Review Queue | ✅ | Bulk action → review overlay: one card per reply (original reply, proposed category/action/message, sending account, To/CC/BCC, COT options), approve / edit / regenerate / change recipients / decline / skip; progress bar; batch runs only when every card is reviewed; approved run, declined → matching non-send category / Open Response. | — |
 | 15 | Send Reply Categories (review) | ✅ | Preview: edit / regenerate / add-AI-instructions / change recipients / decline→non-send / approve+confirm. | — |
 | 16 | Reply Navigation | 🟡 | Auto-advance + ~5s "return to previous" done. | Prev/next arrows + keyboard nav (Phase 7). |
 | 17 | Individual Reply URLs | ✅ | `?reply=<id>` deep-link opens the exact reply. | — |

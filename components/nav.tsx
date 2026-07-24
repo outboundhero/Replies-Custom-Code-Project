@@ -28,6 +28,7 @@ const items: NavItem[] = [
     label: "Inbox",
     children: [
       { href: "/inbox", label: "Inbox (Beta)" },
+      { href: "/data-view", label: "Data View", adminOnly: true },
       { href: "/archive", label: "Archive", adminOnly: true },
     ],
   },
