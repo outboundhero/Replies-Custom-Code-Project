@@ -116,6 +116,63 @@ function sendReplyTemplateFor(category: string, d: ReplyDetail): string {
   return String(d.our_reply || "");
 }
 
+// Split the stored comma-joined name/email strings back into paired people.
+function splitPairs(names?: string | null, emails?: string | null): { name: string; email: string }[] {
+  const es = String(emails || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const ns = String(names || "").split(",").map((s) => s.trim());
+  return es.map((email, i) => ({ name: ns[i] || "", email }));
+}
+
+/**
+ * Reply-all recipients for an outgoing reply (spec §7/§8):
+ *   - To  = the person who actually replied (the lead).
+ *   - CC  = everyone else already on the inbound thread — the reply's other
+ *           To recipients + its CC — minus our own sending account; PLUS the
+ *           client-team CC when the category is positive (§8). Deduped, ≤6.
+ *   - BCC = the client-team BCC, positive categories only (§8). ≤2.
+ * Every list stays editable in the composer/preview before sending.
+ */
+function computeReplyRecipients(d: ReplyDetail, category: string): {
+  to: { name: string; email: string };
+  cc: { name: string; email: string }[];
+  bcc: { name: string; email: string }[];
+} {
+  const norm = (e: string) => e.trim().toLowerCase();
+  const ours = norm(String(d.sender_email || ""));
+  const leadEmail = norm(String(d.from_email || d.lead_email || ""));
+  const to = { name: String(d.from_name || d.lead_name || ""), email: String(d.from_email || d.lead_email || "") };
+  const positive = POSITIVE_CATEGORIES.includes(category);
+
+  const seen = new Set<string>([ours, leadEmail].filter(Boolean));
+  const cc: { name: string; email: string }[] = [];
+  const pushCc = (r: { name: string; email: string }) => {
+    const e = norm(r.email);
+    if (!e || seen.has(e)) return;
+    seen.add(e);
+    cc.push({ name: r.name.trim(), email: r.email.trim() });
+  };
+  // Other original To recipients (the lead addressed us + maybe colleagues) → CC.
+  splitPairs(d.to_name, d.to_email).forEach(pushCc);
+  // Keep the inbound reply's own CC on the thread.
+  splitPairs(d.prospect_cc_name, d.prospect_cc_email).forEach(pushCc);
+  // Loop in the client's team only for positive outcomes (§8).
+  if (positive) {
+    ([1, 2, 3, 4, 5, 6] as const).forEach((n) => {
+      const email = String(d[`cc_email_${n}`] || "");
+      if (email) pushCc({ name: String(d[`cc_name_${n}`] || ""), email });
+    });
+  }
+
+  const bcc: { name: string; email: string }[] = [];
+  if (positive) {
+    ([1, 2] as const).forEach((n) => {
+      const email = String(d[`bcc_email_${n}`] || "");
+      if (email) bcc.push({ name: String(d[`bcc_name_${n}`] || ""), email });
+    });
+  }
+  return { to, cc: cc.slice(0, 6), bcc: bcc.slice(0, 2) };
+}
+
 function fmtDuration(secs: number): string {
   const m = Math.floor(secs / 60), s = secs % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
@@ -390,14 +447,10 @@ export default function InboxPage() {
   function applyDetail(d: ReplyDetail, mergeById?: number) {
     setDetail((prev) => (mergeById && prev && prev.id === mergeById ? { ...prev, ...d } : d));
     setReplyMsg(d.lead_category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || ""));
-    const ccs: Recipient[] = ([1, 2, 3, 4, 5, 6] as const)
-      .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
-      .filter((r) => r.name || r.email);
-    const bccs: Recipient[] = ([1, 2] as const)
-      .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
-      .filter((r) => r.name || r.email);
-    setReplyCc(ccs);
-    setReplyBcc(bccs);
+    // Reply-all: pre-fill CC/BCC from the inbound thread + client team (§7/§8).
+    const { cc, bcc } = computeReplyRecipients(d, String(d.lead_category || "Open Response"));
+    setReplyCc(cc);
+    setReplyBcc(bcc);
     setOoCc([]);
     if (d.client_tag) loadSheetUrl(d.client_tag);
   }
@@ -495,18 +548,14 @@ export default function InboxPage() {
   // ── Send-Reply preview (§15): stage draft, review + approve; nothing sends
   //    until "Approve & Send". Opened when a (Send Reply) category is picked. ──
   function openSendPreview(d: ReplyDetail, category: string) {
-    const cc = ([1, 2, 3, 4, 5, 6] as const)
-      .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
-      .filter((r) => r.name || r.email);
-    const bcc = ([1, 2] as const)
-      .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
-      .filter((r) => r.name || r.email);
+    // Reply-all recipients from the inbound thread (§7/§8).
+    const { to, cc, bcc } = computeReplyRecipients(d, category);
     const message = sendReplyTemplateFor(category, d);
     setSendPreview({
       replyId: d.id, bisonReplyId: (d.reply_id as number | null) ?? null,
       senderEmailId: (d.sender_id as number | null) ?? null,
       category, fromEmail: String(d.sender_email || ""),
-      toEmail: String(d.lead_email || ""), toName: String(d.lead_name || d.from_name || ""),
+      toEmail: to.email, toName: to.name,
       message, cc, bcc, instructions: "", regenerating: false, sending: false, confirm: false,
     });
   }
