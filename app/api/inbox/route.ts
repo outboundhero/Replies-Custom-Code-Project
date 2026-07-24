@@ -79,9 +79,10 @@ async function resolveClientTags(allowed: string[] | null, fresh: boolean): Prom
 async function computeCounts(args: {
   clientTag: string | null; allowed: string[] | null; workflow: string | null;
   search: string | null; view: InboxView | null; viewParam: string | null; fresh: boolean;
+  aiCategory?: string | null;
 }): Promise<{ counts: Record<string, number>; total: number }> {
-  const { clientTag, allowed, workflow, search, view, viewParam, fresh } = args;
-  const cacheKey = `counts:v${getCacheVersion()}:${JSON.stringify({ clientTag, allowed, workflow, search, view: viewParam })}`;
+  const { clientTag, allowed, workflow, search, view, viewParam, fresh, aiCategory } = args;
+  const cacheKey = `counts:v${getCacheVersion()}:${JSON.stringify({ clientTag, allowed, workflow, search, view: viewParam, ai: aiCategory || null })}`;
   if (!fresh) {
     const hit = getInboxCache<{ counts: Record<string, number>; total: number }>(cacheKey, COUNTS_TTL_MS);
     if (hit) return hit;
@@ -91,13 +92,14 @@ async function computeCounts(args: {
   const hidden = new Set(view?.hiddenLeadCategories ?? []);
 
   // Fast path: one RPC call. Noise + AI-allowlist are index-backed params.
+  // An explicit user AI-category filter (§18) narrows the allowlist to just it.
   const { data: rpcRows, error: rpcErr } = await supabase.rpc("inbox_category_counts", {
     p_client_tag: clientTag,
     p_allowed_tags: clientTag ? null : (allowed && allowed.length ? allowed : null),
     p_workflow: workflow,
     p_search: search,
     p_exclude_noise: !!view?.excludeNoise,
-    p_ai_allowlist: view?.aiCategoryAllowlist ?? null,
+    p_ai_allowlist: aiCategory ? [aiCategory] : (view?.aiCategoryAllowlist ?? null),
   });
 
   if (!rpcErr && Array.isArray(rpcRows)) {
@@ -127,6 +129,7 @@ async function computeCounts(args: {
     else if (allowed && allowed.length) q = q.in("client_tag", allowed);
     if (workflow) q = q.eq("workflow", workflow);
     if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
+    if (aiCategory) q = q.eq("ai_categorized_lead_category", aiCategory);
     q = applyView(q, view);
     return q;
   };
@@ -159,9 +162,9 @@ async function computeCounts(args: {
 async function fetchLeads(args: {
   clientTag: string | null; allowed: string[] | null; category: string | null;
   workflow: string | null; search: string | null; view: InboxView | null;
-  limit: number; offset: number;
+  limit: number; offset: number; aiCategory?: string | null;
 }): Promise<{ replies: unknown[]; page: { limit: number; offset: number; returned: number; hasMore: boolean } }> {
-  const { clientTag, allowed, category, workflow, search, view, limit, offset } = args;
+  const { clientTag, allowed, category, workflow, search, view, limit, offset, aiCategory } = args;
   let q = supabase
     .from("replies")
     .select(LEADS_SELECT)
@@ -173,6 +176,7 @@ async function fetchLeads(args: {
   if (category) q = q.eq("lead_category", category);
   if (workflow) q = q.eq("workflow", workflow);
   if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
+  if (aiCategory) q = q.eq("ai_categorized_lead_category", aiCategory);  // §18 filter
   q = applyView(q, view) as typeof q;
   const { data: rows, error } = await q;
   if (error) throw new Error(error.message);
@@ -203,6 +207,7 @@ export async function GET(req: NextRequest) {
     const search = req.nextUrl.searchParams.get("search");
     const viewParam = req.nextUrl.searchParams.get("view");
     const view = getView(viewParam);
+    const aiCategory = req.nextUrl.searchParams.get("ai_category");  // §18 filter
 
     // Mode: client_tags — distinct client tags for the dropdown.
     if (mode === "client_tags") {
@@ -211,7 +216,7 @@ export async function GET(req: NextRequest) {
 
     // Mode: counts — all category counts in one RPC round trip (60s cache).
     if (mode === "counts") {
-      return NextResponse.json(await computeCounts({ clientTag, allowed, workflow, search, view, viewParam, fresh }));
+      return NextResponse.json(await computeCounts({ clientTag, allowed, workflow, search, view, viewParam, fresh, aiCategory }));
     }
 
     // Mode: bootstrap — everything the inbox needs to paint on open in ONE
@@ -219,7 +224,7 @@ export async function GET(req: NextRequest) {
     // the client-tags dropdown. Collapses the old counts→leads waterfall.
     if (mode === "bootstrap") {
       const [{ counts, total }, clientTags] = await Promise.all([
-        computeCounts({ clientTag, allowed, workflow, search, view, viewParam, fresh }),
+        computeCounts({ clientTag, allowed, workflow, search, view, viewParam, fresh, aiCategory }),
         resolveClientTags(allowed, fresh),
       ]);
       const firstCategory = pickFirstCategory(counts);
@@ -227,7 +232,7 @@ export async function GET(req: NextRequest) {
       let hasMore = false;
       if (firstCategory) {
         const r = await fetchLeads({
-          clientTag, allowed, category: firstCategory, workflow, search, view,
+          clientTag, allowed, category: firstCategory, workflow, search, view, aiCategory,
           limit: DEFAULT_PAGE_SIZE, offset: 0,
         });
         leads = r.replies;
@@ -240,7 +245,7 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(req.nextUrl.searchParams.get("limit") || DEFAULT_PAGE_SIZE)));
     const offset = Math.max(0, Number(req.nextUrl.searchParams.get("offset") || 0));
     return NextResponse.json(
-      await fetchLeads({ clientTag, allowed, category, workflow, search, view, limit, offset }),
+      await fetchLeads({ clientTag, allowed, category, workflow, search, view, aiCategory, limit, offset }),
     );
   } catch (error) {
     console.error("[api/inbox] GET failed:", error);

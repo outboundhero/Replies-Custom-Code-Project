@@ -70,6 +70,15 @@ const LEAD_CATEGORIES = [
   "Wrong Person",
 ];
 
+// AI Suggested categories the §18 filter can narrow to (mirror of the
+// categorizer's VALID_CATEGORIES + legacy values still present on rows).
+const AI_FILTER_CATEGORIES = [
+  "Interested", "Meeting Request", "Follow Up at a Later Date", "Not Interested", "Out Of Office",
+  "Wrong Person", "Mailbox No Longer Active", "Automated Error Message", "Automated Catch-All Message",
+  "Wrong Person (Change of Target)", "Do Not Contact", "Referral Given", "Internally Forwarded",
+  "Person No Longer Employed", "Email Address Changed", "Unrecognizable by AI",
+];
+
 const catDot: Record<string, string> = {
   "Interested": "bg-green-500", "Meeting Set": "bg-green-600", "Meeting-Ready Lead": "bg-green-600",
   "Follow Up": "bg-blue-500", "Not Interested": "bg-gray-400", "Do Not Contact": "bg-red-500",
@@ -288,6 +297,8 @@ export default function InboxPage() {
   // Fetches run off the debounced value so typing doesn't fire a request/char.
   const debouncedSearch = useDebouncedValue(search, 300);
   const [filterCategory, setFilterCategory] = useState("");
+  // §18: filter buckets/leads by the AI Suggested category (server-side).
+  const [filterAi, setFilterAi] = useState("");
   const [filterClient, setFilterClient] = useState(initialClient);
   // Default to the curated Cherry view — that's where the team lives day-to-day.
   // Master Inbox ("all") is still selectable from the dropdown.
@@ -322,6 +333,8 @@ export default function InboxPage() {
   const [ooCc, setOoCc] = useState<Recipient[]>([]);
   const [reallocTag, setReallocTag] = useState("");
   const [sending, setSending] = useState<string | null>(null);
+  // §29: inline sends require an explicit second click before firing.
+  const [confirmInline, setConfirmInline] = useState<"reply" | "fwd" | "oo" | null>(null);
 
   // One request for the whole inbox: counts + the first non-empty bucket's
   // leads + client tags. Resets per-category expansion (matches the old
@@ -331,6 +344,7 @@ export default function InboxPage() {
       const p = new URLSearchParams({ mode: "bootstrap" });
       if (debouncedSearch) p.set("search", debouncedSearch);
       if (filterClient) p.set("client_tag", filterClient);
+      if (filterAi) p.set("ai_category", filterAi);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
@@ -349,7 +363,7 @@ export default function InboxPage() {
       setFetchError((e as Error).message);
       setBooted(true);
     }
-  }, [debouncedSearch, filterClient, view]);
+  }, [debouncedSearch, filterClient, filterAi, view]);
 
   // Run on mount + whenever view / client / (debounced) search change. When we
   // hydrated from the app-load prefetch the UI is already painted (booted), so
@@ -365,6 +379,7 @@ export default function InboxPage() {
       const p = new URLSearchParams({ category: cat, offset: String(offset), limit: "100" });
       if (debouncedSearch) p.set("search", debouncedSearch);
       if (filterClient) p.set("client_tag", filterClient);
+      if (filterAi) p.set("ai_category", filterAi);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.ok) {
@@ -461,6 +476,7 @@ export default function InboxPage() {
     setReplyCc(cc);
     setReplyBcc(bcc);
     setOoCc([]);
+    setConfirmInline(null); // new lead → reset any pending send confirmation
     if (d.client_tag) loadSheetUrl(d.client_tag);
   }
 
@@ -779,6 +795,8 @@ export default function InboxPage() {
 
   async function handleSend() {
     if (!detail || !replyMsg) return;
+    if (confirmInline !== "reply") { setConfirmInline("reply"); return; } // §29 confirm
+    setConfirmInline(null);
     setSending("reply");
     const d = await mutate({
       action: "send-reply", id: detail.id, replyId: detail.reply_id,
@@ -793,6 +811,8 @@ export default function InboxPage() {
 
   async function handleFwd() {
     if (!detail || !fwdTo) return;
+    if (confirmInline !== "fwd") { setConfirmInline("fwd"); return; } // §29 confirm
+    setConfirmInline(null);
     setSending("fwd");
     const d = await mutate({
       action: "forward", id: detail.id, replyId: detail.reply_id,
@@ -804,6 +824,8 @@ export default function InboxPage() {
 
   async function handleOneOff() {
     if (!detail || !ooMsg || !ooSubject) return;
+    if (confirmInline !== "oo") { setConfirmInline("oo"); return; } // §29 confirm
+    setConfirmInline(null);
     setSending("oo");
     const d = await mutate({
       action: "send-one-off", id: detail.id, senderEmailId: detail.sender_id,
@@ -913,6 +935,15 @@ export default function InboxPage() {
               triggerClassName="h-6 text-[11px] py-0"
             />
           </div>
+          {/* §18: AI Suggested category filter (server-side, all buckets). */}
+          <SearchableCombobox
+            value={filterAi}
+            onValueChange={(v) => setFilterAi(v === "All AI Suggested" ? "" : v)}
+            options={["All AI Suggested", ...AI_FILTER_CATEGORIES]}
+            placeholder="All AI Suggested"
+            searchPlaceholder="Search AI categories..."
+            triggerClassName="h-6 text-[11px] py-0"
+          />
           <p className="text-[10px] text-muted-foreground">{total} leads</p>
         </div>
 
@@ -1006,8 +1037,14 @@ export default function InboxPage() {
                 {(detail.lead_category || "Open Response") === "Open Response" ? (
                   <LiveTimer startIso={detail.open_response_at || detail.created_at} />
                 ) : detail.time_to_categorize_seconds != null ? (
-                  <span className="text-[11px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700" title="Time from Open Response to categorization">
+                  // Completed record (§9): total time + who categorized; entered/left
+                  // Open Response timestamps in the tooltip.
+                  <span
+                    className="text-[11px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700"
+                    title={`Entered Open Response: ${detail.open_response_at ? new Date(detail.open_response_at).toLocaleString() : "—"}\nLeft Open Response: ${detail.categorized_at ? new Date(detail.categorized_at).toLocaleString() : "—"}\nCategorized by: ${detail.categorized_by || "—"}`}
+                  >
                     ✓ moved in {fmtDuration(Number(detail.time_to_categorize_seconds))}
+                    {detail.categorized_by ? <span className="text-emerald-600/70"> · by {String(detail.categorized_by).split("@")[0]}</span> : null}
                   </span>
                 ) : null}
                 {detail.sheet_url && (
@@ -1196,22 +1233,30 @@ export default function InboxPage() {
                 <RecipientList label="CC Recipients" value={replyCc} onChange={setReplyCc} max={6} addLabel="Add CC" />
                 <RecipientList label="BCC Recipients" value={replyBcc} onChange={setReplyBcc} max={2} addLabel="Add BCC" />
               </div>
-              <Button size="sm" className="h-8 text-xs" onClick={handleSend} disabled={sending === "reply" || !replyMsg}>{sending === "reply" ? "Sending..." : "Send Reply"}</Button>
+              <div className="flex items-center gap-2">
+                <Button size="sm" className="h-8 text-xs" onClick={handleSend} disabled={sending === "reply" || !replyMsg}>{sending === "reply" ? "Sending..." : confirmInline === "reply" ? "Confirm & Send" : "Send Reply"}</Button>
+                {confirmInline === "reply" && <button onClick={() => setConfirmInline(null)} className="text-[11px] text-muted-foreground hover:text-foreground">Cancel</button>}
+                {confirmInline === "reply" && <span className="text-[11px] text-amber-700">Sends to {detail.lead_email} — confirm?</span>}
+              </div>
             </div>
 
             {/* ── Forward ── */}
             <div className="rounded border bg-white px-4 py-3 flex items-end gap-2">
               <div className="flex-1"><Label className="text-[10px] text-muted-foreground">Forward to</Label><Input value={fwdTo} onChange={(e) => setFwdTo(e.target.value)} placeholder="email@example.com" className="text-xs h-8" /></div>
-              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleFwd} disabled={sending === "fwd" || !fwdTo}>{sending === "fwd" ? "..." : "Forward"}</Button>
+              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleFwd} disabled={sending === "fwd" || !fwdTo}>{sending === "fwd" ? "..." : confirmInline === "fwd" ? "Confirm?" : "Forward"}</Button>
             </div>
 
             {/* ── One-Off ── */}
             <div className="rounded border bg-white px-4 py-3 space-y-2">
-              <p className="text-xs font-medium">One-Off Reply <span className="text-muted-foreground font-normal">to {detail.lead_email}</span></p>
+              <p className="text-xs font-medium">One-Off Reply</p>
+              <div className="text-[11px] text-muted-foreground space-y-0.5">
+                <p><span className="font-medium text-foreground">From:</span> {detail.sender_email || "—"}</p>
+                <p><span className="font-medium text-foreground">To:</span> {detail.lead_name ? `${detail.lead_name} — ` : ""}{detail.lead_email}</p>
+              </div>
               <Input value={ooSubject} onChange={(e) => setOoSubject(e.target.value)} placeholder="Subject" className="text-xs h-8" />
               <Textarea value={ooMsg} onChange={(e) => setOoMsg(e.target.value)} rows={3} placeholder="Message" className="text-sm" />
               <RecipientList label="CC Recipients" value={ooCc} onChange={setOoCc} max={6} addLabel="Add CC" />
-              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleOneOff} disabled={sending === "oo" || !ooMsg || !ooSubject}>{sending === "oo" ? "..." : "Send"}</Button>
+              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleOneOff} disabled={sending === "oo" || !ooMsg || !ooSubject}>{sending === "oo" ? "..." : confirmInline === "oo" ? "Confirm & Send" : "Send"}</Button>
             </div>
 
             {/* Notes */}
@@ -1268,6 +1313,14 @@ export default function InboxPage() {
                 <>
                   {cotPreview.error && <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{cotPreview.error}</div>}
                   {cotPreview.manual && !cotPreview.error && <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] text-blue-800">This reply isn&apos;t linked to the original campaign, so we couldn&apos;t attach the original cold email. Here&apos;s an editable re-pitch draft instead — review it before sending.</div>}
+
+                  {/* The lead's original reply, for context while reviewing (§22). */}
+                  {detail && detail.id === cotPreview.replyId && (
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-muted-foreground">Original reply</label>
+                      <div className="rounded border bg-muted/20 px-3 py-2 text-[12px] max-h-28 overflow-y-auto whitespace-pre-wrap">{detail.reply_we_got || "(no content)"}</div>
+                    </div>
+                  )}
 
                   <div className="space-y-1">
                     <label className="text-[11px] font-medium text-muted-foreground">Send to</label>
