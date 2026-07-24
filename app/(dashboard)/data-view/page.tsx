@@ -121,7 +121,6 @@ export default function DataViewPage() {
   // ── Data ──
   const [rows, setRows] = useState<Row[]>([]);
   const [offset, setOffset] = useState(0);
-  const [total, setTotal] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -155,7 +154,6 @@ export default function DataViewPage() {
       if (!res.ok) { setError(`Failed (${res.status})`); return; }
       const d = await res.json();
       setError(null);
-      setTotal(d.page?.total ?? null);
       setHasMore(!!d.page?.hasMore);
       setOffset(nextOffset + (d.rows?.length || 0));
       setRows((prev) => (reset ? d.rows : [...prev, ...d.rows]));
@@ -328,7 +326,7 @@ export default function DataViewPage() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Data View</h1>
-            <p className="text-xs text-muted-foreground">{total != null ? `${total.toLocaleString()} replies` : "Active inbox"} · select rows to run bulk actions</p>
+            <p className="text-xs text-muted-foreground">{rows.length}{hasMore ? "+" : ""} replies loaded{selectedCount > 0 ? ` · ${selectedCount} selected` : " · select rows to run bulk actions"}</p>
           </div>
           {anyFilter && <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={clearFilters}>Clear filters</Button>}
         </div>
@@ -368,69 +366,72 @@ export default function DataViewPage() {
             {anyFilter && <button onClick={clearFilters} className="text-xs text-primary hover:underline">Clear filters</button>}
           </div>
         ) : (
-          <table className="w-full border-separate border-spacing-0 text-sm select-none">
+          <table className="border-separate border-spacing-0 text-sm select-none min-w-full">
             <thead className="sticky top-0 z-10">
-              <tr className="[&>th]:bg-white [&>th]:border-b [&>th]:px-3 [&>th]:py-2.5 [&>th]:text-left [&>th]:text-[10px] [&>th]:font-semibold [&>th]:uppercase [&>th]:tracking-wider [&>th]:text-muted-foreground">
-                <th className="w-10 !pl-4">
-                  <input type="checkbox" checked={allLoadedSelected} onChange={toggleAll} className="h-3.5 w-3.5 cursor-pointer accent-primary" />
+              <tr className="[&>th]:bg-[#f6f6f7] [&>th]:border-b [&>th]:border-r [&>th]:border-border/70 [&>th]:px-3 [&>th]:py-2 [&>th]:text-left [&>th]:text-[11px] [&>th]:font-medium [&>th]:text-muted-foreground [&>th]:whitespace-nowrap">
+                <th className="w-12 !px-0 text-center sticky left-0 z-20">
+                  <input type="checkbox" checked={allLoadedSelected} onChange={toggleAll} className="h-3.5 w-3.5 cursor-pointer accent-primary align-middle" />
                 </th>
-                <th>Contact</th>
-                <th className="w-[15%]">Company</th>
-                <th className="w-[12%]">Recipients</th>
-                <th className="w-[26%]">Reply</th>
-                <th>Category</th>
-                <th>AI Suggested</th>
-                <th>Client</th>
-                <th>Received</th>
+                <th className="w-[260px] sticky left-12 z-20">Contact</th>
+                <th className="w-[170px]">Company</th>
+                <th className="w-[130px]">Recipients</th>
+                <th className="w-[420px]">Reply</th>
+                <th className="w-[180px]">Category</th>
+                <th className="w-[150px]">AI Suggested</th>
+                <th className="w-[90px]">Client</th>
+                <th className="w-[130px]">Received</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {rows.map((r, ri) => {
                 const isSel = selected.has(r.id);
                 const isOpen = expandedRow === r.id;
                 const toN = recipientCount(r.to_name, r.to_email);
                 const ccN = recipientCount(r.prospect_cc_name, r.prospect_cc_email);
                 const bccN = recipientCount(r.prospect_bcc_name, r.prospect_bcc_email);
+                const rowBg = isSel ? "bg-[#fdf6ec]" : "bg-white group-hover/row:bg-[#f8f9fb]";
                 return (
                   <Fragment key={r.id}>
                     <tr
                       onMouseEnter={() => onRowEnter(r.id)}
-                      className={`group cursor-pointer transition-colors [&>td]:border-b [&>td]:border-border/50 [&>td]:px-3 [&>td]:py-2.5 [&>td]:align-top ${isSel ? "bg-primary/5" : "bg-white hover:bg-muted/30"}`}
+                      className={`group/row cursor-pointer [&>td]:border-b [&>td]:border-r [&>td]:border-border/60 [&>td]:px-3 [&>td]:py-2.5 [&>td]:align-top`}
                       onClick={() => setExpandedRow(isOpen ? null : r.id)}
                     >
-                      <td className="!pl-4" onClick={(e) => e.stopPropagation()} onMouseDown={() => onCheckboxDown(r.id)}>
-                        <input type="checkbox" readOnly checked={isSel} className="h-3.5 w-3.5 cursor-pointer accent-primary" />
+                      {/* Gutter: row number normally, checkbox on hover / when selected */}
+                      <td className={`!px-0 text-center sticky left-0 z-10 ${rowBg}`} onClick={(e) => e.stopPropagation()} onMouseDown={() => onCheckboxDown(r.id)}>
+                        <span className={`text-[11px] text-muted-foreground/50 tabular-nums ${isSel ? "hidden" : "group-hover/row:hidden"}`}>{ri + 1}</span>
+                        <input type="checkbox" readOnly checked={isSel} className={`h-3.5 w-3.5 cursor-pointer accent-primary align-middle ${isSel ? "inline-block" : "hidden group-hover/row:inline-block"}`} />
                       </td>
-                      <td>
+                      <td className={`sticky left-12 z-10 ${rowBg}`}>
                         <div className="flex items-center gap-2.5 min-w-0">
                           <div className="h-7 w-7 shrink-0 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center text-[10px] font-semibold">{initials(r.from_name || r.lead_name, r.lead_email)}</div>
                           <div className="min-w-0">
-                            <div className="font-medium truncate max-w-[180px]">{r.from_name || r.lead_name || r.lead_email}</div>
-                            <div className="text-[11px] text-muted-foreground truncate max-w-[180px]">{r.from_email || r.lead_email}</div>
+                            <div className="font-medium truncate max-w-[200px]">{r.from_name || r.lead_name || r.lead_email}</div>
+                            <div className="text-[11px] text-muted-foreground truncate max-w-[200px]">{r.from_email || r.lead_email}</div>
                           </div>
                         </div>
                       </td>
-                      <td className="text-xs text-muted-foreground truncate max-w-[160px]">{r.company_name || "—"}</td>
-                      <td>
+                      <td className={`text-xs text-muted-foreground ${rowBg}`}><span className="line-clamp-2">{r.company_name || "—"}</span></td>
+                      <td className={rowBg}>
                         <div className="flex flex-wrap gap-1">
-                          <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px]" title="To recipients">To {toN || 1}</span>
-                          {ccN > 0 && <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px]" title="CC recipients">CC {ccN}</span>}
-                          {bccN > 0 && <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px]" title="BCC recipients">BCC {bccN}</span>}
+                          <span className="rounded bg-muted/70 px-1.5 py-0.5 text-[10px] font-medium" title="To recipients">To {toN || 1}</span>
+                          {ccN > 0 && <span className="rounded bg-muted/70 px-1.5 py-0.5 text-[10px] font-medium" title="CC recipients">CC {ccN}</span>}
+                          {bccN > 0 && <span className="rounded bg-muted/70 px-1.5 py-0.5 text-[10px] font-medium" title="BCC recipients">BCC {bccN}</span>}
                         </div>
                       </td>
-                      <td>
-                        <p className={`text-xs text-foreground/80 ${isOpen ? "" : "line-clamp-2"} max-w-[360px] whitespace-pre-wrap`}>{r.reply_we_got || <span className="text-muted-foreground/50">No content</span>}</p>
+                      <td className={rowBg}>
+                        <p className={`text-xs text-foreground/80 ${isOpen ? "" : "line-clamp-2"} whitespace-pre-wrap`}>{r.reply_we_got || <span className="text-muted-foreground/50">No content</span>}</p>
                       </td>
-                      <td><CatPill cat={r.lead_category} /></td>
-                      <td className="text-[11px] text-muted-foreground max-w-[130px] truncate">{r.ai_categorized_lead_category || "—"}</td>
-                      <td><span className="font-mono text-[10px] font-bold text-primary">{r.client_tag || "N/A"}</span></td>
-                      <td className="text-[11px] text-muted-foreground whitespace-nowrap">{fmtDate(r.created_at)}</td>
+                      <td className={rowBg}><CatPill cat={r.lead_category} /></td>
+                      <td className={`text-[11px] text-muted-foreground ${rowBg}`}><span className="line-clamp-2">{r.ai_categorized_lead_category || "—"}</span></td>
+                      <td className={rowBg}><span className="font-mono text-[10px] font-bold text-primary">{r.client_tag || "N/A"}</span></td>
+                      <td className={`text-[11px] text-muted-foreground whitespace-nowrap ${rowBg}`}>{fmtDate(r.created_at)}</td>
                     </tr>
                     {isOpen && (
-                      <tr className="bg-white">
-                        <td />
-                        <td colSpan={8} className="border-b border-border/50 px-3 pb-4 pt-0">
-                          <div className="rounded-lg border bg-muted/10 divide-y divide-border/40 text-[11px]">
+                      <tr>
+                        <td className="sticky left-0 bg-[#fafafa] border-b border-border/60" colSpan={2} />
+                        <td colSpan={7} className="border-b border-border/60 bg-[#fafafa] px-3 pb-4 pt-2">
+                          <div className="rounded-lg border bg-white divide-y divide-border/40 text-[11px]">
                             <RecRow label="From" name={r.from_name} email={r.from_email || r.lead_email} />
                             <RecRow label="To" name={r.to_name} email={r.to_email} />
                             <RecRow label="CC" name={r.prospect_cc_name} email={r.prospect_cc_email} />

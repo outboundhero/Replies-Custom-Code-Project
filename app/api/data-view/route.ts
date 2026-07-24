@@ -56,11 +56,14 @@ export async function GET(req: NextRequest) {
 
     const allowed = session?.allowedClientTags ?? null;
 
+    // NO count() — an exact/estimated count over the ~127k-row table blows the
+    // Postgres statement timeout (8s+). We fetch limit+1 rows instead and infer
+    // hasMore from the overflow; the data query alone is ~350ms.
     let q = supabase
       .from("replies")
-      .select(SELECT, { count: "exact" })
+      .select(SELECT)
       .order(sort.col, { ascending: sort.asc, nullsFirst: false })
-      .range(offset, offset + limit - 1);
+      .range(offset, offset + limit); // limit+1 rows
 
     if (await hasArchivedColumn()) q = q.eq("archived", false); // active only
     // Per-user client scoping (enforced server-side regardless of UI filters).
@@ -76,13 +79,16 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { data, error, count } = await q;
+    const { data, error } = await q;
     if (error) throw new Error(error.message);
 
-    const returned = data?.length || 0;
+    // We asked for limit+1; if we got the extra row there's another page.
+    const all = data || [];
+    const hasMore = all.length > limit;
+    const rows = hasMore ? all.slice(0, limit) : all;
     return NextResponse.json({
-      rows: data || [],
-      page: { limit, offset, returned, total: count ?? null, hasMore: offset + returned < (count ?? 0) },
+      rows,
+      page: { limit, offset, returned: rows.length, total: null, hasMore },
     });
   } catch (error) {
     console.error("[api/data-view] GET failed:", error);
