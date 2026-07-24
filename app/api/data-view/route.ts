@@ -32,6 +32,30 @@ const SORTABLE = new Set([
   "lead_category", "ai_categorized_lead_category", "client_tag",
 ]);
 
+// Advanced filter builder (Airtable-style): `filters` = JSON [{field, op, value}]
+// combined with AND. Whitelisted fields/ops only; text fields are trgm-indexed.
+const TEXT_FIELDS = new Set(["lead_name", "lead_email", "from_email", "company_name", "reply_we_got"]);
+const ENUM_FIELDS = new Set(["lead_category", "ai_categorized_lead_category", "client_tag", "workflow", "bison_instance"]);
+interface Cond { field: string; op: string; value: string }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyConds(q: any, conds: Cond[]): any {
+  for (const c of conds) {
+    const v = String(c.value ?? "").trim();
+    if (!v) continue;
+    if (TEXT_FIELDS.has(c.field)) {
+      if (c.op === "contains") q = q.ilike(c.field, `%${v}%`);
+      else if (c.op === "not_contains") q = q.not(c.field, "ilike", `%${v}%`);
+    } else if (ENUM_FIELDS.has(c.field)) {
+      if (c.op === "is") q = q.eq(c.field, v);
+      else if (c.op === "is_not") q = q.neq(c.field, v);
+    } else if (c.field === "created_at") {
+      if (c.op === "after") q = q.gte("created_at", `${v}T00:00:00Z`);
+      else if (c.op === "before") q = q.lte("created_at", `${v}T23:59:59Z`);
+    }
+  }
+  return q;
+}
+
 let _archivedCol: boolean | null = null;
 async function hasArchivedColumn(): Promise<boolean> {
   if (_archivedCol !== null) return _archivedCol;
@@ -85,6 +109,14 @@ export async function GET(req: NextRequest) {
       q = q.or(
         `lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%,from_email.ilike.%${search}%,reply_we_got.ilike.%${search}%`,
       );
+    }
+    // Advanced multi-condition filters (AND-combined).
+    const filtersRaw = sp.get("filters");
+    if (filtersRaw) {
+      try {
+        const conds = JSON.parse(filtersRaw) as Cond[];
+        if (Array.isArray(conds)) q = applyConds(q, conds.slice(0, 10));
+      } catch { /* malformed filters param — ignore */ }
     }
 
     const { data, error } = await q;

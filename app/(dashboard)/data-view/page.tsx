@@ -45,6 +45,28 @@ const AI_CATEGORIES = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 
+// ── Advanced filter builder (Airtable-style, AND-combined) ─────────────────
+interface Cond { field: string; op: string; value: string }
+const FILTER_FIELDS: { id: string; label: string; type: "text" | "select" | "client" | "date"; options?: string[] }[] = [
+  { id: "lead_name", label: "Contact name", type: "text" },
+  { id: "lead_email", label: "Lead email", type: "text" },
+  { id: "from_email", label: "From email", type: "text" },
+  { id: "company_name", label: "Company", type: "text" },
+  { id: "reply_we_got", label: "Reply content", type: "text" },
+  { id: "lead_category", label: "Category", type: "select", options: [] /* filled below */ },
+  { id: "ai_categorized_lead_category", label: "AI Suggested", type: "select", options: [] },
+  { id: "client_tag", label: "Client", type: "client" },
+  { id: "workflow", label: "Workflow", type: "select", options: ["Tracked", "Untracked"] },
+  { id: "created_at", label: "Received date", type: "date" },
+];
+FILTER_FIELDS.find((f) => f.id === "lead_category")!.options = LEAD_CATEGORIES;
+FILTER_FIELDS.find((f) => f.id === "ai_categorized_lead_category")!.options = AI_CATEGORIES;
+function opsFor(type: string): { id: string; label: string }[] {
+  if (type === "text") return [{ id: "contains", label: "contains" }, { id: "not_contains", label: "does not contain" }];
+  if (type === "date") return [{ id: "after", label: "is on or after" }, { id: "before", label: "is on or before" }];
+  return [{ id: "is", label: "is" }, { id: "is_not", label: "is not" }];
+}
+
 // ── Column model: resizable, reorderable, header-click sortable ────────────
 interface ColDef { id: string; label: string; width: number; min: number; sortCol?: string }
 const DEFAULT_COLS: ColDef[] = [
@@ -128,6 +150,11 @@ export default function DataViewPage() {
   const [clientTags, setClientTags] = useState<string[]>([]);
   const [groupBy, setGroupBy] = useState("");           // "" | lead_category | client_tag | ai
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Advanced multi-condition filters (Filter button)
+  const [advFilters, setAdvFilters] = useState<Cond[]>([]);
+  const [showFilters, setShowFilters] = useState(false);
+  const advKey = useDebouncedValue(JSON.stringify(advFilters.filter((f) => f.value.trim())), 400);
+  const activeAdvCount = advFilters.filter((f) => f.value.trim()).length;
 
   // ── Sort (click-a-header) ──
   const [sortCol, setSortCol] = useState("created_at");
@@ -210,6 +237,21 @@ export default function DataViewPage() {
 
   // ── Inline category editing ──
   const [editingCell, setEditingCell] = useState<number | null>(null);
+  // ── Inline field editing (double-click Contact / Company cells) ──
+  const [editField, setEditField] = useState<{ id: number; kind: "contact" | "company" } | null>(null);
+  async function saveFields(id: number, fields: Record<string, string>) {
+    const changed = Object.fromEntries(Object.entries(fields).filter(([k, v]) => {
+      const row = rows.find((x) => x.id === id);
+      return row && String(row[k] || "") !== v;
+    }));
+    if (!Object.keys(changed).length) return;
+    // Optimistic — same row the inbox reads, so it reflects everywhere.
+    setRows((prev) => prev.map((x) => x.id === id ? { ...x, ...changed } : x));
+    setPanelDetail((prev) => (prev && prev.id === id ? { ...prev, ...changed } : prev));
+    const r = await mutate({ action: "update-fields", id, fields: changed });
+    if (r.ok) toast.success("Saved");
+    else toast.error(r.error || "Save failed");
+  }
 
   // ── Bulk review queue ──
   const [queue, setQueue] = useState<ReviewCard[] | null>(null);
@@ -232,6 +274,7 @@ export default function DataViewPage() {
       if (aiCategory) p.set("ai_category", aiCategory);
       if (from) p.set("date_from", from);
       if (to) p.set("date_to", to);
+      if (advKey !== "[]") p.set("filters", advKey);
       const res = await fetch(`/api/data-view?${p}`);
       if (mine !== reqRef.current) return;
       if (res.status === 401) { window.location.href = "/login"; return; }
@@ -246,7 +289,7 @@ export default function DataViewPage() {
     } finally {
       if (mine === reqRef.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [sortCol, sortAsc, groupBy, debouncedSearch, clientTag, category, aiCategory, from, to, offset]);
+  }, [sortCol, sortAsc, groupBy, debouncedSearch, clientTag, category, aiCategory, from, to, advKey, offset]);
 
   // Reset + reload on filter/sort/group change. The very first run is skipped
   // when we hydrated from the fresh app-load prefetch (it IS the default view).
@@ -255,7 +298,7 @@ export default function DataViewPage() {
     setSelected(new Set()); setOffset(0);
     load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortCol, sortAsc, groupBy, debouncedSearch, clientTag, category, aiCategory, from, to]);
+  }, [sortCol, sortAsc, groupBy, debouncedSearch, clientTag, category, aiCategory, from, to, advKey]);
 
   // Client tags for the filter combobox.
   useEffect(() => {
@@ -311,8 +354,22 @@ export default function DataViewPage() {
   }
   function clearFilters() {
     setSearch(""); setClientTag(""); setCategory(""); setAiCategory(""); setFrom(""); setTo("");
+    setAdvFilters([]); setShowFilters(false);
   }
-  const anyFilter = !!(search || clientTag || category || aiCategory || from || to);
+  const anyFilter = !!(search || clientTag || category || aiCategory || from || to || activeAdvCount);
+  function patchFilter(i: number, patch: Partial<Cond>) {
+    setAdvFilters((prev) => prev.map((f, j) => {
+      if (j !== i) return f;
+      const next = { ...f, ...patch };
+      // Field changed → reset op to the new type's first op and clear the value.
+      if (patch.field && patch.field !== f.field) {
+        const def = FILTER_FIELDS.find((x) => x.id === patch.field);
+        next.op = opsFor(def?.type || "text")[0].id;
+        next.value = "";
+      }
+      return next;
+    }));
+  }
 
   // ── Grouping (client-side over loaded rows) ──
   const groupKey = useCallback((r: Row): string => {
@@ -475,8 +532,23 @@ export default function DataViewPage() {
   function renderCell(c: ColDef, r: Row) {
     switch (c.id) {
       case "contact":
-        return (
-          <div className="flex items-center gap-2.5 min-w-0">
+        return editField && editField.id === r.id && editField.kind === "contact" ? (
+          <div
+            className="space-y-1"
+            onClick={(e) => e.stopPropagation()}
+            onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setEditField(null); }}
+          >
+            <input autoFocus defaultValue={String(r.lead_name || "")} placeholder="Name"
+              onBlur={(e) => saveFields(r.id, { lead_name: e.target.value.trim() })}
+              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditField(null); }}
+              className="w-full rounded border border-primary/50 px-1.5 py-0.5 text-[12px] focus:outline-none" />
+            <input defaultValue={String(r.lead_email || "")} placeholder="email@example.com"
+              onBlur={(e) => saveFields(r.id, { lead_email: e.target.value.trim() })}
+              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditField(null); }}
+              className="w-full rounded border border-primary/50 px-1.5 py-0.5 text-[11px] focus:outline-none" />
+          </div>
+        ) : (
+          <div className="flex items-center gap-2.5 min-w-0" onDoubleClick={(e) => { e.stopPropagation(); setEditField({ id: r.id, kind: "contact" }); }} title="Double-click to edit">
             <div className="h-7 w-7 shrink-0 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center text-[10px] font-semibold">{initials(r.from_name || r.lead_name, r.lead_email)}</div>
             <div className="min-w-0">
               <div className="font-medium truncate text-[13px]">{r.from_name || r.lead_name || r.lead_email}</div>
@@ -485,7 +557,15 @@ export default function DataViewPage() {
           </div>
         );
       case "company":
-        return <span className="text-xs text-muted-foreground line-clamp-2">{r.company_name || "—"}</span>;
+        return editField && editField.id === r.id && editField.kind === "company" ? (
+          <input autoFocus defaultValue={String(r.company_name || "")} placeholder="Company"
+            onClick={(e) => e.stopPropagation()}
+            onBlur={(e) => { saveFields(r.id, { company_name: e.target.value.trim() }); setEditField(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditField(null); }}
+            className="w-full rounded border border-primary/50 px-1.5 py-0.5 text-xs focus:outline-none" />
+        ) : (
+          <span className="text-xs text-muted-foreground line-clamp-2" onDoubleClick={(e) => { e.stopPropagation(); setEditField({ id: r.id, kind: "company" }); }} title="Double-click to edit">{r.company_name || "—"}</span>
+        );
       case "recipients": {
         const toN = recipientCount(r.to_name, r.to_email);
         const ccN = recipientCount(r.prospect_cc_name, r.prospect_cc_email);
@@ -581,7 +661,15 @@ export default function DataViewPage() {
               <h1 className="text-lg font-semibold tracking-tight">Data View</h1>
               <p className="text-xs text-muted-foreground">{loading ? "Loading…" : `${rows.length}${hasMore ? "+" : ""} replies`}{selectedCount > 0 ? ` · ${selectedCount} selected` : ""}</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 relative">
+              {/* Airtable-style multi-condition Filter */}
+              <button
+                onClick={() => setShowFilters((s) => !s)}
+                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition-colors ${activeAdvCount ? "border-primary/40 bg-primary/5 text-primary" : "hover:bg-muted"}`}
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" /></svg>
+                Filter{activeAdvCount ? ` · ${activeAdvCount}` : ""}
+              </button>
               <Select value={groupBy || "none"} onValueChange={(v) => { setGroupBy(v === "none" ? "" : v); setCollapsed(new Set()); }}>
                 <SelectTrigger className="h-8 w-[170px] text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -592,6 +680,53 @@ export default function DataViewPage() {
                 </SelectContent>
               </Select>
               {anyFilter && <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={clearFilters}>Clear filters</Button>}
+
+              {/* Filter builder panel */}
+              {showFilters && (
+                <div className="absolute right-0 top-10 z-40 w-[560px] rounded-xl border bg-white p-3 shadow-xl space-y-2 animate-in fade-in slide-in-from-top-1">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold">Filters <span className="font-normal text-muted-foreground">— all conditions must match</span></p>
+                    <button onClick={() => setShowFilters(false)} className="text-base leading-none text-muted-foreground hover:text-foreground">×</button>
+                  </div>
+                  {advFilters.length === 0 && <p className="text-[11px] text-muted-foreground py-1">No filters yet — add one below.</p>}
+                  {advFilters.map((f, i) => {
+                    const def = FILTER_FIELDS.find((x) => x.id === f.field) || FILTER_FIELDS[0];
+                    return (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <span className="w-10 shrink-0 text-[10px] text-muted-foreground text-right">{i === 0 ? "Where" : "and"}</span>
+                        <Select value={f.field} onValueChange={(v) => patchFilter(i, { field: v })}>
+                          <SelectTrigger className="h-8 w-[150px] text-xs shrink-0"><SelectValue /></SelectTrigger>
+                          <SelectContent>{FILTER_FIELDS.map((x) => <SelectItem key={x.id} value={x.id}>{x.label}</SelectItem>)}</SelectContent>
+                        </Select>
+                        <Select value={f.op} onValueChange={(v) => patchFilter(i, { op: v })}>
+                          <SelectTrigger className="h-8 w-[130px] text-xs shrink-0"><SelectValue /></SelectTrigger>
+                          <SelectContent>{opsFor(def.type).map((o) => <SelectItem key={o.id} value={o.id}>{o.label}</SelectItem>)}</SelectContent>
+                        </Select>
+                        {def.type === "select" ? (
+                          <Select value={f.value || undefined} onValueChange={(v) => patchFilter(i, { value: v })}>
+                            <SelectTrigger className="h-8 flex-1 text-xs"><SelectValue placeholder="Choose…" /></SelectTrigger>
+                            <SelectContent>{(def.options || []).map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}</SelectContent>
+                          </Select>
+                        ) : def.type === "client" ? (
+                          <div className="flex-1"><SearchableCombobox value={f.value} onValueChange={(v) => patchFilter(i, { value: v })} options={clientTags} placeholder="Choose client…" /></div>
+                        ) : def.type === "date" ? (
+                          <Input type="date" value={f.value} onChange={(e) => patchFilter(i, { value: e.target.value })} className="h-8 flex-1 text-xs" />
+                        ) : (
+                          <Input value={f.value} onChange={(e) => patchFilter(i, { value: e.target.value })} placeholder="Value…" className="h-8 flex-1 text-xs" />
+                        )}
+                        <button onClick={() => setAdvFilters((prev) => prev.filter((_, j) => j !== i))} className="h-8 w-7 shrink-0 rounded border text-xs text-muted-foreground hover:bg-muted hover:text-destructive">×</button>
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      onClick={() => setAdvFilters((prev) => [...prev, { field: "lead_name", op: "contains", value: "" }])}
+                      className="text-xs font-medium text-primary hover:underline"
+                    >+ Add filter</button>
+                    {activeAdvCount > 0 && <button onClick={() => setAdvFilters([])} className="text-[11px] text-muted-foreground hover:text-foreground">Clear all</button>}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
