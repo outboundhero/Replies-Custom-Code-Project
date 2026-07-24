@@ -6,6 +6,7 @@ import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from
 import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
+import { regenerateReply } from "@/lib/processing/regenerate-reply";
 import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
@@ -335,6 +336,25 @@ export async function POST(req: NextRequest) {
       case "send-one-off": {
         const { senderEmailId, subject, message, toEmail, toName, ccEmails } = body;
         const result = await sendOneOffReply(rowInstance, { senderEmailId, subject, message, toEmail, toName, ccEmails });
+        return NextResponse.json(result);
+      }
+
+      case "regenerate-reply": {
+        // Rewrite the staged reply draft for the Send-Reply preview (spec §15).
+        // Reads the lead's inbound message for context; never sends.
+        const { currentDraft, instructions, senderName, leadName } = body;
+        const { data: reply } = await supabase
+          .from("replies")
+          .select("reply_we_got")
+          .eq("id", id)
+          .single();
+        const result = await regenerateReply({
+          replyBody: (reply?.reply_we_got as string | null) || "",
+          currentDraft: currentDraft || "",
+          instructions: instructions || "",
+          senderName: senderName || "",
+          leadName: leadName || "",
+        });
         return NextResponse.json(result);
       }
 

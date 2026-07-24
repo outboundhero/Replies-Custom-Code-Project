@@ -145,6 +145,25 @@ function firstNameOf(name: string): string {
   return n ? n.split(/\s+/)[0] : "there";
 }
 
+// Send-Reply preview (spec §15): stage the draft, recipients + sending account;
+// edit / regenerate / decline / approve — nothing sends until "Approve & Send".
+interface SendPrevState {
+  replyId: number;                  // our replies.id
+  bisonReplyId: number | null;      // Bison reply id, for the threaded send
+  senderEmailId: number | null;     // sending account id
+  category: string;                 // the (Send Reply) category that opened this
+  fromEmail: string;                // sending account (read-only)
+  toEmail: string;
+  toName: string;
+  message: string;
+  cc: { name: string; email: string }[];
+  bcc: { name: string; email: string }[];
+  instructions: string;             // freeform guidance for "Regenerate with AI"
+  regenerating: boolean;
+  sending: boolean;
+  confirm: boolean;                 // second-step confirm before the send fires
+}
+
 export default function InboxPage() {
   // Per-user scope comes from the server session (context) — no /api/auth fetch.
   const session = useSession();
@@ -200,6 +219,8 @@ export default function InboxPage() {
   const prevTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Change-of-Target preview (spec §22): prepared candidates + editable message.
   const [cotPreview, setCotPreview] = useState<CotState | null>(null);
+  // Send-Reply preview (spec §15): staged draft awaiting review + approval.
+  const [sendPreview, setSendPreview] = useState<SendPrevState | null>(null);
   const detailReqRef = useRef(0);
   const sheetCache = useRef<Record<string, string | null>>({});
   // Hover-prefetched full details, so a click paints instantly.
@@ -453,6 +474,64 @@ export default function InboxPage() {
     else { toast.error(d.error || "Send failed"); cotPatch({ sending: false }); }
   }
 
+  // ── Send-Reply preview (§15): stage draft, review + approve; nothing sends
+  //    until "Approve & Send". Opened when a (Send Reply) category is picked. ──
+  function openSendPreview(d: ReplyDetail, category: string) {
+    const cc = ([1, 2, 3, 4, 5, 6] as const)
+      .map((n) => ({ name: d[`cc_name_${n}`] || "", email: d[`cc_email_${n}`] || "" }))
+      .filter((r) => r.name || r.email);
+    const bcc = ([1, 2] as const)
+      .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
+      .filter((r) => r.name || r.email);
+    const message = category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || "");
+    setSendPreview({
+      replyId: d.id, bisonReplyId: (d.reply_id as number | null) ?? null,
+      senderEmailId: (d.sender_id as number | null) ?? null,
+      category, fromEmail: String(d.sender_email || ""),
+      toEmail: String(d.lead_email || ""), toName: String(d.lead_name || d.from_name || ""),
+      message, cc, bcc, instructions: "", regenerating: false, sending: false, confirm: false,
+    });
+  }
+  function sendPatch(patch: Partial<SendPrevState>) {
+    setSendPreview((prev) => (prev ? { ...prev, ...patch } : prev));
+  }
+  async function regenerateSend() {
+    if (!sendPreview) return;
+    sendPatch({ regenerating: true });
+    const d = await mutate({
+      action: "regenerate-reply", id: sendPreview.replyId,
+      currentDraft: sendPreview.message, instructions: sendPreview.instructions,
+      leadName: sendPreview.toName,
+    });
+    if (d.ok && d.message) { sendPatch({ message: d.message, instructions: "", regenerating: false, confirm: false }); toast.success("Draft regenerated"); }
+    else { toast.error(d.error || "Couldn't regenerate — edit manually."); sendPatch({ regenerating: false }); }
+  }
+  async function approveSend() {
+    if (!sendPreview) return;
+    if (!sendPreview.confirm) { sendPatch({ confirm: true }); return; } // require an explicit second click (§29)
+    if (!sendPreview.message.trim()) { toast.error("The draft is empty."); return; }
+    sendPatch({ sending: true });
+    const d = await mutate({
+      action: "send-reply", id: sendPreview.replyId, replyId: sendPreview.bisonReplyId,
+      senderEmailId: sendPreview.senderEmailId, message: sendPreview.message,
+      toEmail: sendPreview.toEmail, toName: sendPreview.toName,
+      ccEmails: sendPreview.cc.length ? recipientsToApi(sendPreview.cc) : undefined,
+      bccEmails: sendPreview.bcc.length ? recipientsToApi(sendPreview.bcc) : undefined,
+    });
+    if (d.ok) { toast.success(`Reply sent to ${sendPreview.toEmail}`); setSendPreview(null); if (selectedId === sendPreview.replyId) loadDetail(sendPreview.replyId); }
+    else { toast.error(d.error || "Send failed"); sendPatch({ sending: false, confirm: false }); }
+  }
+  async function declineSend() {
+    if (!sendPreview) return;
+    const rid = sendPreview.replyId;
+    setSendPreview(null);
+    // Decline → move off the send flow, back to Open Response for re-triage (§15).
+    await mutate({ action: "update-category", id: rid, category: "Open Response" });
+    setDetail((prev) => (prev && prev.id === rid ? { ...prev, lead_category: "Open Response" } : prev));
+    setCounts((prev) => ({ ...prev, "Open Response": (prev["Open Response"] || 0) + 1 }));
+    toast.success("Declined — moved back to Open Response");
+  }
+
   function recipientsToApi(recipients: Recipient[]) {
     return recipients
       .filter((r) => r.email.trim())
@@ -573,8 +652,10 @@ export default function InboxPage() {
       // Change of Target → open the review/preview (pick destination + approve)
       // instead of auto-sending (spec §22).
       if (cat === "Change Of Target") openCot(detail.id);
-      // Primary-contact category → fill the composer with the templated ask.
-      if (cat === PRIMARY_CONTACT_CATEGORY) setReplyMsg(resolvePrimaryContactTemplate(detail));
+      // Any (Send Reply) category → stage the draft in the Send-Reply preview
+      // (spec §15): review recipients + sending account, edit/regenerate, then
+      // approve. Nothing sends until the user approves.
+      else if (/\(send reply\)/i.test(cat)) openSendPreview({ ...detail, lead_category: cat }, cat);
       // Auto-advance to the next lead for non-send categories; send/approval
       // categories stay put so the user can review the outgoing email.
       if (!isSend) {
@@ -1125,6 +1206,79 @@ export default function InboxPage() {
                 </Button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Send-Reply review (§15): stage the draft, edit/regenerate, then approve. */}
+      {sendPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !sendPreview.sending && !sendPreview.regenerating && setSendPreview(null)}>
+          <div className="w-full max-w-2xl rounded-xl border bg-white shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold">Send Reply — review before sending</h3>
+                <p className="text-[11px] text-muted-foreground">{sendPreview.category} · nothing sends until you approve.</p>
+              </div>
+              <button onClick={() => !sendPreview.sending && !sendPreview.regenerating && setSendPreview(null)} className="text-lg leading-none text-muted-foreground hover:text-foreground">×</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {/* The lead's inbound message, for context. */}
+              {detail && detail.id === sendPreview.replyId && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-muted-foreground">Lead&apos;s reply</label>
+                  <div className="rounded border bg-muted/20 px-3 py-2 text-[12px] max-h-32 overflow-y-auto whitespace-pre-wrap">{detail.reply_we_got || "(no content)"}</div>
+                </div>
+              )}
+
+              {/* Sending account + recipients. */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-muted-foreground">Sending account (From)</label>
+                  <div className="rounded border bg-muted/20 px-3 py-1.5 text-xs truncate" title={sendPreview.fromEmail}>{sendPreview.fromEmail || "—"}</div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-muted-foreground">To</label>
+                  <div className="flex gap-2">
+                    <Input value={sendPreview.toName} onChange={(e) => sendPatch({ toName: e.target.value })} placeholder="Name" className="h-8 text-xs flex-1" />
+                    <Input value={sendPreview.toEmail} onChange={(e) => sendPatch({ toEmail: e.target.value })} placeholder="email@example.com" className="h-8 text-xs flex-[2]" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <RecipientList label="CC Recipients" value={sendPreview.cc} onChange={(next) => sendPatch({ cc: next })} max={6} addLabel="Add CC" />
+                <RecipientList label="BCC Recipients" value={sendPreview.bcc} onChange={(next) => sendPatch({ bcc: next })} max={2} addLabel="Add BCC" />
+              </div>
+
+              {/* The draft — editable. */}
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-muted-foreground">Reply draft</label>
+                <Textarea value={sendPreview.message} onChange={(e) => sendPatch({ message: e.target.value, confirm: false })} rows={7} className="text-sm" placeholder="Type the reply…" />
+              </div>
+
+              {/* Regenerate with AI (optional freeform instructions). */}
+              <div className="rounded border bg-muted/10 px-3 py-2 space-y-1.5">
+                <label className="text-[11px] font-medium text-muted-foreground">Regenerate with AI <span className="font-normal">(optional instructions)</span></label>
+                <div className="flex gap-2">
+                  <Input value={sendPreview.instructions} onChange={(e) => sendPatch({ instructions: e.target.value })} placeholder='e.g. "shorter and warmer", "offer a call Tuesday"' className="h-8 text-xs flex-1" disabled={sendPreview.regenerating} />
+                  <Button variant="outline" size="sm" className="h-8 text-xs shrink-0" onClick={regenerateSend} disabled={sendPreview.regenerating || sendPreview.sending}>
+                    {sendPreview.regenerating ? "Rewriting…" : "Regenerate"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 border-t px-4 py-3">
+              <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={declineSend} disabled={sendPreview.sending || sendPreview.regenerating}>Decline</Button>
+              <div className="flex items-center gap-2">
+                {sendPreview.confirm && <span className="text-[11px] text-amber-700">Send now?</span>}
+                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setSendPreview(null)} disabled={sendPreview.sending || sendPreview.regenerating}>Cancel</Button>
+                <Button size="sm" className="h-8 text-xs" onClick={approveSend} disabled={sendPreview.sending || sendPreview.regenerating || !sendPreview.message.trim() || !sendPreview.toEmail || !sendPreview.senderEmailId}>
+                  {sendPreview.sending ? "Sending…" : sendPreview.confirm ? "Confirm & Send" : "Approve & Send"}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       )}
