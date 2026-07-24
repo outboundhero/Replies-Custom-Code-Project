@@ -569,6 +569,19 @@ export default function InboxPage() {
       toEmail: to.email, toName: to.name,
       message, cc, bcc, instructions: "", regenerating: false, sending: false, confirm: false,
     });
+    // §23: upgrade the primary-contact draft to the scenario-specific wording
+    // (property-mgmt / first-name / forwarded / department). Paints instantly
+    // with the generic ask, then swaps in the tailored one — unless the user
+    // has already edited it.
+    if (category === PRIMARY_CONTACT_CATEGORY) {
+      mutate({ action: "primary-contact-reply", id: d.id, firstName: leadFirstName(d) })
+        .then((r) => {
+          if (r?.ok && r.message) {
+            setSendPreview((prev) => (prev && prev.replyId === d.id && prev.message === message ? { ...prev, message: r.message } : prev));
+          }
+        })
+        .catch(() => {});
+    }
   }
   function sendPatch(patch: Partial<SendPrevState>) {
     setSendPreview((prev) => (prev ? { ...prev, ...patch } : prev));
@@ -722,10 +735,13 @@ export default function InboxPage() {
       // return date from the lead's reply; cron re-sends the original
       // first cold email on that date).
       if (cat === "Out Of Office") {
-        if (d.out_of_office_return_date) {
-          toast.success(`Will re-send the original cold email on ${d.out_of_office_return_date} (lead's stated return date)`);
-        } else if (d.out_of_office_reason) {
-          toast.warning(d.out_of_office_reason);
+        if (d.auto_reply_due_at) {
+          const when = fmtSendDate(d.auto_reply_due_at);
+          toast.success(d.out_of_office_return_date
+            ? `Original cold email will re-send ${when} (day after the lead's return date)`
+            : `No return date found — requeued; original cold email will re-send ${when}`);
+        } else if (d.auto_reply_schedule_error) {
+          toast.error(`Couldn't schedule the OOO re-send: ${d.auto_reply_schedule_error}`);
         }
       }
       // Change of Target → open the review/preview (pick destination + approve)
@@ -1019,9 +1035,9 @@ export default function InboxPage() {
               <div className="rounded-lg border border-yellow-200 bg-yellow-50 px-3.5 py-2.5 text-xs text-yellow-800 flex items-center gap-2">
                 <span className="shrink-0">📅</span>
                 {detail.auto_reply_sent_at ? (
-                  <span>Original cold email was re-sent on <strong>{fmtSendDate(detail.auto_reply_due_at)}</strong> (the lead&apos;s stated return date).</span>
+                  <span>Original cold email was re-sent on <strong>{fmtSendDate(detail.auto_reply_due_at)}</strong>.</span>
                 ) : (
-                  <span>Out of office — the original cold email will re-send on <strong>{fmtSendDate(detail.auto_reply_due_at)}</strong> (the lead&apos;s stated return date), 9:00 AM PT.</span>
+                  <span>Out of office — next eligible send date: <strong>{fmtSendDate(detail.auto_reply_due_at)}</strong> (9:00 AM PT). The original cold email re-sends then.</span>
                 )}
               </div>
             )}

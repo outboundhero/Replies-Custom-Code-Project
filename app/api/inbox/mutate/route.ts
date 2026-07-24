@@ -7,12 +7,16 @@ import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
 import { regenerateReply } from "@/lib/processing/regenerate-reply";
+import { generatePrimaryContactReply } from "@/lib/processing/primary-contact-reply";
 import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
 import { applyReallocate } from "@/lib/processing/apply-reallocate";
 import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
+
+// Default OOO requeue delay when the reply gives no clear return date (§21).
+const DEFAULT_OOO_DELAY_DAYS = 7;
 
 export async function POST(req: NextRequest) {
   // Single session read (was requireAuth() + a second getSession() below).
@@ -160,11 +164,12 @@ export async function POST(req: NextRequest) {
           else extras.auto_reply_due_at = dueAt;
         }
 
-        // Out Of Office → AI extracts the return date from the reply,
-        // then the auto-reply cron sends the original first cold email
-        // back to the lead on that date with a "Looks like you are back…"
-        // intro. If the AI can't pin a date, we skip scheduling and tell
-        // the user — categorization itself still succeeds.
+        // Out Of Office → AI extracts the return date from the reply, then the
+        // auto-reply cron re-sends the original first cold email on the next
+        // eligible send date. Per spec §21 that is the day AFTER the stated
+        // return date ("out until Jul 28" → send Jul 29), so we never email
+        // before the person is back. When no date can be found we DON'T skip —
+        // we requeue after a default delay so the lead is never dropped.
         if (category === "Out Of Office") {
           const { data: ooReply } = await supabase
             .from("replies")
@@ -173,26 +178,22 @@ export async function POST(req: NextRequest) {
             .single();
           const replyText = (ooReply?.reply_we_got as string | null) || "";
           const returnDate = await extractReturnDate(replyText);
-          if (!returnDate) {
-            extras.out_of_office_return_date = null;
-            extras.out_of_office_reason = "No clear return date found in the reply — auto-reschedule skipped.";
-          } else {
-            // Fire at 09:00 PT on the return date so the lead sees it
-            // first thing Monday morning rather than at midnight.
-            const dueAt = new Date(`${returnDate}T16:00:00Z`).toISOString(); // 09:00 PDT = 16:00 UTC
-            const { error: schedErr } = await supabase
-              .from("replies")
-              .update({
-                auto_reply_due_at: dueAt,
-                auto_reply_kind: "out_of_office",
-                auto_reply_sent_at: null,
-              })
-              .eq("id", id);
-            if (schedErr) extras.auto_reply_schedule_error = schedErr.message;
-            else {
-              extras.out_of_office_return_date = returnDate;
-              extras.auto_reply_due_at = dueAt;
-            }
+
+          // Compute the next eligible send date, fired at 09:00 PT (16:00 UTC).
+          const target = returnDate ? new Date(`${returnDate}T16:00:00Z`) : new Date();
+          target.setUTCDate(target.getUTCDate() + (returnDate ? 1 : DEFAULT_OOO_DELAY_DAYS));
+          target.setUTCHours(16, 0, 0, 0);
+          const dueAt = target.toISOString();
+
+          const { error: schedErr } = await supabase
+            .from("replies")
+            .update({ auto_reply_due_at: dueAt, auto_reply_kind: "out_of_office", auto_reply_sent_at: null })
+            .eq("id", id);
+          if (schedErr) extras.auto_reply_schedule_error = schedErr.message;
+          else {
+            extras.auto_reply_due_at = dueAt;
+            extras.out_of_office_return_date = returnDate || null;
+            if (!returnDate) extras.out_of_office_default_delay_days = DEFAULT_OOO_DELAY_DAYS;
           }
         }
 
@@ -351,6 +352,21 @@ export async function POST(req: NextRequest) {
       case "send-one-off": {
         const { senderEmailId, subject, message, toEmail, toName, ccEmails } = body;
         const result = await sendOneOffReply(rowInstance, { senderEmailId, subject, message, toEmail, toName, ccEmails });
+        return NextResponse.json(result);
+      }
+
+      case "primary-contact-reply": {
+        // Scenario-specific "Request for Primary Point of Contact" draft (§23).
+        const { firstName } = body;
+        const { data: reply } = await supabase
+          .from("replies")
+          .select("reply_we_got")
+          .eq("id", id)
+          .single();
+        const result = await generatePrimaryContactReply(
+          (reply?.reply_we_got as string | null) || "",
+          firstName || "",
+        );
         return NextResponse.json(result);
       }
 
