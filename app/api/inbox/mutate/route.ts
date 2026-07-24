@@ -355,6 +355,21 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(result);
       }
 
+      case "update-fields": {
+        // Generic whitelisted field editor (Data View record panel). Writes the
+        // same replies row the inbox reads, so edits reflect everywhere.
+        const EDITABLE = new Set(["lead_name", "lead_email", "first_name", "last_name", "company_name", "phone", "city", "state", "notes"]);
+        const patch: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries((body.fields as Record<string, unknown>) || {})) {
+          if (EDITABLE.has(k)) patch[k] = typeof v === "string" ? v.trim() : v;
+        }
+        if (!Object.keys(patch).length) return NextResponse.json({ ok: false, error: "No editable fields" }, { status: 400 });
+        patch.updated_at = new Date().toISOString();
+        const { error: ufErr } = await supabase.from("replies").update(patch).eq("id", id);
+        if (ufErr) return NextResponse.json({ ok: false, error: ufErr.message }, { status: 500 });
+        return NextResponse.json({ ok: true });
+      }
+
       case "primary-contact-reply": {
         // Scenario-specific "Request for Primary Point of Contact" draft (§23).
         const { firstName } = body;

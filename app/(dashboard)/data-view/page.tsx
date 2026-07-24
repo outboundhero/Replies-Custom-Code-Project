@@ -22,6 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { InstanceBadge } from "@/components/instance-badge";
 import { initials } from "@/components/email-participants";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
+import { peekDataView, DATA_VIEW_PAGE_SIZE } from "@/lib/data-view-prefetch";
 import {
   computeReplyRecipients, sendReplyTemplateFor, isSendReplyCategory,
   PRIMARY_CONTACT_CATEGORY, CAT_DOT, type Recipient,
@@ -182,14 +183,19 @@ export default function DataViewPage() {
     else { setSortCol(c.sortCol); setSortAsc(c.sortCol !== "created_at" && c.sortCol !== "categorized_at"); }
   }
 
-  // ── Data ──
-  const [rows, setRows] = useState<Row[]>([]);
-  const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true);
+  // ── Data — hydrate synchronously from the app-load prefetch when fresh, so
+  //    the first open paints instantly (same pattern as the inbox). ──
+  const bootRef = useRef<ReturnType<typeof peekDataView> | undefined>(undefined);
+  if (bootRef.current === undefined) bootRef.current = peekDataView();
+  const boot = bootRef.current;
+  const [rows, setRows] = useState<Row[]>(boot?.rows ?? []);
+  const [offset, setOffset] = useState(boot?.rows.length ?? 0);
+  const [hasMore, setHasMore] = useState(!!boot?.page?.hasMore);
+  const [loading, setLoading] = useState(!boot);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reqRef = useRef(0);
+  const bootedRef = useRef(!!boot);
 
   // ── Selection ──
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -209,12 +215,17 @@ export default function DataViewPage() {
   const [queue, setQueue] = useState<ReviewCard[] | null>(null);
   const [running, setRunning] = useState(false);
 
+  // When grouping, sort server-side by the group column so groups arrive
+  // contiguous and complete (not fragmented across pages).
+  const GROUP_COL: Record<string, string> = { lead_category: "lead_category", client_tag: "client_tag", ai: "ai_categorized_lead_category" };
+
   const load = useCallback(async (reset: boolean) => {
     const mine = ++reqRef.current;
     const nextOffset = reset ? 0 : offset;
     if (reset) setLoading(true); else setLoadingMore(true);
     try {
-      const p = new URLSearchParams({ sort: `${sortCol}.${sortAsc ? "asc" : "desc"}`, limit: "50", offset: String(nextOffset) });
+      const effSort = groupBy ? `${GROUP_COL[groupBy]}.asc` : `${sortCol}.${sortAsc ? "asc" : "desc"}`;
+      const p = new URLSearchParams({ sort: effSort, limit: String(groupBy ? 200 : DATA_VIEW_PAGE_SIZE), offset: String(nextOffset) });
       if (debouncedSearch) p.set("search", debouncedSearch);
       if (clientTag) p.set("client_tag", clientTag);
       if (category) p.set("category", category);
@@ -235,14 +246,16 @@ export default function DataViewPage() {
     } finally {
       if (mine === reqRef.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [sortCol, sortAsc, debouncedSearch, clientTag, category, aiCategory, from, to, offset]);
+  }, [sortCol, sortAsc, groupBy, debouncedSearch, clientTag, category, aiCategory, from, to, offset]);
 
-  // Reset + reload on filter/sort change.
+  // Reset + reload on filter/sort/group change. The very first run is skipped
+  // when we hydrated from the fresh app-load prefetch (it IS the default view).
   useEffect(() => {
+    if (bootedRef.current) { bootedRef.current = false; return; }
     setSelected(new Set()); setOffset(0);
     load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortCol, sortAsc, debouncedSearch, clientTag, category, aiCategory, from, to]);
+  }, [sortCol, sortAsc, groupBy, debouncedSearch, clientTag, category, aiCategory, from, to]);
 
   // Client tags for the filter combobox.
   useEffect(() => {
@@ -655,9 +668,10 @@ export default function DataViewPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {grouped ? grouped.map((g) => {
+                  {grouped ? grouped.map((g, gi) => {
                     const isCollapsed = collapsed.has(g.key);
                     const allSel = g.rows.every((r) => selected.has(r.id));
+                    const openEnded = gi === grouped.length - 1 && hasMore; // last group may still be loading in
                     return (
                       <Fragment key={g.key}>
                         <tr className="sticky-group">
@@ -668,7 +682,7 @@ export default function DataViewPage() {
                                 {groupBy === "lead_category" && <span className={`h-2 w-2 rounded-full ${CAT_DOT[g.key] || "bg-gray-300"}`} />}
                                 {g.key}
                               </button>
-                              <span className="rounded-full bg-white px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground border">{g.rows.length}</span>
+                              <span className="rounded-full bg-white px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground border">{g.rows.length}{openEnded ? "+" : ""}</span>
                               <button onClick={() => selectGroup(g.rows, !allSel)} className="ml-1 text-[10px] text-muted-foreground hover:text-primary">{allSel ? "Deselect all" : "Select all"}</button>
                             </div>
                           </td>
@@ -688,24 +702,20 @@ export default function DataViewPage() {
           )}
         </div>
 
-        {/* ── Selection / bulk action bar ── */}
+        {/* ── Floating bulk action bar (Airtable-style toolbar) ── */}
         {selectedCount > 0 && !queue && (
-          <div className="sticky bottom-0 z-20 border-t bg-white/95 backdrop-blur px-6 py-3 shadow-[0_-4px_16px_-8px_rgba(0,0,0,0.15)]">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <span className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-sm font-medium text-primary">{selectedCount} selected</span>
-                <button onClick={() => setSelected(new Set())} className="text-xs text-muted-foreground hover:text-foreground">Clear</button>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">Apply to all →</span>
-                <Select value="" onValueChange={(v) => v && openQueue(v)}>
-                  <SelectTrigger className="h-9 w-[240px] text-xs"><SelectValue placeholder="Choose a category / action…" /></SelectTrigger>
-                  <SelectContent>{LEAD_CATEGORIES.filter((c) => c !== "Open Response").map((c) => (
-                    <SelectItem key={c} value={c}>{cardTypeFor(c) === "change-of-target" ? "↪ " : isSendReplyCategory(c) ? "✉ " : ""}{c}</SelectItem>
-                  ))}</SelectContent>
-                </Select>
-              </div>
-            </div>
+          <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 flex items-center gap-3 rounded-2xl border bg-white px-4 py-2.5 shadow-2xl animate-in fade-in slide-in-from-bottom-3">
+            <span className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-sm font-semibold text-primary whitespace-nowrap">{selectedCount} selected</span>
+            <div className="h-5 w-px bg-border" />
+            <span className="text-xs text-muted-foreground whitespace-nowrap">Apply to all →</span>
+            <Select value="" onValueChange={(v) => v && openQueue(v)}>
+              <SelectTrigger className="h-9 w-[250px] text-xs"><SelectValue placeholder="Choose a category / action…" /></SelectTrigger>
+              <SelectContent side="top">{LEAD_CATEGORIES.filter((c) => c !== "Open Response").map((c) => (
+                <SelectItem key={c} value={c}>{cardTypeFor(c) === "change-of-target" ? "↪ " : isSendReplyCategory(c) ? "✉ " : ""}{c}</SelectItem>
+              ))}</SelectContent>
+            </Select>
+            <div className="h-5 w-px bg-border" />
+            <button onClick={() => setSelected(new Set())} className="text-xs text-muted-foreground hover:text-foreground whitespace-nowrap">Clear</button>
           </div>
         )}
       </div>
@@ -717,6 +727,11 @@ export default function DataViewPage() {
           detail={panelDetail}
           onClose={() => { setPanelRow(null); setPanelDetail(null); }}
           onSetCategory={(cat) => inlineSetCategory(panelRow, cat)}
+          onFieldsSaved={(patch) => {
+            // Reflect edits in the grid + panel immediately (same row the inbox reads).
+            setRows((prev) => prev.map((x) => x.id === panelRow.id ? { ...x, ...patch } : x));
+            setPanelDetail((prev) => (prev && prev.id === panelRow.id ? { ...prev, ...patch } : prev));
+          }}
         />
       )}
 
@@ -738,9 +753,10 @@ export default function DataViewPage() {
   );
 }
 
-// ── Right-side record panel ────────────────────────────────────────────────
-function RecordPanel({ row, detail, onClose, onSetCategory }: {
+// ── Right-side record panel — editable fields + send-reply composer ────────
+function RecordPanel({ row, detail, onClose, onSetCategory, onFieldsSaved }: {
   row: Row; detail: Row | null; onClose: () => void; onSetCategory: (cat: string) => void;
+  onFieldsSaved: (patch: Record<string, string>) => void;
 }) {
   const d = detail || row;
   // Close on Escape.
@@ -749,6 +765,59 @@ function RecordPanel({ row, detail, onClose, onSetCategory }: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Save an edited field on blur; grid + inbox read the same row.
+  async function saveField(field: string, value: string) {
+    if (String(d[field] || "") === value) return;
+    onFieldsSaved({ [field]: value });
+    const r = await mutate({ action: "update-fields", id: row.id, fields: { [field]: value } });
+    if (r.ok) toast.success("Saved");
+    else toast.error(r.error || "Save failed");
+  }
+
+  // ── Send Reply composer (full detail only — needs reply_id/sender_id) ──
+  const [msg, setMsg] = useState("");
+  const [sending, setSending] = useState(false);
+  const [confirmSend, setConfirmSend] = useState(false);
+  const [showCompose, setShowCompose] = useState(false);
+  useEffect(() => {
+    if (detail) setMsg(String(detail.our_reply || ""));
+  }, [detail]);
+  const recipients = detail ? computeReplyRecipients(detail, String(detail.lead_category || "Open Response")) : null;
+  async function sendNow() {
+    if (!detail || !msg.trim()) return;
+    if (!confirmSend) { setConfirmSend(true); return; }
+    setSending(true);
+    const r = await mutate({
+      action: "send-reply", id: row.id, replyId: detail.reply_id, senderEmailId: detail.sender_id,
+      message: msg, toEmail: recipients?.to.email || detail.lead_email, toName: recipients?.to.name || detail.lead_name,
+      ccEmails: recipients?.cc.length ? recipients.cc.map((x) => ({ name: x.name, email_address: x.email })) : undefined,
+      bccEmails: recipients?.bcc.length ? recipients.bcc.map((x) => ({ name: x.name, email_address: x.email })) : undefined,
+      clearAutoReply: true,
+    });
+    setSending(false);
+    if (r.ok) { toast.success(`Reply sent to ${recipients?.to.email || detail.lead_email}`); setConfirmSend(false); setShowCompose(false); }
+    else { toast.error(r.error || "Send failed"); setConfirmSend(false); }
+  }
+
+  // Editable field row: label + input saving on blur.
+  function EditField({ label, field, type = "text" }: { label: string; field: string; type?: string }) {
+    return (
+      <div className="min-w-0">
+        <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">{label}</p>
+        <input
+          type={type}
+          defaultValue={String(d[field] || "")}
+          key={`${row.id}-${field}-${String(d[field] || "")}`}
+          onBlur={(e) => saveField(field, e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+          className="w-full truncate rounded border border-transparent bg-transparent px-1 -mx-1 py-0.5 text-xs hover:border-border focus:border-primary focus:outline-none focus:bg-white transition-colors"
+          placeholder="—"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="fixed right-0 top-0 z-40 h-full w-[480px] border-l bg-white shadow-[-8px_0_24px_-12px_rgba(0,0,0,0.15)] flex flex-col animate-in slide-in-from-right duration-200">
       {/* Panel header */}
@@ -800,32 +869,58 @@ function RecordPanel({ row, detail, onClose, onSetCategory }: {
           </div>
         </div>
 
-        {/* Details */}
+        {/* Details — all editable, saved on blur, synced everywhere */}
         <div className="rounded-lg border px-3.5 py-3">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-xs">
-            {[
-              { l: "Company", v: d.company_name },
-              { l: "Phone", v: d.phone },
-              { l: "Location", v: [d.city, d.state].filter(Boolean).join(", ") },
-              { l: "Sender", v: d.sender_email },
-            ].map((f) => (
-              <div key={f.l} className="min-w-0">
-                <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">{f.l}</p>
-                <p className="truncate">{f.v || "—"}</p>
-              </div>
-            ))}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
+            <EditField label="Name" field="lead_name" />
+            <EditField label="Email" field="lead_email" type="email" />
+            <EditField label="Company" field="company_name" />
+            <EditField label="Phone" field="phone" />
+            <EditField label="City" field="city" />
+            <EditField label="State" field="state" />
+            <div className="min-w-0 col-span-2">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">Sender</p>
+              <p className="truncate text-xs py-0.5">{d.sender_email || "—"}</p>
+            </div>
           </div>
         </div>
 
         {/* Reply content */}
         <div className="space-y-1">
           <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Reply</label>
-          <div className="rounded-lg border bg-muted/10 px-3.5 py-3 text-[13px] whitespace-pre-wrap max-h-[320px] overflow-y-auto">
+          <div className="rounded-lg border bg-muted/10 px-3.5 py-3 text-[13px] whitespace-pre-wrap max-h-[280px] overflow-y-auto">
             {d.reply_we_got || <span className="text-muted-foreground/50">No content</span>}
           </div>
         </div>
 
-        {/* Notes (when full detail is loaded) */}
+        {/* Send Reply composer */}
+        {detail && (
+          <div className="rounded-lg border">
+            <button onClick={() => setShowCompose((s) => !s)} className="flex w-full items-center justify-between px-3.5 py-2.5 text-xs font-medium hover:bg-muted/30">
+              <span className="inline-flex items-center gap-1.5">✉ Send Reply</span>
+              <svg className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${showCompose ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            {showCompose && (
+              <div className="border-t px-3.5 py-3 space-y-2.5">
+                <div className="text-[11px] text-muted-foreground space-y-0.5">
+                  <p><span className="font-medium text-foreground">To:</span> {recipients?.to.name ? `${recipients.to.name} — ` : ""}{recipients?.to.email || d.lead_email}</p>
+                  {(recipients?.cc.length || 0) > 0 && <p><span className="font-medium text-foreground">CC:</span> {recipients!.cc.map((x) => x.email).join(", ")}</p>}
+                  {(recipients?.bcc.length || 0) > 0 && <p><span className="font-medium text-foreground">BCC:</span> {recipients!.bcc.map((x) => x.email).join(", ")}</p>}
+                  <p><span className="font-medium text-foreground">From:</span> {d.sender_email || "—"}</p>
+                </div>
+                <Textarea value={msg} onChange={(e) => { setMsg(e.target.value); setConfirmSend(false); }} rows={5} placeholder="Type the reply…" className="text-sm" />
+                <div className="flex items-center justify-end gap-2">
+                  {confirmSend && <span className="text-[11px] text-amber-700">Send now?</span>}
+                  <Button size="sm" className="h-8 text-xs" onClick={sendNow} disabled={sending || !msg.trim() || !detail.sender_id}>
+                    {sending ? "Sending…" : confirmSend ? "Confirm & Send" : "Send Reply"}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Notes */}
         {detail && (
           <div className="space-y-1">
             <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Notes</label>

@@ -93,7 +93,17 @@ export async function GET(req: NextRequest) {
     // We asked for limit+1; if we got the extra row there's another page.
     const all = data || [];
     const hasMore = all.length > limit;
-    const rows = hasMore ? all.slice(0, limit) : all;
+    // Trim long reply bodies for the grid — full text is fetched per-record by
+    // the panel (/api/inbox/[id]). Cuts the JSON payload dramatically.
+    const rows = (hasMore ? all.slice(0, limit) : all).map((raw) => {
+      // Supabase's dynamic-select typing lands on GenericStringError — cast through unknown.
+      const r = raw as unknown as Record<string, unknown>;
+      const body = r.reply_we_got;
+      if (typeof body === "string" && body.length > 600) {
+        return { ...r, reply_we_got: body.slice(0, 600) + "…" };
+      }
+      return r;
+    });
     return NextResponse.json({
       rows,
       page: { limit, offset, returned: rows.length, total: null, hasMore },

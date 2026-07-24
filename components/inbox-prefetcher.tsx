@@ -12,6 +12,7 @@ import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useSession } from "@/components/session-provider";
 import { prefetchInbox, DEFAULT_VIEW } from "@/lib/inbox-prefetch";
+import { prefetchDataView } from "@/lib/data-view-prefetch";
 
 export function InboxPrefetcher() {
   const pathname = usePathname();
@@ -21,8 +22,8 @@ export function InboxPrefetcher() {
 
   useEffect(() => {
     if (!session) return;                         // unauthed (shouldn't happen in the dashboard)
-    if (pathname?.startsWith("/inbox")) return;   // the inbox loads its own fresh data
-    prefetchInbox(DEFAULT_VIEW, defaultClient);
+    if (!pathname?.startsWith("/inbox")) prefetchInbox(DEFAULT_VIEW, defaultClient);
+    if (!pathname?.startsWith("/data-view")) prefetchDataView();
   }, [pathname, session, defaultClient]);
 
   return null;
