@@ -1,52 +1,124 @@
 /**
- * Generates the "Request for Primary Point of Contact (Send Reply)" reply,
- * picking the wording that matches the lead's situation (spec §23).
+ * Generates the "Request for Primary Point of Contact (Send Reply)" reply
+ * (spec §23 + client refinement 2026-07-24).
  *
- * The lead didn't give us a usable contact for whoever actually controls the
- * service, so we ask for it. The exact ask depends on the scenario:
- *   - Property management / landlord controls the service
- *   - A first name only was given ("Bob handles this")
- *   - The message was forwarded internally ("I forwarded this to our admin")
- *   - A department / org / city was named without a contact
+ * Exact structure the client wants:
  *
- * The four canonical templates come straight from the spec; this fills the
- * referenced person's name or the named department when present. Returns plain
- * text (the composer wraps it). Falls back to the property-management wording,
- * which is the generic ask, if the model is unavailable.
+ *   Thanks for letting me know, {first_name}.
+ *
+ *   Would you be able to provide me with the email address of your primary
+ *   point of contact at {ORGANIZATION}?
+ *
+ *   We'd like to reach out to see if they're in the market for the services
+ *   we provide.
+ *
+ *   {sender_first_name}
+ *
+ * Organization resolution (in order):
+ *   1. The specific org/person the prospect NAMES in the reply
+ *      ("Highland Hills Parks & Rec handles that") — always preferred.
+ *   2. If not named but clearly inferable from the signature / company data,
+ *      use that (normalized).
+ *   3. If NOT confident, go GENERIC — "…the primary point of contact who
+ *      handles that for your location?" — never invent or guess an org.
+ *      (Covers property-management-on-lease and "I forwarded it internally".)
+ *
+ * Forwarded-internally replies ask for the email of the person it was sent
+ * to. No extra sales arguments — the universal reason line is the whole
+ * pitch. The reply is generated naturally, not by token insertion.
+ *
+ * The caller (Send-Reply preview / bulk review card) ALWAYS shows this as an
+ * editable draft — generate → preview → human review → confirm. Never sent
+ * without explicit confirmation.
  */
 
-// Generic fallback (property-management wording from §23), {FIRST_NAME} filled by caller.
-export const PRIMARY_CONTACT_FALLBACK =
-  "Thank you, {FIRST_NAME}. I appreciate you letting me know. Would you be able to provide the email address of your primary contact at the property management company? I'm asking because I'd like to see if they are currently in the market for the services we provide.";
+interface PrimaryContactInput {
+  replyBody: string;
+  /** Lead's first name (greeting). */
+  firstName: string;
+  /** Our rep's first name (sign-off). */
+  senderFirstName: string;
+  /** Normalized company/org from our lead data — fallback org source only. */
+  companyName?: string;
+}
+
+/** Generic fallback in the exact client-approved structure. */
+export function primaryContactFallback(firstName: string, senderFirstName: string): string {
+  const greet = firstName ? `Thanks for letting me know, ${firstName}.` : "Thanks for letting me know.";
+  return [
+    greet,
+    "",
+    "Would you mind sharing the email address of the primary point of contact who handles that for your location?",
+    "",
+    "We'd like to reach out to see if they're in the market for the services we provide.",
+    ...(senderFirstName ? ["", senderFirstName] : []),
+  ].join("\n");
+}
+
+const REASON_LINE = "We'd like to reach out to see if they're in the market for the services we provide.";
+
+/** Enforce the client-approved structure regardless of model whitespace:
+ *  paragraphs separated by blank lines, the universal reason line always
+ *  present (inserted before the sign-off if the model dropped it). */
+function normalizeStructure(message: string, senderFirstName: string): string {
+  const paras = message.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const hasReason = paras.some((p) => p.toLowerCase().includes("in the market for the services we provide"));
+  if (!hasReason) {
+    const last = paras[paras.length - 1] || "";
+    if (senderFirstName && last.toLowerCase() === senderFirstName.toLowerCase()) {
+      paras.splice(paras.length - 1, 0, REASON_LINE);
+    } else {
+      paras.push(REASON_LINE);
+    }
+  }
+  return paras.join("\n\n");
+}
 
 export async function generatePrimaryContactReply(
-  replyBody: string,
-  firstName: string,
+  input: PrimaryContactInput,
 ): Promise<{ ok: boolean; message: string; error?: string }> {
-  const fallback = PRIMARY_CONTACT_FALLBACK.replaceAll("{FIRST_NAME}", firstName || "there");
+  const { replyBody, firstName, senderFirstName, companyName } = input;
+  const fallback = primaryContactFallback(firstName, senderFirstName);
   if (!replyBody?.trim() || !process.env.OPENAI_API_KEY) {
-    return { ok: !!process.env.OPENAI_API_KEY, message: fallback, error: process.env.OPENAI_API_KEY ? undefined : "AI unavailable — using the default ask." };
+    return { ok: !!process.env.OPENAI_API_KEY, message: fallback, error: process.env.OPENAI_API_KEY ? undefined : "AI unavailable — using the generic ask." };
   }
 
   const systemPrompt = [
-    "You write a short reply asking a prospect for the email of the primary point of contact who actually controls the service. Pick the wording that fits the situation and fill in the specifics.",
+    "You write a short reply asking a prospect for the email address of the primary point of contact who actually controls the service (cleaning/facilities). Your ONLY goal is to obtain the correct contact — no sales arguments.",
     "Respond with ONLY valid JSON: { \"message\": string }",
     "",
-    "Use exactly one of these four patterns, adapted with the given first name and any specific person/department mentioned:",
+    "The reply MUST follow this exact structure (plain text, these blank lines):",
     "",
-    "1) PROPERTY MANAGEMENT / LANDLORD controls it:",
-    "\"Thank you, {FIRST_NAME}. I appreciate you letting me know. Would you be able to provide the email address of your primary contact at the property management company? I'm asking because I'd like to see if they are currently in the market for the services we provide.\"",
+    "Thanks for letting me know, {first_name}.",
     "",
-    "2) A FIRST NAME ONLY was given (e.g. 'Bob handles this'):",
-    "\"Thank you, {FIRST_NAME}. Would you be able to share {NAME}'s email address? I'd like to reach out and see if they are currently in the market for the services we provide.\"",
+    "<the ask — one sentence>",
     "",
-    "3) FORWARDED INTERNALLY ('I forwarded this to our administrator'):",
-    "\"Thank you for forwarding this. Would you be able to share the email address of the person you sent it to? I'd like to follow up with them directly regarding the services we provide.\"",
+    "We'd like to reach out to see if they're in the market for the services we provide.",
     "",
-    "4) A DEPARTMENT / ORG / CITY was named without a contact (e.g. 'The City of Bellevue Parks Department handles this'):",
-    "\"Thank you, {FIRST_NAME}. Would you be able to provide the email address of your primary contact at {DEPARTMENT}? I'd like to see if they are currently in the market for the services we provide.\"",
+    "{sender_first_name}",
     "",
-    "Rules: replace {FIRST_NAME} with the lead's first name (or drop the name and start 'Thank you.' if none). Replace {NAME} with the referenced person's name, {DEPARTMENT} with the named org/department verbatim. Plain text only, no subject, no placeholders left unfilled.",
+    "Rules for the ask sentence:",
+    "  1. Read the prospect's reply and identify the organization or person responsible for the service.",
+    "  2. PREFER the specific organization named in the reply — e.g. reply says 'Highland Hills Parks & Rec handles that' → 'Would you mind sharing the email address of your primary point of contact at Highland Hills Parks & Rec?'",
+    "  3. If the reply names a PERSON (even first-name-only, 'Bob handles this') → ask for that person's email: 'Would you be able to share Bob's email address?' then keep the universal reason line.",
+    "  4. If they say they FORWARDED it internally / to a department → ask for the email of the person or department they sent it to.",
+    "  5. If no org is named in the reply but the provided company/organization data clearly IS the responsible org, you may use it (normalized).",
+    "  6. If you are NOT confident which organization they mean, go GENERIC: 'Would you mind sharing the email address of the primary point of contact who handles that for your location?' NEVER invent or guess an organization name — a generic ask beats a wrong name.",
+    "  7. Phrase the ask naturally ('Would you be able to provide me with…' / 'Would you mind sharing…') — do not mechanically insert tokens.",
+    "",
+    "Other rules:",
+    "  - Greeting: 'Thanks for letting me know, {first_name}.' — omit the name (just 'Thanks for letting me know.') if no first name is provided.",
+    "  - The reason line is EXACTLY: \"We'd like to reach out to see if they're in the market for the services we provide.\" — no additions (no saving money, no service quality).",
+    "  - Sign off with the sender's first name only (omit if not provided). No subject line, no markdown, no placeholders left in the output.",
+  ].join("\n");
+
+  const userContent = [
+    `Lead's first name: ${firstName || "(unknown)"}`,
+    `Sender's first name (sign-off): ${senderFirstName || "(unknown)"}`,
+    `Normalized company/org from our data (FALLBACK only, may be the prospect's own company — use per rules 5/6): ${companyName || "(none)"}`,
+    "",
+    "Prospect's reply:",
+    replyBody.slice(0, 1500),
   ].join("\n");
 
   try {
@@ -56,23 +128,23 @@ export async function generatePrimaryContactReply(
       body: JSON.stringify({
         model: "gpt-4o-mini",
         temperature: 0.2,
-        max_tokens: 250,
+        max_tokens: 300,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `Lead's first name: ${firstName || "(unknown)"}\n\nLead's reply:\n${replyBody.slice(0, 1500)}` },
+          { role: "user", content: userContent },
         ],
       }),
     });
-    if (!response.ok) return { ok: false, message: fallback, error: `AI error (${response.status}) — using the default ask.` };
+    if (!response.ok) return { ok: false, message: fallback, error: `AI error (${response.status}) — using the generic ask.` };
     const data = await response.json();
     const raw = (data?.choices?.[0]?.message?.content || "").trim();
-    if (!raw) return { ok: false, message: fallback, error: "AI returned nothing — using the default ask." };
+    if (!raw) return { ok: false, message: fallback, error: "AI returned nothing — using the generic ask." };
     const parsed = JSON.parse(raw) as { message?: string };
     const message = (parsed.message || "").trim();
-    if (!message) return { ok: false, message: fallback, error: "AI returned empty — using the default ask." };
-    return { ok: true, message };
+    if (!message) return { ok: false, message: fallback, error: "AI returned empty — using the generic ask." };
+    return { ok: true, message: normalizeStructure(message, senderFirstName) };
   } catch (e) {
-    return { ok: false, message: fallback, error: `AI failed (${(e as Error).message}) — using the default ask.` };
+    return { ok: false, message: fallback, error: `AI failed (${(e as Error).message}) — using the generic ask.` };
   }
 }

@@ -371,17 +371,23 @@ export async function POST(req: NextRequest) {
       }
 
       case "primary-contact-reply": {
-        // Scenario-specific "Request for Primary Point of Contact" draft (§23).
+        // Scenario-aware "Request for Primary Point of Contact" draft (§23):
+        // org named in the reply > confident company-data fallback > generic ask.
         const { firstName } = body;
         const { data: reply } = await supabase
           .from("replies")
-          .select("reply_we_got")
+          .select("reply_we_got, first_name, lead_name, from_name, sender_name, company_name")
           .eq("id", id)
           .single();
-        const result = await generatePrimaryContactReply(
-          (reply?.reply_we_got as string | null) || "",
-          firstName || "",
-        );
+        const leadFirst = String(firstName || reply?.first_name || "").trim()
+          || String(reply?.lead_name || reply?.from_name || "").trim().split(/\s+/)[0] || "";
+        const senderFirst = String(reply?.sender_name || "").trim().split(/\s+/)[0] || "";
+        const result = await generatePrimaryContactReply({
+          replyBody: (reply?.reply_we_got as string | null) || "",
+          firstName: leadFirst,
+          senderFirstName: senderFirst,
+          companyName: (reply?.company_name as string | null) || "",
+        });
         return NextResponse.json(result);
       }
 

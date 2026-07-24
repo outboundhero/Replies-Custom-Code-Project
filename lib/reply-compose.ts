@@ -9,14 +9,13 @@
  */
 import { POSITIVE_CATEGORIES } from "@/lib/inbox-views";
 import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
+import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 export interface Recipient { name: string; email: string }
 
 export const PRIMARY_CONTACT_CATEGORY = "Request for Primary Point of Contact (Send Reply)";
-const PRIMARY_CONTACT_TEMPLATE =
-  "Thank you, {FIRST_NAME}. I appreciate you letting me know. Would you be able to provide the email address of your primary contact at the property management company? I'm asking because I'd like to see if they are currently in the market for the services we provide.";
 
 export function leadFirstName(d: Row): string {
   const first = (d.first_name && String(d.first_name).trim()) || "";
@@ -32,7 +31,10 @@ export function isSendReplyCategory(cat: string): boolean {
 /** The pre-set draft a (Send Reply) category loads. Primary-contact gets its
  *  generic ask here; the scenario-specific version is generated server-side. */
 export function sendReplyTemplateFor(category: string, d: Row): string {
-  if (category === PRIMARY_CONTACT_CATEGORY) return PRIMARY_CONTACT_TEMPLATE.replaceAll("{FIRST_NAME}", leadFirstName(d));
+  // Generic ask paints instantly; the scenario-aware AI draft swaps in async.
+  if (category === PRIMARY_CONTACT_CATEGORY) {
+    return primaryContactFallback(leadFirstName(d), String(d.sender_name || "").trim().split(/\s+/)[0] || "");
+  }
   if (category === "Not Interested (Send Reply)") {
     return buildNotInterestedReply(String(d.lead_name || d.from_name || ""), String(d.sender_name || ""));
   }

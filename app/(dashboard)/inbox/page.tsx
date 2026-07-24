@@ -19,6 +19,7 @@ import { isPersonalDomain } from "@/lib/processing/personal-domains";
 // Pure (Intl/Date only) — safe in the browser bundle. Builds the
 // "Not Interested (Send Reply)" acknowledgment the same way the cron does.
 import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
+import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 import { InstanceBadge } from "@/components/instance-badge";
 import { EmailParticipants, initials } from "@/components/email-participants";
 
@@ -86,10 +87,8 @@ function isSendCategory(cat: string): boolean {
   return cat === "Change Of Target" || /\(send reply\)/i.test(cat);
 }
 
-// Canned reply for the primary-contact category — {FIRST_NAME} filled from the
-// lead. The team reviews/sends it manually from the Send Reply composer.
-const PRIMARY_CONTACT_TEMPLATE =
-  "Thank you, {FIRST_NAME}. I appreciate you letting me know. Would you be able to provide the email address of your primary contact at the property management company? I'm asking because I'd like to see if they are currently in the market for the services we provide.";
+// Generic primary-contact ask (client-approved structure) — paints instantly;
+// the scenario-aware AI draft (org named in the reply, etc.) swaps in async.
 
 function leadFirstName(d: ReplyDetail): string {
   const first = (d.first_name && String(d.first_name).trim()) || "";
@@ -98,7 +97,7 @@ function leadFirstName(d: ReplyDetail): string {
   return name ? name.split(/\s+/)[0] : "there";
 }
 function resolvePrimaryContactTemplate(d: ReplyDetail): string {
-  return PRIMARY_CONTACT_TEMPLATE.replaceAll("{FIRST_NAME}", leadFirstName(d));
+  return primaryContactFallback(leadFirstName(d), String(d.sender_name || "").trim().split(/\s+/)[0] || "");
 }
 
 // The pre-set reply template each (Send Reply) category loads into the draft.
