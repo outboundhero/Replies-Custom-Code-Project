@@ -99,6 +99,18 @@ export async function POST(req: NextRequest) {
           }
           const { error: tErr } = await supabase.from("replies").update(timing).eq("id", id);
           if (tErr) console.warn("[inbox/update-category] timing update skipped:", tErr.message);
+
+          // Moving OFF a category that schedules a delayed auto-reply (e.g.
+          // declining a Not-Interested Send-Reply preview → Open Response, or
+          // re-triaging) cancels the pending send so it never fires.
+          const schedules = (c: string) => c === "Not Interested (Send Reply)" || c === "Out Of Office";
+          if (schedules(oldCat) && !schedules(newCat)) {
+            const { error: cErr } = await supabase
+              .from("replies")
+              .update({ auto_reply_due_at: null })
+              .eq("id", id);
+            if (cErr) console.warn("[inbox/update-category] auto-reply cancel skipped:", cErr.message);
+          }
         }
 
         // Side-effect outputs accumulated below, then merged into the
@@ -309,13 +321,16 @@ export async function POST(req: NextRequest) {
       }
 
       case "send-reply": {
-        const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails } = body;
+        const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply } = body;
         const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails });
         if (result.ok) {
-          await supabase.from("replies").update({
-            sent_reply: message,
-            updated_at: new Date().toISOString(),
-          }).eq("id", id);
+          const nowIso = new Date().toISOString();
+          const update: Record<string, unknown> = { sent_reply: message, updated_at: nowIso };
+          // Approving a Send-Reply preview sends NOW — cancel any pending
+          // scheduled auto-reply (e.g. the 5–10 min Not-Interested cron) so
+          // the lead doesn't also get the delayed one (spec §15).
+          if (clearAutoReply) { update.auto_reply_due_at = null; update.auto_reply_sent_at = nowIso; }
+          await supabase.from("replies").update(update).eq("id", id);
         }
         return NextResponse.json(result);
       }

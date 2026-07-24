@@ -16,6 +16,9 @@ import { useDebouncedValue } from "@/lib/use-debounced-value";
 // Pure / no server deps — must NOT import from domain-blacklist (which
 // pulls in @/lib/db and crashes the browser bundle with URL_INVALID).
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
+// Pure (Intl/Date only) — safe in the browser bundle. Builds the
+// "Not Interested (Send Reply)" acknowledgment the same way the cron does.
+import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { InstanceBadge } from "@/components/instance-badge";
 import { EmailParticipants, initials } from "@/components/email-participants";
 
@@ -96,6 +99,21 @@ function leadFirstName(d: ReplyDetail): string {
 }
 function resolvePrimaryContactTemplate(d: ReplyDetail): string {
   return PRIMARY_CONTACT_TEMPLATE.replaceAll("{FIRST_NAME}", leadFirstName(d));
+}
+
+// The pre-set reply template each (Send Reply) category loads into the draft.
+// The user can still edit or regenerate it before approving. Falls back to the
+// client's generic reply (our_reply) for any send-reply category without a
+// dedicated template.
+function sendReplyTemplateFor(category: string, d: ReplyDetail): string {
+  if (category === PRIMARY_CONTACT_CATEGORY) return resolvePrimaryContactTemplate(d);
+  if (category === "Not Interested (Send Reply)") {
+    return buildNotInterestedReply(
+      String(d.lead_name || d.from_name || ""),
+      String(d.sender_name || ""),
+    );
+  }
+  return String(d.our_reply || "");
 }
 
 function fmtDuration(secs: number): string {
@@ -483,7 +501,7 @@ export default function InboxPage() {
     const bcc = ([1, 2] as const)
       .map((n) => ({ name: d[`bcc_name_${n}`] || "", email: d[`bcc_email_${n}`] || "" }))
       .filter((r) => r.name || r.email);
-    const message = category === PRIMARY_CONTACT_CATEGORY ? resolvePrimaryContactTemplate(d) : (d.our_reply || "");
+    const message = sendReplyTemplateFor(category, d);
     setSendPreview({
       replyId: d.id, bisonReplyId: (d.reply_id as number | null) ?? null,
       senderEmailId: (d.sender_id as number | null) ?? null,
@@ -517,6 +535,7 @@ export default function InboxPage() {
       toEmail: sendPreview.toEmail, toName: sendPreview.toName,
       ccEmails: sendPreview.cc.length ? recipientsToApi(sendPreview.cc) : undefined,
       bccEmails: sendPreview.bcc.length ? recipientsToApi(sendPreview.bcc) : undefined,
+      clearAutoReply: true,
     });
     if (d.ok) { toast.success(`Reply sent to ${sendPreview.toEmail}`); setSendPreview(null); if (selectedId === sendPreview.replyId) loadDetail(sendPreview.replyId); }
     else { toast.error(d.error || "Send failed"); sendPatch({ sending: false, confirm: false }); }
