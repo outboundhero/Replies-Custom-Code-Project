@@ -511,6 +511,7 @@ interface ChangeOfTargetPrep {
   senderEmailId?: number;
   senderName?: string;
   originalLeadDisplayName?: string;
+  manual?: boolean;                   // untracked fallback: generic draft, no original cold email wrapped (§26)
 }
 
 /**
@@ -523,7 +524,7 @@ async function prepareChangeOfTarget(replyId: number, instanceKey: string): Prom
   try {
     const { data: reply, error } = await supabase
       .from("replies")
-      .select("lead_id, lead_email, lead_name, reply_we_got, campaign_id")
+      .select("lead_id, lead_email, lead_name, reply_we_got, campaign_id, sender_id, sender_name")
       .eq("id", replyId)
       .single();
     if (error || !reply) return { ok: false, reason: "Reply not found" };
@@ -533,41 +534,54 @@ async function prepareChangeOfTarget(replyId: number, instanceKey: string): Prom
     const originalLeadEmail = (reply.lead_email as string | null) || "";
     const replyBody = (reply.reply_we_got as string | null) || "";
 
-    if (!leadId) return { ok: false, reason: "No lead_id on this reply (untracked?) — you can still send a One-Off Reply." };
-    if (!campaignId) return { ok: false, reason: "No campaign_id — can't scope the original cold email." };
     if (!replyBody.trim()) return { ok: false, reason: "Reply body is empty — nothing to extract from." };
 
     // Extract ALL alternative contacts for the picker.
     const candidates = await extractRedirectEmails(replyBody, originalLeadEmail);
-
-    // Original cold email from the SAME campaign this reply came from.
-    const firstEmail = await getFirstSentEmail(instanceKey, leadId, campaignId);
-    if (!firstEmail) return { ok: false, reason: `No sent emails found for lead ${leadId} in campaign ${campaignId}`, candidates };
-    if (!firstEmail.sender_email?.id) return { ok: false, reason: "Original email has no sender — cannot re-send.", candidates };
-
     const originalLeadDisplayName =
       ((reply.lead_name as string | null) || "").trim() || originalLeadEmail || "the lead we contacted";
-    const senderName = (firstEmail.sender_email.name || "").trim() || "the team";
 
-    // Greeting keeps a {FIRST_NAME} placeholder so the client can re-resolve it
-    // when the user changes the selected recipient.
+    // Preferred path: wrap the ORIGINAL cold email from the same campaign so the
+    // new contact sees exactly what we pitched. Needs a tracked lead + campaign.
+    if (leadId && campaignId) {
+      const firstEmail = await getFirstSentEmail(instanceKey, leadId, campaignId);
+      if (firstEmail?.sender_email?.id) {
+        const senderName = (firstEmail.sender_email.name || "").trim() || "the team";
+        const messageTemplate =
+          `<p>Hi {FIRST_NAME},</p>` +
+          `<p>We received your email from ${escapeHtml(originalLeadDisplayName)} — here's the email we sent them:</p>` +
+          `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
+          (firstEmail.email_body || "") +
+          `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
+          `<p>Let me know,</p>` +
+          `<p>${escapeHtml(senderName)}</p>`;
+        return {
+          ok: true, candidates,
+          subject: firstEmail.email_subject || "(no subject)",
+          messageTemplate, senderEmailId: firstEmail.sender_email.id,
+          senderName, originalLeadDisplayName,
+        };
+      }
+    }
+
+    // Fallback for untracked replies / no original email found (spec §26): still
+    // let the user re-pitch the new contact with an editable generic draft, sent
+    // from the account that received this reply. No original cold email to wrap.
+    const senderId = (reply.sender_id as number | null) ?? null;
+    if (!senderId) {
+      return { ok: false, reason: "This reply isn't linked to a lead or a sending account, so it can't be re-pitched. Use a One-Off Reply instead.", candidates };
+    }
+    const senderName = ((reply.sender_name as string | null) || "").trim() || "the team";
     const messageTemplate =
       `<p>Hi {FIRST_NAME},</p>` +
-      `<p>We received your email from ${escapeHtml(originalLeadDisplayName)} — here's the email we sent them:</p>` +
-      `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
-      (firstEmail.email_body || "") +
-      `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
-      `<p>Let me know,</p>` +
+      `<p>${escapeHtml(originalLeadDisplayName)} passed your details along to me. I'd love to share how we can help — would you be open to a quick chat?</p>` +
+      `<p>Best,</p>` +
       `<p>${escapeHtml(senderName)}</p>`;
-
     return {
-      ok: true,
-      candidates,
-      subject: firstEmail.email_subject || "(no subject)",
-      messageTemplate,
-      senderEmailId: firstEmail.sender_email.id,
-      senderName,
-      originalLeadDisplayName,
+      ok: true, candidates,
+      subject: "Following up", messageTemplate,
+      senderEmailId: senderId, senderName, originalLeadDisplayName,
+      manual: true,
     };
   } catch (e) {
     await logError("inbox", "change-of-target-prepare", (e as Error).message || "unknown", { reply_id: replyId });

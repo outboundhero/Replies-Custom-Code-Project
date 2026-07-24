@@ -178,6 +178,15 @@ function fmtDuration(secs: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+// Human date for the OOO re-send banner, rendered in PT (matches the cron's TZ).
+function fmtSendDate(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short", month: "short", day: "numeric", timeZone: "America/Los_Angeles",
+  }).format(new Date(t));
+}
+
 // Live, continuously-ticking speed-to-lead timer for a reply in Open Response.
 function LiveTimer({ startIso }: { startIso: string }) {
   const [now, setNow] = useState(() => Date.now());
@@ -214,6 +223,7 @@ interface CotState {
   messageDirty: boolean;
   senderEmailId: number | null;
   sending: boolean;
+  manual?: boolean;   // untracked fallback: generic draft, no original email wrapped (§26)
 }
 function firstNameOf(name: string): string {
   const n = (name || "").trim();
@@ -520,6 +530,7 @@ export default function InboxPage() {
       subject: d.subject || "", messageTemplate,
       message: messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(toName)),
       senderEmailId: d.senderEmailId ?? null,
+      manual: !!d.manual,
     } : prev));
   }
   function cotPatch(patch: Partial<CotState>) {
@@ -1002,6 +1013,19 @@ export default function InboxPage() {
               </div>
             </div>
 
+            {/* Out-of-office re-send schedule (§21): when the original cold email
+                is (or was) queued to re-send on the lead's stated return date. */}
+            {detail.lead_category === "Out Of Office" && detail.auto_reply_kind === "out_of_office" && detail.auto_reply_due_at && (
+              <div className="rounded-lg border border-yellow-200 bg-yellow-50 px-3.5 py-2.5 text-xs text-yellow-800 flex items-center gap-2">
+                <span className="shrink-0">📅</span>
+                {detail.auto_reply_sent_at ? (
+                  <span>Original cold email was re-sent on <strong>{fmtSendDate(detail.auto_reply_due_at)}</strong> (the lead&apos;s stated return date).</span>
+                ) : (
+                  <span>Out of office — the original cold email will re-send on <strong>{fmtSendDate(detail.auto_reply_due_at)}</strong> (the lead&apos;s stated return date), 9:00 AM PT.</span>
+                )}
+              </div>
+            )}
+
             {/* Email participants — From / To / CC / BCC */}
             <EmailParticipants detail={detail} />
 
@@ -1228,6 +1252,7 @@ export default function InboxPage() {
               ) : (
                 <>
                   {cotPreview.error && <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{cotPreview.error}</div>}
+                  {cotPreview.manual && !cotPreview.error && <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] text-blue-800">This reply isn&apos;t linked to the original campaign, so we couldn&apos;t attach the original cold email. Here&apos;s an editable re-pitch draft instead — review it before sending.</div>}
 
                   <div className="space-y-1">
                     <label className="text-[11px] font-medium text-muted-foreground">Send to</label>
