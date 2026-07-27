@@ -61,6 +61,7 @@ async function main() {
         senderFirstName: String(lead.sender_name || "").trim().split(/\s+/)[0] || "",
         replyBody: stripQuotedHistory(String(lead.reply_we_got || "")),
         replySubject: String(lead.email_subject || ""),
+        leadName: String(lead.lead_name || ""),
       }).catch(() => String(cfg.reply_template));
     }
 

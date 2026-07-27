@@ -64,6 +64,7 @@ export async function applyReallocate(
           senderFirstName,
           replyBody: String(leadRow?.reply_we_got || ""),
           replySubject: String(leadRow?.email_subject || ""),
+          leadName: String(leadRow?.lead_name || ""),
         });
       } catch (e) {
         console.warn("[applyReallocate] template resolve failed, using raw template:", (e as Error).message);

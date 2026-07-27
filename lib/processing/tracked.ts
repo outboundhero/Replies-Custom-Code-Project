@@ -227,6 +227,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       senderFirstName: senderNameParts[0] || "",
       replyBody: cleanedReply,
       replySubject: reply.email_subject,
+      leadName: `${lead.first_name || ""} ${lead.last_name || ""}`.trim(),
     });
     baseFields["Our reply"] = resolvedReply;
   }

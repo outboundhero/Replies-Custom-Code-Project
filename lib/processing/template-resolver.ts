@@ -25,12 +25,42 @@ interface TemplateVars {
   senderFirstName: string;
   replyBody: string;
   replySubject: string;
+  leadName?: string;          // full lead name from CRM (e.g. "L&D Millwork Team") — used to detect company/team names
 }
 
 interface ExtractedVars {
   context: string;            // short lowercase phrase, no leading prefix, no trailing period
   company: string | null;     // company from reply/signature, null if not mentioned
   phone: string | null;       // phone(s) from reply, null if none
+  firstName: string | null;   // the actual person's first name from the reply sign-off / signature
+}
+
+// Generic / role words that are never a person's first name.
+const NON_NAME_WORDS = new Set([
+  "team", "info", "sales", "support", "admin", "administrator", "hello", "hi", "hey",
+  "there", "contact", "service", "services", "accounts", "billing", "help", "desk",
+  "inquiries", "enquiries", "reception", "frontdesk", "noreply", "office", "group",
+  "company", "the", "dear", "to", "whom", "owner", "manager", "director", "staff",
+]);
+// Words in the FULL lead name that mark it as a company/team, not a person.
+const COMPANY_MARKERS = /\b(team|inc|incorporated|llc|l\.l\.c|corp|corporation|co|group|company|solutions|services|svcs|dept|department|office|associates|assoc|enterprises|holdings|realty|properties|management|mgmt|systems|industries|international|partners|works|millwork|supply|contractors?|construction|cleaning|janitorial)\b/i;
+
+/** Is `token` a plausible human first name? `fullName` (if given) is checked for
+ *  company/team markers — so "L&D Millwork Team" is rejected even though a bare
+ *  token from it might look name-like. */
+function looksLikePersonName(token?: string | null, fullName?: string | null): boolean {
+  const first = (token || "").trim().split(/\s+/)[0];
+  if (first.length < 2 || first.length > 20) return false;
+  if (!/^[A-Za-z][A-Za-z'’-]*$/.test(first)) return false;     // letters/apostrophe/hyphen only — no &, digits, .
+  if (NON_NAME_WORDS.has(first.toLowerCase())) return false;
+  if (fullName && COMPANY_MARKERS.test(fullName)) return false; // "… Team / Inc / Millwork …" → company name
+  return true;
+}
+
+function sanitizeFirstName(raw: string | null | undefined): string | null {
+  const s = (raw || "").trim().replace(/^["'`]+|["'`.,]+$/g, "").trim();
+  const first = s.split(/\s+/)[0];
+  return looksLikePersonName(first) ? first : null;
 }
 
 const FALLBACK_CONTEXT = "discussing cleaning services";
@@ -106,14 +136,21 @@ async function extractReplyVars(
   replyBody: string,
   replySubject: string,
   leadCompanyName: string,
+  leadName: string,
 ): Promise<ExtractedVars | null> {
   if (!replyBody?.trim()) return null;
   if (!process.env.OPENAI_API_KEY) return null;
 
   const systemPrompt = [
-    "You read a sales lead's email reply and extract three fields for use in our auto-reply template.",
+    "You read a sales lead's email reply and extract fields for use in our auto-reply template.",
     "Respond with ONLY valid JSON, no markdown fences, in this exact shape:",
-    `{ "context": string, "company": string|null, "phone": string|null }`,
+    `{ "context": string, "company": string|null, "phone": string|null, "first_name": string|null }`,
+    "",
+    "FIELD: first_name",
+    `  - The first name of the actual PERSON to greet.`,
+    `  - If the CRM lead name (given below) is already a real person's first name, use that.`,
+    `  - If the CRM lead name is a COMPANY / team / generic name (e.g. "L&D Millwork Team", "Info", "Sales"), find the actual person's first name from the reply's sign-off / signature — e.g. a reply ending "Thanks, Drew" → "Drew".`,
+    `  - Just the first name, proper case. Return null if no real personal name is available in the CRM name OR the reply.`,
     "",
     "FIELD: context",
     `  - A short, natural phrase (≤ 16 words) capturing what the lead wants AND any TIMING they mention.`,
@@ -139,6 +176,7 @@ async function extractReplyVars(
   ].join("\n");
 
   const userContent = [
+    `Lead's CRM name: ${leadName || "(none)"}`,
     `Lead's CRM company: ${leadCompanyName || "(none)"}`,
     `Subject: ${replySubject || ""}`,
     `Reply:`,
@@ -170,12 +208,13 @@ async function extractReplyVars(
     const raw = (data?.choices?.[0]?.message?.content || "").trim();
     if (!raw) return null;
 
-    const parsed = JSON.parse(raw) as { context?: string; company?: string | null; phone?: string | null };
+    const parsed = JSON.parse(raw) as { context?: string; company?: string | null; phone?: string | null; first_name?: string | null };
 
     return {
       context: sanitizeContext(parsed.context || ""),
       company: sanitizeCompany(parsed.company),
       phone: sanitizePhone(parsed.phone),
+      firstName: sanitizeFirstName(parsed.first_name),
     };
   } catch {
     return null;
@@ -185,24 +224,35 @@ async function extractReplyVars(
 export async function resolveTemplate(template: string, vars: TemplateVars): Promise<string> {
   let resolved = template;
 
-  if (resolved.includes("{FIRST_NAME}") && vars.firstName) {
-    resolved = resolved.replaceAll("{FIRST_NAME}", vars.firstName);
-  }
-
   if (resolved.includes("{SENDER_NAME}") && vars.senderFirstName) {
     resolved = resolved.replaceAll("{SENDER_NAME}", vars.senderFirstName);
   }
 
-  // CONTEXT / COMPANY / PHONE all come from one GPT call so we only fire
-  // it when at least one of the three vars actually appears.
+  // Whether the CRM-provided first name is already a real person's name. When it
+  // ISN'T (e.g. "L&D Millwork Team"), we need the AI to pull the real name from
+  // the reply's signature.
+  const providedFirstOk = looksLikePersonName(vars.firstName, vars.leadName);
+
+  // CONTEXT / COMPANY / PHONE / FIRST_NAME all come from one GPT call — fire it
+  // when any is needed. FIRST_NAME only needs the call when the CRM name isn't a
+  // usable person name.
   const needsExtraction =
     resolved.includes("{CONTEXT}") ||
     resolved.includes("{COMPANY}") ||
-    resolved.includes("{PHONE}");
+    resolved.includes("{PHONE}") ||
+    (resolved.includes("{FIRST_NAME}") && !providedFirstOk);
 
   let extracted: ExtractedVars | null = null;
   if (needsExtraction) {
-    extracted = await extractReplyVars(vars.replyBody, vars.replySubject, vars.companyName);
+    extracted = await extractReplyVars(vars.replyBody, vars.replySubject, vars.companyName, vars.leadName || vars.firstName || "");
+  }
+
+  if (resolved.includes("{FIRST_NAME}")) {
+    // Priority: a real first name from the CRM lead name → the person who signed
+    // the reply (signature) → fall back to the raw CRM name.
+    let greet = vars.firstName;
+    if (!providedFirstOk && extracted?.firstName) greet = extracted.firstName;
+    resolved = resolved.replaceAll("{FIRST_NAME}", greet || vars.firstName || "there");
   }
 
   if (resolved.includes("{CONTEXT}")) {
