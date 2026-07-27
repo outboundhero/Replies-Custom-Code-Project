@@ -22,6 +22,7 @@ import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 import { InstanceBadge } from "@/components/instance-badge";
 import { EmailParticipants, initials } from "@/components/email-participants";
+import { QualificationLookup } from "@/components/qualification-lookup";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -238,22 +239,34 @@ function firstNameOf(name: string): string {
   return n ? n.split(/\s+/)[0] : "there";
 }
 
-// Pull the suggested CLIENT TAGS out of the stored suggested_client string,
-// dropping the long justifications + non-tags like "A". Works for both the new
+// Pull the suggested CLIENT TAGS (+ their short reason) out of the stored
+// suggested_client string, dropping non-tags like "A". Works for both the new
 // concise format ("SI (serves nationwide) · PPS (...)") and old verbose rows
 // ("SI (Active) (long paragraph), DBSNJ (Active) (...)"). Validated against the
-// real tag list when available so hallucinated tokens never show.
-function parseSuggestedTags(raw: string, validSet: Set<string>): string[] {
-  const out: string[] = [];
+// real tag list when available so hallucinated tokens never show. The reason is
+// surfaced only on hover, so the chip stays compact.
+function parseSuggestedTags(raw: string, validSet: Set<string>): { tag: string; reason: string }[] {
+  const out: { tag: string; reason: string }[] = [];
   const seen = new Set<string>();
-  for (const seg of String(raw || "").split(/\s*[·,]\s*/)) {
-    const m = seg.trim().match(/^([A-Za-z][A-Za-z0-9&-]{1,11})\b/); // ≥2 chars → drops "A"
+  // Split on " · " (new) OR ", " that precedes another "TAG (" (old, without
+  // breaking reasons that contain commas).
+  const segments = String(raw || "").split(/\s+·\s+|,\s*(?=[A-Za-z][A-Za-z0-9&-]{1,11}\s*[(⚠])/);
+  for (const segRaw of segments) {
+    const seg = segRaw.trim();
+    const m = seg.match(/^([A-Za-z][A-Za-z0-9&-]{1,11})\b/); // ≥2 chars → drops "A"
     if (!m) continue;
     const tag = m[1].toUpperCase();
     if (seen.has(tag)) continue;
     if (validSet.size && !validSet.has(tag)) continue;
+    let reason = seg.slice(m[1].length)
+      .replace(/^[⚠\s]+/, "")                          // drop the inactive flag
+      .replace(/^\((?:active|inactive[^)]*)\)\s*/i, "") // drop "(Active)"/"(INACTIVE…)"
+      .replace(/^\[inactive[^\]]*\]\s*/i, "")
+      .replace(/^\(|\)\s*$/g, "")                       // strip outer parens
+      .trim();
+    if (reason.length > 240) reason = reason.slice(0, 240).replace(/[\s,.]+$/, "") + "…";
     seen.add(tag);
-    out.push(tag);
+    out.push({ tag, reason });
     if (out.length >= 5) break;
   }
   return out;
@@ -359,6 +372,8 @@ export default function InboxPage() {
   const [sending, setSending] = useState<string | null>(null);
   // §29: inline sends require an explicit second click before firing.
   const [confirmInline, setConfirmInline] = useState<"reply" | "fwd" | "oo" | null>(null);
+  // Client qualification rules drawer (search audits/locations from the inbox).
+  const [showQual, setShowQual] = useState(false);
 
   // One request for the whole inbox: counts + the first non-empty bucket's
   // leads + client tags. Resets per-category expansion (matches the old
@@ -936,9 +951,9 @@ export default function InboxPage() {
       {/* ── LEFT PANEL ── */}
       <div className="w-72 border-r flex flex-col bg-white shrink-0">
         {/* View selector — clean header style */}
-        <div className="px-3 py-2.5 border-b bg-muted/20">
+        <div className="px-3 py-2.5 border-b bg-muted/20 flex items-center gap-2">
           <Select value={view} onValueChange={setView}>
-            <SelectTrigger className="h-9 w-full text-sm font-semibold bg-white border-border hover:bg-muted/30 transition-colors">
+            <SelectTrigger className="h-9 flex-1 text-sm font-semibold bg-white border-border hover:bg-muted/30 transition-colors">
               <SelectValue placeholder="Master Inbox" />
             </SelectTrigger>
             <SelectContent>
@@ -949,6 +964,14 @@ export default function InboxPage() {
               ))}
             </SelectContent>
           </Select>
+          {/* Client qualification rules — search audits/locations without leaving the inbox */}
+          <button
+            onClick={() => setShowQual(true)}
+            title="Client qualification rules — industries & locations"
+            className="h-9 w-9 shrink-0 rounded-md border bg-white flex items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M9 3v18M3 9h18" opacity="0" /><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9h10M7 13h6" /></svg>
+          </button>
         </div>
 
         <div className="p-2.5 space-y-1.5 border-b">
@@ -1214,13 +1237,18 @@ export default function InboxPage() {
                     return (
                       <div className="flex items-center gap-1.5 flex-wrap border-t pt-2">
                         <span className="text-[11px] text-muted-foreground">Suggested client:</span>
-                        {tags.map((tag) => (
-                          <button
-                            key={tag}
-                            onClick={() => { setReallocTag(tag); toast.info(`Prefilled reallocation with ${tag}`); }}
-                            className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
-                            title="Click to prefill the reallocation below"
-                          >{tag}</button>
+                        {tags.map(({ tag, reason }) => (
+                          <span key={tag} className="relative group/sug inline-block">
+                            <button
+                              onClick={() => { setReallocTag(tag); toast.info(`Prefilled reallocation with ${tag}`); }}
+                              className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
+                            >{tag}</button>
+                            {reason && (
+                              <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-64 rounded-md bg-gray-900 px-2.5 py-1.5 text-[11px] leading-snug text-white shadow-lg group-hover/sug:block">
+                                {reason}
+                              </span>
+                            )}
+                          </span>
                         ))}
                       </div>
                     );
@@ -1534,6 +1562,25 @@ export default function InboxPage() {
                   {sendPreview.sending ? "Sending…" : sendPreview.confirm ? "Confirm & Send" : "Approve & Send"}
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Client qualification rules drawer — search audits / locations / a
+          client's industries + locations without leaving the inbox. */}
+      {showQual && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/40" onClick={() => setShowQual(false)}>
+          <div className="w-full max-w-md bg-white h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-200" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold">Client Qualification Rules</h3>
+                <p className="text-[11px] text-muted-foreground">Search industries, locations, or find the best-fit client.</p>
+              </div>
+              <button onClick={() => setShowQual(false)} className="text-lg leading-none text-muted-foreground hover:text-foreground">×</button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <QualificationLookup />
             </div>
           </div>
         </div>
