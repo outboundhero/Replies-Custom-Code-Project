@@ -134,6 +134,7 @@ WHAT THE EXCLUSION LIST MEANS — read carefully:
 - Consider what the lead is ASKING FOR in their own message. "Finishing our office… need cleaning… quote" from a contractor = a commercial office cleaning prospect = PASS.
 
 DISAMBIGUATION — do NOT over-fail these common mistakes (each backed by a real error):
+- A PHARMACY / drugstore / compounding pharmacy / apothecary is a HEALTHCARE business, NOT "retail". Do NOT fail a pharmacy under a "retail" / "retail store" exclusion. A "retail" exclusion means typical strip-mall stores (phone/cellular repair, clothing boutiques, convenience stores, etc.), never pharmacies. Only fail a pharmacy if the rules EXPLICITLY list "pharmacy" or "drugstore".
 - A BAKERY / bake shop / patisserie / cafe / coffee shop is NOT a "restaurant" unless the rules explicitly exclude bakeries or cafes.
 - An entertainment or event VENUE (comedy club, theater, music venue, wedding venue, banquet/event hall) is NOT a "restaurant" even if it serves food — only sit-down dining establishments count as restaurants.
 - REAL ESTATE defaults to COMMERCIAL real estate (not excluded) unless the company clearly does RESIDENTIAL real estate / homes / houses.
