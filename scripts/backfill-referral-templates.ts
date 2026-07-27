@@ -17,6 +17,7 @@ import { updateRecord } from "@/lib/airtable";
 const AIRTABLE_TABLE_ID = "tbl1BnpnsUBrBGeuy"; // shared across all section bases
 const CONCURRENCY = 5;
 const APPLY = process.argv.includes("--apply");
+const HOURS = Number(process.argv.find((a) => a.startsWith("--hours="))?.split("=")[1]) || 24;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getConfig(tag: string): Promise<Record<string, any> | null> {
@@ -25,7 +26,7 @@ async function getConfig(tag: string): Promise<Record<string, any> | null> {
 }
 
 async function main() {
-  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const since = new Date(Date.now() - HOURS * 3600 * 1000).toISOString();
   const { data, error } = await supabase.from("replies")
     .select("id, client_tag, first_name, lead_name, company_name, phone, sender_name, reply_we_got, email_subject, our_reply, airtable_record_id, airtable_base_id, lead_category, ai_categorized_lead_category")
     .eq("ai_categorized_lead_category", "Referral Given")

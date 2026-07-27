@@ -31,6 +31,10 @@ export const CC_BCC_CATEGORIES: LeadCategory[] = [
   "Meeting Request",
   "Follow Up at a Later Date",
   "Unrecognizable by AI",
+  // Referral Given stays a SUGGESTION in Open Response (not auto-finalized),
+  // but its Send Reply template + CC/BCC are still prepped at ingest so the
+  // team can review & send without hand-populating them.
+  "Referral Given",
 ];
 
 /**
