@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { prefetchDataView } from "@/lib/data-view-prefetch";
 
 interface NavLink {
   href: string;
@@ -13,11 +14,29 @@ interface NavLink {
 interface NavGroup {
   label: string;
   children: NavLink[];
+  defaultOpen?: boolean;
 }
 type NavItem = NavLink | NavGroup;
 function isGroup(i: NavItem): i is NavGroup {
   return (i as NavGroup).children !== undefined;
 }
+
+// Route → the GET whose result the page needs first. Warmed on hover so the
+// server cache + browser are hot by the time the user clicks. Only endpoints
+// that are cheap/cached server-side are listed (inbox/archive warm themselves
+// via the InboxPrefetcher).
+const WARM_ENDPOINT: Record<string, string> = {
+  "/clients": "/api/config/clients",
+  "/sections": "/api/config/sections",
+  "/untracked": "/api/config/untracked",
+  "/qualification": "/api/config/qualification",
+  "/nurture": "/api/config/clients",
+  "/migrate": "/api/config/clients",
+  "/users": "/api/users",
+  "/sheet-pushes": "/api/sheet-pushes",
+  // /data-view is special-cased in warmHref → prefetchDataView (fills the
+  // buffer the page hydrates from, so the click paints instantly).
+};
 
 const items: NavItem[] = [
   { href: "/", label: "Dashboard", adminOnly: true },
@@ -26,6 +45,7 @@ const items: NavItem[] = [
   { href: "/untracked", label: "Untracked Config", adminOnly: true },
   {
     label: "Inbox",
+    defaultOpen: true,
     children: [
       { href: "/inbox", label: "Inbox (Beta)" },
       { href: "/data-view", label: "Data View", adminOnly: true },
@@ -37,8 +57,13 @@ const items: NavItem[] = [
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
   { href: "/webhooks", label: "Webhook Activity", adminOnly: true },
   { href: "/qualification", label: "Qualification" },
-  { href: "/sheet-pushes", label: "Sheet Pushes", adminOnly: true },
-  { href: "/errors", label: "Error Log", adminOnly: true },
+  {
+    label: "Errors",
+    children: [
+      { href: "/errors", label: "Error Log", adminOnly: true },
+      { href: "/sheet-pushes", label: "Sheet Pushes", adminOnly: true },
+    ],
+  },
   { href: "/users", label: "User Management", adminOnly: true },
 ];
 
@@ -85,6 +110,22 @@ export function Nav({
       active ? "bg-primary text-primary-foreground" : "hover:bg-muted text-muted-foreground hover:text-foreground"
     );
 
+  // Hover-prefetch: warm the section's data endpoint (server responses are
+  // cached ~60s) + the route bundle, so clicking a section paints instantly
+  // instead of showing a loading state while it fetches. Deduped per URL.
+  const warmed = useRef<Map<string, number>>(new Map());
+  function warmHref(href: string) {
+    try { router.prefetch(href); } catch { /* */ }
+    if (href === "/data-view") { prefetchDataView(); return; } // fills the page's hydrate buffer
+    const url = WARM_ENDPOINT[href];
+    if (!url) return;
+    const now = Date.now();
+    const last = warmed.current.get(url) || 0;
+    if (now - last < 20000) return;          // at most once per 20s per endpoint
+    warmed.current.set(url, now);
+    fetch(url).catch(() => {});              // fire-and-forget cache warm
+  }
+
   return (
     <aside className="w-56 border-r bg-muted/30 flex flex-col min-h-screen">
       <div className="p-4 border-b">
@@ -96,11 +137,11 @@ export function Nav({
           if (isGroup(item)) {
             const kids = item.children.filter(canSee);
             if (!kids.length) return null;
-            return <NavGroupEl key={item.label} label={item.label} kids={kids} pathname={pathname} linkClass={linkClass} />;
+            return <NavGroupEl key={item.label} label={item.label} kids={kids} pathname={pathname} linkClass={linkClass} defaultOpen={item.defaultOpen} onWarm={warmHref} />;
           }
           if (!canSee(item)) return null;
           return (
-            <Link key={item.href} href={item.href} className={linkClass(pathname === item.href)}>
+            <Link key={item.href} href={item.href} onMouseEnter={() => warmHref(item.href)} className={linkClass(pathname === item.href)}>
               {item.label}
             </Link>
           );
@@ -125,16 +166,19 @@ export function Nav({
 }
 
 function NavGroupEl({
-  label, kids, pathname, linkClass,
+  label, kids, pathname, linkClass, defaultOpen = false, onWarm,
 }: {
   label: string;
   kids: NavLink[];
   pathname: string;
   linkClass: (active: boolean) => string;
+  defaultOpen?: boolean;
+  onWarm?: (href: string) => void;
 }) {
   const anyActive = kids.some((k) => pathname === k.href);
-  // Open by default (Inbox (Beta) shown); stays open while a child is active.
-  const [open, setOpen] = useState(true);
+  // defaultOpen groups (Inbox) start expanded; others start collapsed but always
+  // open while one of their children is the active page.
+  const [open, setOpen] = useState(defaultOpen);
   const isOpen = open || anyActive;
   return (
     <div>
@@ -158,7 +202,7 @@ function NavGroupEl({
         <div className="overflow-hidden">
           <div className="ml-3 mt-1 pl-2 border-l border-border space-y-1">
             {kids.map((k) => (
-              <Link key={k.href} href={k.href} className={linkClass(pathname === k.href)}>
+              <Link key={k.href} href={k.href} onMouseEnter={() => onWarm?.(k.href)} className={linkClass(pathname === k.href)}>
                 {k.label}
               </Link>
             ))}

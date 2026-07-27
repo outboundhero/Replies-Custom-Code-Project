@@ -12,7 +12,6 @@ import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useSession } from "@/components/session-provider";
 import { prefetchInbox, DEFAULT_VIEW } from "@/lib/inbox-prefetch";
-import { prefetchDataView } from "@/lib/data-view-prefetch";
 
 export function InboxPrefetcher() {
   const pathname = usePathname();
@@ -22,8 +21,10 @@ export function InboxPrefetcher() {
 
   useEffect(() => {
     if (!session) return;                         // unauthed (shouldn't happen in the dashboard)
+    // Only warm the INBOX globally (it's the primary landing page). Data View
+    // is heavier and warmed on nav-hover instead, so it never competes with the
+    // page you're actually loading.
     if (!pathname?.startsWith("/inbox")) prefetchInbox(DEFAULT_VIEW, defaultClient);
-    if (!pathname?.startsWith("/data-view")) prefetchDataView();
   }, [pathname, session, defaultClient]);
 
   return null;
