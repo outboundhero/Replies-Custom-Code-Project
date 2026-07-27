@@ -143,7 +143,12 @@ export async function enrichLead(input: EnrichInput): Promise<EnrichedLeadData> 
 
     return {
       companyName: parsed.company_name || input.companyName,
-      website: parsed.website || domain,
+      // The lead's OWN email domain is the authoritative company website — never
+      // let the model override it with a domain it inferred from the text (that
+      // is how a quoted client signature became the "website" and mislabeled the
+      // lead's industry). Only fall back to the model's website for personal
+      // emails (gmail etc.) where there is no company domain.
+      website: domain || parsed.website,
       industry: parsed.industry || "",
       city: parsed.city || input.city,
       state: parsed.state || input.state,

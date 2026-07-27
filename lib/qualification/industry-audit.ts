@@ -126,6 +126,13 @@ RULES INTERPRETATION:
 - DEFAULT (exclusion): FAIL only if the company clearly operates in one of the excluded industries. PASS otherwise. When in doubt, PASS.
 - ONLY if the text explicitly says "we only want"/"only accept": treat as inclusion-only → FAIL if the company is NOT in the specified industry.
 
+WHAT THE EXCLUSION LIST MEANS — read carefully:
+- The list is the set of FACILITY / BUSINESS TYPES this cleaning client will NOT take on as a cleaning job. FAIL only when the LEAD'S OWN business/facility clearly IS one of those excluded types.
+- Judge the lead as a CLEANING PROSPECT. A normal commercial business asking to have THEIR OWN office/building/facility cleaned is a PASS — unless that facility itself is an explicitly excluded type (e.g. the lead literally IS a restaurant, an apartment complex, a condo association).
+- Do NOT fail a lead because their company merely OFFERS or is ADJACENT to something on the list. Example (real error): a flooring / remodeling contractor is NOT an "apartment room turn or condo" just because their marketing mentions remodeling rentals — they are a flooring company whose office needs cleaning. PASS.
+- Use the lead's EMAIL DOMAIN as the strongest signal of their real company; weigh it above generic website text or marketing copy.
+- Consider what the lead is ASKING FOR in their own message. "Finishing our office… need cleaning… quote" from a contractor = a commercial office cleaning prospect = PASS.
+
 DISAMBIGUATION — do NOT over-fail these common mistakes (each backed by a real error):
 - A BAKERY / bake shop / patisserie / cafe / coffee shop is NOT a "restaurant" unless the rules explicitly exclude bakeries or cafes.
 - An entertainment or event VENUE (comedy club, theater, music venue, wedding venue, banquet/event hall) is NOT a "restaurant" even if it serves food — only sit-down dining establishments count as restaurants.
@@ -135,7 +142,7 @@ DISAMBIGUATION — do NOT over-fail these common mistakes (each backed by a real
 IGNORE in the rules (handled separately — never fail for these here):
 - "residential", "house cleaning", "home cleaning".
 
-Only fail on the company's ACTUAL primary industry matching a specific excluded industry.
+Only fail when the LEAD'S OWN facility/business type genuinely matches a specific excluded type. When in doubt, PASS.
 
 Respond with JSON only, no other text:
 {"result": "Passed" | "Failed", "industry": "the company's verified primary industry", "reason": "one sentence explanation"}
@@ -199,12 +206,13 @@ export async function auditIndustry(
   }
 
   const userParts = [
+    leadEmail ? `Lead email: "${leadEmail}" — the domain is the STRONGEST signal of the lead's real company.` : null,
     `Company: "${companyName}"`,
     website ? `Website: "${website}"` : null,
-    leadEmail ? `Lead email (domain hints at the company): "${leadEmail}"` : null,
     industry ? `Provided industry (may be empty/unreliable): "${industry}"` : null,
+    replyText?.trim() ? `Lead's own message (what they are actually asking for — judge intent from this): "${replyText.trim().slice(0, 600)}"` : null,
     `Data confidence: ${confidence} | Sources: ${dataSources}`,
-    `\nIndustry rules (EXCLUSION list): "${cleanedExclusions}"`,
+    `\nIndustry rules (EXCLUSION list of facility/business types NOT to service): "${cleanedExclusions}"`,
   ].filter(Boolean).join("\n");
 
   try {

@@ -18,6 +18,7 @@ import { enrichLead, type EnrichedLeadData } from "./enrich-lead";
 import { auditIndustry } from "./industry-audit";
 import { auditLocation } from "./location-audit";
 import { extractReplyLocation } from "./extract-reply-location";
+import { stripQuotedHistory } from "./strip-quoted";
 import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
 import { geminiJSON } from "@/lib/gemini";
 
@@ -57,6 +58,11 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   const inclusionLocations = rules?.inclusion_locations || "";
   const hqAnchor = rules?.hq_anchor || "";
 
+  // The LEAD's own new message only — the quoted history below carries OUR
+  // client's original email (its signature, website, "janitorial" wording,
+  // office address), which must never be mistaken for the lead's own identity.
+  const leadMessage = stripQuotedHistory(replyText);
+
   // 2. Enrich lead data (GPT + web search)
   let enriched: EnrichedLeadData;
   try {
@@ -68,7 +74,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
       address,
       googleMapsUrl,
       phone: String(phone || ""),
-      replyText,
+      replyText: leadMessage,
     });
   } catch (error) {
     await logError("tracked", "qualification-enrich", (error as Error).message, {
@@ -87,7 +93,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     industryResult = await auditIndustry(
       enriched.companyName, enriched.website, enriched.industry,
       exclusionIndustries, enriched.confidence, enriched.dataSources,
-      replyText, leadEmail,
+      leadMessage, leadEmail,
     );
   } catch (error) {
     await logError("tracked", "qualification-industry", (error as Error).message, {
@@ -112,7 +118,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     confidence: enriched.confidence,
   };
   try {
-    const replyLoc = await extractReplyLocation(replyText);
+    const replyLoc = await extractReplyLocation(leadMessage);
     if (replyLoc && (replyLoc.city || replyLoc.address)) {
       locResolved = {
         city: replyLoc.city || enriched.city,
