@@ -73,6 +73,23 @@ function sanitizeCompany(raw: string | null | undefined): string | null {
   return s.replace(/^["'`]+|["'`]+$/g, "").replace(/[.,;\s]+$/g, "").trim() || null;
 }
 
+/**
+ * Normalize a company name for the reply: title-case ALL-CAPS names and drop a
+ * trailing legal suffix (LLC / Inc / Corp / Co / LLP / PLLC / PC …). Applied to
+ * the Bison-fallback company too, so it matches the AI-normalized path.
+ */
+function normalizeCompany(raw: string | null | undefined): string | null {
+  let s = sanitizeCompany(raw);
+  if (!s) return null;
+  s = s.replace(/[,\s]+(?:L\.?L\.?C\.?|Inc\.?|Incorporated|Corp\.?|Corporation|Co\.?|L\.?L\.?P\.?|L\.?P\.?|P\.?L\.?L\.?C\.?|P\.?C\.?)\.?$/i, "").trim();
+  if (!s) return sanitizeCompany(raw); // don't let normalization empty a name
+  // Title-case names that arrived ALL CAPS (e.g. "ABC CLEANING" → "ABC Cleaning").
+  if (s === s.toUpperCase() && /[A-Z]{2,}/.test(s)) {
+    s = s.toLowerCase().replace(/\b([a-z])/g, (_, c) => c.toUpperCase());
+  }
+  return s || null;
+}
+
 function sanitizePhone(raw: string | null | undefined): string | null {
   const s = (raw || "").trim();
   if (!s) return null;
@@ -99,26 +116,25 @@ async function extractReplyVars(
     `{ "context": string, "company": string|null, "phone": string|null }`,
     "",
     "FIELD: context",
-    `  - A short noun phrase (≤ 12 words) describing what the lead wants help with.`,
+    `  - A short, natural phrase (≤ 16 words) capturing what the lead wants AND any TIMING they mention.`,
     `  - Will be inserted into the sentence: "since you're interested in {context} for {company}".`,
+    `  - INCLUDE timing details when the lead gives them, to sound human and precise: e.g. "a couple months before service", a specific month ("this December"), a season/term ("the 2027 school year"), or a milestone ("once your new location is built out").`,
     `  - DO NOT include "since you're interested in" — the template adds it.`,
-    `  - DO NOT add a trailing period.`,
-    `  - Start with a lowercase letter (it continues a sentence).`,
-    `  - Examples: "getting a cleaning estimate for your office", "discussing janitorial services", "exploring floor care options".`,
-    `  - If unclear, use: "discussing cleaning services".`,
+    `  - DO NOT add a trailing period. Start with a lowercase letter (it continues a sentence).`,
+    `  - Examples: "getting a cleaning quote once your new office is finished this December", "recurring janitorial service starting the 2027 school year", "reconnecting a couple months before you need service".`,
+    `  - If truly unclear, use: "discussing cleaning services".`,
     "",
     "FIELD: company",
     `  - The company the lead is asking us to service.`,
-    `  - PREFER a company name explicitly mentioned in the reply body or email signature.`,
-    `  - If the reply doesn't mention one, use the lead's CRM company (provided below) when it looks like a real business.`,
+    `  - PREFER a company name explicitly mentioned in the reply body or email signature; otherwise use the lead's CRM company (provided below) when it looks like a real business.`,
+    `  - NORMALIZE it: proper Title Case, and drop trailing legal suffixes (LLC, L.L.C., Inc., Incorporated, Corp., Corporation, Co., LLP, LP, PLLC, PC) and trailing punctuation — unless removing them would make the name confusing.`,
     `  - Return null when nothing reasonable is available — the template will fall back to "your space".`,
     "",
     "FIELD: phone",
-    `  - All phone numbers from the lead's REPLY (not from the CRM data — that's a fallback handled outside).`,
-    `  - Format each number as "(xxx) xxx-xxxx" with optional " ext. NNN".`,
-    `  - If the lead specifies a SPECIFIC number to use ("call me at…", "best to reach me on my mobile…"), return ONLY that number.`,
-    `  - If multiple unspecified numbers: mobile first, office second, joined with " and ".`,
-    `  - Preserve any extension the lead mentions.`,
+    `  - EVERY distinct phone number the lead gives in their REPLY (their DIRECT line AND their MOBILE/cell if BOTH appear) — not from the CRM data (that's a fallback handled outside).`,
+    `  - Format each number as "(xxx) xxx-xxxx" with optional " ext. NNN". Preserve any extension.`,
+    `  - Join multiple numbers with " or " — e.g. "(812) 508-6685 or (812) 555-1212".`,
+    `  - Return a SINGLE number only when the lead explicitly restricts it ("only call my cell", "don't use the office line").`,
     `  - Return null if the reply contains no phone numbers.`,
   ].join("\n");
 
@@ -139,7 +155,7 @@ async function extractReplyVars(
       body: JSON.stringify({
         model: "gpt-4o-mini",
         temperature: 0,
-        max_tokens: 200,
+        max_tokens: 300,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
@@ -195,10 +211,11 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
   }
 
   if (resolved.includes("{COMPANY}")) {
-    // Priority: AI-extracted (from reply / signature) → Bison lead.company → "your space"
+    // Priority: AI-extracted (from reply / signature) → Bison lead.company → "your space".
+    // Both real-company paths are normalized (legal suffix dropped, ALL-CAPS title-cased).
     const company =
-      extracted?.company
-      || sanitizeCompany(vars.companyName)
+      normalizeCompany(extracted?.company)
+      || normalizeCompany(vars.companyName)
       || FALLBACK_COMPANY;
     resolved = resolved.replaceAll("{COMPANY}", company);
   }
