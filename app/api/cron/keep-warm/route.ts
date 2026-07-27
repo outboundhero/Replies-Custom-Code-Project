@@ -50,16 +50,23 @@ export async function GET(req: NextRequest) {
   const cookie = `oh-session=${token}`;
   const base = baseUrl();
 
-  const results = await Promise.all(ROUTES.map(async (path) => {
+  // Vercel serves the team from a few concurrent function instances, so warm
+  // several per route (concurrent requests force Vercel to spin up / keep warm
+  // multiple instances) — otherwise a user can still land on a cold one.
+  const FANOUT = 3;
+  const hit = async (path: string) => {
     const t0 = Date.now();
     try {
-      const r = await fetch(base + path, { headers: { cookie }, signal: AbortSignal.timeout(20000) });
+      const r = await fetch(base + path, { headers: { cookie }, signal: AbortSignal.timeout(25000) });
       await r.text().catch(() => "");
       return { path, ms: Date.now() - t0, status: r.status };
     } catch (e) {
       return { path, ms: Date.now() - t0, error: (e as Error).message };
     }
-  }));
+  };
+  const results = await Promise.all(
+    ROUTES.flatMap((path) => Array.from({ length: FANOUT }, () => hit(path))),
+  );
 
-  return NextResponse.json({ ok: true, base, warmed: results });
+  return NextResponse.json({ ok: true, base, fanout: FANOUT, warmed: results.length });
 }
