@@ -238,6 +238,27 @@ function firstNameOf(name: string): string {
   return n ? n.split(/\s+/)[0] : "there";
 }
 
+// Pull the suggested CLIENT TAGS out of the stored suggested_client string,
+// dropping the long justifications + non-tags like "A". Works for both the new
+// concise format ("SI (serves nationwide) · PPS (...)") and old verbose rows
+// ("SI (Active) (long paragraph), DBSNJ (Active) (...)"). Validated against the
+// real tag list when available so hallucinated tokens never show.
+function parseSuggestedTags(raw: string, validSet: Set<string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const seg of String(raw || "").split(/\s*[·,]\s*/)) {
+    const m = seg.trim().match(/^([A-Za-z][A-Za-z0-9&-]{1,11})\b/); // ≥2 chars → drops "A"
+    if (!m) continue;
+    const tag = m[1].toUpperCase();
+    if (seen.has(tag)) continue;
+    if (validSet.size && !validSet.has(tag)) continue;
+    seen.add(tag);
+    out.push(tag);
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+
 // Send-Reply preview (spec §15): stage the draft, recipients + sending account;
 // edit / regenerate / decline / approve — nothing sends until "Approve & Send".
 interface SendPrevState {
@@ -1185,17 +1206,25 @@ export default function InboxPage() {
                   )}
                   {/* Source / data notes */}
                   {metaReasons.length > 0 && <p className="text-[10px] text-muted-foreground/70 leading-relaxed border-t pt-1.5">{metaReasons.join(" · ")}</p>}
-                  {/* Suggested client on a failed audit — click to prefill reallocate */}
-                  {suggested && (
-                    <div className="flex items-center gap-2 border-t pt-2">
-                      <span className="text-[11px] text-muted-foreground">Suggested client:</span>
-                      <button
-                        onClick={() => { setReallocTag(suggested.split(/[,\s]+/)[0].toUpperCase()); toast.info(`Prefilled reallocation with ${suggested}`); }}
-                        className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
-                        title="Click to prefill the reallocation below"
-                      >{suggested}</button>
-                    </div>
-                  )}
+                  {/* Suggested client on a failed audit — concise clickable tag
+                      chips (click prefills the reallocation below). */}
+                  {(() => {
+                    const tags = suggested ? parseSuggestedTags(suggested, new Set(clientTags.map((t) => t.toUpperCase()))) : [];
+                    if (!tags.length) return null;
+                    return (
+                      <div className="flex items-center gap-1.5 flex-wrap border-t pt-2">
+                        <span className="text-[11px] text-muted-foreground">Suggested client:</span>
+                        {tags.map((tag) => (
+                          <button
+                            key={tag}
+                            onClick={() => { setReallocTag(tag); toast.info(`Prefilled reallocation with ${tag}`); }}
+                            className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
+                            title="Click to prefill the reallocation below"
+                          >{tag}</button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })()}

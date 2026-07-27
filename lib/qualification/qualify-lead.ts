@@ -274,7 +274,7 @@ async function findFittingClients(
   const churnedTags = new Set<string>();
   for (const row of statusRows || []) {
     for (const part of String(row.client_abbreviation).split(/\s*[&\/,]+\s*/)) {
-      const tag = part.trim();
+      const tag = part.trim().toUpperCase();
       if (!tag) continue;
       if (row.status === "Active") activeTags.add(tag);
       else if (row.status === "Churned") churnedTags.add(tag);
@@ -286,13 +286,23 @@ async function findFittingClients(
     .select("client_abbreviation, exclusion_industries, inclusion_locations, hq_anchor");
   if (!allRules?.length) return "";
 
+  // The set of REAL client tags (split combined abbreviations). Any AI-returned
+  // tag not in here is a hallucination (e.g. "A") and gets dropped.
+  const validTags = new Set<string>();
+  for (const r of allRules) {
+    for (const part of String(r.client_abbreviation).split(/\s*[&\/,]+\s*/)) {
+      const t = part.trim().toUpperCase();
+      if (t) validTags.add(t);
+    }
+  }
+
   // Candidates: any OTHER, NON-CHURNED client with a location signal (anchor or
   // service area). Churned clients are dropped outright; inactive-but-not-churned
   // ones stay in (flagged), since they may be mis-marked in the status sync.
   const candidates = allRules.filter(
     (r) =>
       r.client_abbreviation !== excludeTag &&
-      !churnedTags.has(r.client_abbreviation) &&
+      !churnedTags.has(String(r.client_abbreviation).trim().toUpperCase()) &&
       (r.inclusion_locations?.trim() || r.hq_anchor?.trim()),
   );
   if (!candidates.length) return "";
@@ -303,7 +313,7 @@ async function findFittingClients(
   // grows very large — it sits well above the current ~92 non-churned clients.
   const clientsList = candidates.slice(0, 250)
     .map((r) => {
-      const parts = [`- ${r.client_abbreviation} (${activeTags.has(r.client_abbreviation) ? "Active" : "INACTIVE"})`];
+      const parts = [`- ${r.client_abbreviation} (${activeTags.has(String(r.client_abbreviation).trim().toUpperCase()) ? "Active" : "INACTIVE"})`];
       if (r.hq_anchor?.trim()) parts.push(`office: "${r.hq_anchor.trim()}"`);
       if (r.inclusion_locations?.trim()) parts.push(`serves: "${r.inclusion_locations.trim()}"`);
       if (r.exclusion_industries?.trim()) parts.push(`excludes: "${r.exclusion_industries.trim()}"`);
@@ -321,7 +331,10 @@ A fit means BOTH:
 
 USE GOOGLE SEARCH to verify real driving distances (disambiguate same-named towns by state). Read the FULL service area — it may span multiple regions.
 
-In each reason, state the location match. If the client is marked INACTIVE, prefix the reason with "[INACTIVE — verify] ".
+Rules for the output:
+- "tag" MUST be copied EXACTLY from a candidate's tag as listed (e.g. "SI", "DBSNJ"). NEVER invent, abbreviate, or shorten a tag (do not output "A").
+- Return only the BEST 3 fits, most-fitting first.
+- "reason" is a SHORT phrase, max 8 words, stating only the location match — e.g. "serves nationwide", "Fairfax County, VA", "~15 mi from office". No sentences.
 
 Respond with JSON only: {"fits":[{"tag":"TAG","reason":"..."}]}. If none fit, {"fits":[]}.`,
       user: `Company: "${enriched.companyName}"
@@ -332,11 +345,23 @@ Location: "${enriched.city}, ${enriched.state}" (${enriched.address || "no addre
 Candidate clients:
 ${clientsList}`,
       withSearch: true,
-      maxTokens: 2048,
+      maxTokens: 1024,
     });
     const fits = parsed.fits || [];
-    if (fits.length === 0) return "";
-    return fits.map((f) => `${f.tag} (${f.reason})`).join(", ");
+    // Keep only REAL tags (drops hallucinations like "A"), dedupe, active-first,
+    // top 3, with a short trimmed reason → a concise "TAG (reason) · TAG (reason)".
+    const seen = new Set<string>();
+    const clean = fits
+      .map((f) => ({ tag: String(f.tag || "").trim().toUpperCase(), reason: String(f.reason || "").replace(/\[inactive[^\]]*\]/i, "").trim() }))
+      .filter((f) => f.tag && validTags.has(f.tag) && f.tag !== excludeTag.toUpperCase() && !seen.has(f.tag) && seen.add(f.tag))
+      .sort((a, b) => (activeTags.has(b.tag) ? 1 : 0) - (activeTags.has(a.tag) ? 1 : 0))
+      .slice(0, 3);
+    if (!clean.length) return "";
+    return clean.map((f) => {
+      const reason = f.reason.length > 45 ? f.reason.slice(0, 45).replace(/[\s,.]+$/, "") + "…" : f.reason;
+      const flag = activeTags.has(f.tag) ? "" : " ⚠";
+      return reason ? `${f.tag}${flag} (${reason})` : `${f.tag}${flag}`;
+    }).join(" · ");
   } catch {
     return "";
   }
