@@ -901,6 +901,20 @@ export default function InboxPage() {
     else toast.error(d.error);
   }
 
+  // Run (or re-run) the qualification audit for this lead on demand — for
+  // leads whose audit failed / never ran at ingest, or to refresh it.
+  async function handleRunAudit() {
+    if (!detail) return;
+    setSending("audit");
+    try {
+      const res = await fetch("/api/inbox/qualify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: detail.id }) });
+      const d = await res.json();
+      if (d.ok) { toast.success("Audit complete"); detailCache.current.delete(detail.id); loadDetail(detail.id); }
+      else toast.error(d.error || "Audit failed");
+    } catch (e) { toast.error((e as Error).message); }
+    setSending(null);
+  }
+
   // Pull the CURRENT client's latest template + CC/BCC into this lead and map
   // the variables — for leads that were in the inbox before the template existed.
   async function handleSyncTemplate() {
@@ -967,10 +981,11 @@ export default function InboxPage() {
           {/* Client qualification rules — search audits/locations without leaving the inbox */}
           <button
             onClick={() => setShowQual(true)}
-            title="Client qualification rules — industries & locations"
-            className="h-9 w-9 shrink-0 rounded-md border bg-white flex items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+            title="Client qualification rules — search industries & locations, find best-fit client"
+            className="h-9 shrink-0 rounded-md border bg-white px-2.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M9 3v18M3 9h18" opacity="0" /><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9h10M7 13h6" /></svg>
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9h10M7 13h6" /></svg>
+            Rules
           </button>
         </div>
 
@@ -1197,6 +1212,17 @@ export default function InboxPage() {
               </div>
             </div>
 
+            {/* No audit yet → let the team run it on demand. */}
+            {!detail.industry_audit && !detail.location_audit && detail.client_tag && detail.client_tag !== "N/A" && (
+              <div className="rounded border bg-white px-4 py-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium">No audit yet</p>
+                  <p className="text-[11px] text-muted-foreground">Run the industry + location audit for this lead.</p>
+                </div>
+                <Button size="sm" className="h-8 text-xs shrink-0" onClick={handleRunAudit} disabled={sending === "audit"}>{sending === "audit" ? "Auditing…" : "Run Audit"}</Button>
+              </div>
+            )}
+
             {/* Audit — industry + location split onto their own lines, with the
                 suggested client tag surfaced when an audit failed. */}
             {(detail.industry_audit || detail.location_audit) && (() => {
@@ -1213,6 +1239,10 @@ export default function InboxPage() {
               const suggested = !isCW && (industryBad || locationBad) ? String(detail.suggested_client || "").trim() : "";
               return (
                 <div className="rounded border bg-white px-4 py-3 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Audit</span>
+                    <button onClick={handleRunAudit} disabled={sending === "audit"} className="text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
+                  </div>
                   {/* Industry */}
                   {detail.industry_audit && (
                     <div className="space-y-1">
@@ -1233,7 +1263,13 @@ export default function InboxPage() {
                       chips (click prefills the reallocation below). */}
                   {(() => {
                     const tags = suggested ? parseSuggestedTags(suggested, new Set(clientTags.map((t) => t.toUpperCase()))) : [];
-                    if (!tags.length) return null;
+                    // Failed audit but nothing to suggest — tell the user it ran and found none.
+                    if (!tags.length) {
+                      if (!isCW && (industryBad || locationBad)) {
+                        return <p className="text-[11px] text-muted-foreground border-t pt-2">Suggested client: <span className="italic">no matching client found</span></p>;
+                      }
+                      return null;
+                    }
                     return (
                       <div className="flex items-center gap-1.5 flex-wrap border-t pt-2">
                         <span className="text-[11px] text-muted-foreground">Suggested client:</span>
