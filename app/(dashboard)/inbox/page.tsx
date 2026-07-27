@@ -901,6 +901,20 @@ export default function InboxPage() {
     else toast.error(d.error);
   }
 
+  // Generate Reply — use the client's template as the core and adapt it to the
+  // actual conversation. Fills the composer; does not send.
+  async function handleGenerateReply() {
+    if (!detail) return;
+    setSending("gen");
+    try {
+      const res = await fetch("/api/inbox/generate-reply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: detail.id }) });
+      const d = await res.json();
+      if (d.ok && d.reply) { setReplyMsg(d.reply); setConfirmInline(null); toast.success("Reply generated from the client template"); }
+      else toast.error(d.error || "Couldn't generate a reply");
+    } catch (e) { toast.error((e as Error).message); }
+    setSending(null);
+  }
+
   // Run (or re-run) the qualification audit for this lead on demand — for
   // leads whose audit failed / never ran at ingest, or to refresh it.
   async function handleRunAudit() {
@@ -1385,11 +1399,17 @@ export default function InboxPage() {
 
             {/* ── Send Reply (with CC/BCC pre-populated) ── */}
             <div className="rounded border bg-white px-4 py-3 space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-medium">Send Reply</p>
-                <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
+                <div className="flex items-center gap-2">
+                  {/* Generate Reply — client template as the core, adapted to the conversation */}
+                  <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={handleGenerateReply} disabled={sending === "gen"} title="Draft a reply from this client's template, tailored to the conversation">
+                    {sending === "gen" ? "Generating…" : "✨ Generate Reply"}
+                  </Button>
+                  <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
+                </div>
               </div>
-              <Textarea value={replyMsg} onChange={(e) => setReplyMsg(e.target.value)} rows={4} placeholder="Type reply..." className="text-sm" />
+              <Textarea value={replyMsg} onChange={(e) => { setReplyMsg(e.target.value); setConfirmInline(null); }} rows={4} placeholder="Type reply..." className="text-sm" />
               <div className="grid grid-cols-2 gap-3">
                 <RecipientList label="CC Recipients" value={replyCc} onChange={setReplyCc} max={6} addLabel="Add CC" />
                 <RecipientList label="BCC Recipients" value={replyBcc} onChange={setReplyBcc} max={2} addLabel="Add BCC" />
