@@ -20,7 +20,9 @@ import { getServiceArea } from "@/lib/service-area";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-const STATUSES = ["active", "paused", "completed", "stopped", "archived", "draft"];
+// "queued" is a real Bison campaign status — include it so queued campaigns
+// aren't invisible to the matcher (see the plan route for detail).
+const STATUSES = ["active", "paused", "completed", "stopped", "archived", "draft", "queued"];
 const isNurtureName = (name: string) => /\[nurture\s*\d*\]|\(nurture\)/i.test(name);
 
 export async function POST(req: Request) {

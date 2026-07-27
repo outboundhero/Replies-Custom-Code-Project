@@ -18,8 +18,18 @@ import { getServiceArea } from "@/lib/service-area";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-const STATUSES = ["active", "paused", "completed", "stopped", "archived", "draft"];
+// "queued" is a real Bison campaign status (a campaign scheduled/queued to send
+// but not yet active) — it was missing here, so queued destination campaigns
+// (e.g. ISS's Google campaign in FacilityReach) were invisible to the matcher
+// and reported as "no <ESP> campaign". ("scheduled"/"sending" are NOT valid
+// status filters — Bison 422s on them.)
+const STATUSES = ["active", "paused", "completed", "stopped", "archived", "draft", "queued"];
 const ESPS: Esp[] = ["google", "outlook", "segs"];
+// A Google (catch-all) source campaign can contain leads of ANY ESP — they're
+// resolved per-lead at move time (findLeadByEmail → Bison tag), so it can feed
+// any of the three destinations. An Outlook/SEGs-named source is trusted as pure
+// → only its own ESP. Mirrors `needsLookup` in the mover.
+const reachableEsps = (esp: Esp): Esp[] => (esp === "google" ? ESPS : [esp]);
 // Prefer active > draft > paused > everything else when auto-picking a destination.
 const rankStatus = (s: string) => (s === "active" ? 0 : s === "draft" ? 1 : s === "paused" ? 2 : 3);
 // Never move leads INTO a nurture campaign — matches "[Nurture]" and legacy
@@ -85,7 +95,12 @@ export async function POST(req: Request) {
       .filter((c) => exact(c.name) && !isNurtureName(c.name) && detectCampaignEsp(c.name))
       .map((c) => ({ id: c.id, name: c.name, status: c.status, esp: detectCampaignEsp(c.name)! }));
 
-    const sourceEsps = [...new Set(sourceCampaigns.map((c) => c.esp))];
+    // The ESPs this client's leads could actually need a destination for is the
+    // UNION of each source campaign's reachable ESPs (a Google catch-all → all
+    // three, since SEGs/Outlook leads hide inside it) — NOT just the source
+    // campaign-name ESPs. This is what makes "missing SEGs destination" surface
+    // as `partial` instead of a false `ready`.
+    const sourceEsps = [...new Set(sourceCampaigns.flatMap((c) => reachableEsps(c.esp)))];
     const unmatchedEsps = sourceEsps.filter((e) => !match[e]);
     const totalLeads = sourceCampaigns.reduce((s, c) => s + c.total_leads, 0);
     const targetTagCampaigns = targetOptions.length; // exact-tag campaigns of any ESP in the To instance
