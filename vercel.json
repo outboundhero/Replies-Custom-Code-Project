@@ -72,6 +72,10 @@
     {
       "path": "/api/cron/retry-sheet-pushes",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/keep-warm",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
