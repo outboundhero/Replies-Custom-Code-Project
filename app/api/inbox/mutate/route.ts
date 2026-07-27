@@ -296,6 +296,19 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      case "sync-template": {
+        // Re-pull the CURRENT client's latest reply template + CC/BCC into this
+        // reply and re-map the variables — for leads that were sitting in the
+        // inbox before their client's template/config was set. Reuses the same
+        // path as reallocate (same tag → no move, just refresh the fields).
+        if (!rowClientTag || rowClientTag === "N/A") {
+          return NextResponse.json({ ok: false, error: "This lead has no client tag to sync a template from." }, { status: 400 });
+        }
+        const result = await applyReallocate(id, rowClientTag);
+        if (!result.ok) throw new Error(result.error);
+        return NextResponse.json({ ok: true, client_tag: rowClientTag });
+      }
+
       case "send-reply": {
         const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply } = body;
         const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails });

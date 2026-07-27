@@ -281,9 +281,9 @@ export default function InboxPage() {
     boot?.firstCategory ? { [boot.firstCategory]: boot.leads as unknown as ReplyListItem[] } : {}
   );
   const [loadingCat, setLoadingCat] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(
-    boot?.firstCategory ? new Set([boot.firstCategory]) : new Set()
-  );
+  // Every category section starts COLLAPSED (user preference) — no bucket opens
+  // on its own; the first bucket's leads are still preloaded for instant expand.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Per-category pagination cursor for "Load more".
   const [catPage, setCatPage] = useState<Record<string, { offset: number; hasMore: boolean }>>(
     boot?.firstCategory ? { [boot.firstCategory]: { offset: boot.leads.length, hasMore: boot.hasMore } } : {}
@@ -299,6 +299,9 @@ export default function InboxPage() {
   const [filterCategory, setFilterCategory] = useState("");
   // §18: filter buckets/leads by the AI Suggested category (server-side).
   const [filterAi, setFilterAi] = useState("");
+  // Current filters mirrored into a ref so the realtime handler (which doesn't
+  // re-subscribe on every keystroke) can honor them without stale closures.
+  const filtersRef = useRef({ search: "", client: "", category: "", ai: "" });
   const [filterClient, setFilterClient] = useState(initialClient);
   // Default to the curated Cherry view — that's where the team lives day-to-day.
   // Master Inbox ("all") is still selectable from the dropdown.
@@ -356,7 +359,7 @@ export default function InboxPage() {
       if (Array.isArray(d.clientTags)) setClientTags(d.clientTags);
       setCategoryLeads(first ? { [first]: (d.leads || []) as ReplyListItem[] } : {});
       setCatPage(first ? { [first]: { offset: (d.leads || []).length, hasMore: !!d.hasMore } } : {});
-      setExpanded(first ? new Set([first]) : new Set());
+      setExpanded(new Set()); // collapsed by default
       setFetchError(null);
       setBooted(true);
     } catch (e) {
@@ -369,6 +372,11 @@ export default function InboxPage() {
   // hydrated from the app-load prefetch the UI is already painted (booted), so
   // this becomes a silent background revalidate — instant AND fresh.
   useEffect(() => { loadBootstrap(); }, [loadBootstrap]);
+
+  // Keep the realtime handler's view of the active filters current.
+  useEffect(() => {
+    filtersRef.current = { search: debouncedSearch || "", client: filterClient || "", category: filterCategory || "", ai: filterAi || "" };
+  }, [debouncedSearch, filterClient, filterCategory, filterAi]);
 
   // Load leads for a specific category (paginated). `append` pulls the next
   // page and concatenates; otherwise it loads the first page.
@@ -434,6 +442,17 @@ export default function InboxPage() {
         }
         const cat = newRow.lead_category || "Open Response";
         if (activeView?.hiddenLeadCategories?.includes(cat)) return;
+        // Respect ACTIVE search + filters — when the user has filtered the inbox
+        // they should only see matching leads, not every new arrival.
+        const f = filtersRef.current;
+        if (f.client && newRow.client_tag !== f.client) return;
+        if (f.category && cat !== f.category) return;
+        if (f.ai && (newRow.ai_categorized_lead_category || "") !== f.ai) return;
+        if (f.search) {
+          const s = f.search.toLowerCase();
+          const hay = `${newRow.lead_email || ""} ${newRow.company_name || ""} ${newRow.lead_name || ""}`.toLowerCase();
+          if (!hay.includes(s)) return;
+        }
         // Update counts
         setCounts((prev) => ({ ...prev, [cat]: (prev[cat] || 0) + 1 }));
         setTotal((t) => t + 1);
@@ -839,9 +858,22 @@ export default function InboxPage() {
   async function handleRealloc() {
     if (!detail || !reallocTag) return;
     const tag = reallocTag.toUpperCase();
+    setSending("realloc");
     const d = await mutate({ action: "reallocate", id: detail.id, client_tag: tag });
-    if (d.ok) { toast.success(`Reallocated to ${tag}`); setReallocTag(""); loadBootstrap(); loadDetail(detail.id); }
+    setSending(null);
+    if (d.ok) { toast.success(`Reallocated to ${tag} — CC/BCC, template & sheet routing updated`); setReallocTag(""); loadBootstrap(); loadDetail(detail.id); }
     else toast.error(d.error);
+  }
+
+  // Pull the CURRENT client's latest template + CC/BCC into this lead and map
+  // the variables — for leads that were in the inbox before the template existed.
+  async function handleSyncTemplate() {
+    if (!detail) return;
+    setSending("synctpl");
+    const d = await mutate({ action: "sync-template", id: detail.id });
+    setSending(null);
+    if (d.ok) { toast.success("Template + CC/BCC synced from the latest client config"); loadDetail(detail.id); }
+    else toast.error(d.error || "Sync failed");
   }
 
   async function handleBlacklist() {
@@ -864,12 +896,6 @@ export default function InboxPage() {
     if (r.ok) toast.success(`Domain ${domain} blacklisted`);
     else toast.error(r.error || "Blacklist failed");
   }
-
-  const showRealloc = detail && (
-    !detail.client_tag || detail.client_tag === "N/A" ||
-    POSITIVE_CATEGORIES.includes(detail.lead_category) ||
-    detail.industry_audit === "Failed" || detail.industry_audit === "Residential" || detail.location_audit === "Failed"
-  );
 
   // Sort categories: by count descending
   // Sort: Open Response always first, then by count descending
@@ -1127,20 +1153,52 @@ export default function InboxPage() {
               </div>
             </div>
 
-            {/* Audit */}
-            {(detail.industry_audit || detail.location_audit) && (
-              <div className="rounded border bg-white px-4 py-3 space-y-1.5">
-                <div className="flex gap-4 items-center">
+            {/* Audit — industry + location split onto their own lines, with the
+                suggested client tag surfaced when an audit failed. */}
+            {(detail.industry_audit || detail.location_audit) && (() => {
+              // qualification_reason is one combined string; split it back out.
+              const parts = String(detail.qualification_reason || "").split(/\s*\|\s*/).map((s) => s.trim()).filter(Boolean);
+              const industryReason = parts.find((p) => /^industry/i.test(p));
+              const locationReason = parts.find((p) => /^location audit/i.test(p));
+              const metaReasons = parts.filter((p) => p !== industryReason && p !== locationReason);
+              const industryBad = detail.industry_audit === "Failed" || detail.industry_audit === "Residential";
+              const locationBad = detail.location_audit === "Failed";
+              // Suggested client on a failed audit (non-CW leads store a tag here;
+              // CW leads use suggested_client for routing messages, shown below).
+              const isCW = !!detail.client_tag?.toUpperCase().startsWith("CW");
+              const suggested = !isCW && (industryBad || locationBad) ? String(detail.suggested_client || "").trim() : "";
+              return (
+                <div className="rounded border bg-white px-4 py-3 space-y-2.5">
+                  {/* Industry */}
                   {detail.industry_audit && (
-                    <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${detail.industry_audit === "Passed" ? "bg-green-50 text-green-700" : detail.industry_audit === "Residential" ? "bg-yellow-50 text-yellow-700" : "bg-red-50 text-red-700"}`}>Industry: {detail.industry_audit}</span>
+                    <div className="space-y-1">
+                      <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${detail.industry_audit === "Passed" ? "bg-green-50 text-green-700" : detail.industry_audit === "Residential" ? "bg-yellow-50 text-yellow-700" : "bg-red-50 text-red-700"}`}>Industry: {detail.industry_audit}</span>
+                      {industryReason && <p className="text-[11px] text-muted-foreground leading-relaxed">{industryReason.replace(/^industry audit:\s*/i, "")}</p>}
+                    </div>
                   )}
+                  {/* Location */}
                   {detail.location_audit && (
-                    <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${detail.location_audit === "Passed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>Location: {detail.location_audit}</span>
+                    <div className="space-y-1">
+                      <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${detail.location_audit === "Passed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>Location: {detail.location_audit}</span>
+                      {locationReason && <p className="text-[11px] text-muted-foreground leading-relaxed">{locationReason.replace(/^location audit:\s*/i, "")}</p>}
+                    </div>
+                  )}
+                  {/* Source / data notes */}
+                  {metaReasons.length > 0 && <p className="text-[10px] text-muted-foreground/70 leading-relaxed border-t pt-1.5">{metaReasons.join(" · ")}</p>}
+                  {/* Suggested client on a failed audit — click to prefill reallocate */}
+                  {suggested && (
+                    <div className="flex items-center gap-2 border-t pt-2">
+                      <span className="text-[11px] text-muted-foreground">Suggested client:</span>
+                      <button
+                        onClick={() => { setReallocTag(suggested.split(/[,\s]+/)[0].toUpperCase()); toast.info(`Prefilled reallocation with ${suggested}`); }}
+                        className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
+                        title="Click to prefill the reallocation below"
+                      >{suggested}</button>
+                    </div>
                   )}
                 </div>
-                {detail.qualification_reason && <p className="text-[11px] text-muted-foreground">{detail.qualification_reason}</p>}
-              </div>
-            )}
+              );
+            })()}
 
             {/* City Wide Routing — only for CW* leads */}
             {detail.client_tag?.toUpperCase().startsWith("CW") && (() => {
@@ -1210,17 +1268,25 @@ export default function InboxPage() {
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
-            {/* Reallocate */}
-            {showRealloc && (
-              <div className="rounded border bg-white px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground shrink-0">Reallocate</span>
-                  <Input value={reallocTag} onChange={(e) => setReallocTag(e.target.value)} placeholder="New client tag" className="w-32 h-8 text-xs font-mono" />
-                  <Button size="sm" className="h-8 text-xs" onClick={handleRealloc} disabled={!reallocTag}>Assign</Button>
-                  <span className="text-[10px] text-muted-foreground">Updates CC/BCC/template</span>
-                </div>
+            {/* Client & Template — on every lead. Sync pulls the current
+                client's latest template + CC/BCC (with variables mapped);
+                Reallocate moves the lead to a different client tag and rewrites
+                everything (template, CC/BCC, and which sheet it lands in). */}
+            <div className="rounded border bg-white px-4 py-3 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium">Client &amp; Template</span>
+                <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleSyncTemplate} disabled={sending === "synctpl" || !detail.client_tag || detail.client_tag === "N/A"}>
+                  {sending === "synctpl" ? "Syncing…" : "↻ Sync Template"}
+                </Button>
               </div>
-            )}
+              <p className="text-[10px] text-muted-foreground -mt-1">Syncs the latest template + CC/BCC from <span className="font-mono font-semibold">{detail.client_tag || "—"}</span> and maps the variables.</p>
+              <div className="flex items-center gap-2 border-t pt-2.5">
+                <span className="text-xs text-muted-foreground shrink-0">Reallocate to</span>
+                <Input value={reallocTag} onChange={(e) => setReallocTag(e.target.value.toUpperCase())} placeholder="client tag" className="w-32 h-8 text-xs font-mono" />
+                <Button size="sm" className="h-8 text-xs" onClick={handleRealloc} disabled={!reallocTag || sending === "realloc"}>{sending === "realloc" ? "…" : "Assign"}</Button>
+                <span className="text-[10px] text-muted-foreground">reroutes CC/BCC, template &amp; sheet</span>
+              </div>
+            </div>
 
             {/* ── Send Reply (with CC/BCC pre-populated) ── */}
             <div className="rounded border bg-white px-4 py-3 space-y-2">
