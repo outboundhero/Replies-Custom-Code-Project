@@ -94,16 +94,28 @@ export async function pushToSheet(clientTag: string, data: ReplyData): Promise<{
     data.notes || "", // Notes (Required)
   ];
 
-  try {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheet.sheet_id,
-      range: `'${sheet.sheet_name}'!A:W`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [row] },
-    });
-
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, error: (error as Error).message };
+  // Retry transient Google API failures (rate limit / 5xx / network) a few
+  // times before giving up, so a blip never drops a lead. Permanent errors
+  // (bad range, permission) fail fast.
+  let lastErr = "";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: sheet.sheet_id,
+        range: `'${sheet.sheet_name}'!A:W`,
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values: [row] },
+      });
+      return { ok: true };
+    } catch (error) {
+      lastErr = (error as Error).message || "unknown error";
+      const status = (error as { code?: number; response?: { status?: number } })?.code
+        ?? (error as { response?: { status?: number } })?.response?.status;
+      const transient = status === 429 || (typeof status === "number" && status >= 500)
+        || /rate limit|quota|timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND|socket hang up|network|fetch failed|backend error|internal error/i.test(lastErr);
+      if (!transient || attempt === 3) break;
+      await new Promise((r) => setTimeout(r, Math.min(2 ** attempt * 800, 6000)));
+    }
   }
+  return { ok: false, error: lastErr };
 }

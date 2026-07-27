@@ -3,7 +3,8 @@ import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
-import { pushToSheet, SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
+import { SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
+import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
 import { regenerateReply } from "@/lib/processing/regenerate-reply";
@@ -197,38 +198,12 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Auto-push to Google Sheet for qualifying categories
+        // Auto-push to the client's lead-tracking sheet for positive categories.
+        // A failure is recorded durably (Sheet Pushes dashboard) so no lead is
+        // ever silently lost — retried until it succeeds or is dismissed.
         if (SHEET_PUSH_CATEGORIES.some((c) => c.toLowerCase() === category?.toLowerCase())) {
-          const { data: reply } = await supabase.from("replies").select("*").eq("id", id).single();
-          if (reply && reply.client_tag && reply.client_tag !== "N/A") {
-            const result = await pushToSheet(reply.client_tag, {
-              lead_email: reply.lead_email || "",
-              lead_name: reply.lead_name || "",
-              company_name: reply.company_name || "",
-              reply_time: reply.reply_time || "",
-              city: reply.city || "",
-              state: reply.state || "",
-              address: reply.address || "",
-              google_maps_url: reply.google_maps_url || "",
-              phone: reply.phone || "",
-              lead_category: category,
-              client_tag: reply.client_tag || "",
-              sender_email: reply.sender_email || "",
-              reply_we_got: reply.reply_we_got || "",
-              prospect_cc_email: reply.prospect_cc_email || "",
-              our_reply: reply.our_reply || "",
-              cc_email_1: reply.cc_email_1 || "",
-              cc_email_2: reply.cc_email_2 || "",
-              cc_email_3: reply.cc_email_3 || "",
-              bcc_email_1: reply.bcc_email_1 || "",
-              notes: reply.notes || "",
-            });
-            if (result.ok) {
-              await supabase.from("replies").update({
-                pushed_to_sheet: true,
-                pushed_to_sheet_at: new Date().toISOString(),
-              }).eq("id", id);
-            }
+          const result = await pushReplyToSheet(id, { category });
+          if (!result.skipped) {
             extras.pushed_to_sheet = result.ok;
             if (result.error) extras.sheet_error = result.error;
           }
@@ -430,39 +405,8 @@ export async function POST(req: NextRequest) {
       }
 
       case "push-to-sheet": {
-        const { data: reply } = await supabase.from("replies").select("*").eq("id", id).single();
-        if (!reply) return NextResponse.json({ error: "Reply not found" }, { status: 404 });
-        if (!reply.client_tag || reply.client_tag === "N/A") {
-          return NextResponse.json({ error: "Cannot push N/A client to sheet" }, { status: 400 });
-        }
-        const result = await pushToSheet(reply.client_tag, {
-          lead_email: reply.lead_email || "",
-          lead_name: reply.lead_name || "",
-          company_name: reply.company_name || "",
-          reply_time: reply.reply_time || "",
-          city: reply.city || "",
-          state: reply.state || "",
-          address: reply.address || "",
-          google_maps_url: reply.google_maps_url || "",
-          phone: reply.phone || "",
-          lead_category: reply.lead_category || "",
-          client_tag: reply.client_tag || "",
-          sender_email: reply.sender_email || "",
-          reply_we_got: reply.reply_we_got || "",
-          prospect_cc_email: reply.prospect_cc_email || "",
-          our_reply: reply.our_reply || "",
-          cc_email_1: reply.cc_email_1 || "",
-          cc_email_2: reply.cc_email_2 || "",
-          cc_email_3: reply.cc_email_3 || "",
-          bcc_email_1: reply.bcc_email_1 || "",
-          notes: reply.notes || "",
-        });
-        if (result.ok) {
-          await supabase.from("replies").update({
-            pushed_to_sheet: true,
-            pushed_to_sheet_at: new Date().toISOString(),
-          }).eq("id", id);
-        }
+        const result = await pushReplyToSheet(id);
+        if (result.skipped) return NextResponse.json({ error: result.skipped === "no client tag" ? "Cannot push N/A client to sheet" : "Reply not found" }, { status: 400 });
         return NextResponse.json(result);
       }
 

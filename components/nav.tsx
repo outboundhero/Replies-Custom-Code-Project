@@ -37,6 +37,7 @@ const items: NavItem[] = [
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
   { href: "/webhooks", label: "Webhook Activity", adminOnly: true },
   { href: "/qualification", label: "Qualification" },
+  { href: "/sheet-pushes", label: "Sheet Pushes", adminOnly: true },
   { href: "/errors", label: "Error Log", adminOnly: true },
   { href: "/users", label: "User Management", adminOnly: true },
 ];
