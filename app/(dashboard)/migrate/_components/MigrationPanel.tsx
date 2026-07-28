@@ -7,7 +7,7 @@
  * moving / retrying / done / error, with a per-client bar and ESP legend.
  */
 import { useMemo } from "react";
-import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, ArrowRight, RotateCw, Download, MapPin } from "lucide-react";
+import { Loader2, Check, AlertTriangle, X, Square, CircleSlash, ArrowRight, RotateCw, Download, MapPin, Clock } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 
 export type MoveStep = "queued" | "matching" | "moving" | "retrying" | "done" | "error" | "skipped";
@@ -28,15 +28,22 @@ export interface MoveClientRow {
   /** Leads skipped by the service-area gate for this client (distinct from the
    *  whole-client `state:"skipped"` = no destination). */
   skipped: number;
+  /** Leads skipped because they belong to the OTHER lane — a business lead when
+   *  moving to a B2C instance, or vice-versa. They move in the other run. */
+  skippedLane?: number;
+  /** Leads skipped because the To instance has no campaign for that lead's ESP. */
+  skippedNoDest?: number;
   /** Whether a service-area filter is configured for this client (false → the
    *  filter was OFF for it, so ALL its leads move). */
   serviceArea?: boolean;
 }
 
 export interface MigrationState {
-  status: "running" | "done";
+  status: "queued" | "running" | "done";
   from: string;
   to: string;
+  /** The To instance's lane — only leads of this lane move in this run. */
+  lane?: "b2b" | "b2c";
   rows: MoveClientRow[];
 }
 
@@ -56,19 +63,22 @@ export default function MigrationPanel({
   onExportSkipped?: () => void;
 }) {
   const { rows, from, to } = state;
+  const queued = state.status === "queued";
+  const laneLabel = state.lane === "b2c" ? "B2C" : state.lane === "b2b" ? "B2B" : "";
   const total = rows.length;
   const done = rows.filter((r) => r.state === "done" || r.state === "error" || r.state === "skipped").length;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   const tally = useMemo(() => {
-    let moved = 0, retries = 0, skipped = 0, errored = 0, doneN = 0, skippedLeads = 0;
+    let moved = 0, retries = 0, skipped = 0, errored = 0, doneN = 0, skippedLeads = 0, otherLane = 0, noDest = 0;
     for (const r of rows) {
       moved += r.moved; retries += r.retries; skippedLeads += r.skipped || 0;
+      otherLane += r.skippedLane || 0; noDest += r.skippedNoDest || 0;
       if (r.state === "skipped") skipped++;
       if (r.state === "error") errored++;
       if (r.state === "done") doneN++;
     }
-    return { moved, retries, skipped, errored, doneN, skippedLeads };
+    return { moved, retries, skipped, errored, doneN, skippedLeads, otherLane, noDest };
   }, [rows]);
 
   // Active/retrying first, then queued, then finished.
@@ -81,38 +91,42 @@ export default function MigrationPanel({
     <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
       {/* Overall header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b">
-        <span className={`grid place-items-center size-8 rounded-lg ${running ? "bg-emerald-100 text-emerald-700" : tally.errored ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
-          {running ? <Loader2 className="size-4 animate-spin" /> : tally.errored ? <AlertTriangle className="size-4" /> : <Check className="size-4" />}
+        <span className={`grid place-items-center size-8 rounded-lg ${queued ? "bg-slate-100 text-slate-500" : running ? "bg-emerald-100 text-emerald-700" : tally.errored ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
+          {queued ? <Clock className="size-4" /> : running ? <Loader2 className="size-4 animate-spin" /> : tally.errored ? <AlertTriangle className="size-4" /> : <Check className="size-4" />}
         </span>
         <div className="min-w-0">
           <p className="text-sm font-semibold flex items-center gap-1.5">
-            {running ? "Migrating leads…" : "Migration complete"}
+            {queued ? "Queued — waiting to start" : running ? "Migrating leads…" : "Migration complete"}
             <span className="text-muted-foreground font-normal inline-flex items-center gap-1 text-xs">
-              · {getInstanceLabel(from)} <ArrowRight className="size-3" /> {getInstanceLabel(to)}
+              · {getInstanceLabel(from)} <ArrowRight className="size-3" /> {getInstanceLabel(to)}{laneLabel ? ` (${laneLabel})` : ""}
             </span>
           </p>
-          <p className="text-xs text-muted-foreground tabular-nums">{done} / {total} clients</p>
+          <p className="text-xs text-muted-foreground tabular-nums">{queued ? `${total} client${total === 1 ? "" : "s"} · waiting` : `${done} / ${total} clients`}</p>
         </div>
-        <div className="ml-auto hidden md:flex items-center gap-3 text-xs">
+        <div className={`ml-auto hidden md:flex items-center gap-3 text-xs ${queued ? "invisible" : ""}`}>
           <Stat n={tally.moved} label="leads moved" tone="emerald" />
           <Stat n={tally.doneN} label="done" tone="slate" />
           {tally.retries > 0 && <Stat n={tally.retries} label="retries" tone="amber" />}
+          {tally.otherLane > 0 && <Stat n={tally.otherLane} label="other lane" tone="slate" />}
           {tally.skippedLeads > 0 && <Stat n={tally.skippedLeads} label="out of area" tone="amber" />}
+          {tally.noDest > 0 && <Stat n={tally.noDest} label="no ESP dest" tone="amber" />}
           {tally.skipped > 0 && <Stat n={tally.skipped} label="no dest" tone="amber" />}
           {tally.errored > 0 && <Stat n={tally.errored} label="errors" tone="rose" />}
         </div>
-        {tally.skippedLeads > 0 && onExportSkipped && (
+        {!queued && tally.skippedLeads > 0 && onExportSkipped && (
           <button onClick={onExportSkipped} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50" title="Download the out-of-area leads that were skipped"><Download className="size-3" /> Skipped CSV</button>
         )}
         {running ? (
           <button onClick={onStop} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50"><Square className="size-3" /> Stop</button>
+        ) : queued ? (
+          <button onClick={onStop} className="flex items-center gap-1.5 px-2.5 h-8 text-xs rounded-md border hover:bg-muted/50" title="Remove from queue"><X className="size-3" /> Cancel</button>
         ) : (
           <button onClick={onClose} className="grid place-items-center size-8 rounded-md hover:bg-muted/50" title="Dismiss"><X className="size-4" /></button>
         )}
       </div>
       {/* Progress bar */}
       <div className="h-1 bg-muted">
-        <div className={`h-full transition-all duration-300 ${tally.errored ? "bg-rose-500" : running ? "bg-emerald-500" : "bg-slate-400"}`} style={{ width: `${pct}%` }} />
+        <div className={`h-full transition-all duration-300 ${queued ? "bg-slate-300" : tally.errored ? "bg-rose-500" : running ? "bg-emerald-500" : "bg-slate-400"}`} style={{ width: `${queued ? 0 : pct}%` }} />
       </div>
 
       {/* Per-client grid */}
@@ -176,7 +190,9 @@ function ClientCard({ r, onRetry }: { r: MoveClientRow; onRetry: (tag: string) =
               {STEP_LABEL[r.state]}{r.state === "moving" && r.currentEsp ? ` ${ESP_SHORT[r.currentEsp] || r.currentEsp}` : ""}
             </span>
             {r.campaignsTotal > 0 && <span>· {r.campaignsDone}/{r.campaignsTotal} campaigns</span>}
+            {(r.skippedLane || 0) > 0 && <span className="text-muted-foreground" title="Leads of the other lane — they move in the run to the other instance">· {r.skippedLane!.toLocaleString()} other lane</span>}
             {r.skipped > 0 && <span className="text-amber-600">· {r.skipped.toLocaleString()} out of area</span>}
+            {(r.skippedNoDest || 0) > 0 && <span className="text-amber-600" title="No campaign for that lead's ESP in the To instance">· {r.skippedNoDest!.toLocaleString()} no ESP dest</span>}
             {r.serviceArea === false && <span className="inline-flex items-center gap-0.5 text-muted-foreground/70" title="No service area configured — all leads move"><MapPin className="size-2.5" /> no area filter</span>}
             {r.unmatchedEsps.length > 0 && <span className="text-amber-600">· {r.unmatchedEsps.map((e) => ESP_SHORT[e] || e).join("")} unmatched</span>}
             {r.retries > 0 && r.state !== "done" && <span className="text-amber-600">· {r.retries} retries</span>}

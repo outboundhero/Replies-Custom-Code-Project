@@ -1,12 +1,22 @@
 /**
  * POST /api/leads/move
  *
- * Lead Mover — one bounded batch: cursor-sweep a window of a SOURCE campaign's
- * leads and copy them into a TARGET campaign (same or another Bison instance),
- * reusing the nurture routing core (routeCandidates: same-instance attach, or
- * cross-instance create+attach). The caller re-invokes with the returned
- * `nextCursor` until `done`. Copy-only — the source campaign is NOT modified
- * (operator pauses it).
+ * Cross-Instance Lead Mover — one bounded batch: cursor-sweep a window of a
+ * SOURCE campaign's leads and copy them into a TARGET Bison instance, routing
+ * each lead by ITS OWN category:
+ *   • lane — isPersonalDomain(email) ? "b2c" : "b2b". Only leads whose lane
+ *            matches the TARGET instance's lane move; the rest are skipped
+ *            (they belong in the other instance's migration). A B2B instance
+ *            never receives personal leads, a B2C instance never business ones.
+ *   • ESP  — per lead, from the lead's Bison ESP tag (findLeadByEmail) when the
+ *            source is a Google/unknown catch-all campaign — so SEGs/Outlook
+ *            leads hidden inside a "Google + Others" campaign reach the right
+ *            SEGs/Outlook destination. Outlook/SEGs-named sources are trusted
+ *            from the name. Falls back to the email-domain heuristic.
+ *
+ * routeCandidates then create+attaches each lead into dest[esp] of the target
+ * instance (idempotent). The caller re-invokes with `nextCursor` until `done`.
+ * Copy-only — the source campaign is NOT modified (operator pauses it).
  *
  * Cursor pagination (not page pagination) is used because Bison hard-caps page
  * pagination at 1000 pages (= 15,000 leads/campaign, 15 rows/page locked). Cursor
@@ -22,22 +32,48 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
-import { sweepCampaignLeadsCursor, type OutboundLead } from "@/lib/outboundhero-api";
+import { sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead } from "@/lib/outboundhero-api";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
-import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
+import { detectCampaignEsp, bucketEsp, detectEsp, pickEspFromTags, type Esp } from "@/lib/nurture/esp";
 import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
+import { getInstanceLane } from "@/lib/bison-instances-shared";
+import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { getServiceArea, cityInServiceArea, cityFromCustomVars, stateFromCustomVars } from "@/lib/service-area";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+const ESPS: Esp[] = ["google", "outlook", "segs"];
+type DestMap = Partial<Record<Esp, number>>;
+
+async function parallelForEach<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (i < items.length) { const idx = i++; await fn(items[idx]); }
+  }));
+}
+
 // Bison caps reads at 15 leads/request, so reads are the bottleneck. We read in
 // small SUB_WINDOW chunks and OVERLAP each chunk's write (create+attach+log)
 // with the NEXT chunk's read — so the write time is largely hidden behind reads.
 // A call returns after WINDOW leads or WINDOW_MS, handing back the cursor.
-const WINDOW = 2500;       // leads processed per call before handing the cursor back
-const SUB_WINDOW = 800;    // read chunk size; its write overlaps the next read
-const WINDOW_MS = 170_000; // …or this much wall-time, whichever comes first (< maxDuration 300)
+// Per-lead ESP lookups (catch-all Google sources) make each call much heavier,
+// so those use smaller windows — mirrors the Same Instance mover.
+const WINDOW_MS = 170_000; // < maxDuration 300
+
+interface Ctx {
+  runId: string | null;
+  clientTag: string;
+  sourceInstance: string;
+  sourceCampaignId: number;
+  sourceCampaignName: string;
+  targetInstance: string;
+  targetLane: "b2b" | "b2c";
+  dest: DestMap;
+  campaignEsp: Esp | null;
+  needsLookup: boolean;
+  area: Awaited<ReturnType<typeof getServiceArea>>;
+}
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
@@ -45,7 +81,7 @@ export async function POST(req: NextRequest) {
 
   let body: {
     clientTag?: string; sourceInstance?: string; sourceCampaignId?: number;
-    sourceCampaignName?: string; targetInstance?: string; targetCampaignId?: number; cursor?: string | null;
+    sourceCampaignName?: string; targetInstance?: string; dest?: DestMap; cursor?: string | null;
     serviceAreaFilter?: boolean; runId?: string;
   };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
@@ -54,30 +90,41 @@ export async function POST(req: NextRequest) {
   const sourceInstance = String(body.sourceInstance || "").trim();
   const targetInstance = String(body.targetInstance || "").trim();
   const sourceCampaignId = Number(body.sourceCampaignId);
-  const targetCampaignId = Number(body.targetCampaignId);
   const sourceCampaignName = String(body.sourceCampaignName || "");
   const startCursor = body.cursor ? String(body.cursor) : null;
   const serviceAreaFilter = body.serviceAreaFilter !== false; // default ON
   const runId = body.runId ? String(body.runId) : null;
 
-  if (!clientTag || !sourceInstance || !targetInstance || !sourceCampaignId || !targetCampaignId) {
-    return NextResponse.json({ error: "clientTag, sourceInstance, targetInstance, sourceCampaignId, targetCampaignId required" }, { status: 400 });
+  // Destination campaign per ESP in the target instance (google/outlook/segs).
+  const dest: DestMap = {};
+  for (const e of ESPS) { const cid = Number(body.dest?.[e]); if (cid) dest[e] = cid; }
+
+  if (!clientTag || !sourceInstance || !targetInstance || !sourceCampaignId) {
+    return NextResponse.json({ error: "clientTag, sourceInstance, targetInstance, sourceCampaignId required" }, { status: 400 });
   }
-  const esp = detectCampaignEsp(sourceCampaignName);
-  if (!esp) {
-    return NextResponse.json({ error: `cannot detect ESP from source campaign name "${sourceCampaignName}"` }, { status: 400 });
+  if (!ESPS.some((e) => dest[e])) {
+    return NextResponse.json({ error: "no destination campaigns provided (need at least one of google/outlook/segs)" }, { status: 400 });
   }
+
+  const targetLane = getInstanceLane(targetInstance);
+  const campaignEsp = detectCampaignEsp(sourceCampaignName);
+  // Google (catch-all) or an un-ESP'd name → resolve each lead's ESP from its
+  // Bison tags. Outlook/SEGs names are specific enough to trust directly.
+  const needsLookup = campaignEsp !== "outlook" && campaignEsp !== "segs";
 
   // Service-area gate: skip leads whose CITY isn't in the client's allowed area.
   // Only when the filter is on AND an area is configured AND the lead has a city.
   const area = serviceAreaFilter ? await getServiceArea(clientTag) : null;
-  const ctx = { runId, clientTag, sourceInstance, sourceCampaignId, sourceCampaignName, targetInstance };
+  const ctx: Ctx = { runId, clientTag, sourceInstance, sourceCampaignId, sourceCampaignName, targetInstance, targetLane, dest, campaignEsp, needsLookup, area };
+
+  const WINDOW = needsLookup ? 800 : 2500;      // leads processed per call before handing the cursor back
+  const SUB_WINDOW = needsLookup ? 400 : 800;   // read chunk size; its write overlaps the next read
 
   // ── Pipelined sweep + write ──
   // Read sub-windows sequentially (cursor), but overlap each sub-window's write
   // with the NEXT sub-window's read. Writes are chained (one at a time), so
   // counters never race; reads run ahead. This hides most of the write time.
-  let moved = 0, skippedCount = 0, fetched = 0;
+  let moved = 0, skippedArea = 0, skippedLane = 0, skippedNoDest = 0, fetched = 0;
   let cursor: string | null = startCursor;
   let done = false;
   const w: { error: Error | null } = { error: null }; // object property so the async-closure assignment isn't narrowed away
@@ -94,25 +141,13 @@ export async function POST(req: NextRequest) {
       await writeChain; // let queued writes finish
       if (w.error) return NextResponse.json({ error: `move failed: ${w.error.message}` }, { status: 502 });
       if (fetched === 0) return NextResponse.json({ error: `fetch failed: ${(e as Error).message}` }, { status: 502 });
-      return NextResponse.json({ ok: true, fetched, moved, skipped: skippedCount, nextCursor: cursor, done: false }); // resume from cursor
+      return NextResponse.json({ ok: true, fetched, moved, skippedArea, skippedLane, skippedNoDest, nextCursor: cursor, done: false }); // resume from cursor
     }
     fetched += s.leads.length;
     cursor = s.nextCursor;
     done = s.done;
 
-    // Partition this sub-window by service area.
-    const kept: OutboundLead[] = [];
-    const skippedLeads: OutboundLead[] = [];
-    if (area) {
-      for (const l of s.leads) {
-        const city = cityFromCustomVars(l.custom_variables);
-        if (city && !cityInServiceArea(city, area.tokens)) skippedLeads.push(l);
-        else kept.push(l);
-      }
-    } else if (s.leads.length) {
-      kept.push(...s.leads);
-    }
-
+    const chunk = s.leads;
     // Chain the write after the previous one; do NOT await here — loop back to
     // read the next sub-window while this write runs.
     const prev = writeChain;
@@ -120,8 +155,11 @@ export async function POST(req: NextRequest) {
       await prev;
       if (w.error) return;
       try {
-        moved += await routeAndLog(kept, esp, targetCampaignId, ctx);
-        if (skippedLeads.length) { await persistSkipped(skippedLeads, ctx); skippedCount += skippedLeads.length; }
+        const r = await routeAndLog(chunk, ctx);
+        moved += r.moved;
+        skippedArea += r.skippedArea;
+        skippedLane += r.skippedLane;
+        skippedNoDest += r.skippedNoDest;
       } catch (e) { w.error = e as Error; }
     })();
 
@@ -135,33 +173,88 @@ export async function POST(req: NextRequest) {
     ok: true,
     fetched,
     moved,
-    skipped: skippedCount,
+    skippedArea,
+    skippedLane,
+    skippedNoDest,
     nextCursor: done ? null : cursor,
     done,
   });
 }
 
-/** Create+attach one batch of kept leads into the target campaign and record
- *  lead_move_log. Returns how many were attached. */
+/** Service-area gate → lane filter → per-lead ESP → route each kept lead into
+ *  dest[esp] of the target instance, record lead_move_log. */
 async function routeAndLog(
-  kept: OutboundLead[], esp: Esp, targetCampaignId: number,
-  ctx: { clientTag: string; sourceInstance: string; sourceCampaignId: number; targetInstance: string },
-): Promise<number> {
-  const candidates: Candidate[] = kept
-    .filter((l) => (l.email || "").trim())
-    .map((l) => ({
-      source: "campaign" as const,
-      rowId: l.id, email: l.email, esp,
+  leads: OutboundLead[], ctx: Ctx,
+): Promise<{ moved: number; skippedArea: number; skippedLane: number; skippedNoDest: number }> {
+  // 1) Service-area gate — partition by city; out-of-area leads are logged +
+  // counted. Missing city → keep (move); no area configured → ctx.area null → keep all.
+  let gated = leads;
+  let skippedArea = 0;
+  if (ctx.area) {
+    const inArea: OutboundLead[] = [];
+    const outArea: OutboundLead[] = [];
+    for (const l of leads) {
+      const city = cityFromCustomVars(l.custom_variables);
+      if (city && !cityInServiceArea(city, ctx.area.tokens)) outArea.push(l);
+      else inArea.push(l);
+    }
+    if (outArea.length) { await persistSkipped(outArea, ctx); skippedArea += outArea.length; }
+    gated = inArea;
+  }
+
+  // 2) Lane filter — only leads whose lane matches the TARGET instance's lane
+  // move. The rest belong in the other instance's migration (skipped here).
+  const laneMatched: OutboundLead[] = [];
+  let skippedLane = 0;
+  for (const l of gated) {
+    const lane = isPersonalDomain(l.email) ? "b2c" : "b2b";
+    if (lane === ctx.targetLane) laneMatched.push(l);
+    else skippedLane++;
+  }
+  const withEmail = laneMatched.filter((l) => (l.email || "").trim());
+
+  // 3) ESP per lead — trust the source name for Outlook/SEGs, else resolve from
+  // the lead's Bison tag (catch-all Google sources hide SEGs/Outlook leads).
+  const espByEmail = new Map<string, Esp>();
+  if (!ctx.needsLookup && ctx.campaignEsp) {
+    for (const l of withEmail) espByEmail.set(l.email, ctx.campaignEsp);
+  } else {
+    await parallelForEach(withEmail, 8, async (l) => {
+      let esp: Esp;
+      try {
+        const full = await findLeadByEmail(ctx.sourceInstance, l.email);
+        const tag = pickEspFromTags(full?.tags);
+        esp = tag ? bucketEsp(tag) : detectEsp(l.email);
+      } catch { esp = detectEsp(l.email); }
+      espByEmail.set(l.email, esp);
+    });
+  }
+
+  // 4) Build candidates → dest[esp] in the target instance.
+  const candidates: Candidate[] = [];
+  let skippedNoDest = 0;
+  const usedEsps = new Set<Esp>();
+  for (const l of withEmail) {
+    const esp = espByEmail.get(l.email) || "google";
+    const targetCampaignId = ctx.dest[esp];
+    if (!targetCampaignId) { skippedNoDest++; continue; } // no destination for this ESP
+    usedEsps.add(esp);
+    candidates.push({
+      source: "campaign", rowId: l.id, email: l.email, esp,
       first_name: l.first_name ?? null, last_name: l.last_name ?? null, company: l.company ?? null,
       obLeadId: l.id, sourceInstance: ctx.sourceInstance,
       custom_variables: Array.isArray(l.custom_variables) ? l.custom_variables.filter((v) => v && v.name && v.value != null) : [],
-      instance: ctx.targetInstance,
-    }));
-  if (!candidates.length) return 0;
+      lane: ctx.targetLane, instance: ctx.targetInstance,
+    });
+  }
 
-  const map: CampaignMapEntry[] = [
-    { bison_instance: ctx.targetInstance, esp, campaign_id: targetCampaignId, campaign_name: null, lane: null },
-  ];
+  const map: CampaignMapEntry[] = [];
+  for (const esp of ESPS) {
+    const cid = ctx.dest[esp];
+    if (cid && usedEsps.has(esp)) map.push({ bison_instance: ctx.targetInstance, esp, campaign_id: cid, campaign_name: null, lane: ctx.targetLane });
+  }
+  if (!candidates.length || !map.length) return { moved: 0, skippedArea, skippedLane, skippedNoDest };
+
   let moved = 0;
   const nowIso = new Date().toISOString();
   await routeCandidates(ctx.clientTag, candidates, map, {
@@ -185,16 +278,13 @@ async function routeAndLog(
       }
     },
   });
-  return moved;
+  return { moved, skippedArea, skippedLane, skippedNoDest };
 }
 
 /** Record service-area-skipped leads (full detail + reason) for the export.
  *  INSERT OR REPLACE on (ob_lead_id, source_campaign_id) → idempotent on retries.
  *  Never throws — a skip-log failure must not fail the move. */
-async function persistSkipped(
-  leads: OutboundLead[],
-  ctx: { runId: string | null; clientTag: string; sourceInstance: string; sourceCampaignId: number; sourceCampaignName: string; targetInstance: string },
-) {
+async function persistSkipped(leads: OutboundLead[], ctx: Ctx) {
   const nowIso = new Date().toISOString();
   const COLS = 16;
   for (let i = 0; i < leads.length; i += 200) {

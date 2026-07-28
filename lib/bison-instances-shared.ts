@@ -22,6 +22,27 @@ export type BisonInstanceKey = typeof BISON_INSTANCES[number]["key"];
 /** The instance everything defaults to when no mapping exists. */
 export const DEFAULT_INSTANCE: BisonInstanceKey = "outboundhero";
 
+/**
+ * Which lane each Bison instance serves — B2B (business email) vs B2C (personal
+ * email). Mirrors GROUP_INSTANCE_MAP in lib/nurture/group-routing.ts:
+ *   Group 1 → B2B outboundhero    | B2C cleaningoutbound
+ *   Group 2 → B2B facilityreach   | B2C outboundclean
+ * Kept here (browser-safe, no server imports) so the Move Leads UI and the
+ * Cross Instance mover share one source of truth for a target instance's lane.
+ */
+export const INSTANCE_LANE: Record<BisonInstanceKey, "b2b" | "b2c"> = {
+  outboundhero: "b2b",
+  facilityreach: "b2b",
+  cleaningoutbound: "b2c",
+  outboundclean: "b2c",
+};
+
+/** The lane (b2b/b2c) a destination instance serves. Defaults to b2b for any
+ *  unknown key (all four real instances are mapped above). */
+export function getInstanceLane(key: string): "b2b" | "b2c" {
+  return INSTANCE_LANE[key as BisonInstanceKey] ?? "b2b";
+}
+
 const INSTANCE_KEYS = new Set<string>(BISON_INSTANCES.map((i) => i.key));
 
 export function isValidInstance(key: string | null | undefined): key is BisonInstanceKey {
