@@ -66,7 +66,10 @@ export function QualificationLookup() {
       const res = await fetch("/api/qualification/match", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }),
       });
-      setResult(await res.json());
+      const text = await res.text();
+      let d: MatchResp | null = null;
+      try { d = JSON.parse(text) as MatchResp; } catch { d = null; }
+      setResult(res.ok && d ? d : { match: null, reason: res.status === 504 ? "The lookup timed out — please try again." : "Lookup failed, please try again." });
     } catch (e) {
       setResult({ match: null, reason: (e as Error).message });
     } finally { setMatching(false); }

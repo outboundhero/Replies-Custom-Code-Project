@@ -100,11 +100,16 @@ export interface Candidate {
  * Code pre-filter: shortlist clients whose locations plausibly include the
  * query, each condensed to just the relevant lines (keeps the AI prompt tiny).
  */
-export function shortlist(clients: QualClient[], parsed: ParsedQuery, cap = 25): Candidate[] {
+export function shortlist(clients: QualClient[], parsed: ParsedQuery, cap = 15): Candidate[] {
   const stateNeedles: string[] = [];
   if (parsed.stateName) stateNeedles.push(parsed.stateName.toLowerCase());
   if (parsed.stateAbbr) stateNeedles.push(parsed.stateAbbr.toLowerCase());
   const termNeedles = parsed.terms.flatMap(termVariants);
+  // Match city/county terms on WORD BOUNDARIES so "spring" doesn't hit
+  // "Springfield" and "grove" doesn't hit "Grovetown" — those false substring
+  // hits used to flood the shortlist with unrelated clients.
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const termRes = termNeedles.map((n) => new RegExp(`\\b${esc(n)}\\b`));
 
   const nationwide: Candidate[] = [];
   const regional: Candidate[] = [];
@@ -112,7 +117,6 @@ export function shortlist(clients: QualClient[], parsed: ParsedQuery, cap = 25):
   for (const c of clients) {
     const loc = (c.inclusion_locations || "").trim();
     if (!loc) continue;
-    const lower = loc.toLowerCase();
     const nw = isNationwide(loc);
 
     // Which lines mention the state (as a whole word) or a city/county term?
@@ -121,7 +125,7 @@ export function shortlist(clients: QualClient[], parsed: ParsedQuery, cap = 25):
     for (const line of lines) {
       const ll = line.toLowerCase();
       const stateHit = stateNeedles.some((n) => n.length === 2 ? new RegExp(`\\b${n}\\b`).test(ll) : ll.includes(n));
-      const termHit = termNeedles.some((n) => ll.includes(n));
+      const termHit = termRes.some((re) => re.test(ll));
       if (stateHit || termHit) { hitLines.push(line.trim().replace(/\s{2,}/g, " ")); if (hitLines.length >= 6) break; }
     }
 
@@ -186,7 +190,7 @@ export async function aiPickClient(query: string, candidates: Candidate[]): Prom
     "location: 'full' = coverage clearly includes the query location (its city, county, or an explicit statewide/nationwide area that contains it); 'partial' = coverage is the same STATE/region but the specific city/county isn't listed; 'none' = does not cover it.",
     "industry: if the query names NO industry/business-type, set 'na' for ALL. Otherwise 'excluded' if the client's EXCLUSIONS cover that industry, else 'fit'.",
     "best: the tag whose location is 'full' AND industry is not 'excluded'. PREFER the most specific regional client over a nationwide one. If none qualifies, best = null.",
-    "Each reason: one specific sentence naming WHY (e.g. 'Spring Grove is in McHenry County, IL, which YBS covers' or 'Covers IL but only the Chicago metro, not Spring Grove').",
+    "Each reason: ONE short clause (max 12 words) naming WHY (e.g. 'Spring Grove is in McHenry County, IL, which YBS covers' or 'Covers IL but only the Chicago metro').",
     "If NO client covers the location at all (or all that do exclude the industry), set best=null and reason='" + NO_MATCH_MSG + "'.",
   ].join("\n");
   const user = [
@@ -201,7 +205,7 @@ export async function aiPickClient(query: string, candidates: Candidate[]): Prom
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: "gpt-4o-mini", temperature: 0, max_tokens: 900,
+        model: "gpt-4o-mini", temperature: 0, max_tokens: 1800,
         response_format: { type: "json_object" },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
       }),

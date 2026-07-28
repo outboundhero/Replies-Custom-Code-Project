@@ -43,9 +43,13 @@ export default function QualificationPage() {
       const res = await fetch("/api/qualification/match", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }),
       });
-      const d = await res.json();
-      if (res.ok) setMatchResult(d);
-      else setMatchResult({ match: null, reason: d.error || "Lookup failed" });
+      // Read as text first — a platform timeout/crash returns an HTML/plaintext
+      // error page, not JSON, so res.json() would throw "Unexpected token".
+      const text = await res.text();
+      let d: (MatchResp & { error?: string }) | null = null;
+      try { d = JSON.parse(text); } catch { d = null; }
+      if (res.ok && d && !d.error) setMatchResult(d);
+      else setMatchResult({ match: null, reason: d?.error || (res.status === 504 ? "The lookup timed out — please try again." : "Lookup failed, please try again.") });
     } catch (e) {
       setMatchResult({ match: null, reason: (e as Error).message });
     } finally {
