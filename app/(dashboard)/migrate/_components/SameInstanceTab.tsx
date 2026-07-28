@@ -321,6 +321,14 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
   // A move is queued or running → the button label flips to "Queue".
   const anyActive = moves.some((m) => m.status === "running" || m.status === "queued");
 
+  // Moves run in THIS browser tab — closing/reloading stops them. Warn on leave.
+  useEffect(() => {
+    if (!anyActive) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [anyActive]);
+
   // Show running first, then queued (in order), then done — active work stays on
   // top. Stable sort keeps enqueue order within each group; keyed by runId so
   // reordering never remounts a panel.

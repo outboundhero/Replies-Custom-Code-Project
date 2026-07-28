@@ -3,13 +3,20 @@
 /**
  * Lead Mover — self-serve batch migration of a client tag's leads between Bison
  * instances/campaigns. Pick From → To, select clients, Plan (auto-match by ESP),
- * then Migrate. A sticky top MigrationPanel shows the whole run live with
- * per-client progress + retry state.
+ * then Migrate.
+ *
+ * Cross Instance moves are LANE-AWARE + PER-LEAD-ESP: the To instance's lane
+ * (B2B/B2C) decides which leads move — only business leads into a B2B instance,
+ * only personal leads into a B2C instance — and each lead is routed by its OWN
+ * ESP (resolved from its Bison tag for Google catch-all sources), so SEGs/Outlook
+ * leads hidden inside a "Google + Others" campaign reach the right destination.
+ * To fully move a returning client you run it twice: once → their B2B instance,
+ * once → their B2C instance. Runs QUEUE (one at a time), each with a live panel.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown, UserX } from "lucide-react";
-import { BISON_INSTANCES } from "@/lib/bison-instances-shared";
+import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown, UserX, Plus } from "lucide-react";
+import { BISON_INSTANCES, getInstanceLane } from "@/lib/bison-instances-shared";
 import MigrationPanel, { type MigrationState, type MoveClientRow } from "./_components/MigrationPanel";
 import SameInstanceTab from "./_components/SameInstanceTab";
 
@@ -28,6 +35,7 @@ interface ClientPlan {
   serviceAreaCount: number;
 }
 const ESP_LABEL: Record<string, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
+const ESPS: Esp[] = ["google", "outlook", "segs"];
 const INSTANCE_ACCENT: Record<string, string> = {
   outboundhero: "data-[on=true]:bg-emerald-600", facilityreach: "data-[on=true]:bg-sky-600",
   cleaningoutbound: "data-[on=true]:bg-amber-600", outboundclean: "data-[on=true]:bg-violet-600",
@@ -47,6 +55,23 @@ async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {
 
 type ClientRow = { tag: string; churned: boolean; churnDate: string | null };
 type MoveTab = "cross" | "same";
+type SrcCampaign = ClientPlan["sourceCampaigns"][number];
+
+// One Cross-Instance migration in the serial queue. Its run params (From→To +
+// planned clients + service-area + runId) are FROZEN at enqueue time so a later
+// plan/instance change can't leak in, and `state` drives its own progress panel.
+type CrossMoveStatus = "queued" | "running" | "done";
+interface CrossMoveEntry {
+  runId: string;
+  status: CrossMoveStatus;
+  from: string;
+  to: string;
+  toLabel: string;
+  targetLane: "b2b" | "b2c";
+  serviceAreaFilter: boolean;
+  clients: ClientPlan[];
+  state: MigrationState;
+}
 
 export default function MigratePage() {
   const [tab, setTab] = useState<MoveTab>("cross");
@@ -61,19 +86,36 @@ export default function MigratePage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [plan, setPlan] = useState<Map<string, ClientPlan>>(new Map());
   const [planning, setPlanning] = useState(false);
-  const [migration, setMigration] = useState<MigrationState | null>(null);
-  const [running, setRunning] = useState(false);
   const [serviceAreaFilter, setServiceAreaFilter] = useState(true);
-  const abortRef = useRef(false);
-  const abortCtlRef = useRef<AbortController | null>(null);
-  const runIdRef = useRef<string | null>(null);
 
-  // Stop = flip the flag AND abort every in-flight request/backoff immediately,
-  // so the run halts within a second instead of after the current window.
-  const stopMigration = useCallback(() => {
-    abortRef.current = true;
-    abortCtlRef.current?.abort();
+  // Serial queue of Cross-Instance migrations (mirrors the Same Instance tab):
+  // each "Migrate" click freezes its From→To + planned clients into an entry and
+  // the entries execute ONE AT A TIME, so the B2B run and the B2C run (and more
+  // client batches) can be queued back-to-back. Each entry has its own panel.
+  const [crossMoves, setCrossMoves] = useState<CrossMoveEntry[]>([]);
+  const crossMovesRef = useRef<CrossMoveEntry[]>([]);           // authoritative queue (state mirrors it)
+  const chainRef = useRef<Promise<void>>(Promise.resolve());    // serial executor — ONE migration at a time
+  const abortRef = useRef(false);                               // aborts the currently-executing migration
+  const abortCtlRef = useRef<AbortController | null>(null);
+
+  // Update the queue state + ref together so the serial executor always reads fresh data.
+  const setCrossMovesSynced = useCallback((updater: (prev: CrossMoveEntry[]) => CrossMoveEntry[]) => {
+    crossMovesRef.current = updater(crossMovesRef.current);
+    setCrossMoves(crossMovesRef.current);
   }, []);
+
+  // Stop a RUNNING migration (abort in-flight requests) or cancel a QUEUED one.
+  const stopMove = useCallback((runId: string) => {
+    const entry = crossMovesRef.current.find((m) => m.runId === runId);
+    if (!entry) return;
+    if (entry.status === "running") { abortRef.current = true; abortCtlRef.current?.abort(); }
+    else if (entry.status === "queued") setCrossMovesSynced((prev) => prev.filter((m) => m.runId !== runId));
+  }, [setCrossMovesSynced]);
+
+  const closeMove = useCallback((runId: string) => {
+    setCrossMovesSynced((prev) => prev.filter((m) => m.runId !== runId));
+  }, [setCrossMovesSynced]);
+
   // Sleep that resolves early when the run is aborted (so backoff waits don't
   // hold Stop hostage).
   const abortableSleep = useCallback((ms: number) => new Promise<void>((resolve) => {
@@ -161,124 +203,194 @@ export default function MigratePage() {
   }
 
   // ── Migration driver ──
-  const patchRow = useCallback((tag: string, patch: Partial<MoveClientRow> | ((r: MoveClientRow) => Partial<MoveClientRow>)) => {
-    setMigration((m) => m && { ...m, rows: m.rows.map((r) => (r.tag === tag ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) });
-  }, []);
+  const patchRow = useCallback((runId: string, tag: string, patch: Partial<MoveClientRow> | ((r: MoveClientRow) => Partial<MoveClientRow>)) => {
+    setCrossMovesSynced((prev) => prev.map((m) => (m.runId !== runId ? m : {
+      ...m,
+      state: { ...m.state, rows: m.state.rows.map((r) => (r.tag === tag ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) },
+    })));
+  }, [setCrossMovesSynced]);
+
+  const setEntryStatus = useCallback((runId: string, status: CrossMoveStatus) => {
+    setCrossMovesSynced((prev) => prev.map((m) => (m.runId !== runId ? m : { ...m, status, state: { ...m.state, status } })));
+  }, [setCrossMovesSynced]);
 
   // One /api/leads/move call (one cursor window), with exponential-backoff retry.
-  async function postMoveWithRetry(tag: string, body: object): Promise<{ ok: boolean; data?: { moved: number; skipped: number; done: boolean; nextCursor: string | null }; error?: string }> {
+  async function postMoveWithRetry(runId: string, tag: string, body: object): Promise<{ ok: boolean; data?: { moved: number; skippedArea: number; skippedLane: number; skippedNoDest: number; done: boolean; nextCursor: string | null }; error?: string }> {
     const MAX = 5;
     for (let attempt = 1; attempt <= MAX; attempt++) {
       if (abortRef.current) return { ok: false, error: "stopped" };
       try {
         const res = await fetch("/api/leads/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: abortCtlRef.current?.signal });
-        if (res.ok) { patchRow(tag, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
+        if (res.ok) { patchRow(runId, tag, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
         const err = await res.json().catch(() => ({}));
         if (res.status !== 429 && res.status < 500) return { ok: false, error: err.error || `HTTP ${res.status}` }; // hard 4xx → don't retry
       } catch { if (abortRef.current) return { ok: false, error: "stopped" }; /* else network → retry */ }
       if (attempt < MAX) {
         const wait = Math.min(20000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
-        patchRow(tag, (r) => ({ state: "retrying", retryAttempt: attempt, retries: r.retries + 1 }));
+        patchRow(runId, tag, (r) => ({ state: "retrying", retryAttempt: attempt, retries: r.retries + 1 }));
         await abortableSleep(wait);
       }
     }
     return { ok: false, error: "failed after 5 retries" };
   }
 
-  type SrcCampaign = ClientPlan["sourceCampaigns"][number];
-
-  // Drain ONE source campaign fully via cursor windows (no 15k page cap).
-  async function drainCampaign(tag: string, c: SrcCampaign, targetCampaignId: number, onProgress: (moved: number, skipped: number) => void): Promise<{ ok: boolean; error?: string }> {
+  // Drain ONE source campaign fully via cursor windows (no 15k page cap). The
+  // server routes each lead by lane + per-lead ESP into dest[esp].
+  async function drainCampaign(
+    runId: string, tag: string, c: SrcCampaign, entry: CrossMoveEntry, dest: Partial<Record<Esp, number>>,
+    onProgress: (moved: number, skippedArea: number, skippedLane: number, skippedNoDest: number) => void,
+  ): Promise<{ ok: boolean; error?: string }> {
     let cursor: string | null = null;
     for (;;) {
       if (abortRef.current) return { ok: false, error: "stopped" };
-      const r = await postMoveWithRetry(tag, {
-        clientTag: tag, sourceInstance: from, sourceCampaignId: c.id, sourceCampaignName: c.name,
-        targetInstance: to, targetCampaignId, cursor,
-        serviceAreaFilter, runId: runIdRef.current,
+      const r = await postMoveWithRetry(runId, tag, {
+        clientTag: tag, sourceInstance: entry.from, sourceCampaignId: c.id, sourceCampaignName: c.name,
+        targetInstance: entry.to, dest, cursor,
+        serviceAreaFilter: entry.serviceAreaFilter, runId,
       });
       if (!r.ok) return { ok: false, error: r.error };
-      onProgress(r.data!.moved || 0, r.data!.skipped || 0);
+      onProgress(r.data!.moved || 0, r.data!.skippedArea || 0, r.data!.skippedLane || 0, r.data!.skippedNoDest || 0);
       if (r.data!.done || !r.data!.nextCursor) return { ok: true };
       cursor = r.data!.nextCursor;
     }
   }
 
-  // Run a client's matched campaigns concurrently, aggregating progress on its row.
-  async function migrateClientCampaigns(p: ClientPlan, concurrency: number) {
+  // Run a client's source campaigns concurrently, aggregating progress on its row.
+  // ALL source campaigns are drained (per-lead ESP splits mixed catch-all sources);
+  // the lane filter + ESP routing happen server-side.
+  async function migrateClientCampaigns(entry: CrossMoveEntry, p: ClientPlan, concurrency: number) {
+    const runId = entry.runId;
     const tag = p.tag;
-    const camps = p.sourceCampaigns.filter((c) => p.match[c.esp]);
-    if (!camps.length) {
-      patchRow(tag, { state: "skipped", skipReason: p.totalLeads === 0 ? "no leads in source" : `no ${p.unmatchedEsps.map((e) => ESP_LABEL[e]).join("/")} campaign in ${toLabel}` });
+    const dest: Partial<Record<Esp, number>> = {};
+    for (const e of ESPS) { const m = p.match[e]; if (m) dest[e] = m.campaignId; }
+    if (!Object.keys(dest).length) {
+      patchRow(runId, tag, { state: "skipped", skipReason: `no ${tag} campaigns in ${entry.toLabel}` });
       return;
     }
-    const acc = { moved: 0, skipped: 0, done: 0, failed: 0 };
+    const camps = p.sourceCampaigns;
+    if (!camps.length) {
+      patchRow(runId, tag, { state: "skipped", skipReason: "no leads in source" });
+      return;
+    }
+    const acc = { moved: 0, skippedArea: 0, skippedLane: 0, skippedNoDest: 0, done: 0, failed: 0 };
     let lastError = "";
-    patchRow(tag, { state: "moving", campaignsTotal: camps.length, campaignsDone: 0, moved: 0, skipped: 0, error: undefined });
+    patchRow(runId, tag, { state: "moving", campaignsTotal: camps.length, campaignsDone: 0, moved: 0, skipped: 0, skippedLane: 0, skippedNoDest: 0, error: undefined });
     // Campaigns are INDEPENDENT — one failing doesn't abandon the others. We drain
     // every campaign, then settle the client's state from the tallies.
     await pool(camps, concurrency, async (c) => {
       if (abortRef.current) return;
-      const res = await drainCampaign(tag, c, p.match[c.esp]!.campaignId, (moved, skipped) => {
-        acc.moved += moved; acc.skipped += skipped;
-        patchRow(tag, { moved: acc.moved, skipped: acc.skipped, state: "moving" });
+      const res = await drainCampaign(runId, tag, c, entry, dest, (moved, skippedArea, skippedLane, skippedNoDest) => {
+        acc.moved += moved; acc.skippedArea += skippedArea; acc.skippedLane += skippedLane; acc.skippedNoDest += skippedNoDest;
+        patchRow(runId, tag, { moved: acc.moved, skipped: acc.skippedArea, skippedLane: acc.skippedLane, skippedNoDest: acc.skippedNoDest, state: "moving" });
       });
       if (!res.ok) {
         if (res.error !== "stopped") { acc.failed++; lastError = res.error || "failed"; }
         return;
       }
       acc.done++;
-      patchRow(tag, { campaignsDone: acc.done });
+      patchRow(runId, tag, { campaignsDone: acc.done });
     });
     // Settle: stopped → error("stopped"); any campaign failed → error; else done.
-    if (abortRef.current) patchRow(tag, { state: "error", error: "stopped", moved: acc.moved, skipped: acc.skipped });
-    else if (acc.failed > 0) patchRow(tag, { state: "error", error: `${acc.failed}/${camps.length} campaign${acc.failed === 1 ? "" : "s"} failed — ${lastError}`, moved: acc.moved, skipped: acc.skipped });
-    else patchRow(tag, { state: "done", moved: acc.moved, skipped: acc.skipped });
+    const tally = { moved: acc.moved, skipped: acc.skippedArea, skippedLane: acc.skippedLane, skippedNoDest: acc.skippedNoDest };
+    if (abortRef.current) patchRow(runId, tag, { state: "error", error: "stopped", ...tally });
+    else if (acc.failed > 0) patchRow(runId, tag, { state: "error", error: `${acc.failed}/${camps.length} campaign${acc.failed === 1 ? "" : "s"} failed — ${lastError}`, ...tally });
+    else patchRow(runId, tag, { state: "done", ...tally });
   }
 
-  async function runMigration(tags: string[]) {
-    if (running) return;
-    const planned = tags.map((t) => plan.get(t)).filter(Boolean) as ClientPlan[];
+  // Run ONE whole migration entry to completion. Called only from the serial
+  // chain, so exactly one runs at a time — no cross-run mixing.
+  async function executeMigration(runId: string) {
+    const entry = crossMovesRef.current.find((m) => m.runId === runId);
+    if (!entry) return; // cancelled while queued
+    abortRef.current = false;
+    abortCtlRef.current = new AbortController();
+    setEntryStatus(runId, "running");
+    try {
+      // Parallelise across CLIENTS; within each client its campaigns also run in
+      // parallel. Total in-flight cursor streams ≈ CLIENT_CONCURRENCY × CAMPAIGN_CONCURRENCY.
+      await pool(entry.clients, CLIENT_CONCURRENCY, (p) => migrateClientCampaigns(entry, p, CAMPAIGN_CONCURRENCY));
+    } finally {
+      setEntryStatus(runId, "done");
+    }
+    if (!abortRef.current) {
+      const n = entry.clients.length;
+      toast.success(`${entry.toLabel} migration finished (${n} client${n === 1 ? "" : "s"}). Sources unchanged — pause/archive them in Bison.`);
+    }
+  }
+
+  // Append a unit of work to the serial chain — guarantees one-at-a-time ordering.
+  function runExclusive(fn: () => Promise<void>) {
+    chainRef.current = chainRef.current.then(fn, fn).catch(() => {});
+  }
+
+  function enqueueMigration(tags: string[]) {
+    if (from === to) { toast.error("Pick different From and To instances."); return; }
+    const planned = tags.map((t) => plan.get(t)).filter((p): p is ClientPlan => !!p && p.totalLeads > 0);
     if (!planned.length) { toast.error("Nothing planned — run Plan first."); return; }
+
+    // Freeze EVERY run parameter now, so later plan/instance changes can't leak in.
+    const runId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    const toLbl = BISON_INSTANCES.find((i) => i.key === to)?.label || to;
+    const targetLane = getInstanceLane(to);
     const rows: MoveClientRow[] = planned.map((p) => ({
-      tag: p.tag, state: "queued", totalLeads: p.totalLeads, moved: 0, skipped: 0,
-      campaignsTotal: p.sourceCampaigns.filter((c) => p.match[c.esp]).length, campaignsDone: 0,
+      tag: p.tag, state: "queued", totalLeads: p.totalLeads, moved: 0, skipped: 0, skippedLane: 0, skippedNoDest: 0,
+      campaignsTotal: p.sourceCampaigns.length, campaignsDone: 0,
       retries: 0, unmatchedEsps: p.unmatchedEsps, serviceArea: serviceAreaFilter ? p.hasServiceArea : false,
     }));
-    setMigration({ status: "running", from, to, rows });
-    setRunning(true);
-    abortRef.current = false;
-    abortCtlRef.current = new AbortController();
-    runIdRef.current = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}`;
-    // Parallelise across CLIENTS; within each client its campaigns also run in
-    // parallel. Total in-flight cursor streams ≈ CLIENT_CONCURRENCY × CAMPAIGN_CONCURRENCY,
-    // capped so we hit Bison hard without tripping sustained rate-limits.
-    await pool(planned, CLIENT_CONCURRENCY, (p) => migrateClientCampaigns(p, CAMPAIGN_CONCURRENCY));
-    setMigration((m) => m && { ...m, status: "done" });
-    setRunning(false);
-    const total = rows.length;
-    toast.success(`Migration finished (${total} client${total === 1 ? "" : "s"}). Remember to pause/archive the source campaigns.`);
+    const entry: CrossMoveEntry = {
+      runId, status: "queued", from, to, toLabel: toLbl, targetLane, serviceAreaFilter,
+      clients: planned.slice(),
+      state: { status: "queued", from, to, lane: targetLane, rows },
+    };
+    setCrossMovesSynced((prev) => [...prev, entry]);
+    runExclusive(() => executeMigration(runId));
+    const active = crossMovesRef.current.filter((m) => m.status === "queued" || m.status === "running").length;
+    toast.success(active > 1 ? `${toLbl} migration queued — position ${active}.` : `${toLbl} migration started.`);
   }
 
-  async function retryClient(tag: string) {
-    const p = plan.get(tag); if (!p) return;
-    abortRef.current = false;
-    abortCtlRef.current = new AbortController();
-    setRunning(true);
-    patchRow(tag, { state: "queued", moved: 0, skipped: 0, campaignsDone: 0, error: undefined, retryAttempt: null });
-    await migrateClientCampaigns(p, CAMPAIGN_CONCURRENCY);
-    setRunning(false);
+  // Retry one failed/errored client — serialized through the chain so it never
+  // runs alongside another migration.
+  function retryClient(runId: string, tag: string) {
+    runExclusive(async () => {
+      const entry = crossMovesRef.current.find((m) => m.runId === runId);
+      if (!entry) return;
+      const p = entry.clients.find((c) => c.tag === tag);
+      if (!p) return;
+      abortRef.current = false;
+      abortCtlRef.current = new AbortController();
+      setEntryStatus(runId, "running");
+      patchRow(runId, tag, { state: "queued", moved: 0, skipped: 0, skippedLane: 0, skippedNoDest: 0, campaignsDone: 0, error: undefined, retryAttempt: null });
+      try { await migrateClientCampaigns(entry, p, CAMPAIGN_CONCURRENCY); } finally { setEntryStatus(runId, "done"); }
+    });
   }
 
-  // Download the current run's skipped (out-of-area) leads as CSV.
-  const exportSkipped = useCallback(() => {
-    const rid = runIdRef.current;
-    if (!rid) return;
-    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(rid)}`, "_blank");
+  // Download a run's skipped (out-of-area) leads as CSV.
+  const exportSkipped = useCallback((runId: string) => {
+    if (!runId) return;
+    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(runId)}`, "_blank");
   }, []);
 
   const plannedSelected = useMemo(() => [...selected].filter((t) => plan.get(t) && plan.get(t)!.totalLeads > 0), [selected, plan]);
   const toLabel = useMemo(() => BISON_INSTANCES.find((i) => i.key === to)?.label || to, [to]);
+  const targetLane = useMemo(() => getInstanceLane(to), [to]);
+  const laneLabel = targetLane === "b2b" ? "B2B" : "B2C";
+  const anyActive = crossMoves.some((m) => m.status === "running" || m.status === "queued");
+
+  // Migrations are driven from THIS browser tab — closing/reloading it stops them
+  // (there is no server-side runner). Warn before the user leaves mid-migration.
+  useEffect(() => {
+    if (!anyActive) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [anyActive]);
+
+  // Running first, then queued, then done — active work stays on top; keyed by
+  // runId so reordering never remounts a panel.
+  const orderedMoves = useMemo(() => {
+    const rank = (s: CrossMoveStatus) => (s === "running" ? 0 : s === "queued" ? 1 : 2);
+    return [...crossMoves].sort((a, b) => rank(a.status) - rank(b.status));
+  }, [crossMoves]);
 
   // Batch preview: ready to migrate vs flagged (missing campaigns), computed over selected+planned clients.
   const summary = useMemo(() => {
@@ -287,9 +399,7 @@ export default function MigratePage() {
     const partial = rows.filter((r) => r.status === "partial");
     const blocked = rows.filter((r) => r.status === "blocked");
     const empty = rows.filter((r) => r.status === "empty");
-    const readyLeads = [...ready, ...partial].reduce((s, r) => s + (r.status === "partial"
-      ? r.sourceCampaigns.filter((c) => r.match[c.esp]).reduce((a, c) => a + c.total_leads, 0)
-      : r.totalLeads), 0);
+    const readyLeads = [...ready, ...partial].reduce((s, r) => s + r.totalLeads, 0);
     return { total: rows.length, ready, partial, blocked, empty, readyLeads };
   }, [selected, plan]);
 
@@ -298,14 +408,25 @@ export default function MigratePage() {
       <div>
         <h1 className="text-[26px] font-semibold tracking-tight">Move Leads</h1>
         <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-          Move a client&apos;s leads between Bison instances (Cross Instance) or between campaigns within one instance (Same Instance), matched by ESP. Copy-only.
+          Move a client&apos;s leads between Bison instances (Cross Instance) or between campaigns within one instance (Same Instance). Each lead is routed by its lane (business→B2B, personal→B2C) and its ESP. Copy-only.
         </p>
       </div>
 
-      {/* Persistent progress panels — ABOVE the tabs, always visible so a running
-          move (Cross or Same) stays shown when you switch tabs. */}
-      {migration && <MigrationPanel state={migration} running={running} onStop={stopMigration} onClose={() => setMigration(null)} onRetry={retryClient} onExportSkipped={exportSkipped} />}
-      {migration && <SkippedViewer runId={runIdRef.current} onExport={exportSkipped} />}
+      {/* Persistent progress panels — ABOVE the tabs, always visible so running/
+          queued moves (Cross or Same) stay shown when you switch tabs. */}
+      {orderedMoves.map((m) => (
+        <div key={m.runId} className="space-y-2">
+          <MigrationPanel
+            state={m.state}
+            running={m.status === "running"}
+            onStop={() => stopMove(m.runId)}
+            onClose={() => closeMove(m.runId)}
+            onRetry={(tag) => retryClient(m.runId, tag)}
+            onExportSkipped={() => exportSkipped(m.runId)}
+          />
+          {m.status !== "queued" && <SkippedViewer runId={m.runId} onExport={() => exportSkipped(m.runId)} />}
+        </div>
+      ))}
       <div ref={setSamePanelSlot} className="empty:hidden" />
 
       {/* Tabs */}
@@ -331,14 +452,19 @@ export default function MigratePage() {
           <button onClick={loadPlan} disabled={planning || !selected.size} className="inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50">
             {planning ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />} Plan {selected.size || ""} client{selected.size === 1 ? "" : "s"}
           </button>
-          <button onClick={() => runMigration([...selected])} disabled={running || !plannedSelected.length} className="inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-            {running ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />} Migrate {plannedSelected.length || ""}
+          <button onClick={() => enqueueMigration([...selected])} disabled={!plannedSelected.length} title={anyActive ? "A migration is already running — this adds another to the queue" : undefined} className="inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+            {anyActive ? <Plus className="size-3.5" /> : <Zap className="size-3.5" />} {anyActive ? "Queue" : "Migrate"} {plannedSelected.length || ""}
           </button>
+        </div>
+        {/* Lane note — the To instance decides which leads move */}
+        <div className="w-full flex items-center gap-2 pt-3 mt-1 border-t text-xs text-muted-foreground">
+          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${targetLane === "b2b" ? "bg-indigo-50 text-indigo-700 border-indigo-200" : "bg-amber-50 text-amber-700 border-amber-200"}`}>{laneLabel}</span>
+          <span>{toLabel} is a <span className="font-medium text-foreground">{laneLabel}</span> instance — only <span className="font-medium text-foreground">{targetLane === "b2b" ? "business" : "personal"}-email</span> leads move here, each routed by its own ESP (Google/Outlook/SEGs). {targetLane === "b2b" ? "Personal" : "Business"} leads are skipped — move them in a separate run to the {targetLane === "b2b" ? "B2C" : "B2B"} instance.</span>
         </div>
         {/* Service-area gate */}
         <div className="w-full flex items-center gap-2 pt-3 mt-1 border-t">
           <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
-            <input type="checkbox" checked={serviceAreaFilter} disabled={running} onChange={(e) => setServiceAreaFilter(e.target.checked)} className="size-4 rounded border-muted-foreground/40" />
+            <input type="checkbox" checked={serviceAreaFilter} onChange={(e) => setServiceAreaFilter(e.target.checked)} className="size-4 rounded border-muted-foreground/40" />
             <MapPin className="size-3.5 text-muted-foreground" />
             <span className="font-medium">Service-area filter</span>
           </label>
@@ -360,7 +486,7 @@ export default function MigratePage() {
             {summary.blocked.length > 0 && <SummaryPill tone="rose" n={summary.blocked.length} label="blocked" />}
             {summary.empty.length > 0 && <SummaryPill tone="slate" n={summary.empty.length} label="no leads" />}
             <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-              <span className="text-foreground font-semibold">{summary.readyLeads.toLocaleString()}</span> leads will move
+              up to <span className="text-foreground font-semibold">{summary.readyLeads.toLocaleString()}</span> leads · only {laneLabel} leads move
             </span>
           </div>
           {(summary.blocked.length > 0 || summary.partial.length > 0) && (
@@ -368,13 +494,13 @@ export default function MigratePage() {
               {summary.blocked.length > 0 && (
                 <p className="flex items-start gap-1.5 text-rose-700">
                   <AlertTriangle className="size-3.5 shrink-0 mt-px" />
-                  <span><span className="font-semibold">No campaigns in {toLabel}</span> for {summary.blocked.map((r) => r.tag).join(", ")} — these will be skipped. Create the matching nurture campaigns in {toLabel} first.</span>
+                  <span><span className="font-semibold">No campaigns in {toLabel}</span> for {summary.blocked.map((r) => r.tag).join(", ")} — these will be skipped. Create the matching campaigns in {toLabel} first.</span>
                 </p>
               )}
               {summary.partial.length > 0 && (
                 <p className="flex items-start gap-1.5 text-amber-700">
                   <AlertTriangle className="size-3.5 shrink-0 mt-px" />
-                  <span><span className="font-semibold">Missing some ESPs:</span> {summary.partial.map((r) => `${r.tag} (${r.unmatchedEsps.map((e) => ESP_LABEL[e]).join(", ")})`).join("; ")} — matched ESPs move, the rest are skipped.</span>
+                  <span><span className="font-semibold">Missing some ESPs:</span> {summary.partial.map((r) => `${r.tag} (${r.unmatchedEsps.map((e) => ESP_LABEL[e]).join(", ")})`).join("; ")} — leads of a missing ESP are skipped (create that ESP&apos;s campaign in {toLabel}).</span>
                 </p>
               )}
             </div>
@@ -434,7 +560,7 @@ export default function MigratePage() {
                     <span className="tabular-nums"><span className="text-foreground font-medium">{p.totalLeads.toLocaleString()}</span> leads · {p.sourceCampaigns.length} campaigns</span>
                     {p.status === "blocked" && <span className="text-rose-700">no <span className="font-medium">{tag}</span> campaigns in {toLabel}</span>}
                     {p.status !== "blocked" && matchedEsps.length > 0 && (
-                      <span className="inline-flex items-center gap-1 text-emerald-700"><Check className="size-3" /> {matchedEsps.map((e) => ESP_LABEL[e]).join(", ")} → {toLabel}</span>
+                      <span className="inline-flex items-center gap-1 text-emerald-700"><Check className="size-3" /> {matchedEsps.map((e) => ESP_LABEL[e]).join(", ")} → {toLabel} ({laneLabel})</span>
                     )}
                     {p.status === "partial" && p.unmatchedEsps.length > 0 && (
                       <span className="inline-flex items-center gap-1 text-amber-700"><AlertTriangle className="size-3" /> no {p.unmatchedEsps.map((e) => ESP_LABEL[e]).join(", ")} campaign in {toLabel}</span>
