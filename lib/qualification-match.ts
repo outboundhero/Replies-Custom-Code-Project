@@ -155,7 +155,7 @@ export interface FitMatch {
 }
 
 export interface MatchResult {
-  match: { tag: string; reason: string } | null;   // best fit (location full + industry not excluded)
+  match: { tag: string; reason: string; matched?: string } | null;   // best fit (location full + industry not excluded); `matched` = the exact coverage phrase that matched
   matches: FitMatch[];        // every classified candidate (best first), for the fit chips
   reason: string;             // human message (esp. for the no-match case)
   alternatives?: string[];    // other tags that fully cover it AND fit the industry
@@ -178,23 +178,24 @@ export function rankMatches(matches: FitMatch[]): FitMatch[] {
  * (location + industry) so the UI can show the best fit plus near-misses
  * ("location fit but not industry fit", "industry fit but not location fit").
  */
-export async function aiPickClient(query: string, candidates: Candidate[]): Promise<{ best: string | null; reason: string; matches: FitMatch[] }> {
+export async function aiPickClient(query: string, candidates: Candidate[]): Promise<{ best: string | null; reason: string; matched?: string; matches: FitMatch[] }> {
   if (!process.env.OPENAI_API_KEY) {
     // No key → heuristic: shortlist is location-plausible, so mark them partial.
     const matches: FitMatch[] = candidates.map((c) => ({ tag: c.tag, location: "partial", industry: "na", reason: `Location signal: ${c.coverage}. [AI unavailable]` }));
     const top = candidates[0];
-    return top ? { best: top.tag, reason: `Closest coverage match (${top.coverage}). [AI unavailable — heuristic pick]`, matches } : { best: null, reason: NO_MATCH_MSG, matches: [] };
+    return top ? { best: top.tag, reason: `Closest coverage match (${top.coverage}). [AI unavailable — heuristic pick]`, matched: top.coverage, matches } : { best: null, reason: NO_MATCH_MSG, matches: [] };
   }
   const system = [
     "You route a prospect (given a LOCATION and optionally an INDUSTRY) to the best-fit client, and you ALSO rate every other shortlisted client so a human can see near-misses.",
     "Each client has a COVERAGE area (where their prospects are) and EXCLUSIONS (industries they do NOT want).",
-    "Respond with ONLY JSON: { \"best\": string|null, \"reason\": string, \"matches\": [ { \"tag\": string, \"location\": \"full\"|\"partial\"|\"none\", \"industry\": \"fit\"|\"excluded\"|\"na\", \"reason\": string } ] }",
+    "Respond with ONLY JSON: { \"best\": string|null, \"reason\": string, \"matched\": string, \"matches\": [ { \"tag\": string, \"location\": \"full\"|\"partial\"|\"none\", \"industry\": \"fit\"|\"excluded\"|\"na\", \"reason\": string } ] }",
     "Include one matches[] entry for EVERY client in the shortlist. Use your own geography knowledge (a city belongs to its county/state).",
     "location: 'full' = coverage clearly includes the query location (its city, county, or an explicit statewide/nationwide area that contains it); 'partial' = coverage is the same STATE/region but the specific city/county isn't listed; 'none' = does not cover it.",
     "industry: if the query names NO industry/business-type, set 'na' for ALL. Otherwise 'excluded' if the client's EXCLUSIONS cover that industry, else 'fit'.",
     "best: the tag whose location is 'full' AND industry is not 'excluded'. PREFER the most specific regional client over a nationwide one. If none qualifies, best = null.",
-    "Each reason: ONE short clause (max 12 words) naming WHY (e.g. 'Spring Grove is in McHenry County, IL, which YBS covers' or 'Covers IL but only the Chicago metro').",
-    "If NO client covers the location at all (or all that do exclude the industry), set best=null and reason='" + NO_MATCH_MSG + "'.",
+    "reason (TOP-LEVEL, for the BEST pick): a SPECIFIC, verifiable justification the user can trust — do NOT write circular phrases like 'is included in its coverage area'. State (1) the geographic containment chain, naming the county/region (e.g. 'San Mateo is a city in San Mateo County, in the SF Bay Area'), (2) the EXACT entry in this client's coverage that matches (e.g. \"HS's coverage lists 'San Mateo County' / 'Bay Area'\"), and (3) if an industry was given, confirm it is not in this client's exclusions (name the industry). 1-2 full sentences. If best is null, reason='" + NO_MATCH_MSG + "'.",
+    "matched (TOP-LEVEL): copy the SHORT exact phrase from the best client's coverage that matched (e.g. 'San Mateo County' or 'statewide CA'), or '' if best is null.",
+    "matches[].reason: ONE short clause (max 12 words) for the chip (e.g. 'Covers IL but only the Chicago metro').",
   ].join("\n");
   const user = [
     `Query: ${query}`,
@@ -216,7 +217,7 @@ export async function aiPickClient(query: string, candidates: Candidate[]): Prom
     if (!res.ok) return { best: null, reason: NO_MATCH_MSG, matches: [] };
     const data = await res.json();
     const raw = (data?.choices?.[0]?.message?.content || "").trim();
-    const parsed = JSON.parse(raw) as { best?: string | null; reason?: string; matches?: Array<{ tag?: string; location?: string; industry?: string; reason?: string }> };
+    const parsed = JSON.parse(raw) as { best?: string | null; reason?: string; matched?: string; matches?: Array<{ tag?: string; location?: string; industry?: string; reason?: string }> };
     const valid = new Set(candidates.map((c) => c.tag));
     const loc = (v: unknown): FitMatch["location"] => (v === "full" || v === "partial" ? v : "none");
     const ind = (v: unknown): FitMatch["industry"] => (v === "fit" || v === "excluded" ? v : "na");
@@ -230,8 +231,12 @@ export async function aiPickClient(query: string, candidates: Candidate[]): Prom
       const fallback = matches.find((m) => m.location === "full" && m.industry !== "excluded");
       best = fallback?.tag || null;
     }
-    const reason = best ? (matches.find((m) => m.tag === best)?.reason || parsed.reason || "Matched.") : (parsed.reason || NO_MATCH_MSG);
-    return { best, reason, matches: rankMatches(matches) };
+    // Detailed top-level reason for the best pick; fall back to its chip reason.
+    const reason = best
+      ? ((parsed.reason || "").trim() || matches.find((m) => m.tag === best)?.reason || "Matched.")
+      : NO_MATCH_MSG;
+    const matched = best ? ((parsed.matched || "").trim() || undefined) : undefined;
+    return { best, reason, matched, matches: rankMatches(matches) };
   } catch {
     return { best: null, reason: NO_MATCH_MSG, matches: [] };
   }

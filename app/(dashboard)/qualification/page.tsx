@@ -32,7 +32,7 @@ export default function QualificationPage() {
   // "Find perfect client" matcher
   const [matchQuery, setMatchQuery] = useState("");
   const [matching, setMatching] = useState(false);
-  interface MatchResp { match: { tag: string; reason: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean; aiUsed?: boolean; candidatesConsidered?: number }
+  interface MatchResp { match: { tag: string; reason: string; matched?: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean; aiUsed?: boolean; candidatesConsidered?: number }
   const [matchResult, setMatchResult] = useState<MatchResp | null>(null);
 
   async function runMatch() {
@@ -160,7 +160,13 @@ export default function QualificationPage() {
                     <span className="inline-flex items-center rounded-md bg-green-600 px-2.5 py-1 text-sm font-mono font-bold text-white">{matchResult.match.tag}</span>
                     {matchResult.viaCache && <span className="text-[10px] text-green-700/70 bg-green-100 px-1.5 py-0.5 rounded">cached</span>}
                   </div>
-                  <p className="mt-2 text-sm text-green-900">{matchResult.match.reason}</p>
+                  <p className="mt-2 text-sm text-green-900 leading-relaxed">{matchResult.match.reason}</p>
+                  {matchResult.match.matched && (
+                    <p className="mt-1.5 text-xs text-green-800/90">
+                      <span className="font-semibold uppercase tracking-wider text-[10px] text-green-700/70">Matched rule</span>{" "}
+                      <span className="font-mono bg-green-100/70 rounded px-1.5 py-0.5">{matchResult.match.matched}</span>
+                    </p>
+                  )}
                   {matchResult.matches && <div className="[&_.text-muted-foreground]:text-green-700/70"><QualificationFitChips matches={matchResult.matches} bestTag={matchResult.match.tag} /></div>}
                 </div>
               ) : (

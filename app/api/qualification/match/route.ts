@@ -71,7 +71,7 @@ async function loadClients(): Promise<{ clients: QualClient[]; version: string }
   // active+cleaning set changes (synced_at on the qualifications table alone
   // wouldn't catch a status/type change). v3 = active+cleaning filter added.
   const roster = haveMeta ? `ac${[...activeCleaning].sort().join(",")}` : `c${[...churned].sort().join(",")}`;
-  const versioned = `v3|${version}|${roster}`;
+  const versioned = `v4|${version}|${roster}`;
   return { clients, version: versioned };
 }
 
@@ -110,7 +110,7 @@ export async function POST(req: NextRequest) {
         .filter((m) => m.tag !== pick.best && m.location === "full" && m.industry !== "excluded")
         .map((m) => m.tag);
       result = pick.best
-        ? { match: { tag: pick.best, reason: pick.reason }, matches: pick.matches, reason: pick.reason, alternatives, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true }
+        ? { match: { tag: pick.best, reason: pick.reason, matched: pick.matched }, matches: pick.matches, reason: pick.reason, alternatives, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true }
         : { match: null, matches: pick.matches, reason: pick.reason || NO_MATCH_MSG, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true };
     }
 

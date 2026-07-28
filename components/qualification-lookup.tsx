@@ -18,7 +18,7 @@ interface Client {
   inclusion_locations: string;
 }
 interface Section { id: number; name: string; clients: Client[] }
-interface MatchResp { match: { tag: string; reason: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean }
+interface MatchResp { match: { tag: string; reason: string; matched?: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean }
 
 export function QualificationLookup() {
   const [sections, setSections] = useState<Section[]>([]);
@@ -90,7 +90,10 @@ export function QualificationLookup() {
               <div className="rounded border border-green-300 bg-green-50 px-2.5 py-1.5">
                 <span className="font-mono font-bold text-green-700">{result.match.tag}</span>
                 {result.viaCache && <span className="ml-1 text-[9px] text-green-700/60 bg-green-100 px-1 rounded">cached</span>}
-                <p className="mt-0.5 text-green-900 text-[11px]">{result.match.reason}</p>
+                <p className="mt-0.5 text-green-900 text-[11px] leading-relaxed">{result.match.reason}</p>
+                {result.match.matched && (
+                  <p className="mt-1 text-[10px] text-green-800/90">Matched rule: <span className="font-mono bg-green-100/70 rounded px-1 py-0.5">{result.match.matched}</span></p>
+                )}
                 {result.matches && <QualificationFitChips matches={result.matches} bestTag={result.match.tag} size="sm" />}
               </div>
             ) : (
