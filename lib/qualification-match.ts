@@ -135,10 +135,23 @@ export function shortlist(clients: QualClient[], parsed: ParsedQuery, cap = 25):
   return [...regional, ...nationwide].slice(0, cap);
 }
 
+/** How well one candidate client fits the query, on each axis. */
+export interface FitMatch {
+  tag: string;
+  /** "full" = coverage includes the exact location; "partial" = same state/region
+   *  but the specific city/county isn't listed; "none" = doesn't cover it. */
+  location: "full" | "partial" | "none";
+  /** "fit" = doesn't exclude the query industry; "excluded" = exclusions cover it;
+   *  "na" = the query had no industry, so this axis doesn't apply. */
+  industry: "fit" | "excluded" | "na";
+  reason: string;
+}
+
 export interface MatchResult {
-  match: { tag: string; reason: string } | null;
+  match: { tag: string; reason: string } | null;   // best fit (location full + industry not excluded)
+  matches: FitMatch[];        // every classified candidate (best first), for the fit chips
   reason: string;             // human message (esp. for the no-match case)
-  alternatives?: string[];    // other covering tags
+  alternatives?: string[];    // other tags that fully cover it AND fit the industry
   candidatesConsidered: number;
   viaCache: boolean;
   aiUsed: boolean;
@@ -146,24 +159,35 @@ export interface MatchResult {
 
 const NO_MATCH_MSG = "No client tag matches this location or industry.";
 
-/** Run the AI over the shortlist. Returns best tag + reason, or null. */
-export async function aiPickClient(query: string, candidates: Candidate[]): Promise<{ tag: string | null; reason: string; alternatives?: string[] }> {
+/** Order matches: best (full+fit) → other full-location → partial → none; each by industry fit. */
+export function rankMatches(matches: FitMatch[]): FitMatch[] {
+  const locRank = { full: 0, partial: 1, none: 2 };
+  const indRank = { fit: 0, na: 1, excluded: 2 };
+  return [...matches].sort((a, b) => (locRank[a.location] - locRank[b.location]) || (indRank[a.industry] - indRank[b.industry]) || a.tag.localeCompare(b.tag));
+}
+
+/**
+ * Run the AI over the shortlist. Classifies EVERY candidate on both axes
+ * (location + industry) so the UI can show the best fit plus near-misses
+ * ("location fit but not industry fit", "industry fit but not location fit").
+ */
+export async function aiPickClient(query: string, candidates: Candidate[]): Promise<{ best: string | null; reason: string; matches: FitMatch[] }> {
   if (!process.env.OPENAI_API_KEY) {
-    // No key → fall back to the top shortlist entry (regional first).
+    // No key → heuristic: shortlist is location-plausible, so mark them partial.
+    const matches: FitMatch[] = candidates.map((c) => ({ tag: c.tag, location: "partial", industry: "na", reason: `Location signal: ${c.coverage}. [AI unavailable]` }));
     const top = candidates[0];
-    return top ? { tag: top.tag, reason: `Closest coverage match (${top.coverage}). [AI unavailable — heuristic pick]` } : { tag: null, reason: NO_MATCH_MSG };
+    return top ? { best: top.tag, reason: `Closest coverage match (${top.coverage}). [AI unavailable — heuristic pick]`, matches } : { best: null, reason: NO_MATCH_MSG, matches: [] };
   }
   const system = [
-    "You route a prospect (given a LOCATION and optionally an INDUSTRY) to the single best-fit client from a shortlist.",
+    "You route a prospect (given a LOCATION and optionally an INDUSTRY) to the best-fit client, and you ALSO rate every other shortlisted client so a human can see near-misses.",
     "Each client has a COVERAGE area (where their prospects are) and EXCLUSIONS (industries they do NOT want).",
-    "Respond with ONLY JSON: { \"tag\": string|null, \"reason\": string, \"alternatives\": string[] }",
-    "Rules:",
-    "  - Pick the client whose COVERAGE includes the query location. Use your own geography knowledge (a city belongs to its county/state).",
-    "  - PREFER the most specific regional client that covers the location over a nationwide one. Use a nationwide client only if no regional client covers it.",
-    "  - If an INDUSTRY is given, do NOT pick a client whose EXCLUSIONS cover that industry.",
-    "  - reason: one specific sentence naming WHY (e.g. 'Mt Airy is in Carroll County, MD, which PBS covers').",
-    "  - alternatives: other tags that also cover it (may be empty).",
-    "  - If NO client covers the location (or all that do exclude the industry), return tag=null and reason='" + NO_MATCH_MSG + "'.",
+    "Respond with ONLY JSON: { \"best\": string|null, \"reason\": string, \"matches\": [ { \"tag\": string, \"location\": \"full\"|\"partial\"|\"none\", \"industry\": \"fit\"|\"excluded\"|\"na\", \"reason\": string } ] }",
+    "Include one matches[] entry for EVERY client in the shortlist. Use your own geography knowledge (a city belongs to its county/state).",
+    "location: 'full' = coverage clearly includes the query location (its city, county, or an explicit statewide/nationwide area that contains it); 'partial' = coverage is the same STATE/region but the specific city/county isn't listed; 'none' = does not cover it.",
+    "industry: if the query names NO industry/business-type, set 'na' for ALL. Otherwise 'excluded' if the client's EXCLUSIONS cover that industry, else 'fit'.",
+    "best: the tag whose location is 'full' AND industry is not 'excluded'. PREFER the most specific regional client over a nationwide one. If none qualifies, best = null.",
+    "Each reason: one specific sentence naming WHY (e.g. 'Spring Grove is in McHenry County, IL, which YBS covers' or 'Covers IL but only the Chicago metro, not Spring Grove').",
+    "If NO client covers the location at all (or all that do exclude the industry), set best=null and reason='" + NO_MATCH_MSG + "'.",
   ].join("\n");
   const user = [
     `Query: ${query}`,
@@ -177,21 +201,32 @@ export async function aiPickClient(query: string, candidates: Candidate[]): Prom
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: "gpt-4o-mini", temperature: 0, max_tokens: 250,
+        model: "gpt-4o-mini", temperature: 0, max_tokens: 900,
         response_format: { type: "json_object" },
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
       }),
     });
-    if (!res.ok) return { tag: null, reason: NO_MATCH_MSG };
+    if (!res.ok) return { best: null, reason: NO_MATCH_MSG, matches: [] };
     const data = await res.json();
     const raw = (data?.choices?.[0]?.message?.content || "").trim();
-    const parsed = JSON.parse(raw) as { tag?: string | null; reason?: string; alternatives?: string[] };
-    const tag = (parsed.tag || "").trim() || null;
-    // Guard: the model must pick a tag that was actually in the shortlist.
-    if (tag && !candidates.some((c) => c.tag === tag)) return { tag: null, reason: NO_MATCH_MSG };
-    return { tag, reason: parsed.reason || (tag ? "Matched." : NO_MATCH_MSG), alternatives: (parsed.alternatives || []).filter((a) => candidates.some((c) => c.tag === a)) };
+    const parsed = JSON.parse(raw) as { best?: string | null; reason?: string; matches?: Array<{ tag?: string; location?: string; industry?: string; reason?: string }> };
+    const valid = new Set(candidates.map((c) => c.tag));
+    const loc = (v: unknown): FitMatch["location"] => (v === "full" || v === "partial" ? v : "none");
+    const ind = (v: unknown): FitMatch["industry"] => (v === "fit" || v === "excluded" ? v : "na");
+    const matches: FitMatch[] = (parsed.matches || [])
+      .filter((m) => m.tag && valid.has(m.tag.trim()))
+      .map((m) => ({ tag: (m.tag as string).trim(), location: loc(m.location), industry: ind(m.industry), reason: (m.reason || "").trim() || "Coverage match." }));
+    let best = (parsed.best || "").trim() || null;
+    // Guard: best must be in the shortlist AND actually a full-location, non-excluded fit.
+    if (best && !valid.has(best)) best = null;
+    if (best && !matches.some((m) => m.tag === best && m.location === "full" && m.industry !== "excluded")) {
+      const fallback = matches.find((m) => m.location === "full" && m.industry !== "excluded");
+      best = fallback?.tag || null;
+    }
+    const reason = best ? (matches.find((m) => m.tag === best)?.reason || parsed.reason || "Matched.") : (parsed.reason || NO_MATCH_MSG);
+    return { best, reason, matches: rankMatches(matches) };
   } catch {
-    return { tag: null, reason: NO_MATCH_MSG };
+    return { best: null, reason: NO_MATCH_MSG, matches: [] };
   }
 }
 

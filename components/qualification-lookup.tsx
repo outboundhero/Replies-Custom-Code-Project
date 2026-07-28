@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
+import { QualificationFitChips, type FitMatch } from "@/components/qualification-fit-chips";
 
 interface Client {
   tag: string;
@@ -17,7 +18,7 @@ interface Client {
   inclusion_locations: string;
 }
 interface Section { id: number; name: string; clients: Client[] }
-interface MatchResp { match: { tag: string; reason: string } | null; reason: string; alternatives?: string[]; viaCache?: boolean }
+interface MatchResp { match: { tag: string; reason: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean }
 
 export function QualificationLookup() {
   const [sections, setSections] = useState<Section[]>([]);
@@ -87,10 +88,15 @@ export function QualificationLookup() {
                 <span className="font-mono font-bold text-green-700">{result.match.tag}</span>
                 {result.viaCache && <span className="ml-1 text-[9px] text-green-700/60 bg-green-100 px-1 rounded">cached</span>}
                 <p className="mt-0.5 text-green-900 text-[11px]">{result.match.reason}</p>
-                {result.alternatives?.length ? <p className="mt-0.5 text-[10px] text-green-700">Also: {result.alternatives.join(", ")}</p> : null}
+                {result.matches && <QualificationFitChips matches={result.matches} bestTag={result.match.tag} size="sm" />}
               </div>
             ) : (
-              <div className="rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-800 text-[11px]">{result.reason}</div>
+              <div className="rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-800 text-[11px]">
+                {result.reason}
+                {result.matches && result.matches.some((m) => m.location !== "none") && (
+                  <QualificationFitChips matches={result.matches} bestTag={null} size="sm" />
+                )}
+              </div>
             )}
           </div>
         )}

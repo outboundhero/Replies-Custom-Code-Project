@@ -22,18 +22,32 @@ async function loadClients(): Promise<{ clients: QualClient[]; version: string }
     .from("client_qualifications")
     .select("client_abbreviation, exclusion_industries, inclusion_locations, synced_at");
   const rows = data || [];
+
+  // Churned clients must never be suggested. Same source qualify-lead uses:
+  // client_status.status === "Churned" (synced from the Client Tracker sheet).
+  const { data: statusRows } = await supabase.from("client_status").select("client_abbreviation, status");
+  const churned = new Set<string>();
+  for (const s of statusRows || []) {
+    if (String(s.status || "") === "Churned") churned.add(String(s.client_abbreviation || "").trim().toUpperCase());
+  }
+
   let version = "0";
-  const clients: QualClient[] = rows.map((r) => {
-    const sa = (r.synced_at as string | null) || "";
-    if (sa > version) version = sa;
-    return {
-      tag: r.client_abbreviation as string,
-      status: "",
-      exclusion_industries: (r.exclusion_industries as string | null) || "",
-      inclusion_locations: (r.inclusion_locations as string | null) || "",
-    };
-  });
-  return { clients, version };
+  const clients: QualClient[] = rows
+    .filter((r) => !churned.has(String(r.client_abbreviation || "").trim().toUpperCase()))
+    .map((r) => {
+      const sa = (r.synced_at as string | null) || "";
+      if (sa > version) version = sa;
+      return {
+        tag: r.client_abbreviation as string,
+        status: "",
+        exclusion_industries: (r.exclusion_industries as string | null) || "",
+        inclusion_locations: (r.inclusion_locations as string | null) || "",
+      };
+    });
+  // Fold the churned roster into the version so cache invalidates when a client
+  // churns/un-churns (its synced_at may not change on the qualifications table).
+  const versioned = `v2|${version}|c${[...churned].sort().join(",")}`;
+  return { clients, version: versioned };
 }
 
 export async function POST(req: NextRequest) {
@@ -63,12 +77,16 @@ export async function POST(req: NextRequest) {
     let result: MatchResult;
     if (candidates.length === 0) {
       // No plausible coverage → no AI call needed.
-      result = { match: null, reason: NO_MATCH_MSG, candidatesConsidered: 0, viaCache: false, aiUsed: false };
+      result = { match: null, matches: [], reason: NO_MATCH_MSG, candidatesConsidered: 0, viaCache: false, aiUsed: false };
     } else {
       const pick = await aiPickClient(query, candidates);
-      result = pick.tag
-        ? { match: { tag: pick.tag, reason: pick.reason }, reason: pick.reason, alternatives: pick.alternatives, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true }
-        : { match: null, reason: pick.reason || NO_MATCH_MSG, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true };
+      // Alternatives = other tags that fully cover it AND fit the industry (not the best).
+      const alternatives = pick.matches
+        .filter((m) => m.tag !== pick.best && m.location === "full" && m.industry !== "excluded")
+        .map((m) => m.tag);
+      result = pick.best
+        ? { match: { tag: pick.best, reason: pick.reason }, matches: pick.matches, reason: pick.reason, alternatives, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true }
+        : { match: null, matches: pick.matches, reason: pick.reason || NO_MATCH_MSG, candidatesConsidered: candidates.length, viaCache: false, aiUsed: true };
     }
 
     // ── Store in cache ──

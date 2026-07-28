@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { QualificationFitChips, type FitMatch } from "@/components/qualification-fit-chips";
 
 interface ClientQualification {
   tag: string;
@@ -31,7 +32,7 @@ export default function QualificationPage() {
   // "Find perfect client" matcher
   const [matchQuery, setMatchQuery] = useState("");
   const [matching, setMatching] = useState(false);
-  interface MatchResp { match: { tag: string; reason: string } | null; reason: string; alternatives?: string[]; viaCache?: boolean; aiUsed?: boolean; candidatesConsidered?: number }
+  interface MatchResp { match: { tag: string; reason: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean; aiUsed?: boolean; candidatesConsidered?: number }
   const [matchResult, setMatchResult] = useState<MatchResp | null>(null);
 
   async function runMatch() {
@@ -156,13 +157,14 @@ export default function QualificationPage() {
                     {matchResult.viaCache && <span className="text-[10px] text-green-700/70 bg-green-100 px-1.5 py-0.5 rounded">cached</span>}
                   </div>
                   <p className="mt-2 text-sm text-green-900">{matchResult.match.reason}</p>
-                  {matchResult.alternatives && matchResult.alternatives.length > 0 && (
-                    <p className="mt-1.5 text-xs text-green-700">Also covers this area: {matchResult.alternatives.map((a) => <span key={a} className="font-mono font-medium">{a} </span>)}</p>
-                  )}
+                  {matchResult.matches && <div className="[&_.text-muted-foreground]:text-green-700/70"><QualificationFitChips matches={matchResult.matches} bestTag={matchResult.match.tag} /></div>}
                 </div>
               ) : (
                 <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
                   <p className="text-sm text-amber-800">{matchResult.reason}</p>
+                  {matchResult.matches && matchResult.matches.some((m) => m.location !== "none") && (
+                    <QualificationFitChips matches={matchResult.matches} bestTag={null} />
+                  )}
                 </div>
               )}
             </div>
