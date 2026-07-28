@@ -81,10 +81,14 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const query = String(body.query || "").trim();
-    if (!query) return NextResponse.json({ error: "Empty query" }, { status: 400 });
+    // New shape: { location (required), industry (optional) }. Back-compat: a
+    // lone `query` string is treated as the location.
+    const location = String(body.location || body.query || "").trim();
+    const industry = String(body.industry || "").trim();
+    if (!location) return NextResponse.json({ error: "Location is required" }, { status: 400 });
 
-    const key = query.toLowerCase().replace(/\s+/g, " ");
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+    const key = `${norm(location)}||${norm(industry)}`;
     const { clients, version } = await loadClients();
 
     // ── Cache check (Turso). Data version invalidates on resync. ──
@@ -95,8 +99,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ...result, viaCache: true });
     }
 
-    // ── Compute ──
-    const parsed = parseQuery(query);
+    // ── Compute ── (shortlist on LOCATION only; industry never pollutes it)
+    const parsed = parseQuery(location);
     const candidates = shortlist(clients, parsed);
 
     let result: MatchResult;
@@ -104,7 +108,7 @@ export async function POST(req: NextRequest) {
       // No plausible coverage → no AI call needed.
       result = { match: null, matches: [], reason: NO_MATCH_MSG, candidatesConsidered: 0, viaCache: false, aiUsed: false };
     } else {
-      const pick = await aiPickClient(query, candidates);
+      const pick = await aiPickClient(location, candidates, industry);
       // Alternatives = other tags that fully cover it AND fit the industry (not the best).
       const alternatives = pick.matches
         .filter((m) => m.tag !== pick.best && m.location === "full" && m.industry !== "excluded")

@@ -27,8 +27,9 @@ export function QualificationLookup() {
   const debounced = useDebouncedValue(search, 200);
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  // Find-perfect-client
-  const [q, setQ] = useState("");
+  // Find-perfect-client — Location (required) + Industry (optional)
+  const [location, setLocation] = useState("");
+  const [industry, setIndustry] = useState("");
   const [matching, setMatching] = useState(false);
   const [result, setResult] = useState<MatchResp | null>(null);
 
@@ -59,12 +60,13 @@ export function QualificationLookup() {
   }, [clients, debounced]);
 
   async function runMatch() {
-    const query = q.trim();
-    if (!query || matching) return;
+    const loc = location.trim();
+    const ind = industry.trim();
+    if (!loc || matching) return;
     setMatching(true); setResult(null);
     try {
       const res = await fetch("/api/qualification/match", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location: loc, industry: ind }),
       });
       const text = await res.text();
       let d: MatchResp | null = null;
@@ -80,9 +82,12 @@ export function QualificationLookup() {
       {/* Find perfect client */}
       <div className="border-b bg-primary/[0.03] px-4 py-3">
         <p className="text-[11px] font-semibold mb-1.5">Find the perfect client</p>
-        <div className="flex gap-2">
-          <Input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }} placeholder="e.g. Mt Airy MD, dental" className="h-8 text-xs" />
-          <Button size="sm" className="h-8 text-xs shrink-0" onClick={runMatch} disabled={matching || !q.trim()}>{matching ? "…" : "Find"}</Button>
+        <div className="space-y-1.5">
+          <div className="flex gap-2">
+            <Input value={location} onChange={(e) => setLocation(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }} placeholder="Location (required) — e.g. Mt Airy, MD" className="h-8 text-xs" />
+            <Button size="sm" className="h-8 text-xs shrink-0" onClick={runMatch} disabled={matching || !location.trim()}>{matching ? "…" : "Find"}</Button>
+          </div>
+          <Input value={industry} onChange={(e) => setIndustry(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }} placeholder="Industry (optional) — e.g. dental" className="h-8 text-xs" />
         </div>
         {result && (
           <div className="mt-2 text-xs">

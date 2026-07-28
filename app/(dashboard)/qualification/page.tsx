@@ -29,19 +29,21 @@ export default function QualificationPage() {
   const [expandedTag, setExpandedTag] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
-  // "Find perfect client" matcher
-  const [matchQuery, setMatchQuery] = useState("");
+  // "Find perfect client" matcher — separate Location (required) + Industry (optional)
+  const [matchLocation, setMatchLocation] = useState("");
+  const [matchIndustry, setMatchIndustry] = useState("");
   const [matching, setMatching] = useState(false);
   interface MatchResp { match: { tag: string; reason: string; matched?: string } | null; matches?: FitMatch[]; reason: string; alternatives?: string[]; viaCache?: boolean; aiUsed?: boolean; candidatesConsidered?: number }
   const [matchResult, setMatchResult] = useState<MatchResp | null>(null);
 
   async function runMatch() {
-    const q = matchQuery.trim();
-    if (!q || matching) return;
+    const location = matchLocation.trim();
+    const industry = matchIndustry.trim();
+    if (!location || matching) return;
     setMatching(true); setMatchResult(null);
     try {
       const res = await fetch("/api/qualification/match", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location, industry }),
       });
       // Read as text first — a platform timeout/crash returns an HTML/plaintext
       // error page, not JSON, so res.json() would throw "Unexpected token".
@@ -137,16 +139,29 @@ export default function QualificationPage() {
             <svg className="h-4 w-4 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M12 21s-6-5.686-6-10a6 6 0 1 1 12 0c0 4.314-6 10-6 10z" /><circle cx="12" cy="11" r="2" /></svg>
             <h3 className="text-sm font-semibold">Find the perfect client</h3>
           </div>
-          <p className="text-xs text-muted-foreground mb-3">Enter a location (and optionally an industry) — e.g. <span className="font-medium">Mt Airy MD</span> or <span className="font-medium">Chicago IL, dental</span>. Matches against every client&apos;s location + industry rules.</p>
-          <div className="flex gap-2 max-w-2xl">
-            <Input
-              placeholder="e.g. Mt Airy MD"
-              value={matchQuery}
-              onChange={(e) => setMatchQuery(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }}
-              className="h-10"
-            />
-            <Button onClick={runMatch} disabled={matching || !matchQuery.trim()} className="h-10 px-5 shrink-0">
+          <p className="text-xs text-muted-foreground mb-3">Enter a <span className="font-medium">location</span> (required) and optionally an <span className="font-medium">industry</span>. Industry is only sent to the AI when you fill it in. Matches against every client&apos;s location + industry rules.</p>
+          <div className="flex flex-col sm:flex-row gap-2 max-w-2xl">
+            <div className="flex-1">
+              <label className="block text-[11px] font-medium text-muted-foreground mb-1">Location <span className="text-rose-500">*</span></label>
+              <Input
+                placeholder="e.g. Mt Airy, MD"
+                value={matchLocation}
+                onChange={(e) => setMatchLocation(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }}
+                className="h-10"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-[11px] font-medium text-muted-foreground mb-1">Industry <span className="text-muted-foreground/60">(optional)</span></label>
+              <Input
+                placeholder="e.g. dental"
+                value={matchIndustry}
+                onChange={(e) => setMatchIndustry(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }}
+                className="h-10"
+              />
+            </div>
+            <Button onClick={runMatch} disabled={matching || !matchLocation.trim()} className="h-10 px-5 shrink-0 sm:self-end">
               {matching ? "Finding…" : "Find client"}
             </Button>
           </div>

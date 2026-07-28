@@ -178,7 +178,8 @@ export function rankMatches(matches: FitMatch[]): FitMatch[] {
  * (location + industry) so the UI can show the best fit plus near-misses
  * ("location fit but not industry fit", "industry fit but not location fit").
  */
-export async function aiPickClient(query: string, candidates: Candidate[]): Promise<{ best: string | null; reason: string; matched?: string; matches: FitMatch[] }> {
+export async function aiPickClient(location: string, candidates: Candidate[], industry?: string): Promise<{ best: string | null; reason: string; matched?: string; matches: FitMatch[] }> {
+  const ind = (industry || "").trim();
   if (!process.env.OPENAI_API_KEY) {
     // No key → heuristic: shortlist is location-plausible, so mark them partial.
     const matches: FitMatch[] = candidates.map((c) => ({ tag: c.tag, location: "partial", industry: "na", reason: `Location signal: ${c.coverage}. [AI unavailable]` }));
@@ -191,14 +192,15 @@ export async function aiPickClient(query: string, candidates: Candidate[]): Prom
     "Respond with ONLY JSON: { \"best\": string|null, \"reason\": string, \"matched\": string, \"matches\": [ { \"tag\": string, \"location\": \"full\"|\"partial\"|\"none\", \"industry\": \"fit\"|\"excluded\"|\"na\", \"reason\": string } ] }",
     "Include one matches[] entry for EVERY client in the shortlist. Use your own geography knowledge (a city belongs to its county/state).",
     "location: 'full' = coverage clearly includes the query location (its city, county, or an explicit statewide/nationwide area that contains it); 'partial' = coverage is the same STATE/region but the specific city/county isn't listed; 'none' = does not cover it.",
-    "industry: if the query names NO industry/business-type, set 'na' for ALL. Otherwise 'excluded' if the client's EXCLUSIONS cover that industry, else 'fit'.",
+    "industry: if NO Industry is provided below, set 'na' for ALL. Otherwise 'excluded' if the client's EXCLUSIONS cover that industry, else 'fit'.",
     "best: the tag whose location is 'full' AND industry is not 'excluded'. PREFER the most specific regional client over a nationwide one. If none qualifies, best = null.",
     "reason (TOP-LEVEL, for the BEST pick): a SPECIFIC, verifiable justification the user can trust — do NOT write circular phrases like 'is included in its coverage area'. State (1) the geographic containment chain, naming the county/region (e.g. 'San Mateo is a city in San Mateo County, in the SF Bay Area'), (2) the EXACT entry in this client's coverage that matches (e.g. \"HS's coverage lists 'San Mateo County' / 'Bay Area'\"), and (3) if an industry was given, confirm it is not in this client's exclusions (name the industry). 1-2 full sentences. If best is null, reason='" + NO_MATCH_MSG + "'.",
     "matched (TOP-LEVEL): copy the SHORT exact phrase from the best client's coverage that matched (e.g. 'San Mateo County' or 'statewide CA'), or '' if best is null.",
     "matches[].reason: ONE short clause (max 12 words) for the chip (e.g. 'Covers IL but only the Chicago metro').",
   ].join("\n");
   const user = [
-    `Query: ${query}`,
+    `Location: ${location}`,
+    ind ? `Industry: ${ind}` : "Industry: (none provided — set industry='na' for every client)",
     "",
     "Shortlist:",
     ...candidates.map((c) => `- ${c.tag} | coverage: ${c.coverage}${c.exclusions ? ` | excludes: ${c.exclusions}` : ""}`),
