@@ -33,7 +33,10 @@ export const US_STATES: Record<string, string> = {
   DC: "District of Columbia",
 };
 
-const NATIONWIDE_RE = /\b(usa|u\.s\.a\.|united states|nationwide|national|all (?:of )?(?:us|usa|states)|contiguous united states|entire (?:us|country))\b/i;
+// NB: bare "national" is intentionally NOT here — it false-matches city names
+// like "National City, CA" / "National Harbor, MD", flagging a regional client
+// as nationwide. Use "nationwide"/"nationally"/"national coverage" instead.
+const NATIONWIDE_RE = /\b(usa|u\.s\.a\.|united states|nationwide|nationally|national coverage|all (?:of )?(?:us|usa|states)|contiguous united states|entire (?:us|country))\b/i;
 
 export interface ParsedQuery {
   stateAbbr: string | null;

@@ -23,17 +23,40 @@ async function loadClients(): Promise<{ clients: QualClient[]; version: string }
     .select("client_abbreviation, exclusion_industries, inclusion_locations, synced_at");
   const rows = data || [];
 
-  // Churned clients must never be suggested. Same source qualify-lead uses:
-  // client_status.status === "Churned" (synced from the Client Tracker sheet).
-  const { data: statusRows } = await supabase.from("client_status").select("client_abbreviation, status");
+  // Only suggest ACTIVE + CLEANING clients — same rule as the inbox
+  // suggested-client matcher (Turso client_meta: status "Active" + type
+  // "Cleaning"). Non-Cleaning clients (SI, MISC, TSM, …) and non-Active
+  // (Churned / Not Found / Paused) are never suggested. Falls open to
+  // "non-churned" if client_meta isn't populated yet.
+  let activeCleaning = new Set<string>();
+  try {
+    const meta = await db.execute("SELECT client_tag, client_type, status FROM client_meta");
+    for (const m of meta.rows) {
+      if (/^active$/i.test(String(m.status || "")) && /^cleaning$/i.test(String(m.client_type || ""))) {
+        activeCleaning.add(String(m.client_tag).trim().toUpperCase());
+      }
+    }
+  } catch { activeCleaning = new Set(); }
+  const haveMeta = activeCleaning.size > 0;
+
+  // Fallback churn set (used only when client_meta is unavailable). Same source
+  // qualify-lead uses: client_status.status === "Churned".
   const churned = new Set<string>();
-  for (const s of statusRows || []) {
-    if (String(s.status || "") === "Churned") churned.add(String(s.client_abbreviation || "").trim().toUpperCase());
+  if (!haveMeta) {
+    const { data: statusRows } = await supabase.from("client_status").select("client_abbreviation, status");
+    for (const s of statusRows || []) {
+      if (String(s.status || "") === "Churned") churned.add(String(s.client_abbreviation || "").trim().toUpperCase());
+    }
   }
+
+  const keep = (tag: string) => {
+    const t = tag.trim().toUpperCase();
+    return haveMeta ? activeCleaning.has(t) : !churned.has(t);
+  };
 
   let version = "0";
   const clients: QualClient[] = rows
-    .filter((r) => !churned.has(String(r.client_abbreviation || "").trim().toUpperCase()))
+    .filter((r) => keep(String(r.client_abbreviation || "")))
     .map((r) => {
       const sa = (r.synced_at as string | null) || "";
       if (sa > version) version = sa;
@@ -44,9 +67,11 @@ async function loadClients(): Promise<{ clients: QualClient[]; version: string }
         inclusion_locations: (r.inclusion_locations as string | null) || "",
       };
     });
-  // Fold the churned roster into the version so cache invalidates when a client
-  // churns/un-churns (its synced_at may not change on the qualifications table).
-  const versioned = `v2|${version}|c${[...churned].sort().join(",")}`;
+  // Fold the eligible roster into the version so cache invalidates when the
+  // active+cleaning set changes (synced_at on the qualifications table alone
+  // wouldn't catch a status/type change). v3 = active+cleaning filter added.
+  const roster = haveMeta ? `ac${[...activeCleaning].sort().join(",")}` : `c${[...churned].sort().join(",")}`;
+  const versioned = `v3|${version}|${roster}`;
   return { clients, version: versioned };
 }
 
