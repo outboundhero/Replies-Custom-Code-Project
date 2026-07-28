@@ -1363,20 +1363,6 @@ export default function InboxPage() {
               );
             })()}
 
-            {/* Category */}
-            <div className="flex items-center gap-3 rounded border bg-white px-4 py-3">
-              <span className="text-xs text-muted-foreground shrink-0">Category</span>
-              <SearchableCombobox
-                value={detail.lead_category || "Open Response"}
-                onValueChange={updateCategory}
-                options={LEAD_CATEGORIES}
-                placeholder="Open Response"
-                searchPlaceholder="Search categories..."
-                triggerClassName="w-52 h-8 text-xs"
-              />
-              {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
-            </div>
-
             {/* Client & Template — on every lead. Sync pulls the current
                 client's latest template + CC/BCC (with variables mapped);
                 Reallocate moves the lead to a different client tag and rewrites
@@ -1395,6 +1381,20 @@ export default function InboxPage() {
                 <Button size="sm" className="h-8 text-xs" onClick={handleRealloc} disabled={!reallocTag || sending === "realloc"}>{sending === "realloc" ? "…" : "Assign"}</Button>
                 <span className="text-[10px] text-muted-foreground">reroutes CC/BCC, template &amp; sheet</span>
               </div>
+            </div>
+
+            {/* Category — sits between Client & Template and Send Reply. */}
+            <div className="flex items-center gap-3 rounded border bg-white px-4 py-3">
+              <span className="text-xs text-muted-foreground shrink-0">Category</span>
+              <SearchableCombobox
+                value={detail.lead_category || "Open Response"}
+                onValueChange={updateCategory}
+                options={LEAD_CATEGORIES}
+                placeholder="Open Response"
+                searchPlaceholder="Search categories..."
+                triggerClassName="w-52 h-8 text-xs"
+              />
+              {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
             {/* ── Send Reply (with CC/BCC pre-populated) ── */}

@@ -7,6 +7,7 @@
  */
 
 import supabase from "@/lib/supabase";
+import db from "@/lib/db";
 import { fetchClientTracker, fetchOnboardingForm } from "@/lib/google-sheets";
 
 interface SyncResult {
@@ -76,6 +77,30 @@ export async function syncAll(): Promise<SyncResult> {
       .upsert(qualRecords, { onConflict: "client_abbreviation" });
 
     if (qualError) throw new Error(`Failed to sync client_qualifications: ${qualError.message}`);
+  }
+
+  // 3. Sync onboarding Status + Client Type into Turso client_meta. The
+  //    cross-client suggested-client matcher only suggests Active + Cleaning
+  //    clients (Non-Cleaning like SI/DM4PM/SC/OH, and non-Active, are excluded).
+  const metaMap = new Map<string, { tag: string; type: string; status: string }>();
+  for (const r of formRows) {
+    for (const tag of splitAbbreviations(r.clientAbbreviation)) {
+      metaMap.set(tag.toUpperCase(), { tag: tag.toUpperCase(), type: r.clientType || "", status: r.status || "" });
+    }
+  }
+  if (metaMap.size > 0) {
+    await db.execute("CREATE TABLE IF NOT EXISTS client_meta (client_tag TEXT PRIMARY KEY, client_type TEXT, status TEXT, synced_at TEXT)");
+    // Chunked upserts so a large roster doesn't exceed statement limits.
+    const rows = [...metaMap.values()];
+    for (let i = 0; i < rows.length; i += 50) {
+      const batch = rows.slice(i, i + 50);
+      await db.batch(
+        batch.map((m) => ({
+          sql: "INSERT INTO client_meta (client_tag, client_type, status, synced_at) VALUES (?, ?, ?, ?) ON CONFLICT(client_tag) DO UPDATE SET client_type = excluded.client_type, status = excluded.status, synced_at = excluded.synced_at",
+          args: [m.tag, m.type, m.status, now],
+        })),
+      );
+    }
   }
 
   return {

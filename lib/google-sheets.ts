@@ -169,6 +169,11 @@ export interface OnboardingFormRow {
    *  falling back to Column F "Company Address" when G is blank. Used by the
    *  location audit as the precise point to measure lead distance FROM. */
   hqAnchor: string;
+  /** "Status" column (Active / Not Found / Churned / Paused). */
+  status: string;
+  /** "Client Type" column (Cleaning / Non-Cleaning). Only Active+Cleaning
+   *  clients are suggested by the cross-client matcher. */
+  clientType: string;
 }
 
 export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
@@ -201,6 +206,8 @@ export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
   const hqIdx = findColumnIndex(headers, "Client Office ({City, State} or {ZIP})");
   const hqIdxLoose = hqIdx !== -1 ? hqIdx : findColumnStartsWith(headers, "Client Office");
   const addressIdx = findColumnStartsWith(headers, "Company Address");
+  const statusIdx = findColumnIndex(headers, "Status");
+  const typeIdx = findColumnIndex(headers, "Client Type");
 
   if (abbrIdx === -1) {
     throw new Error(`Onboarding Form: missing Client Abbreviation column`);
@@ -217,6 +224,8 @@ export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
         exclusionIndustries: exclusionIdx !== -1 ? (rows[i][exclusionIdx]?.toString()?.trim() || "") : "",
         inclusionLocations: inclusionIdx !== -1 ? (rows[i][inclusionIdx]?.toString()?.trim() || "") : "",
         hqAnchor: hq || addr,
+        status: statusIdx !== -1 ? (rows[i][statusIdx]?.toString()?.trim() || "") : "",
+        clientType: typeIdx !== -1 ? (rows[i][typeIdx]?.toString()?.trim() || "") : "",
       });
     }
   }

@@ -12,6 +12,7 @@
  */
 
 import supabase from "@/lib/supabase";
+import db from "@/lib/db";
 import { updateRecord } from "@/lib/airtable";
 import { logActivity, logError } from "@/lib/errors";
 import { enrichLead, type EnrichedLeadData } from "./enrich-lead";
@@ -302,15 +303,32 @@ async function findFittingClients(
     }
   }
 
-  // Candidates: any OTHER, NON-CHURNED client with a location signal (anchor or
-  // service area). Churned clients are dropped outright; inactive-but-not-churned
-  // ones stay in (flagged), since they may be mis-marked in the status sync.
-  const candidates = allRules.filter(
-    (r) =>
-      r.client_abbreviation !== excludeTag &&
-      !churnedTags.has(String(r.client_abbreviation).trim().toUpperCase()) &&
-      (r.inclusion_locations?.trim() || r.hq_anchor?.trim()),
-  );
+  // Only suggest ACTIVE + CLEANING clients (from the onboarding "Status" +
+  // "Client Type" columns, synced into Turso client_meta). Non-Cleaning clients
+  // (e.g. SI, DM4PM, SC, OH) and non-Active (Churned / Not Found / Paused) are
+  // never suggested. Falls open (suggest as before) if client_meta isn't
+  // populated yet, so this never blanks out suggestions pre-sync.
+  const activeCleaning = new Set<string>();
+  let haveMeta = false;
+  try {
+    const meta = await db.execute("SELECT client_tag, client_type, status FROM client_meta");
+    haveMeta = meta.rows.length > 0;
+    for (const m of meta.rows) {
+      if (/^active$/i.test(String(m.status || "")) && /^cleaning$/i.test(String(m.client_type || ""))) {
+        activeCleaning.add(String(m.client_tag).trim().toUpperCase());
+      }
+    }
+  } catch { /* table not created yet → fall open */ }
+
+  // Candidates: any OTHER client with a location signal that is Active+Cleaning.
+  // (When meta isn't available, fall back to the old rule: non-churned.)
+  const candidates = allRules.filter((r) => {
+    const t = String(r.client_abbreviation).trim().toUpperCase();
+    if (r.client_abbreviation === excludeTag) return false;
+    if (!(r.inclusion_locations?.trim() || r.hq_anchor?.trim())) return false;
+    if (haveMeta) return activeCleaning.has(t);
+    return !churnedTags.has(t);
+  });
   if (!candidates.length) return "";
 
   // Send EVERY non-churned candidate. The old slice(0, 40) silently dropped
