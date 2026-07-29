@@ -375,6 +375,9 @@ export default function InboxPage() {
   interface SendRow { id: number; status: string; error: string | null; created_at: string }
   const [history, setHistory] = useState<{ thread: ThreadMsg[]; sends: SendRow[] } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Collapse the rarely-used secondary send tools (Forward / One-Off) to keep
+  // the detail panel compact.
+  const [moreOpen, setMoreOpen] = useState(false);
   const loadSendHistory = useCallback(async (rid: number) => {
     try {
       const res = await fetch(`/api/inbox/${rid}/thread`);
@@ -1180,7 +1183,7 @@ export default function InboxPage() {
         {loading && <div className="flex items-center justify-center h-full"><p className="text-sm text-muted-foreground">Loading...</p></div>}
 
         {detail && !loading && (
-          <div className="p-5 max-w-2xl mx-auto space-y-3 pb-16">
+          <div className="p-4 max-w-2xl mx-auto space-y-2.5 pb-16">
             {/* Header */}
             <div className="flex items-start justify-between gap-3 pb-3 border-b">
               <div className="flex items-center gap-3 min-w-0">
@@ -1542,23 +1545,33 @@ export default function InboxPage() {
               </div>
             </div>
 
-            {/* ── Forward ── */}
-            <div className="rounded border bg-white px-4 py-3 flex items-end gap-2">
-              <div className="flex-1"><Label className="text-[10px] text-muted-foreground">Forward to</Label><Input value={fwdTo} onChange={(e) => setFwdTo(e.target.value)} placeholder="email@example.com" className="text-xs h-8" /></div>
-              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleFwd} disabled={sending === "fwd" || !fwdTo}>{sending === "fwd" ? "..." : confirmInline === "fwd" ? "Confirm?" : "Forward"}</Button>
-            </div>
-
-            {/* ── One-Off ── */}
-            <div className="rounded border bg-white px-4 py-3 space-y-2">
-              <p className="text-xs font-medium">One-Off Reply</p>
-              <div className="text-[11px] text-muted-foreground space-y-0.5">
-                <p><span className="font-medium text-foreground">From:</span> {detail.sender_email || "—"}</p>
-                <p><span className="font-medium text-foreground">To:</span> {detail.lead_name ? `${detail.lead_name} — ` : ""}{detail.lead_email}</p>
-              </div>
-              <Input value={ooSubject} onChange={(e) => setOoSubject(e.target.value)} placeholder="Subject" className="text-xs h-8" />
-              <Textarea value={ooMsg} onChange={(e) => setOoMsg(e.target.value)} rows={3} placeholder="Message" className="text-sm" />
-              <RecipientList label="CC Recipients" value={ooCc} onChange={setOoCc} max={6} addLabel="Add CC" />
-              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleOneOff} disabled={sending === "oo" || !ooMsg || !ooSubject}>{sending === "oo" ? "..." : confirmInline === "oo" ? "Confirm & Send" : "Send"}</Button>
+            {/* ── More actions (Forward / One-Off) — collapsed by default ── */}
+            <div className="rounded border bg-white">
+              <button onClick={() => setMoreOpen((o) => !o)} className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium">
+                <span>More actions <span className="font-normal text-muted-foreground">— forward, one-off reply</span></span>
+                <span className="text-muted-foreground">{moreOpen ? "▲" : "▼"}</span>
+              </button>
+              {moreOpen && (
+                <div className="px-4 pb-3 space-y-3 border-t pt-3">
+                  {/* Forward */}
+                  <div className="flex items-end gap-2">
+                    <div className="flex-1"><Label className="text-[10px] text-muted-foreground">Forward to</Label><Input value={fwdTo} onChange={(e) => setFwdTo(e.target.value)} placeholder="email@example.com" className="text-xs h-8" /></div>
+                    <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleFwd} disabled={sending === "fwd" || !fwdTo}>{sending === "fwd" ? "..." : confirmInline === "fwd" ? "Confirm?" : "Forward"}</Button>
+                  </div>
+                  {/* One-Off */}
+                  <div className="space-y-2 border-t pt-3">
+                    <p className="text-xs font-medium">One-Off Reply</p>
+                    <div className="text-[11px] text-muted-foreground space-y-0.5">
+                      <p><span className="font-medium text-foreground">From:</span> {detail.sender_email || "—"}</p>
+                      <p><span className="font-medium text-foreground">To:</span> {detail.lead_name ? `${detail.lead_name} — ` : ""}{detail.lead_email}</p>
+                    </div>
+                    <Input value={ooSubject} onChange={(e) => setOoSubject(e.target.value)} placeholder="Subject" className="text-xs h-8" />
+                    <Textarea value={ooMsg} onChange={(e) => setOoMsg(e.target.value)} rows={3} placeholder="Message" className="text-sm" />
+                    <RecipientList label="CC Recipients" value={ooCc} onChange={setOoCc} max={6} addLabel="Add CC" />
+                    <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleOneOff} disabled={sending === "oo" || !ooMsg || !ooSubject}>{sending === "oo" ? "..." : confirmInline === "oo" ? "Confirm & Send" : "Send"}</Button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Notes */}
