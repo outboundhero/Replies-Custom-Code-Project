@@ -13,6 +13,8 @@ import db from "@/lib/db";
 import { resolveTemplate } from "@/lib/processing/template-resolver";
 import { generateReplyFromTemplate } from "@/lib/processing/generate-reply";
 import { stripQuotedHistory } from "@/lib/qualification/strip-quoted";
+import { buildConversationThread, threadToPrompt } from "@/lib/inbox/conversation-thread";
+import { coerceInstance } from "@/lib/bison-instances";
 
 export const maxDuration = 45;
 
@@ -21,12 +23,12 @@ export async function POST(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const { id } = await req.json();
+    const { id, instructions } = await req.json();
     if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 
     const { data: r, error } = await supabase
       .from("replies")
-      .select("client_tag, first_name, lead_name, company_name, phone, sender_name, reply_we_got, email_subject")
+      .select("client_tag, first_name, lead_name, company_name, phone, sender_name, reply_we_got, email_subject, reply_id, lead_id, campaign_id, bison_instance, lead_email")
       .eq("id", id)
       .single();
     if (error || !r) return NextResponse.json({ error: "Reply not found" }, { status: 404 });
@@ -59,11 +61,29 @@ export async function POST(req: NextRequest) {
       leadName: String(r.lead_name || ""),
     });
 
-    // 2. Adapt the resolved template to the conversation (core preserved).
+    // 2. Build the full conversation (campaign email + follow-ups + replies) so
+    //    the reply understands what was already said. Best-effort — falls back
+    //    to the inbound reply text if the thread can't be fetched.
+    let fullThread = String(r.reply_we_got || "");
+    if (r.reply_id) {
+      try {
+        const entries = await buildConversationThread({
+          instance: coerceInstance(r.bison_instance),
+          replyId: Number(r.reply_id),
+          leadId: r.lead_id ? Number(r.lead_id) : null,
+          campaignId: r.campaign_id ? Number(r.campaign_id) : null,
+          leadEmail: String(r.lead_email || ""),
+        });
+        if (entries.length) fullThread = threadToPrompt(entries);
+      } catch { /* keep the reply-only fallback */ }
+    }
+
+    // 3. Adapt the resolved template to the conversation (core preserved).
     const result = await generateReplyFromTemplate({
       template: resolved,
       leadMessage,
-      fullThread: String(r.reply_we_got || ""),
+      fullThread,
+      instructions: typeof instructions === "string" ? instructions : "",
     });
 
     return NextResponse.json({ ok: result.ok, reply: result.reply, error: result.error });

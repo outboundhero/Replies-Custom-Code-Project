@@ -915,6 +915,41 @@ export async function getFirstSentEmail(
   return sorted[0] || null;
 }
 
+/** One message in a reply's conversation thread (GET /api/replies/{id}/conversation-thread). */
+export interface ConversationThreadMessage {
+  id: number;
+  folder: string | null;
+  subject: string | null;
+  html_body: string | null;
+  text_body: string | null;
+  date_received: string | null;
+  created_at: string | null;
+  type: string | null;          // "Tracked Reply" | "Untracked Reply" | sent types
+  tracked_reply: boolean;
+  from_name: string | null;
+  from_email_address: string | null;
+  campaign_id: number | null;
+  lead_id: number | null;
+}
+
+/**
+ * The full conversation thread for a reply: older_messages → current_reply →
+ * newer_messages, flattened oldest-first. Works for BOTH tracked and untracked
+ * replies. NOTE: the initial campaign cold email is NOT part of this response —
+ * fetch it separately via getFirstSentEmail (tracked only) and prepend it.
+ */
+export async function getReplyConversationThread(instanceKey: string, replyId: number): Promise<ConversationThreadMessage[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/replies/${replyId}/conversation-thread`, { headers: buildHeaders(token) });
+  if (!res.ok) throw new Error(`getReplyConversationThread(${instanceKey}, ${replyId}) failed: ${res.status} ${await res.text()}`);
+  const j = await res.json();
+  const d = (j?.data ?? j) || {};
+  const older = Array.isArray(d.older_messages) ? d.older_messages : [];
+  const newer = Array.isArray(d.newer_messages) ? d.newer_messages : [];
+  const current = d.current_reply ? [d.current_reply] : [];
+  return [...older, ...current, ...newer] as ConversationThreadMessage[];
+}
+
 /**
  * Find a single lead by email. Returns the matching lead or null.
  *

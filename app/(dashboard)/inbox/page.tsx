@@ -366,6 +366,24 @@ export default function InboxPage() {
   const [replyMsg, setReplyMsg] = useState("");
   const [replyCc, setReplyCc] = useState<Recipient[]>([]);
   const [replyBcc, setReplyBcc] = useState<Recipient[]>([]);
+  // Optional freeform instructions for Generate Reply (empty = adapt normally).
+  const [genInstructions, setGenInstructions] = useState("");
+  // Email history (Bison conversation thread + our ReplyRouter send attempts).
+  interface ThreadMsg { direction: "sent" | "received"; at: string; subject: string; body: string; sender: string }
+  interface SendRow { id: number; status: string; error: string | null; created_at: string }
+  const [history, setHistory] = useState<{ thread: ThreadMsg[]; sends: SendRow[] } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const loadSendHistory = useCallback(async (rid: number) => {
+    try {
+      const res = await fetch(`/api/inbox/${rid}/thread`);
+      if (res.ok) setHistory(await res.json());
+    } catch { /* non-fatal */ }
+  }, []);
+  // Load the email history whenever a different lead is opened.
+  useEffect(() => {
+    setHistory(null); setHistoryOpen(false);
+    if (selectedId) loadSendHistory(selectedId);
+  }, [selectedId, loadSendHistory]);
   const [fwdTo, setFwdTo] = useState("");
   const [ooSubject, setOoSubject] = useState("");
   const [ooMsg, setOoMsg] = useState("");
@@ -872,6 +890,7 @@ export default function InboxPage() {
       setReplyMsg(""); setReplyCc([]); setReplyBcc([]);
       setDetail((prev) => (prev && prev.id === detailId ? { ...prev, send_error: null, send_error_at: null, last_sent_at: now, sent_reply: sentBody } : prev));
       toast.success("Reply sent");
+      loadSendHistory(detailId);
     } else {
       // Failure: KEEP the draft (don't reload) and surface the error
       // persistently on the lead until the next successful send.
@@ -923,9 +942,9 @@ export default function InboxPage() {
     if (!detail) return;
     setSending("gen");
     try {
-      const res = await fetch("/api/inbox/generate-reply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: detail.id }) });
+      const res = await fetch("/api/inbox/generate-reply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: detail.id, instructions: genInstructions.trim() || undefined }) });
       const d = await res.json();
-      if (d.ok && d.reply) { setReplyMsg(d.reply); setConfirmInline(null); toast.success("Reply generated from the client template"); }
+      if (d.ok && d.reply) { setReplyMsg(d.reply); setConfirmInline(null); toast.success(d.error ? d.error : "Reply generated from the client template"); }
       else toast.error(d.error || "Couldn't generate a reply");
     } catch (e) { toast.error((e as Error).message); }
     setSending(null);
@@ -1413,6 +1432,40 @@ export default function InboxPage() {
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
+            {/* ── Email history (full conversation + our send attempts) ── */}
+            <div className="rounded border bg-white px-4 py-2.5">
+              <button onClick={() => setHistoryOpen((o) => !o)} className="w-full flex items-center justify-between text-xs font-medium">
+                <span>Email history{history ? ` (${history.thread?.length || 0} message${(history.thread?.length || 0) === 1 ? "" : "s"})` : "…"}</span>
+                <span className="text-muted-foreground">{historyOpen ? "▲" : "▼"}</span>
+              </button>
+              {historyOpen && (
+                <div className="mt-2 space-y-1.5 max-h-80 overflow-y-auto">
+                  {!history && <p className="text-[11px] text-muted-foreground">Loading…</p>}
+                  {history && history.thread.length === 0 && <p className="text-[11px] text-muted-foreground">No prior messages found for this lead.</p>}
+                  {history?.thread.map((m, i) => (
+                    <div key={i} className={`rounded border px-2.5 py-1.5 text-[11px] ${m.direction === "sent" ? "bg-blue-50 border-blue-200" : "bg-slate-50 border-slate-200"}`}>
+                      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                        <span className="font-semibold">{m.direction === "sent" ? "→ Sent" : "← Received"}{m.sender ? ` · ${m.sender}` : ""}</span>
+                        <span>{m.at ? new Date(m.at).toLocaleDateString() : ""}</span>
+                      </div>
+                      {m.subject && <p className="font-medium mt-0.5">{m.subject}</p>}
+                      <p className="whitespace-pre-wrap text-muted-foreground mt-0.5">{m.body.length > 500 ? m.body.slice(0, 500) + "…" : m.body}</p>
+                    </div>
+                  ))}
+                  {history && history.sends.length > 0 && (
+                    <div className="pt-1.5 border-t space-y-0.5">
+                      <p className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">ReplyRouter sends</p>
+                      {history.sends.map((s) => (
+                        <p key={s.id} className={`text-[10px] ${s.status === "failed" ? "text-rose-700" : "text-green-700"}`}>
+                          {s.status === "sent" ? "✓ sent" : "⚠ failed"} · {new Date(s.created_at).toLocaleString()}{s.error ? ` · ${s.error}` : ""}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* ── Send Reply (with CC/BCC pre-populated) ── */}
             <div className="rounded border bg-white px-4 py-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
@@ -1425,6 +1478,8 @@ export default function InboxPage() {
                   <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
                 </div>
               </div>
+              {/* Optional Generate-Reply instructions (empty = adapt normally). */}
+              <Input value={genInstructions} onChange={(e) => setGenInstructions(e.target.value)} placeholder="Optional instructions for ✨ Generate Reply (e.g. 'confirm we can start in December')" className="h-7 text-[11px]" />
               {/* Persistent send status: failure stays until the next success. */}
               {detail.send_error && (
                 <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800">
