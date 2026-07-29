@@ -384,6 +384,19 @@ export default function InboxPage() {
     setHistory(null); setHistoryOpen(false);
     if (selectedId) loadSendHistory(selectedId);
   }, [selectedId, loadSendHistory]);
+
+  // Auto-run the qualification audit when an audit-eligible lead opens without
+  // one yet — non-blocking (never gates the send). Restores the old behavior;
+  // only for the qualification-relevant AI categories (positive outcomes) that
+  // have a client tag + Airtable record.
+  useEffect(() => {
+    if (!detail) return;
+    const cat = String(detail.ai_categorized_lead_category || detail.lead_category || "");
+    const eligible = detail.client_tag && detail.client_tag !== "N/A" && detail.airtable_record_id && POSITIVE_CATEGORIES.includes(cat);
+    const noAudit = !detail.industry_audit && !detail.location_audit;
+    if (eligible && noAudit && sending !== "audit") handleRunAudit({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id]);
   const [fwdTo, setFwdTo] = useState("");
   const [ooSubject, setOoSubject] = useState("");
   const [ooMsg, setOoMsg] = useState("");
@@ -952,15 +965,23 @@ export default function InboxPage() {
 
   // Run (or re-run) the qualification audit for this lead on demand — for
   // leads whose audit failed / never ran at ingest, or to refresh it.
-  async function handleRunAudit() {
+  async function handleRunAudit(opts?: { silent?: boolean }) {
     if (!detail) return;
+    const rid = detail.id;
     setSending("audit");
     try {
-      const res = await fetch("/api/inbox/qualify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: detail.id }) });
+      const res = await fetch("/api/inbox/qualify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: rid }) });
       const d = await res.json();
-      if (d.ok) { toast.success("Audit complete"); detailCache.current.delete(detail.id); loadDetail(detail.id); }
-      else toast.error(d.error || "Audit failed");
-    } catch (e) { toast.error((e as Error).message); }
+      if (d.ok) {
+        if (!opts?.silent) toast.success("Audit complete");
+        // Merge ONLY the audit fields into the open detail — never reload, so a
+        // manually edited / generated reply draft is preserved (items 8 & 9).
+        const audit = (d.audit || {}) as Record<string, unknown>;
+        setDetail((prev) => (prev && prev.id === rid ? { ...prev, ...audit } : prev));
+        const cached = detailCache.current.get(rid);
+        if (cached) detailCache.current.set(rid, { ...cached, ...audit });
+      } else if (!opts?.silent) toast.error(d.error || "Audit failed");
+    } catch (e) { if (!opts?.silent) toast.error((e as Error).message); }
     setSending(null);
   }
 
@@ -1270,7 +1291,7 @@ export default function InboxPage() {
                   <p className="text-xs font-medium">No audit yet</p>
                   <p className="text-[11px] text-muted-foreground">Run the industry + location audit for this lead.</p>
                 </div>
-                <Button size="sm" className="h-8 text-xs shrink-0" onClick={handleRunAudit} disabled={sending === "audit"}>{sending === "audit" ? "Auditing…" : "Run Audit"}</Button>
+                <Button size="sm" className="h-8 text-xs shrink-0" onClick={() => handleRunAudit()} disabled={sending === "audit"}>{sending === "audit" ? "Auditing…" : "Run Audit"}</Button>
               </div>
             )}
 
@@ -1292,7 +1313,7 @@ export default function InboxPage() {
                 <div className="rounded border bg-white px-4 py-3 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Audit</span>
-                    <button onClick={handleRunAudit} disabled={sending === "audit"} className="text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
+                    <button onClick={() => handleRunAudit()} disabled={sending === "audit"} className="text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
                   </div>
                   {/* Industry */}
                   {detail.industry_audit && (

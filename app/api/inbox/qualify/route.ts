@@ -64,7 +64,15 @@ export async function POST(req: NextRequest) {
       airtableTableId: AIRTABLE_TABLE_ID,
     });
 
-    return NextResponse.json({ ok: true });
+    // Return the freshly-written audit fields so the inbox can merge them into
+    // the open detail WITHOUT a full reload (which would clobber the reply draft).
+    const { data: after } = await supabase
+      .from("replies")
+      .select("industry_audit, location_audit, qualification_reason, suggested_client, audit_city, audit_state, audit_industry")
+      .eq("id", id)
+      .single();
+
+    return NextResponse.json({ ok: true, audit: after || {} });
   } catch (e) {
     console.error("[api/inbox/qualify] failed:", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
