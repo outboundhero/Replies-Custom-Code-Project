@@ -79,7 +79,7 @@
     },
     {
       "path": "/api/cron/audit-pending",
-      "schedule": "*/3 * * * *"
+      "schedule": "*/10 * * * *"
     }
   ]
 }
