@@ -66,9 +66,11 @@ export async function POST(req: NextRequest) {
 
     // Return the freshly-written audit fields so the inbox can merge them into
     // the open detail WITHOUT a full reload (which would clobber the reply draft).
+    // Core fields only (always exist); the optional audit_* columns are picked up
+    // on the next detail load once the migration is run.
     const { data: after } = await supabase
       .from("replies")
-      .select("industry_audit, location_audit, qualification_reason, suggested_client, audit_city, audit_state, audit_industry")
+      .select("industry_audit, location_audit, qualification_reason, suggested_client")
       .eq("id", id)
       .single();
 
