@@ -390,18 +390,9 @@ export default function InboxPage() {
     if (selectedId) loadSendHistory(selectedId);
   }, [selectedId, loadSendHistory]);
 
-  // Auto-run the qualification audit when an audit-eligible lead opens without
-  // one yet — non-blocking (never gates the send). Restores the old behavior;
-  // only for the qualification-relevant AI categories (positive outcomes) that
-  // have a client tag + Airtable record.
-  useEffect(() => {
-    if (!detail) return;
-    const cat = String(detail.ai_categorized_lead_category || detail.lead_category || "");
-    const eligible = detail.client_tag && detail.client_tag !== "N/A" && detail.airtable_record_id && POSITIVE_CATEGORIES.includes(cat);
-    const noAudit = !detail.industry_audit && !detail.location_audit;
-    if (eligible && noAudit && sending !== "audit") handleRunAudit({ silent: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail?.id]);
+  // NOTE: the qualification audit runs AT INGEST (lib/processing/tracked.ts) for
+  // the positive AI lead categories — NOT on open. Opening a lead never triggers
+  // it; the manual "Run Audit" button is still available for anything missing.
   const [fwdTo, setFwdTo] = useState("");
   const [ooSubject, setOoSubject] = useState("");
   const [ooMsg, setOoMsg] = useState("");

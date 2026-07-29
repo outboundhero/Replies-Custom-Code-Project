@@ -424,8 +424,12 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     }
   });
 
-  // 5b. Lead qualification (non-blocking, fire-and-forget)
-  const QUALIFYING_CATEGORIES = ["Interested", "Meeting Request"];
+  // 5b. Lead qualification — runs AT INGEST (non-blocking, fire-and-forget) for
+  // the positive AI lead categories, so the audit is ready before anyone opens
+  // the lead. Mirrors the inbox's positive set (Interested / Meeting / Follow Up
+  // / Referral Given / Internally Forwarded); "Unrecognizable" audits uncertain
+  // leads to aid categorization.
+  const QUALIFYING_CATEGORIES = ["Interested", "Meeting Request", "Referral Given", "Internally Forwarded"];
   const QUALIFYING_CONTAINS = ["Follow Up", "Unrecognizable"];
 
   const shouldQualify = aiCategory && (
