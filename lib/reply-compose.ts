@@ -61,7 +61,11 @@ export function computeReplyRecipients(d: Row, category: string): {
   const ours = norm(String(d.sender_email || ""));
   const leadEmail = norm(String(d.from_email || d.lead_email || ""));
   const to: Recipient = { name: String(d.from_name || d.lead_name || ""), email: String(d.from_email || d.lead_email || "") };
-  const positive = POSITIVE_CATEGORIES.includes(category);
+  // Loop in the client's configured team (CC/BCC from the template) whenever we're
+  // actually composing a reply — every (Send Reply) category AND positive outcomes.
+  // (Previously positive-only, which left the client contacts off Send-Reply
+  // categories like "Not Interested (Send Reply)" / primary-contact.)
+  const includeTeam = POSITIVE_CATEGORIES.includes(category) || isSendReplyCategory(category);
 
   const seen = new Set<string>([ours, leadEmail].filter(Boolean));
   const cc: Recipient[] = [];
@@ -73,14 +77,14 @@ export function computeReplyRecipients(d: Row, category: string): {
   };
   splitPairs(d.to_name, d.to_email).forEach(pushCc);
   splitPairs(d.prospect_cc_name, d.prospect_cc_email).forEach(pushCc);
-  if (positive) {
+  if (includeTeam) {
     ([1, 2, 3, 4, 5, 6] as const).forEach((n) => {
       const email = String(d[`cc_email_${n}`] || "");
       if (email) pushCc({ name: String(d[`cc_name_${n}`] || ""), email });
     });
   }
   const bcc: Recipient[] = [];
-  if (positive) {
+  if (includeTeam) {
     ([1, 2] as const).forEach((n) => {
       const email = String(d[`bcc_email_${n}`] || "");
       if (email) bcc.push({ name: String(d[`bcc_name_${n}`] || ""), email });

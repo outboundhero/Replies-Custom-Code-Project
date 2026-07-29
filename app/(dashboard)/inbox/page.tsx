@@ -150,7 +150,9 @@ function computeReplyRecipients(d: ReplyDetail, category: string): {
   const ours = norm(String(d.sender_email || ""));
   const leadEmail = norm(String(d.from_email || d.lead_email || ""));
   const to = { name: String(d.from_name || d.lead_name || ""), email: String(d.from_email || d.lead_email || "") };
-  const positive = POSITIVE_CATEGORIES.includes(category);
+  // Loop in the client's configured team (template CC/BCC) whenever we're
+  // composing a reply — every (Send Reply) category AND positive outcomes.
+  const includeTeam = POSITIVE_CATEGORIES.includes(category) || /\(send reply\)/i.test(category);
 
   const seen = new Set<string>([ours, leadEmail].filter(Boolean));
   const cc: { name: string; email: string }[] = [];
@@ -164,8 +166,8 @@ function computeReplyRecipients(d: ReplyDetail, category: string): {
   splitPairs(d.to_name, d.to_email).forEach(pushCc);
   // Keep the inbound reply's own CC on the thread.
   splitPairs(d.prospect_cc_name, d.prospect_cc_email).forEach(pushCc);
-  // Loop in the client's team only for positive outcomes (§8).
-  if (positive) {
+  // Loop in the client's team for positive + Send-Reply categories (§8).
+  if (includeTeam) {
     ([1, 2, 3, 4, 5, 6] as const).forEach((n) => {
       const email = String(d[`cc_email_${n}`] || "");
       if (email) pushCc({ name: String(d[`cc_name_${n}`] || ""), email });
@@ -173,7 +175,7 @@ function computeReplyRecipients(d: ReplyDetail, category: string): {
   }
 
   const bcc: { name: string; email: string }[] = [];
-  if (positive) {
+  if (includeTeam) {
     ([1, 2] as const).forEach((n) => {
       const email = String(d[`bcc_email_${n}`] || "");
       if (email) bcc.push({ name: String(d[`bcc_name_${n}`] || ""), email });
@@ -853,6 +855,8 @@ export default function InboxPage() {
     if (confirmInline !== "reply") { setConfirmInline("reply"); return; } // §29 confirm
     setConfirmInline(null);
     setSending("reply");
+    const detailId = detail.id;
+    const sentBody = replyMsg;
     const d = await mutate({
       action: "send-reply", id: detail.id, replyId: detail.reply_id,
       senderEmailId: detail.sender_id, message: replyMsg,
@@ -861,7 +865,19 @@ export default function InboxPage() {
       bccEmails: replyBcc.length ? recipientsToApi(replyBcc) : undefined,
     });
     setSending(null);
-    if (d.ok) { toast.success("Reply sent"); loadDetail(detail.id); } else toast.error(d.error || "Failed");
+    const now = new Date().toISOString();
+    if (d.ok) {
+      // Success: clear the composer + show a persistent "sent" confirmation on
+      // the lead (last_sent_at), and clear any prior send error.
+      setReplyMsg(""); setReplyCc([]); setReplyBcc([]);
+      setDetail((prev) => (prev && prev.id === detailId ? { ...prev, send_error: null, send_error_at: null, last_sent_at: now, sent_reply: sentBody } : prev));
+      toast.success("Reply sent");
+    } else {
+      // Failure: KEEP the draft (don't reload) and surface the error
+      // persistently on the lead until the next successful send.
+      setDetail((prev) => (prev && prev.id === detailId ? { ...prev, send_error: d.error || "Send failed", send_error_at: now } : prev));
+      toast.error(d.error || "Send failed — your draft is kept, retry when ready");
+    }
   }
 
   async function handleFwd() {
@@ -1409,6 +1425,15 @@ export default function InboxPage() {
                   <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
                 </div>
               </div>
+              {/* Persistent send status: failure stays until the next success. */}
+              {detail.send_error && (
+                <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800">
+                  <span className="font-semibold">⚠ Last send failed:</span> {detail.send_error}. Your draft is kept — fix and retry.
+                </div>
+              )}
+              {detail.last_sent_at && !detail.send_error && (
+                <p className="text-[11px] text-green-700">✓ Reply sent {new Date(detail.last_sent_at).toLocaleString()}</p>
+              )}
               <Textarea value={replyMsg} onChange={(e) => { setReplyMsg(e.target.value); setConfirmInline(null); }} rows={4} placeholder="Type reply..." className="text-sm" />
               <div className="grid grid-cols-2 gap-3">
                 <RecipientList label="CC Recipients" value={replyCc} onChange={setReplyCc} max={6} addLabel="Add CC" />

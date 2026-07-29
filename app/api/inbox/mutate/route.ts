@@ -312,14 +312,38 @@ export async function POST(req: NextRequest) {
       case "send-reply": {
         const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply } = body;
         const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails });
+        const nowIso = new Date().toISOString();
+        // History row (success OR failure) so the inbox can show the full
+        // outbound history + retry failures. Best-effort — never break the send.
+        const recordSend = async (status: "sent" | "failed", error?: string) => {
+          try {
+            await supabase.from("reply_sends").insert({
+              reply_row_id: id, client_tag: rowClientTag, lead_email: toEmail || null,
+              message: message ?? null, to_json: toEmail ? [{ name: toName || "", email: toEmail }] : null,
+              cc_json: ccEmails ?? null, bcc_json: bccEmails ?? null, status, error: error ?? null,
+            });
+          } catch { /* table may not exist pre-migration */ }
+        };
         if (result.ok) {
-          const nowIso = new Date().toISOString();
-          const update: Record<string, unknown> = { sent_reply: message, updated_at: nowIso };
+          const update: Record<string, unknown> = {
+            sent_reply: message, last_sent_at: nowIso, send_error: null, send_error_at: null, updated_at: nowIso,
+          };
           // Approving a Send-Reply preview sends NOW — cancel any pending
           // scheduled auto-reply (e.g. the 5–10 min Not-Interested cron) so
           // the lead doesn't also get the delayed one (spec §15).
           if (clearAutoReply) { update.auto_reply_due_at = null; update.auto_reply_sent_at = nowIso; }
           await supabase.from("replies").update(update).eq("id", id);
+          await recordSend("sent");
+        } else {
+          // Persist the failure so it stays visible on the lead + in the error
+          // log until the next successful send clears it. Draft is NOT touched.
+          await logError("inbox", "send-reply", result.error || "send failed", {
+            row_id: id, client_tag: rowClientTag, lead_email: toEmail, instance: rowInstance,
+          });
+          try {
+            await supabase.from("replies").update({ send_error: result.error || "Send failed", send_error_at: nowIso, updated_at: nowIso }).eq("id", id);
+          } catch { /* columns may not exist pre-migration */ }
+          await recordSend("failed", result.error);
         }
         return NextResponse.json(result);
       }
