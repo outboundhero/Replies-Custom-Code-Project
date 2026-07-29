@@ -137,7 +137,7 @@ export default function QualificationPage() {
         <CardContent className="pt-5">
           <div className="flex items-center gap-2 mb-1">
             <svg className="h-4 w-4 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M12 21s-6-5.686-6-10a6 6 0 1 1 12 0c0 4.314-6 10-6 10z" /><circle cx="12" cy="11" r="2" /></svg>
-            <h3 className="text-sm font-semibold">Find the perfect client</h3>
+            <h3 className="text-sm font-semibold">Find Best Fit Client</h3>
           </div>
           <p className="text-xs text-muted-foreground mb-3">Enter a <span className="font-medium">location</span> (required) and optionally an <span className="font-medium">industry</span>. Industry is only sent to the AI when you fill it in. Matches against every client&apos;s location + industry rules.</p>
           <div className="flex flex-col sm:flex-row gap-2 max-w-2xl">

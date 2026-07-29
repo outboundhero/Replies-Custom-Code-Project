@@ -201,6 +201,12 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     location_audit: locationResult.result,
     qualification_reason: qualificationReason,
     suggested_client: suggestedClients || null,
+    // Resolved location (reply-first) + verified industry, so the inbox's
+    // embedded "Find Best Fit Client" matcher can auto-populate without a new
+    // AI call. Best-effort — columns exist after the reply_sends migration.
+    audit_city: locResolved.city || null,
+    audit_state: locResolved.state || null,
+    audit_industry: enriched.industry || null,
     updated_at: new Date().toISOString(),
   }).eq("airtable_record_id", recordId).then(({ error }) => {
     if (error) console.error("[qualification] Supabase update failed:", error.message);

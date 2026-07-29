@@ -23,6 +23,7 @@ import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 import { InstanceBadge } from "@/components/instance-badge";
 import { EmailParticipants, initials } from "@/components/email-participants";
 import { QualificationLookup } from "@/components/qualification-lookup";
+import { InboxBestFit } from "@/components/inbox-best-fit";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -1365,6 +1366,16 @@ export default function InboxPage() {
               );
             })()}
 
+            {/* Find Best Fit Client — embedded below the audit; auto-populates
+                location (reply-first, from the audit) + industry, shows the
+                recommended tag, and prefills reallocation on click. */}
+            <InboxBestFit
+              leadKey={detail.id}
+              initialLocation={[detail.audit_city || detail.city, detail.audit_state || detail.state].map((s) => String(s || "").trim()).filter(Boolean).join(", ")}
+              initialIndustry={String(detail.audit_industry || "").trim()}
+              onPick={(tag) => { setReallocTag(tag.toUpperCase()); toast.info(`Prefilled reallocation with ${tag}`); }}
+            />
+
             {/* City Wide Routing — only for CW* leads */}
             {detail.client_tag?.toUpperCase().startsWith("CW") && (() => {
               const sug = (detail.suggested_client as string | null) || "";
@@ -1433,7 +1444,15 @@ export default function InboxPage() {
               <p className="text-[10px] text-muted-foreground -mt-1">Syncs the latest template + CC/BCC from <span className="font-mono font-semibold">{detail.client_tag || "—"}</span> and maps the variables.</p>
               <div className="flex items-center gap-2 border-t pt-2.5">
                 <span className="text-xs text-muted-foreground shrink-0">Reallocate to</span>
-                <Input value={reallocTag} onChange={(e) => setReallocTag(e.target.value.toUpperCase())} placeholder="client tag" className="w-32 h-8 text-xs font-mono" />
+                <div className="w-44">
+                  <SearchableCombobox
+                    value={reallocTag}
+                    onValueChange={(v) => setReallocTag((v || "").toUpperCase())}
+                    options={(allowedClientTags ?? clientTags)}
+                    placeholder="Pick a client…"
+                    searchPlaceholder="Search client tags…"
+                  />
+                </div>
                 <Button size="sm" className="h-8 text-xs" onClick={handleRealloc} disabled={!reallocTag || sending === "realloc"}>{sending === "realloc" ? "…" : "Assign"}</Button>
                 <span className="text-[10px] text-muted-foreground">reroutes CC/BCC, template &amp; sheet</span>
               </div>

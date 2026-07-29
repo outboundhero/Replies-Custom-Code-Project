@@ -81,7 +81,7 @@ export function QualificationLookup() {
     <div className="flex flex-col h-full">
       {/* Find perfect client */}
       <div className="border-b bg-primary/[0.03] px-4 py-3">
-        <p className="text-[11px] font-semibold mb-1.5">Find the perfect client</p>
+        <p className="text-[11px] font-semibold mb-1.5">Find Best Fit Client</p>
         <div className="space-y-1.5">
           <div className="flex gap-2">
             <Input value={location} onChange={(e) => setLocation(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runMatch(); }} placeholder="Location (required) — e.g. Mt Airy, MD" className="h-8 text-xs" />
