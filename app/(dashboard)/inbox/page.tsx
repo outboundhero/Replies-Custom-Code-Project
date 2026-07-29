@@ -24,6 +24,7 @@ import { InstanceBadge } from "@/components/instance-badge";
 import { EmailParticipants, initials } from "@/components/email-participants";
 import { QualificationLookup } from "@/components/qualification-lookup";
 import { InboxBestFit } from "@/components/inbox-best-fit";
+import { htmlToText, textToHtml } from "@/lib/html-text";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -1649,12 +1650,12 @@ export default function InboxPage() {
                   </div>
 
                   <div className="space-y-1">
-                    <label className="text-[11px] font-medium text-muted-foreground">Preview</label>
-                    <div className="rounded border bg-muted/20 px-3 py-2 text-[13px] max-h-52 overflow-y-auto" dangerouslySetInnerHTML={{ __html: cotPreview.message }} />
+                    <label className="text-[11px] font-medium text-muted-foreground">Message — edit as plain text</label>
+                    <Textarea value={htmlToText(cotPreview.message)} onChange={(e) => cotPatch({ message: textToHtml(e.target.value), messageDirty: true })} rows={7} className="text-xs" />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-[11px] font-medium text-muted-foreground">Message (HTML — edit if needed)</label>
-                    <Textarea value={cotPreview.message} onChange={(e) => cotPatch({ message: e.target.value, messageDirty: true })} rows={6} className="text-[11px] font-mono" />
+                    <label className="text-[11px] font-medium text-muted-foreground">Live preview — exactly what will send</label>
+                    <div className="rounded border bg-muted/20 px-3 py-2 text-[13px] max-h-52 overflow-y-auto" dangerouslySetInnerHTML={{ __html: cotPreview.message }} />
                   </div>
                 </>
               )}
