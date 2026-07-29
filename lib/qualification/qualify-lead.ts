@@ -196,29 +196,22 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   }
 
   // 7b. Also update Supabase replies table with audit results
-  // Core audit write — these columns always exist. Kept SEPARATE from the
-  // best-effort audit_* write below so a missing optional column can never
-  // break persistence of the industry/location/suggested-client results.
+  // Single audit write (keyed on airtable_record_id — now indexed, so this is a
+  // one-row lookup, not a table scan). Includes the resolved location
+  // (reply-first) + verified industry so the inbox's "Find Best Fit Client"
+  // matcher auto-populates. audit_city/state/industry require the
+  // 2026-07_reply_sends migration.
   supabase.from("replies").update({
     industry_audit: industryResult.result,
     location_audit: locationResult.result,
     qualification_reason: qualificationReason,
     suggested_client: suggestedClients || null,
-    updated_at: new Date().toISOString(),
-  }).eq("airtable_record_id", recordId).then(({ error }) => {
-    if (error) console.error("[qualification] Supabase update failed:", error.message);
-  });
-
-  // Best-effort: resolved location (reply-first) + verified industry, so the
-  // inbox's embedded "Find Best Fit Client" matcher can auto-populate. These
-  // columns exist only after the 2026-07_reply_sends migration — a failure here
-  // (column missing) must NOT affect the core audit write above.
-  supabase.from("replies").update({
     audit_city: locResolved.city || null,
     audit_state: locResolved.state || null,
     audit_industry: enriched.industry || null,
+    updated_at: new Date().toISOString(),
   }).eq("airtable_record_id", recordId).then(({ error }) => {
-    if (error) { /* migration not run yet — best-fit falls back to CRM city/state */ }
+    if (error) console.error("[qualification] Supabase update failed:", error.message);
   });
 
   // 7c. CW ZIP auto-router. For City Wide tags (CWSJ/CWSV/…), check whether
