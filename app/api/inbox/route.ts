@@ -207,6 +207,12 @@ export async function GET(req: NextRequest) {
     const search = req.nextUrl.searchParams.get("search");
     const viewParam = req.nextUrl.searchParams.get("view");
     const view = getView(viewParam);
+    // A client-scoped view (e.g. OutboundHero (Cherry)) forces its client tag —
+    // but never past per-user scoping: only apply it when the user is allowed
+    // that tag (unscoped users always are).
+    if (view?.clientTag && (!allowed || !allowed.length || allowed.includes(view.clientTag))) {
+      clientTag = view.clientTag;
+    }
     const aiCategory = req.nextUrl.searchParams.get("ai_category");  // §18 filter
 
     // Mode: client_tags — distinct client tags for the dropdown.

@@ -1473,16 +1473,15 @@ export default function InboxPage() {
             <div className="rounded border bg-white px-4 py-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-medium">Send Reply</p>
-                <div className="flex items-center gap-2">
-                  {/* Generate Reply — client template as the core, adapted to the conversation */}
-                  <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={handleGenerateReply} disabled={sending === "gen"} title="Draft a reply from this client's template, tailored to the conversation">
-                    {sending === "gen" ? "Generating…" : "✨ Generate Reply"}
-                  </Button>
-                  <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
-                </div>
+                <span className="text-[10px] text-muted-foreground">To: {detail.lead_email}</span>
               </div>
-              {/* Optional Generate-Reply instructions (empty = adapt normally). */}
-              <Input value={genInstructions} onChange={(e) => setGenInstructions(e.target.value)} placeholder="Optional instructions for ✨ Generate Reply (e.g. 'confirm we can start in December')" className="h-7 text-[11px]" />
+              {/* Optional Generate-Reply instructions + the Generate button to its right. */}
+              <div className="flex items-center gap-2">
+                <Input value={genInstructions} onChange={(e) => setGenInstructions(e.target.value)} placeholder="Optional instructions for ✨ Generate Reply (e.g. 'confirm we can start in December')" className="h-7 text-[11px] flex-1" />
+                <Button size="sm" variant="outline" className="h-7 text-[11px] shrink-0" onClick={handleGenerateReply} disabled={sending === "gen"} title="Draft a reply from this client's template, tailored to the conversation">
+                  {sending === "gen" ? "Generating…" : "✨ Generate Reply"}
+                </Button>
+              </div>
               {/* Persistent send status: failure stays until the next success. */}
               {detail.send_error && (
                 <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800">

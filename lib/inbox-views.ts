@@ -28,7 +28,36 @@ export interface InboxView {
   aiCategoryAllowlist?: string[];
   /** lead_category buckets to hide from the sidebar (negatives). */
   hiddenLeadCategories?: string[];
+  /** Force the view to a single client tag (overrides the client dropdown). */
+  clientTag?: string;
 }
+
+// Shared "Cherry" filter config, reused by Base Clients (Cherry) and any
+// client-scoped Cherry view (e.g. OutboundHero (Cherry)).
+// EXACT values from VALID_CATEGORIES in lib/processing/lead-categorizer.ts.
+const CHERRY_AI_ALLOWLIST = [
+  "Interested",
+  "Meeting Request",
+  "Follow Up at a Later Date",
+  "Referral Given",
+  "Internally Forwarded",
+  "Unrecognizable by AI",
+];
+// Negative lead_category buckets hidden from the sidebar. Kept buckets:
+// Open Response, Interested, Meeting Set, Meeting-Ready Lead, Follow Up,
+// Referral Given, Internally Forwarded, Closed Won, Needs Review.
+const CHERRY_HIDDEN = [
+  "Not Interested",
+  "Not Interested (Send Reply)",
+  "Do Not Contact",
+  "Out Of Office",
+  "Wrong Person",
+  "Lost",
+  "Automated Reply",
+  "Mailbox No Longer Active",
+  "Change Of Target",
+  "Unqualified (Cleaning)",
+];
 
 export const INBOX_VIEWS: InboxView[] = [
   {
@@ -41,30 +70,17 @@ export const INBOX_VIEWS: InboxView[] = [
     label: "Base Clients (Cherry)",
     description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden",
     excludeNoise: true,
-    // EXACT values from VALID_CATEGORIES in lib/processing/lead-categorizer.ts.
-    aiCategoryAllowlist: [
-      "Interested",
-      "Meeting Request",
-      "Follow Up at a Later Date",
-      "Referral Given",
-      "Internally Forwarded",
-      "Unrecognizable by AI",
-    ],
-    // Negative lead_category buckets hidden from the sidebar. Kept buckets:
-    // Open Response, Interested, Meeting Set, Meeting-Ready Lead, Follow Up,
-    // Referral Given, Internally Forwarded, Closed Won, Needs Review.
-    hiddenLeadCategories: [
-      "Not Interested",
-      "Not Interested (Send Reply)",
-      "Do Not Contact",
-      "Out Of Office",
-      "Wrong Person",
-      "Lost",
-      "Automated Reply",
-      "Mailbox No Longer Active",
-      "Change Of Target",
-      "Unqualified (Cleaning)",
-    ],
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
+  },
+  {
+    id: "outboundhero-cherry",
+    label: "OutboundHero (Cherry)",
+    description: "Base Clients (Cherry), restricted to the OH client tag",
+    excludeNoise: true,
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
+    clientTag: "OH",
   },
 ];
 
