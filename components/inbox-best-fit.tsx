@@ -71,11 +71,17 @@ export function InboxBestFit({
         <div className="rounded border border-green-300 bg-green-50 px-2.5 py-1.5">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[10px] text-green-700 font-medium">Best fit:</span>
-            <button onClick={() => onPick(result.match!.tag)} className="inline-flex items-center rounded bg-green-600 px-2 py-0.5 text-xs font-mono font-bold text-white hover:bg-green-700" title="Use this tag for reallocation">{result.match.tag}</button>
+            {/* Tag only; hover reveals the full reason + matched rule + confidence. */}
+            <span className="relative group/bf inline-block">
+              <button onClick={() => onPick(result.match!.tag)} className="inline-flex items-center rounded bg-green-600 px-2 py-0.5 text-xs font-mono font-bold text-white hover:bg-green-700" title="Click to use for reallocation">{result.match.tag}</button>
+              <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-80 rounded-md bg-gray-900 px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg group-hover/bf:block whitespace-normal">
+                {result.match.reason}
+                {result.match.matched && <span className="block mt-1 opacity-80">Matched rule: <span className="font-mono">{result.match.matched}</span></span>}
+              </span>
+            </span>
             {result.viaCache && <span className="text-[9px] text-green-700/60 bg-green-100 px-1 rounded">cached</span>}
+            <span className="text-[10px] text-green-700/70">hover for reason</span>
           </div>
-          <p className="mt-1 text-[11px] text-green-900 leading-relaxed">{result.match.reason}</p>
-          {result.match.matched && <p className="mt-0.5 text-[10px] text-green-800/90">Matched rule: <span className="font-mono bg-green-100/70 rounded px-1">{result.match.matched}</span></p>}
           {result.matches && <QualificationFitChips matches={result.matches} bestTag={result.match.tag} size="sm" />}
         </div>
       ) : (
