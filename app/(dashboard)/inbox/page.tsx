@@ -1350,7 +1350,7 @@ export default function InboxPage() {
                               className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
                             >{tag}</button>
                             {reason && (
-                              <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-64 rounded-md bg-gray-900 px-2.5 py-1.5 text-[11px] leading-snug text-white shadow-lg group-hover/sug:block">
+                              <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-80 rounded-md bg-gray-900 px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg group-hover/sug:block whitespace-normal">
                                 {reason}
                               </span>
                             )}

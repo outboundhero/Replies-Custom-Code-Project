@@ -21,6 +21,7 @@ import { auditLocation } from "./location-audit";
 import { extractReplyLocation } from "./extract-reply-location";
 import { stripQuotedHistory } from "./strip-quoted";
 import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
+import { getChurnedTags } from "@/lib/churn";
 import { geminiJSON } from "@/lib/gemini";
 
 interface QualifyLeadParams {
@@ -328,12 +329,19 @@ async function findFittingClients(
     }
   } catch { /* table not created yet → fall open */ }
 
+  // Never suggest a client that has CHURNED per the Client Tracker sheet —
+  // Status="Churned" AND its churn date is on/before today (future churn dates
+  // stay active). This is date-based and authoritative; it also catches clients
+  // whose onboarding-form Status still reads "Active" but who have since churned.
+  const churnedByDate = await getChurnedTags();
+
   // Candidates: any OTHER client with a location signal that is Active+Cleaning.
   // (When meta isn't available, fall back to the old rule: non-churned.)
   const candidates = allRules.filter((r) => {
     const t = String(r.client_abbreviation).trim().toUpperCase();
     if (r.client_abbreviation === excludeTag) return false;
     if (!(r.inclusion_locations?.trim() || r.hq_anchor?.trim())) return false;
+    if (churnedByDate.has(t)) return false; // churned (past churn date) → never suggest
     if (haveMeta) return activeCleaning.has(t);
     return !churnedTags.has(t);
   });
@@ -366,7 +374,7 @@ USE GOOGLE SEARCH to verify real driving distances (disambiguate same-named town
 Rules for the output:
 - "tag" MUST be copied EXACTLY from a candidate's tag as listed (e.g. "SI", "DBSNJ"). NEVER invent, abbreviate, or shorten a tag (do not output "A").
 - Return only the BEST 3 fits, most-fitting first.
-- "reason" is a SHORT phrase, max 8 words, stating only the location match — e.g. "serves nationwide", "Fairfax County, VA", "~15 mi from office". No sentences.
+- "reason" EXPLAINS why you chose this client, so a human can trust it. In 1-2 short sentences cover BOTH checks you ran: (1) INDUSTRY — the company's industry is a commercial fit and is NOT in this client's excluded industries; (2) LOCATION — name the city/county and the approximate driving distance to the client's office, or state it's within the client's stated service area (e.g. "~14 mi from office in Fairfax County, VA" or "inside their statewide TX service area"). Then END with a confidence level exactly as "Confidence: High" / "Confidence: Medium" / "Confidence: Low" — High = clearly in-area AND industry fits; Medium = borderline distance or industry; Low = weak/uncertain. Never use the "·" character in a reason.
 
 Respond with JSON only: {"fits":[{"tag":"TAG","reason":"..."}]}. If none fit, {"fits":[]}.`,
       user: `Company: "${enriched.companyName}"
@@ -377,20 +385,27 @@ Location: "${enriched.city}, ${enriched.state}" (${enriched.address || "no addre
 Candidate clients:
 ${clientsList}`,
       withSearch: true,
-      maxTokens: 1024,
+      maxTokens: 1536,
     });
     const fits = parsed.fits || [];
     // Keep only REAL tags (drops hallucinations like "A"), dedupe, active-first,
     // top 3, with a short trimmed reason → a concise "TAG (reason) · TAG (reason)".
     const seen = new Set<string>();
     const clean = fits
-      .map((f) => ({ tag: String(f.tag || "").trim().toUpperCase(), reason: String(f.reason || "").replace(/\[inactive[^\]]*\]/i, "").trim() }))
+      .map((f) => ({
+        tag: String(f.tag || "").trim().toUpperCase(),
+        // Keep the full explanation (industry + location steps + confidence);
+        // strip the "·" separator char so it can't break the stored format.
+        reason: String(f.reason || "").replace(/\[inactive[^\]]*\]/i, "").replace(/\s*·\s*/g, "; ").trim(),
+      }))
       .filter((f) => f.tag && validTags.has(f.tag) && f.tag !== excludeTag.toUpperCase() && !seen.has(f.tag) && seen.add(f.tag))
       .sort((a, b) => (activeTags.has(b.tag) ? 1 : 0) - (activeTags.has(a.tag) ? 1 : 0))
       .slice(0, 3);
     if (!clean.length) return "";
     return clean.map((f) => {
-      const reason = f.reason.length > 45 ? f.reason.slice(0, 45).replace(/[\s,.]+$/, "") + "…" : f.reason;
+      // Store the full reason (the hover bubble renders it; it caps display at
+      // 240 chars). Only trim if unreasonably long.
+      const reason = f.reason.length > 220 ? f.reason.slice(0, 220).replace(/[\s,.;]+$/, "") + "…" : f.reason;
       const flag = activeTags.has(f.tag) ? "" : " ⚠";
       return reason ? `${f.tag}${flag} (${reason})` : `${f.tag}${flag}`;
     }).join(" · ");
