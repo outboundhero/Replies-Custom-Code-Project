@@ -41,15 +41,15 @@ export async function GET(
   // pages cap protects the 5-min route budget. Each call covers up to N
   // pages PER CAMPAIGN. For mega-clients (JPNYC has campaigns with 1,021
   // pages of sequence_finished leads), one call can't reach everything —
-  // hit the endpoint multiple times to backfill incrementally. Bison
-  // returns leads in roughly chronological order without filter support,
-  // so each repeat call fetches the same first N pages, which is fine —
-  // upserts dedupe and only new arrivals at the top get added.
-  const pagesParam = Number(req.nextUrl.searchParams.get("pages") || 100);
-  const maxPagesPerCampaign = Number.isFinite(pagesParam) && pagesParam > 0 ? pagesParam : 100;
+  // Cursor-based scan with saved resume position (no page cap) — this manual
+  // endpoint gives a client a bigger time slice than the autonomous tick so an
+  // operator can drain a large backlog faster. Repeat calls resume where the
+  // last left off. `?ms=` overrides the per-run time budget.
+  const msParam = Number(req.nextUrl.searchParams.get("ms") || 240_000);
+  const maxMs = Number.isFinite(msParam) && msParam > 0 ? msParam : 240_000;
 
   try {
-    const result = await syncOneClient(instanceKey, clientTag, { maxPagesPerCampaign });
+    const result = await syncOneClient(instanceKey, clientTag, { maxMs });
 
     await logActivity("nurture-sync-client", "completed", {
       client_tag: clientTag,

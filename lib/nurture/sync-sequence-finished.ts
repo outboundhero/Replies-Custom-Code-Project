@@ -15,11 +15,68 @@
  */
 
 import supabase from "@/lib/supabase";
-import { listCampaigns, listCampaignLeads, findLeadByEmail, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
+import db from "@/lib/db";
+import { listCampaigns, listCampaignLeads, sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { detectCampaignEsp, pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
+
+// ── Cursor-based, resumable per-campaign scan state (Turso) ───────────────────
+// Page pagination (listCampaignLeads) hard-caps at ~1000 pages / 15 rows and, in
+// the autonomous sync, was capped at 50 pages — so large campaigns (JPOKC's
+// 14k-lead Google campaign) were only ever partially scanned or skipped, and the
+// scan re-read the same first pages every run (permanent gaps). We now sweep each
+// campaign with Bison's CURSOR pagination (no cap; reaches every lead) and SAVE
+// the resume cursor per campaign, so successive cron runs walk the whole campaign
+// and never re-scan already-covered leads. Once fully drained we periodically
+// re-sweep from the start to pick up newly-finished leads.
+const CURSOR_WINDOW_LEADS = 1000;          // leads per sweep request-window
+const CURSOR_WINDOW_MS = 30_000;           // per request-window time cap
+const PER_CAMPAIGN_MS = 60_000;            // max time on ONE campaign per run (may span several windows)
+const RESWEEP_MS = 18 * 60 * 60 * 1000;    // re-scan a fully-drained campaign at most this often (for new finishers)
+
+interface CursorState { cursor: string | null; completed_at: string | null }
+
+async function ensureCursorTable(): Promise<void> {
+  await db.execute(
+    `CREATE TABLE IF NOT EXISTS nurture_sync_cursor (
+      bison_instance TEXT NOT NULL,
+      campaign_id INTEGER NOT NULL,
+      cursor TEXT,
+      last_swept_at TEXT,
+      completed_at TEXT,
+      PRIMARY KEY (bison_instance, campaign_id)
+    )`,
+  );
+}
+
+async function loadCursors(instanceKey: string, campaignIds: number[]): Promise<Map<number, CursorState>> {
+  const map = new Map<number, CursorState>();
+  if (!campaignIds.length) return map;
+  try {
+    const res = await db.execute({ sql: "SELECT campaign_id, cursor, completed_at FROM nurture_sync_cursor WHERE bison_instance = ?", args: [instanceKey] });
+    for (const r of res.rows) {
+      map.set(Number(r.campaign_id), { cursor: (r.cursor as string) ?? null, completed_at: (r.completed_at as string) ?? null });
+    }
+  } catch { /* table missing first run → all campaigns start fresh */ }
+  return map;
+}
+
+async function saveCursor(instanceKey: string, campaignId: number, cursor: string | null, done: boolean): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    await db.execute({
+      sql: `INSERT INTO nurture_sync_cursor (bison_instance, campaign_id, cursor, last_swept_at, completed_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(bison_instance, campaign_id) DO UPDATE SET
+              cursor = excluded.cursor, last_swept_at = excluded.last_swept_at,
+              completed_at = COALESCE(excluded.completed_at, nurture_sync_cursor.completed_at)`,
+      // done → clear cursor (next cycle restarts from the top) + stamp completed_at.
+      args: [instanceKey, campaignId, done ? null : cursor, now, done ? now : null],
+    });
+  } catch { /* non-fatal — worst case the campaign re-sweeps from where our DB left off */ }
+}
 
 interface InstanceSyncResult {
   instance: BisonInstanceKey;
@@ -126,13 +183,13 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
       break;
     }
     try {
-      // Autonomous sync caps at 50 pages per campaign (~750 leads). For
-      // mega-campaigns like JPNYC's 1,021-page Outlook (15k leads), the
-      // most recent 50 pages get refreshed each tick; older leads stay
-      // synced from earlier runs. Manual /api/cron/nurture-sync-client
-      // uses no cap so operators can do a full backfill on demand.
+      // Cursor-based scan with a saved resume position per campaign — walks the
+      // WHOLE campaign across successive runs (no page cap, nothing skipped). We
+      // bound each client to ~60s per run so many clients rotate per tick;
+      // fully-drained clients return instantly (all campaigns skipped), so the
+      // budget focuses on backlog clients until they're caught up.
       const r = await syncOneClient(instanceKey, tag, {
-        maxPagesPerCampaign: 50,
+        maxMs: 60_000,
         preloadedCampaigns: allCampaigns,
       });
       state.campaignsScanned += r.campaignsScanned;
@@ -222,7 +279,7 @@ export type SyncProgressFn = (e: SyncProgressEvent) => void;
 export async function syncOneClient(
   instanceKey: BisonInstanceKey,
   clientTag: string,
-  opts: { maxPagesPerCampaign?: number; preloadedCampaigns?: OutboundCampaign[]; onProgress?: SyncProgressFn } = {},
+  opts: { maxMs?: number; preloadedCampaigns?: OutboundCampaign[]; onProgress?: SyncProgressFn } = {},
 ): Promise<InstanceSyncResult> {
   const state: InstanceSyncState = { campaignsScanned: 0, candidatesFound: 0, upserted: 0, errors: [] };
 
@@ -266,8 +323,8 @@ export async function syncOneClient(
   });
 
   await processCampaigns(instanceKey, usableCampaigns, state, {
-    maxPagesPerCampaign: opts.maxPagesPerCampaign,
     onProgress: opts.onProgress,
+    maxMs: opts.maxMs,
   });
   return { instance: instanceKey, ...state };
 }
@@ -333,17 +390,58 @@ async function processCampaigns(
   instanceKey: BisonInstanceKey,
   campaigns: OutboundCampaign[],
   state: InstanceSyncState,
-  opts: { maxPagesPerCampaign?: number; onProgress?: SyncProgressFn } = {},
+  opts: { onProgress?: SyncProgressFn; maxMs?: number } = {},
+): Promise<void> {
+  await ensureCursorTable();
+  const cursors = await loadCursors(instanceKey, campaigns.map((c) => c.id));
+  const now = Date.now();
+  // Prioritise campaigns that still need scanning: mid-sweep first, then
+  // never-completed, then fully-drained ones older than RESWEEP_MS (to catch new
+  // finishers). Skip freshly-drained campaigns so the run's budget goes to the
+  // backlog, not re-reading already-covered leads.
+  const queue = campaigns.filter((c) => {
+    const st = cursors.get(c.id);
+    if (!st) return true;
+    if (st.cursor) return true;
+    if (!st.completed_at) return true;
+    return now - Date.parse(st.completed_at) > RESWEEP_MS;
+  });
+  const deadline = now + (opts.maxMs ?? 240_000);
+  const CONCURRENCY = 4;
+  await parallelForEach(queue, CONCURRENCY, async (campaign) => {
+    if (Date.now() >= deadline) return;
+    state.campaignsScanned++;
+    let cursor = cursors.get(campaign.id)?.cursor ?? null;
+    const campDeadline = Math.min(deadline, Date.now() + PER_CAMPAIGN_MS);
+    try {
+      for (;;) {
+        const window = await sweepCampaignLeadsCursor(instanceKey, campaign.id, cursor, {
+          leadCampaignStatus: "sequence_finished", maxLeads: CURSOR_WINDOW_LEADS, maxMs: CURSOR_WINDOW_MS,
+        });
+        await processLeadWindow(instanceKey, campaign, window.leads, state, opts.onProgress);
+        cursor = window.nextCursor;
+        await saveCursor(instanceKey, campaign.id, cursor, window.done);
+        if (window.done || !cursor || Date.now() >= campDeadline || Date.now() >= deadline) break;
+      }
+    } catch (e) {
+      state.errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}) sweep: ${(e as Error).message}`);
+    }
+  });
+}
+
+// Process ONE window of cursor-swept leads for a campaign: drop bounced/replied,
+// drop already-known (new-leads-only), resolve ESP, and upsert into
+// nurture_sequence_finished. Mutates `state` for progress reporting.
+async function processLeadWindow(
+  instanceKey: BisonInstanceKey,
+  campaign: OutboundCampaign,
+  leads: OutboundLead[],
+  state: InstanceSyncState,
+  onProgress?: SyncProgressFn,
 ): Promise<void> {
   const errors = state.errors;
-  const CONCURRENCY = 6;
-  await parallelForEach(campaigns, CONCURRENCY, async (campaign) => {
-    state.campaignsScanned++;
-    try {
-      const leads = await listCampaignLeads(instanceKey, campaign.id, {
-        leadCampaignStatus: "sequence_finished",
-        maxPages: opts.maxPagesPerCampaign,
-      });
+  if (leads.length === 0) return;
+  try {
 
       const candidates = leads.filter((lead) => {
         // Bison already filtered to lead_campaign_status=sequence_finished
@@ -400,7 +498,7 @@ async function processCampaigns(
 
       state.candidatesFound += newCandidates.length;
       if (newCandidates.length === 0) {
-        opts.onProgress?.({
+        onProgress?.({
           phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
           status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
           candidates: 0, upserted: 0, skipped, esp: { google: 0, outlook: 0, segs: 0, other: 0 },
@@ -495,7 +593,7 @@ async function processCampaigns(
       } else {
         state.upserted += dedupedRows.length;
       }
-      opts.onProgress?.({
+      onProgress?.({
         phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
         status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
         candidates: newCandidates.length, upserted: error ? 0 : dedupedRows.length, skipped, esp,
@@ -508,13 +606,12 @@ async function processCampaigns(
     } catch (e) {
       const msg = (e as Error).message;
       errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${msg}`);
-      opts.onProgress?.({
+      onProgress?.({
         phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
         status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
         candidates: 0, upserted: 0, esp: { google: 0, outlook: 0, segs: 0, other: 0 }, error: msg,
       });
     }
-  });
 }
 
 // Per-instance hard cap. Vercel kills the whole route at 5 min

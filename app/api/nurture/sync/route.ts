@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
           const perInstance = await Promise.all(
             instances.map((i) =>
               syncOneClient(i, tag, {
-                maxPagesPerCampaign: 100,
+                maxMs: 240_000,
                 onProgress: (e) => emit({ type: e.phase, ...e }),
               }),
             ),
