@@ -87,6 +87,19 @@ export const POSITIVE_CATEGORIES = [
   "Internally Forwarded",
 ];
 
+// Positive AI lead categories (`ai_categorized_lead_category` strings, distinct
+// from the working `lead_category` values above). Used to decide when a reply
+// should loop in the client's configured CC/BCC — gated on the AI category so a
+// lead still sitting in the Open Response bucket but AI-classified positive
+// (e.g. "Interested") still gets the client team CC'd.
+export const POSITIVE_AI_CATEGORIES = [
+  "Interested",
+  "Meeting Request",
+  "Follow Up at a Later Date",
+  "Referral Given",
+  "Internally Forwarded",
+];
+
 /**
  * Pick the first non-empty bucket to auto-expand: positives first, then Open
  * Response, then whatever else has rows. MUST match the client's auto-expand so

@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
-import { INBOX_VIEWS, getView, POSITIVE_CATEGORIES } from "@/lib/inbox-views";
+import { INBOX_VIEWS, getView, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { useSession } from "@/components/session-provider";
 import { peekFreshBootstrap, DEFAULT_VIEW, type InboxBootstrap } from "@/lib/inbox-prefetch";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -152,9 +152,10 @@ function computeReplyRecipients(d: ReplyDetail, category: string): {
   const ours = norm(String(d.sender_email || ""));
   const leadEmail = norm(String(d.from_email || d.lead_email || ""));
   const to = { name: String(d.from_name || d.lead_name || ""), email: String(d.from_email || d.lead_email || "") };
-  // Loop in the client's configured team (template CC/BCC) whenever we're
-  // composing a reply — every (Send Reply) category AND positive outcomes.
-  const includeTeam = POSITIVE_CATEGORIES.includes(category) || /\(send reply\)/i.test(category);
+  // Loop in the client's configured team (CC/BCC) when the lead is AI-classified
+  // positive (gated on ai_categorized_lead_category so Open-Response-bucket leads
+  // that are AI-positive still get the client CC'd), OR any (Send Reply) category.
+  const includeTeam = POSITIVE_AI_CATEGORIES.includes(String(d.ai_categorized_lead_category || "")) || /\(send reply\)/i.test(category);
 
   const seen = new Set<string>([ours, leadEmail].filter(Boolean));
   const cc: { name: string; email: string }[] = [];
@@ -560,6 +561,7 @@ export default function InboxPage() {
     setReplyCc(cc);
     setReplyBcc(bcc);
     setOoCc([]);
+    setGenInstructions(""); // instructions are per-lead — don't carry over
     setConfirmInline(null); // new lead → reset any pending send confirmation
     if (d.client_tag) loadSheetUrl(d.client_tag);
   }
@@ -1174,7 +1176,7 @@ export default function InboxPage() {
         {loading && <div className="flex items-center justify-center h-full"><p className="text-sm text-muted-foreground">Loading...</p></div>}
 
         {detail && !loading && (
-          <div className="p-4 max-w-2xl mx-auto space-y-2.5 pb-16">
+          <div className="p-5 max-w-4xl mx-auto space-y-3 pb-16">
             {/* Header */}
             <div className="flex items-start justify-between gap-3 pb-3 border-b">
               <div className="flex items-center gap-3 min-w-0">
@@ -1467,40 +1469,6 @@ export default function InboxPage() {
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
-            {/* ── Email history (full conversation + our send attempts) ── */}
-            <div className="rounded border bg-white px-4 py-2.5">
-              <button onClick={() => setHistoryOpen((o) => !o)} className="w-full flex items-center justify-between text-xs font-medium">
-                <span>Email history{history ? ` (${history.thread?.length || 0} message${(history.thread?.length || 0) === 1 ? "" : "s"})` : "…"}</span>
-                <span className="text-muted-foreground">{historyOpen ? "▲" : "▼"}</span>
-              </button>
-              {historyOpen && (
-                <div className="mt-2 space-y-1.5 max-h-80 overflow-y-auto">
-                  {!history && <p className="text-[11px] text-muted-foreground">Loading…</p>}
-                  {history && history.thread.length === 0 && <p className="text-[11px] text-muted-foreground">No prior messages found for this lead.</p>}
-                  {history?.thread.map((m, i) => (
-                    <div key={i} className={`rounded border px-2.5 py-1.5 text-[11px] ${m.direction === "sent" ? "bg-blue-50 border-blue-200" : "bg-slate-50 border-slate-200"}`}>
-                      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                        <span className="font-semibold">{m.direction === "sent" ? "→ Sent" : "← Received"}{m.sender ? ` · ${m.sender}` : ""}</span>
-                        <span>{m.at ? new Date(m.at).toLocaleDateString() : ""}</span>
-                      </div>
-                      {m.subject && <p className="font-medium mt-0.5">{m.subject}</p>}
-                      <p className="whitespace-pre-wrap text-muted-foreground mt-0.5">{m.body.length > 500 ? m.body.slice(0, 500) + "…" : m.body}</p>
-                    </div>
-                  ))}
-                  {history && history.sends.length > 0 && (
-                    <div className="pt-1.5 border-t space-y-0.5">
-                      <p className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">ReplyRouter sends</p>
-                      {history.sends.map((s) => (
-                        <p key={s.id} className={`text-[10px] ${s.status === "failed" ? "text-rose-700" : "text-green-700"}`}>
-                          {s.status === "sent" ? "✓ sent" : "⚠ failed"} · {new Date(s.created_at).toLocaleString()}{s.error ? ` · ${s.error}` : ""}
-                        </p>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
             {/* ── Send Reply (with CC/BCC pre-populated) ── */}
             <div className="rounded border bg-white px-4 py-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
@@ -1534,6 +1502,40 @@ export default function InboxPage() {
                 {confirmInline === "reply" && <button onClick={() => setConfirmInline(null)} className="text-[11px] text-muted-foreground hover:text-foreground">Cancel</button>}
                 {confirmInline === "reply" && <span className="text-[11px] text-amber-700">Sends to {detail.lead_email} — confirm?</span>}
               </div>
+            </div>
+
+            {/* ── Email history (full conversation + our send attempts) ── */}
+            <div className="rounded border bg-white px-4 py-2.5">
+              <button onClick={() => setHistoryOpen((o) => !o)} className="w-full flex items-center justify-between text-xs font-medium">
+                <span>Email history{history ? ` (${history.thread?.length || 0} message${(history.thread?.length || 0) === 1 ? "" : "s"})` : "…"}</span>
+                <span className="text-muted-foreground">{historyOpen ? "▲" : "▼"}</span>
+              </button>
+              {historyOpen && (
+                <div className="mt-2 space-y-1.5 max-h-80 overflow-y-auto">
+                  {!history && <p className="text-[11px] text-muted-foreground">Loading…</p>}
+                  {history && history.thread.length === 0 && <p className="text-[11px] text-muted-foreground">No prior messages found for this lead.</p>}
+                  {history?.thread.map((m, i) => (
+                    <div key={i} className={`rounded border px-2.5 py-1.5 text-[11px] ${m.direction === "sent" ? "bg-blue-50 border-blue-200" : "bg-slate-50 border-slate-200"}`}>
+                      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                        <span className="font-semibold">{m.direction === "sent" ? "→ Sent" : "← Received"}{m.sender ? ` · ${m.sender}` : ""}</span>
+                        <span>{m.at ? new Date(m.at).toLocaleDateString() : ""}</span>
+                      </div>
+                      {m.subject && <p className="font-medium mt-0.5">{m.subject}</p>}
+                      <p className="whitespace-pre-wrap text-muted-foreground mt-0.5">{m.body.length > 500 ? m.body.slice(0, 500) + "…" : m.body}</p>
+                    </div>
+                  ))}
+                  {history && history.sends.length > 0 && (
+                    <div className="pt-1.5 border-t space-y-0.5">
+                      <p className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">ReplyRouter sends</p>
+                      {history.sends.map((s) => (
+                        <p key={s.id} className={`text-[10px] ${s.status === "failed" ? "text-rose-700" : "text-green-700"}`}>
+                          {s.status === "sent" ? "✓ sent" : "⚠ failed"} · {new Date(s.created_at).toLocaleString()}{s.error ? ` · ${s.error}` : ""}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* ── More actions (Forward / One-Off) — collapsed by default ── */}

@@ -7,7 +7,7 @@
  * MUST stay free of server-only imports (no @/lib/db, supabase, etc.) — it runs
  * in the browser bundle.
  */
-import { POSITIVE_CATEGORIES } from "@/lib/inbox-views";
+import { POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 
@@ -61,11 +61,11 @@ export function computeReplyRecipients(d: Row, category: string): {
   const ours = norm(String(d.sender_email || ""));
   const leadEmail = norm(String(d.from_email || d.lead_email || ""));
   const to: Recipient = { name: String(d.from_name || d.lead_name || ""), email: String(d.from_email || d.lead_email || "") };
-  // Loop in the client's configured team (CC/BCC from the template) whenever we're
-  // actually composing a reply — every (Send Reply) category AND positive outcomes.
-  // (Previously positive-only, which left the client contacts off Send-Reply
-  // categories like "Not Interested (Send Reply)" / primary-contact.)
-  const includeTeam = POSITIVE_CATEGORIES.includes(category) || isSendReplyCategory(category);
+  // Loop in the client's configured team (CC/BCC) when the lead is AI-classified
+  // positive (gated on ai_categorized_lead_category, so leads still in the Open
+  // Response bucket but AI-positive still get the client CC'd), OR when we're
+  // composing an explicit (Send Reply) category.
+  const includeTeam = POSITIVE_AI_CATEGORIES.includes(String(d.ai_categorized_lead_category || "")) || isSendReplyCategory(category);
 
   const seen = new Set<string>([ours, leadEmail].filter(Boolean));
   const cc: Recipient[] = [];
