@@ -25,6 +25,8 @@ import { EmailParticipants, initials } from "@/components/email-participants";
 import { QualificationLookup } from "@/components/qualification-lookup";
 import { InboxBestFit } from "@/components/inbox-best-fit";
 import { htmlToText, textToHtml } from "@/lib/html-text";
+import { useInboxPresence } from "@/lib/use-inbox-presence";
+import { getPresenceProfile } from "@/lib/presence-users";
 
 // Browser-side Supabase client for realtime (anon key)
 const realtimeSupabase = createClient(
@@ -332,6 +334,19 @@ export default function InboxPage() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
+
+  // Real-time lead presence (Google-Docs-style): show who is currently viewing
+  // each lead. Identity = the signed-in user; color from getPresenceProfile.
+  const me = getPresenceProfile(session?.email);
+  const presenceByLead = useInboxPresence(realtimeSupabase, {
+    email: session?.email,
+    name: me.name,
+    color: me.color,
+    currentLeadId: selectedId,
+  });
+  // Teammates (not me) currently viewing the open lead — warns of a collision.
+  const otherViewers = (selectedId != null ? presenceByLead.get(selectedId) ?? [] : [])
+    .filter((v) => v.email.toLowerCase() !== (session?.email || "").toLowerCase());
   const [search, setSearch] = useState("");
   // Fetches run off the debounced value so typing doesn't fire a request/char.
   const debouncedSearch = useDebouncedValue(search, 300);
@@ -1126,9 +1141,20 @@ export default function InboxPage() {
                   {loadingCat === cat && !categoryLeads[cat] && (
                     <div className="px-3 py-2 text-[10px] text-muted-foreground">Loading...</div>
                   )}
-                  {categoryLeads[cat]?.map((r) => (
+                  {categoryLeads[cat]?.map((r) => {
+                    const viewers = presenceByLead.get(r.id);
+                    return (
                     <button key={r.id} onClick={() => loadDetail(r.id, r)} onMouseEnter={() => prefetchDetail(r.id)}
-                      className={`w-full text-left px-3 py-2 border-b border-muted/30 transition-colors ${selectedId === r.id ? "bg-primary/5 border-l-2 border-l-primary" : "hover:bg-muted/10 border-l-2 border-l-transparent"}`}>
+                      className={`relative w-full text-left px-3 py-2 border-b border-muted/30 transition-colors ${selectedId === r.id ? "bg-primary/5 border-l-2 border-l-primary" : "hover:bg-muted/10 border-l-2 border-l-transparent"}`}>
+                      {/* Live presence: who's viewing this lead — a top bar split
+                          evenly by color, left-to-right by who opened it first. */}
+                      {viewers && viewers.length > 0 && (
+                        <div className="absolute top-0 left-0 right-0 flex h-1" aria-hidden>
+                          {viewers.map((v, i) => (
+                            <div key={`${v.email}-${i}`} style={{ backgroundColor: v.color, flex: 1 }} title={`${v.name} is viewing`} />
+                          ))}
+                        </div>
+                      )}
                       <p className="text-xs font-medium truncate">{r.lead_email}</p>
                       <div className="flex items-center gap-1 mt-0.5">
                         <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category || "—"}</span>
@@ -1136,7 +1162,8 @@ export default function InboxPage() {
                         <InstanceBadge instance={r.bison_instance} size="xs" />
                       </div>
                     </button>
-                  ))}
+                    );
+                  })}
                   {categoryLeads[cat] && catPage[cat]?.hasMore && (
                     <button
                       onClick={() => loadCategoryLeads(cat, true)}
@@ -1189,6 +1216,24 @@ export default function InboxPage() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-1.5 items-center justify-end">
+                {/* Live collision warning: teammates also viewing this lead. */}
+                {otherViewers.length > 0 && (
+                  <span
+                    className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded border border-amber-200 bg-amber-50 text-amber-800"
+                    title={`Also viewing: ${otherViewers.map((v) => v.name).join(", ")}`}
+                  >
+                    <span className="flex -space-x-1">
+                      {otherViewers.map((v, i) => (
+                        <span
+                          key={`${v.email}-${i}`}
+                          className="h-3.5 w-3.5 rounded-full ring-1 ring-white"
+                          style={{ backgroundColor: v.color }}
+                        />
+                      ))}
+                    </span>
+                    {otherViewers.length === 1 ? `${otherViewers[0].name} also viewing` : `${otherViewers.length} also viewing`}
+                  </span>
+                )}
                 {(detail.lead_category || "Open Response") === "Open Response" ? (
                   <LiveTimer startIso={detail.open_response_at || detail.created_at} />
                 ) : detail.time_to_categorize_seconds != null ? (
