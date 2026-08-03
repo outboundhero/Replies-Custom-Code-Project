@@ -38,30 +38,58 @@ export function colLetter(idx: number): string {
   return s;
 }
 
-/** Find the "Lead handoff email" column; create it at the next empty column when
- *  absent. Returns the 0-based column index. Idempotent. */
+/** A tab's grid id + width + where the handoff header currently sits (if any). */
+export async function getSheetLayout(
+  sheets: sheets_v4.Sheets,
+  spreadsheetId: string,
+  sheetName: string,
+): Promise<{ gridId: number; columnCount: number; headerIndex: number | null }> {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(sheetId,title,gridProperties(columnCount)))",
+  });
+  const tab = (meta.data.sheets || []).find((s) => s.properties?.title === sheetName);
+  if (!tab?.properties || tab.properties.sheetId == null) {
+    throw new Error(`tab '${sheetName}' not found`);
+  }
+  const gridId = tab.properties.sheetId;
+  const columnCount = tab.properties.gridProperties?.columnCount ?? 0;
+
+  const headerRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'!1:1` });
+  const headers: string[] = (headerRes.data.values?.[0] || []).map((h) => String(h || ""));
+  const i = headers.findIndex((h) => h.trim().toLowerCase() === HANDOFF_HEADER.toLowerCase());
+  return { gridId, columnCount, headerIndex: i === -1 ? null : i };
+}
+
+/** Find the "Lead handoff email" column; create it (GROWING the grid first —
+ *  values.update can't write past the grid) when absent. The new column always
+ *  lands at ≥ col X so it never collides with the A:W data. Idempotent. */
 export async function ensureHandoffColumn(
   sheets: sheets_v4.Sheets,
   spreadsheetId: string,
   sheetName: string,
-): Promise<number> {
-  const headerRes = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `'${sheetName}'!1:1`,
-  });
-  const headers: string[] = (headerRes.data.values?.[0] || []).map((h) => String(h || ""));
-  const existing = headers.findIndex((h) => h.trim().toLowerCase() === HANDOFF_HEADER.toLowerCase());
-  if (existing !== -1) return existing;
+): Promise<{ index: number; created: boolean }> {
+  const { gridId, columnCount, headerIndex } = await getSheetLayout(sheets, spreadsheetId, sheetName);
+  if (headerIndex != null) return { index: headerIndex, created: false };
 
-  // Next empty column, but never inside the A:W data range (see PUSH_COLUMN_COUNT).
-  const idx = Math.max(headers.length, PUSH_COLUMN_COUNT);
-  await sheets.spreadsheets.values.update({
+  const index = Math.max(columnCount, PUSH_COLUMN_COUNT); // never inside A:W data
+  const addCols = index + 1 - columnCount; // columns to append so `index` exists in the grid
+  await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
-    range: `'${sheetName}'!${colLetter(idx)}1`,
-    valueInputOption: "RAW",
-    requestBody: { values: [[HANDOFF_HEADER]] },
+    requestBody: {
+      requests: [
+        { appendDimension: { sheetId: gridId, dimension: "COLUMNS", length: addCols } },
+        {
+          updateCells: {
+            rows: [{ values: [{ userEnteredValue: { stringValue: HANDOFF_HEADER } }] }],
+            fields: "userEnteredValue",
+            start: { sheetId: gridId, rowIndex: 0, columnIndex: index },
+          },
+        },
+      ],
+    },
   });
-  return idx;
+  return { index, created: true };
 }
 
 export async function setLeadHandoffEmail(
@@ -82,10 +110,11 @@ export async function setLeadHandoffEmail(
   const auth = getAuth();
   const sheets = google.sheets({ version: "v4", auth });
 
-  // Column — find or create by header name.
+  // Column — find or create by header name (grows the grid if needed).
   let col: string;
   try {
-    col = colLetter(await ensureHandoffColumn(sheets, sheet.id, sheet.name));
+    const { index } = await ensureHandoffColumn(sheets, sheet.id, sheet.name);
+    col = colLetter(index);
   } catch (e) {
     return { ok: false, error: `handoff column lookup failed: ${(e as Error).message}` };
   }
