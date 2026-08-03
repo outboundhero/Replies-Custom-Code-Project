@@ -28,10 +28,14 @@ import { htmlToText, textToHtml } from "@/lib/html-text";
 import { useInboxPresence } from "@/lib/use-inbox-presence";
 import { getPresenceProfile } from "@/lib/presence-users";
 
-// Browser-side Supabase client for realtime (anon key)
+// Browser-side Supabase client for realtime (anon key).
+// eventsPerSecond raised from the default 10 → 40 so rapid presence track()
+// calls (switching leads quickly) aren't dropped by the client rate limiter,
+// which would otherwise leave a viewer's presence stuck on a stale lead.
 const realtimeSupabase = createClient(
   "https://iiiupmanpycjcopcrkdh.supabase.co",
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlpaXVwbWFucHljamNvcGNya2RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjk1NzgsImV4cCI6MjA5MTg0NTU3OH0.psM-ngpfrDUJqRCy_r33eP664y5HfZq_W6elkMJ7D88"
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlpaXVwbWFucHljamNvcGNya2RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNjk1NzgsImV4cCI6MjA5MTg0NTU3OH0.psM-ngpfrDUJqRCy_r33eP664y5HfZq_W6elkMJ7D88",
+  { realtime: { params: { eventsPerSecond: 40 } } }
 );
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1155,7 +1159,18 @@ export default function InboxPage() {
                           ))}
                         </div>
                       )}
-                      <p className="text-xs font-medium truncate">{r.lead_email}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-xs font-medium truncate flex-1">{r.lead_email}</p>
+                        {/* Colored dots — one per viewer — unambiguously mark this row. */}
+                        {viewers && viewers.length > 0 && (
+                          <span className="flex -space-x-1 shrink-0">
+                            {viewers.map((v, i) => (
+                              <span key={`${v.email}-${i}`} title={`${v.name} is viewing`}
+                                className="h-2.5 w-2.5 rounded-full ring-2 ring-white" style={{ backgroundColor: v.color }} />
+                            ))}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1 mt-0.5">
                         <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category || "—"}</span>
                         <span className="text-[10px] font-mono font-bold text-primary/60">{r.client_tag || "N/A"}</span>

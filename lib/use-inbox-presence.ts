@@ -43,6 +43,8 @@ export function useInboxPresence(
   const leadRef = useRef<number | null>(currentLeadId);
   const openedAtRef = useRef<number>(Date.now());
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const subscribedRef = useRef<boolean>(false);
+  const trackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Signature of the last committed presence state. Supabase fires `sync` on
   // every heartbeat/join/leave anywhere — most carry no change relevant to us.
   // We only re-render (which repaints the whole inbox) when this actually moves.
@@ -53,9 +55,19 @@ export function useInboxPresence(
     return { email: e || "", name: n, color: c, leadId: leadRef.current, at: openedAtRef.current };
   }
 
-  function pushTrack() {
+  // Announce our current lead. `track()` can be dropped by the client-side rate
+  // limiter (or time out) when leads are switched rapidly — if the server
+  // doesn't ack "ok", retry shortly with the LATEST payload so presence never
+  // sticks on a stale lead.
+  async function pushTrack() {
     const ch = channelRef.current;
-    if (ch) void ch.track(payload());
+    if (!ch || !subscribedRef.current) return;
+    try {
+      const res = await ch.track(payload());
+      if (res !== "ok") setTimeout(() => { void ch.track(payload()); }, 400);
+    } catch {
+      setTimeout(() => { const c = channelRef.current; if (c) void c.track(payload()); }, 400);
+    }
   }
 
   // ── Subscribe once (per signed-in email). Rebuild the map on every presence
@@ -101,7 +113,10 @@ export function useInboxPresence(
       .on("presence", { event: "join" }, rebuild)
       .on("presence", { event: "leave" }, rebuild)
       .subscribe((status) => {
-        if (status === "SUBSCRIBED") pushTrack();
+        if (status === "SUBSCRIBED") { subscribedRef.current = true; void pushTrack(); }
+        else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          subscribedRef.current = false;
+        }
       });
 
     // Graceful tab close → drop our presence immediately (don't wait for the
@@ -114,7 +129,7 @@ export function useInboxPresence(
     // from the current state so it snaps back to real-time immediately.
     const onVisible = () => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-      pushTrack();
+      void pushTrack();
       rebuild();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -124,6 +139,7 @@ export function useInboxPresence(
       window.removeEventListener("beforeunload", onUnload);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
+      subscribedRef.current = false;
       channelRef.current = null;
       client.removeChannel(channel);
     };
@@ -131,11 +147,15 @@ export function useInboxPresence(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, email]);
 
-  // ── Lead switch → re-track with a fresh open timestamp (near-instant). ──
+  // ── Lead switch → re-track. Coalesce rapid switches (clicking through leads)
+  //    with a short trailing debounce so the lead you SETTLE on always wins and
+  //    intermediate flicks don't burn the rate limit. ~120ms still feels live. ──
   useEffect(() => {
     leadRef.current = currentLeadId;
     openedAtRef.current = Date.now();
-    pushTrack();
+    if (trackTimerRef.current) clearTimeout(trackTimerRef.current);
+    trackTimerRef.current = setTimeout(() => { void pushTrack(); }, 120);
+    return () => { if (trackTimerRef.current) clearTimeout(trackTimerRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentLeadId]);
 
