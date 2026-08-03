@@ -3,12 +3,23 @@
 /**
  * Real-time "who's viewing which lead" presence for the inbox.
  *
- * Rides the inbox's existing Supabase Realtime WebSocket via the built-in
- * Presence feature (ephemeral, in-memory, sub-second join/leave — no polling).
- * Each client tracks { email, name, color, leadId, at }; the moment someone
- * opens/switches a lead we push a fresh track(), and every other inbox sees it
- * near-instantly. Returns a Map<leadId, Viewer[]> the UI renders as split color
- * bars, ordered left-to-right by who opened the lead first (`at` ascending).
+ * Uses Supabase Realtime **Broadcast** (not Presence) for the current-lead
+ * signal. Presence meta-updates (repeated track()) proved unreliable here — the
+ * first state stuck and switches didn't propagate. Broadcast is a direct pub/sub
+ * message delivered to every subscriber instantly (the same mechanism live
+ * cursors use), so a lead switch shows up on everyone else's screen right away.
+ *
+ * Online/offline is handled ourselves:
+ *   - every client re-broadcasts its state on a heartbeat; a viewer whose
+ *     heartbeats stop (closed tab / crash) is pruned after TTL_MS.
+ *   - a graceful tab close broadcasts an explicit "leaving" so the color clears
+ *     immediately instead of waiting for the TTL.
+ *   - on join we broadcast "hello"; everyone replies with their state, so a
+ *     freshly-opened inbox learns every current position within a fraction of a
+ *     second (Broadcast has no built-in state sync like Presence does).
+ *
+ * Returns Map<leadId, Viewer[]> the UI renders as split color bars + dots,
+ * ordered left-to-right by who opened the lead first (`at` ascending).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -28,7 +39,18 @@ interface Identity {
   currentLeadId: number | null;
 }
 
+interface Entry {
+  leadId: number | null;
+  name: string;
+  color: string;
+  at: number;
+  lastSeen: number;
+}
+
 const CHANNEL = "inbox-presence";
+const HEARTBEAT_MS = 4000; // re-announce so others keep us alive
+const TTL_MS = 11000;      // drop a viewer we haven't heard from in this long
+const PRUNE_MS = 3000;     // sweep for expired viewers
 
 export function useInboxPresence(
   client: SupabaseClient,
@@ -36,125 +58,152 @@ export function useInboxPresence(
 ): Map<number, Viewer[]> {
   const [byLead, setByLead] = useState<Map<number, Viewer[]>>(new Map());
 
-  // Latest identity + current lead held in refs so the channel never has to
-  // re-subscribe on a lead switch — we just push a new track() payload.
+  // Latest identity + current lead in refs so channel wiring never needs to
+  // re-subscribe on a lead switch — we just broadcast a new state.
   const idRef = useRef({ email, name, color });
   idRef.current = { email, name, color };
   const leadRef = useRef<number | null>(currentLeadId);
   const openedAtRef = useRef<number>(Date.now());
   const channelRef = useRef<RealtimeChannel | null>(null);
   const subscribedRef = useRef<boolean>(false);
-  const trackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Signature of the last committed presence state. Supabase fires `sync` on
-  // every heartbeat/join/leave anywhere — most carry no change relevant to us.
-  // We only re-render (which repaints the whole inbox) when this actually moves.
+  // email → latest known state (includes ourselves, upserted locally).
+  const viewersRef = useRef<Map<string, Entry>>(new Map());
   const lastSigRef = useRef<string>("");
+  const trackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function payload() {
-    const { email: e, name: n, color: c } = idRef.current;
-    return { email: e || "", name: n, color: c, leadId: leadRef.current, at: openedAtRef.current };
+  const debug = typeof window !== "undefined" && window.location.search.includes("presenceDebug");
+
+  // Rebuild byLead from viewersRef, pruning expired entries. Only re-renders
+  // (repaints the whole inbox) when the meaningful signature actually changes —
+  // heartbeats that only bump lastSeen never trigger a render.
+  function recompute() {
+    const now = Date.now();
+    const map = new Map<number, Viewer[]>();
+    const sig: string[] = [];
+    for (const [em, e] of viewersRef.current) {
+      if (now - e.lastSeen > TTL_MS) { viewersRef.current.delete(em); continue; }
+      if (typeof e.leadId !== "number") continue; // online but not on a lead
+      sig.push(`${e.leadId}:${em}:${e.at}`);
+      const v: Viewer = { email: em, name: e.name, color: e.color, at: e.at };
+      const arr = map.get(e.leadId);
+      if (arr) arr.push(v);
+      else map.set(e.leadId, [v]);
+    }
+    const signature = sig.sort().join("|");
+    if (signature === lastSigRef.current) return;
+    lastSigRef.current = signature;
+    for (const arr of map.values()) arr.sort((a, b) => a.at - b.at);
+    if (debug) console.debug("[presence] recompute →", [...map.entries()]);
+    setByLead(map);
   }
 
-  // Announce our current lead. `track()` can be dropped by the client-side rate
-  // limiter (or time out) when leads are switched rapidly — if the server
-  // doesn't ack "ok", retry shortly with the LATEST payload so presence never
-  // sticks on a stale lead.
-  async function pushTrack() {
+  function upsertSelf() {
+    const { email: e, name: n, color: c } = idRef.current;
+    if (!e) return;
+    viewersRef.current.set(e, {
+      leadId: leadRef.current, name: n, color: c, at: openedAtRef.current, lastSeen: Date.now(),
+    });
+  }
+
+  function sendState() {
     const ch = channelRef.current;
     if (!ch || !subscribedRef.current) return;
-    try {
-      const res = await ch.track(payload());
-      if (res !== "ok") setTimeout(() => { void ch.track(payload()); }, 400);
-    } catch {
-      setTimeout(() => { const c = channelRef.current; if (c) void c.track(payload()); }, 400);
-    }
+    const { email: e, name: n, color: c } = idRef.current;
+    upsertSelf();  // reflect our own state locally (broadcast self:false)
+    recompute();
+    if (debug) console.debug("[presence] sendState leadId=", leadRef.current);
+    void ch.send({ type: "broadcast", event: "viewing",
+      payload: { email: e || "", name: n, color: c, leadId: leadRef.current, at: openedAtRef.current } });
   }
 
-  // ── Subscribe once (per signed-in email). Rebuild the map on every presence
-  //    event; do the initial track() the instant we're SUBSCRIBED. ──
+  function sendHello() {
+    const ch = channelRef.current;
+    if (!ch || !subscribedRef.current) return;
+    void ch.send({ type: "broadcast", event: "hello", payload: {} });
+  }
+
+  function sendLeave() {
+    const ch = channelRef.current;
+    const { email: e } = idRef.current;
+    if (e) viewersRef.current.delete(e);
+    if (ch) void ch.send({ type: "broadcast", event: "viewing", payload: { email: e || "", leaving: true } });
+  }
+
+  // ── Wire the channel once per signed-in email. ──
   useEffect(() => {
-    if (!email) return; // not signed in → no presence
+    if (!email) return;
     lastSigRef.current = "";
-    const channel = client.channel(CHANNEL, { config: { presence: { key: email } } });
+    viewersRef.current.clear();
+    const channel = client.channel(CHANNEL, { config: { broadcast: { self: false } } });
     channelRef.current = channel;
 
-    const rebuild = () => {
-      const state = channel.presenceState() as Record<string, Array<Record<string, unknown>>>;
-      const map = new Map<number, Viewer[]>();
-      const sig: string[] = [];
-      for (const entries of Object.values(state)) {
-        for (const p of entries) {
-          const leadId = p.leadId;
-          if (typeof leadId !== "number") continue; // present but not on a lead
-          const v: Viewer = {
-            email: String(p.email || ""),
-            name: String(p.name || "Someone"),
-            color: String(p.color || "#6b7280"),
-            at: typeof p.at === "number" ? p.at : 0,
-          };
-          sig.push(`${leadId}:${v.email}:${v.at}`);
-          const arr = map.get(leadId);
-          if (arr) arr.push(v);
-          else map.set(leadId, [v]);
-        }
-      }
-      // Skip the re-render entirely when nothing we care about changed — this is
-      // what keeps the inbox from getting sluggish under heartbeat sync spam.
-      const signature = sig.sort().join("|");
-      if (signature === lastSigRef.current) return;
-      lastSigRef.current = signature;
-      // Left-to-right = who opened the lead first.
-      for (const arr of map.values()) arr.sort((a, b) => a.at - b.at);
-      setByLead(map);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const onViewing = (payload: any) => {
+      const p = payload || {};
+      if (!p.email) return;
+      if (p.leaving) { viewersRef.current.delete(p.email); recompute(); return; }
+      viewersRef.current.set(p.email, {
+        leadId: typeof p.leadId === "number" ? p.leadId : null,
+        name: String(p.name || "Someone"),
+        color: String(p.color || "#6b7280"),
+        at: typeof p.at === "number" ? p.at : 0,
+        lastSeen: Date.now(),
+      });
+      recompute();
     };
 
     channel
-      .on("presence", { event: "sync" }, rebuild)
-      .on("presence", { event: "join" }, rebuild)
-      .on("presence", { event: "leave" }, rebuild)
+      .on("broadcast", { event: "viewing" }, ({ payload }) => onViewing(payload))
+      .on("broadcast", { event: "hello" }, () => sendState()) // newcomer asked — announce ourselves
       .subscribe((status) => {
-        if (status === "SUBSCRIBED") { subscribedRef.current = true; void pushTrack(); }
-        else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        if (debug) console.debug("[presence] status:", status);
+        if (status === "SUBSCRIBED") {
+          subscribedRef.current = true;
+          sendState();  // announce our current lead
+          sendHello();  // ask everyone else to announce theirs
+        } else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
           subscribedRef.current = false;
         }
       });
 
-    // Graceful tab close → drop our presence immediately (don't wait for the
-    // socket-timeout reaper). Passive backstop for hard crashes remains.
-    const onUnload = () => { void channel.untrack(); };
-    window.addEventListener("beforeunload", onUnload);
+    const hb = setInterval(() => { sendState(); }, HEARTBEAT_MS);
+    const pruneTimer = setInterval(() => { recompute(); }, PRUNE_MS);
 
-    // A backgrounded tab is throttled by the browser (rendering paused). The
-    // instant it regains focus, re-announce our presence AND force a repaint
-    // from the current state so it snaps back to real-time immediately.
+    const onUnload = () => { sendLeave(); };
+    window.addEventListener("beforeunload", onUnload);
+    window.addEventListener("pagehide", onUnload);
+
+    // Regaining focus (from a throttled background tab) → re-announce + re-sync.
     const onVisible = () => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-      void pushTrack();
-      rebuild();
+      sendState();
+      sendHello();
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
 
     return () => {
+      clearInterval(hb);
+      clearInterval(pruneTimer);
       window.removeEventListener("beforeunload", onUnload);
+      window.removeEventListener("pagehide", onUnload);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
+      sendLeave();
       subscribedRef.current = false;
       channelRef.current = null;
       client.removeChannel(channel);
     };
-    // Re-subscribe only if the signed-in identity's key (email) changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, email]);
 
-  // ── Lead switch → re-track. Coalesce rapid switches (clicking through leads)
-  //    with a short trailing debounce so the lead you SETTLE on always wins and
-  //    intermediate flicks don't burn the rate limit. ~120ms still feels live. ──
+  // ── Lead switch → broadcast new state. Coalesce rapid switches (clicking
+  //    through leads) with a short trailing debounce so the settled lead wins. ──
   useEffect(() => {
     leadRef.current = currentLeadId;
     openedAtRef.current = Date.now();
     if (trackTimerRef.current) clearTimeout(trackTimerRef.current);
-    trackTimerRef.current = setTimeout(() => { void pushTrack(); }, 120);
+    trackTimerRef.current = setTimeout(() => { sendState(); }, 120);
     return () => { if (trackTimerRef.current) clearTimeout(trackTimerRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentLeadId]);
