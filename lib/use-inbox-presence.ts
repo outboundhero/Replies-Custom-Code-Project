@@ -43,6 +43,10 @@ export function useInboxPresence(
   const leadRef = useRef<number | null>(currentLeadId);
   const openedAtRef = useRef<number>(Date.now());
   const channelRef = useRef<RealtimeChannel | null>(null);
+  // Signature of the last committed presence state. Supabase fires `sync` on
+  // every heartbeat/join/leave anywhere — most carry no change relevant to us.
+  // We only re-render (which repaints the whole inbox) when this actually moves.
+  const lastSigRef = useRef<string>("");
 
   function payload() {
     const { email: e, name: n, color: c } = idRef.current;
@@ -58,12 +62,14 @@ export function useInboxPresence(
   //    event; do the initial track() the instant we're SUBSCRIBED. ──
   useEffect(() => {
     if (!email) return; // not signed in → no presence
+    lastSigRef.current = "";
     const channel = client.channel(CHANNEL, { config: { presence: { key: email } } });
     channelRef.current = channel;
 
     const rebuild = () => {
       const state = channel.presenceState() as Record<string, Array<Record<string, unknown>>>;
       const map = new Map<number, Viewer[]>();
+      const sig: string[] = [];
       for (const entries of Object.values(state)) {
         for (const p of entries) {
           const leadId = p.leadId;
@@ -74,11 +80,17 @@ export function useInboxPresence(
             color: String(p.color || "#6b7280"),
             at: typeof p.at === "number" ? p.at : 0,
           };
+          sig.push(`${leadId}:${v.email}:${v.at}`);
           const arr = map.get(leadId);
           if (arr) arr.push(v);
           else map.set(leadId, [v]);
         }
       }
+      // Skip the re-render entirely when nothing we care about changed — this is
+      // what keeps the inbox from getting sluggish under heartbeat sync spam.
+      const signature = sig.sort().join("|");
+      if (signature === lastSigRef.current) return;
+      lastSigRef.current = signature;
       // Left-to-right = who opened the lead first.
       for (const arr of map.values()) arr.sort((a, b) => a.at - b.at);
       setByLead(map);
@@ -97,8 +109,21 @@ export function useInboxPresence(
     const onUnload = () => { void channel.untrack(); };
     window.addEventListener("beforeunload", onUnload);
 
+    // A backgrounded tab is throttled by the browser (rendering paused). The
+    // instant it regains focus, re-announce our presence AND force a repaint
+    // from the current state so it snaps back to real-time immediately.
+    const onVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      pushTrack();
+      rebuild();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+
     return () => {
       window.removeEventListener("beforeunload", onUnload);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
       channelRef.current = null;
       client.removeChannel(channel);
     };
