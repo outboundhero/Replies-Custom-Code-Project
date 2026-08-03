@@ -5,7 +5,7 @@ import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { isNoiseReply } from "@/lib/inbox-noise";
-import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
+import { searchRecords, createRecord, updateRecord, AIRTABLE_WRITES_ENABLED } from "@/lib/airtable";
 import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
@@ -184,10 +184,15 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     ...(includeClientConfig && clientConfig?.reply_template && { "Our reply": clientConfig.reply_template }),
   };
 
-  // 7. Search for existing record in the resolved Airtable base and create/update
+  // 7. Search + create/update the Airtable record — SKIPPED ENTIRELY when
+  //    Airtable is unplugged (AIRTABLE_WRITES_ENABLED=false): no Airtable calls,
+  //    no dependency, replies flow to Reply Router (Supabase) only. `action`
+  //    defaults to "created" so a brand-new reply still gets reply_status
+  //    "Pending" in the Supabase write below.
   let recordId: string | undefined;
-  let action: string;
+  let action = "created";
 
+  if (AIRTABLE_WRITES_ENABLED) {
   try {
     const escapedEmail = reply.from_email_address.replace(/"/g, '\\"');
     const escapedTag = companyCode.replace(/"/g, '\\"');
@@ -223,6 +228,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     });
     throw error;
   }
+  } // end if (AIRTABLE_WRITES_ENABLED)
 
   // 7b. Store in Supabase (non-blocking)
   const untrackedReplyStatus = action === "created" ? "Pending" : "Pending again";

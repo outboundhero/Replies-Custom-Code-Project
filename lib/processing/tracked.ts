@@ -6,7 +6,7 @@ import { cleanReply } from "./reply-cleaner";
 import { shouldFilter } from "./bounce-filter";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
 import { isNoiseReply } from "@/lib/inbox-noise";
-import { searchRecords, createRecord, updateRecord } from "@/lib/airtable";
+import { searchRecords, createRecord, updateRecord, AIRTABLE_WRITES_ENABLED } from "@/lib/airtable";
 import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { sendToClayWebhook } from "@/lib/clay";
@@ -233,10 +233,15 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     baseFields["Our reply"] = resolvedReply;
   }
 
-  // 5. Search for existing record
+  // 5. Search + create/update the Airtable record — SKIPPED ENTIRELY when
+  //    Airtable is unplugged (AIRTABLE_WRITES_ENABLED=false): no Airtable calls,
+  //    no dependency, replies flow to Reply Router (Supabase) only. `action`
+  //    defaults to "created" so a brand-new reply still gets reply_status
+  //    "Pending" in the Supabase write below.
   let recordId: string | undefined;
-  let action: string;
+  let action = "created";
 
+  if (AIRTABLE_WRITES_ENABLED) {
   try {
     // Dedupe by Lead ID + Campaign Name (legacy formula). The "Bison
     // Instance" field is written on every record (see baseFields) but
@@ -286,6 +291,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     });
     throw error;
   }
+  } // end if (AIRTABLE_WRITES_ENABLED)
 
   // 5. Inline nurture-safety classification — so a brand new reply
   // lands in `replies` already classified instead of waiting for the

@@ -1,5 +1,13 @@
 const AIRTABLE_API = "https://api.airtable.com/v0";
 
+// ── Airtable WRITE kill-switch ───────────────────────────────────────────────
+// When false, Airtable is UNPLUGGED from the workflow: createRecord/updateRecord
+// become safe no-ops, so replies are no longer written or updated to Airtable and
+// everything flows to Reply Router (Supabase) only. Reads (searchRecords,
+// listAllRecords, schema) are intentionally left working. Reversible — flip back
+// to true to re-enable. Set to false as of the 4:45 PM PST Airtable cutover.
+export const AIRTABLE_WRITES_ENABLED: boolean = false;
+
 function getHeaders() {
   return {
     Authorization: `Bearer ${process.env.AIRTABLE_PAT}`,
@@ -64,6 +72,7 @@ export async function createRecord(
   tableId: string,
   fields: Record<string, unknown>
 ): Promise<string> {
+  if (!AIRTABLE_WRITES_ENABLED) return ""; // unplugged — no record created, no error
   return withRetry(async () => {
     const res = await fetch(`${AIRTABLE_API}/${baseId}/${tableId}`, {
       method: "POST",
@@ -94,6 +103,7 @@ export async function updateRecord(
   recordId: string,
   fields: Record<string, unknown>
 ): Promise<void> {
+  if (!AIRTABLE_WRITES_ENABLED) return; // unplugged — no record updated, no error
   return withRetry(async () => {
     const res = await fetch(
       `${AIRTABLE_API}/${baseId}/${tableId}/${recordId}`,
