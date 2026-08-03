@@ -5,6 +5,8 @@ import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/l
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
+import { setLeadHandoffEmail } from "@/lib/sheet-handoff";
+import { htmlToText } from "@/lib/html-text";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
 import { regenerateReply } from "@/lib/processing/regenerate-reply";
@@ -15,6 +17,12 @@ import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
 import { applyReallocate } from "@/lib/processing/apply-reallocate";
 import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
+
+// Category change + send-reply now do extra best-effort work (phone waterfall:
+// reply AI + optional website scrape for the sheet; the handoff-email sheet
+// write on send). Give the route ample headroom over the platform default so a
+// slow website fetch can never time the request out.
+export const maxDuration = 60;
 
 // Default OOO requeue delay when the reply gives no clear return date (§21).
 const DEFAULT_OOO_DELAY_DAYS = 7;
@@ -334,6 +342,19 @@ export async function POST(req: NextRequest) {
           if (clearAutoReply) { update.auto_reply_due_at = null; update.auto_reply_sent_at = nowIso; }
           await supabase.from("replies").update(update).eq("id", id);
           await recordSend("sent");
+          // Record the SENT email into the client's sheet under "Lead handoff
+          // email" — only here (a real send), never for the template/draft.
+          // Best-effort: a sheet hiccup must never fail the send. Uses the exact
+          // appended row (sheet_row/sheet_id) when we have it, else email-match.
+          if (rowClientTag && rowClientTag !== "N/A" && toEmail) {
+            try {
+              const { data: sr } = await supabase.from("replies")
+                .select("sheet_row, sheet_id").eq("id", id).single();
+              await setLeadHandoffEmail(rowClientTag, toEmail, htmlToText(message || ""), {
+                row: sr?.sheet_row ?? undefined, sheetId: sr?.sheet_id ?? undefined,
+              });
+            } catch { /* handoff-email sheet write is best-effort */ }
+          }
         } else {
           // Persist the failure so it stays visible on the lead + in the error
           // log until the next successful send clears it. Draft is NOT touched.

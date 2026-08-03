@@ -47,7 +47,7 @@ export async function applyReallocate(
     if (cfg.reply_template) {
       const { data: leadRow } = await supabase
         .from("replies")
-        .select("first_name, lead_name, phone, company_name, sender_name, reply_we_got, email_subject")
+        .select("first_name, lead_name, phone, company_name, sender_name, reply_we_got, email_subject, lead_email")
         .eq("id", rowId)
         .single();
       const firstName =
@@ -65,6 +65,7 @@ export async function applyReallocate(
           replyBody: String(leadRow?.reply_we_got || ""),
           replySubject: String(leadRow?.email_subject || ""),
           leadName: String(leadRow?.lead_name || ""),
+          leadEmail: String(leadRow?.lead_email || ""),
         });
       } catch (e) {
         console.warn("[applyReallocate] template resolve failed, using raw template:", (e as Error).message);

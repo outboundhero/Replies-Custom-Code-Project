@@ -7,7 +7,7 @@
 import { google } from "googleapis";
 import { getSheetForClient } from "@/lib/google-sheets-registry";
 
-function getAuth() {
+export function getAuth() {
   return new google.auth.GoogleAuth({
     credentials: {
       client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -50,7 +50,10 @@ interface ReplyData {
   notes: string;
 }
 
-export async function pushToSheet(clientTag: string, data: ReplyData): Promise<{ ok: boolean; error?: string }> {
+export async function pushToSheet(
+  clientTag: string,
+  data: ReplyData,
+): Promise<{ ok: boolean; error?: string; row?: number; sheetId?: string }> {
   // Look up client's sheet from the canonical external registry.
   let sheet: { sheet_id: string; sheet_name: string } | null = null;
   try {
@@ -100,13 +103,18 @@ export async function pushToSheet(clientTag: string, data: ReplyData): Promise<{
   let lastErr = "";
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      await sheets.spreadsheets.values.append({
+      const resp = await sheets.spreadsheets.values.append({
         spreadsheetId: sheet.sheet_id,
         range: `'${sheet.sheet_name}'!A:W`,
         valueInputOption: "USER_ENTERED",
         requestBody: { values: [row] },
       });
-      return { ok: true };
+      // Google returns the range it wrote, e.g. 'Sheet1'!A45:W45 → row 45. We
+      // capture it so the send-reply flow can update THIS exact row later
+      // (the "Lead handoff email" column) without guessing by email.
+      const updatedRange = resp.data.updates?.updatedRange || "";
+      const rowNum = updatedRange.match(/![A-Z]+(\d+)/i)?.[1];
+      return { ok: true, row: rowNum ? Number(rowNum) : undefined, sheetId: sheet.sheet_id };
     } catch (error) {
       lastErr = (error as Error).message || "unknown error";
       const status = (error as { code?: number; response?: { status?: number } })?.code

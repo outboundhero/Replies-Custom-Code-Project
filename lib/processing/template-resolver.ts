@@ -18,6 +18,8 @@
  * surrounding grammar.
  */
 
+import { resolveLeadPhones, phonesForTemplate } from "@/lib/processing/resolve-phones";
+
 interface TemplateVars {
   firstName: string;
   phoneNumber: string;        // raw company phone from Bison custom vars (fallback)
@@ -26,6 +28,7 @@ interface TemplateVars {
   replyBody: string;
   replySubject: string;
   leadName?: string;          // full lead name from CRM (e.g. "L&D Millwork Team") — used to detect company/team names
+  leadEmail?: string;         // lead's email — its domain is scraped for phones when the reply has none
 }
 
 interface ExtractedVars {
@@ -284,13 +287,23 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
     // Confident:   "Looks like a good number to call is (812) 508-6685."
     // Fallback:    "Looks like a good number to call is (812) 508-6685,
     //               but not sure if it's direct to Ryan's phone yet."
-    const replyPhone = extracted?.phone;
-    const fallbackPhone = sanitizePhone(vars.phoneNumber);
-    const phone = replyPhone || fallbackPhone || "";
-    const isFallback = !replyPhone && !!fallbackPhone;
+    // Reuse the phone(s) the single extraction call already pulled from the
+    // reply (no duplicate AI call); the resolver only reaches for the website /
+    // custom-var fallbacks when the reply had none.
+    const replyPhones = extracted?.phone
+      ? extracted.phone.split(/\s+or\s+|,\s*/i).map((s) => s.trim()).filter(Boolean)
+      : [];
+    const { phones, source } = await resolveLeadPhones({
+      replyPhones,
+      leadEmail: vars.leadEmail,
+      customVarPhone: vars.phoneNumber,
+    });
+    const phone = phonesForTemplate(phones); // "A, B or C"
     const firstName = (vars.firstName || "").trim();
+    // Only the company-switchboard fallback gets the "not sure if direct"
+    // disclaimer — a number the LEAD gave (reply) or their site is spoken plainly.
     const replacement =
-      isFallback && phone && firstName
+      source === "custom" && phone && firstName
         ? `${phone}, but not sure if it's direct to ${firstName}'s phone yet`
         : phone;
     resolved = resolved.replaceAll("{PHONE}", replacement);

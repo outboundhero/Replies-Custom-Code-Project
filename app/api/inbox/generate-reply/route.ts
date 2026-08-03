@@ -59,6 +59,7 @@ export async function POST(req: NextRequest) {
       replyBody: leadMessage,
       replySubject: String(r.email_subject || ""),
       leadName: String(r.lead_name || ""),
+      leadEmail: String(r.lead_email || ""),
     });
 
     // 2. Build the full conversation (campaign email + follow-ups + replies) so

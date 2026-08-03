@@ -50,6 +50,11 @@ async function loadRegistry(): Promise<RegistrySheet[]> {
   return data;
 }
 
+/** Every registered client sheet (used by the handoff-column backfill). */
+export async function listRegistrySheets(): Promise<RegistrySheet[]> {
+  return loadRegistry();
+}
+
 /** Look up a client's sheet by tag. Case-insensitive. Returns null if not found. */
 export async function getSheetForClient(clientTag: string): Promise<RegistrySheet | null> {
   if (!clientTag || clientTag === "N/A") return null;

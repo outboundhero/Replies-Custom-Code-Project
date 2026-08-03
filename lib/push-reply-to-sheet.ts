@@ -12,6 +12,7 @@
 import supabase from "@/lib/supabase";
 import { pushToSheet } from "@/lib/push-to-sheet";
 import { recordSheetPushFailure, clearSheetPushFailure } from "@/lib/sheet-push-tracker";
+import { resolveLeadPhones, phonesForSheet } from "@/lib/processing/resolve-phones";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Reply = Record<string, any>;
@@ -30,6 +31,21 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
 
   const category = opts?.category || reply.lead_category || "";
 
+  // Phone: waterfall — the lead's reply/signature first, then their website
+  // (scraped from the email domain), then the Bison company-phone custom var.
+  // All numbers from the winning source go in, comma-separated. Best-effort:
+  // any failure inside resolveLeadPhones degrades to the custom-var phone.
+  let phoneCell = reply.phone || "";
+  try {
+    const { phones } = await resolveLeadPhones({
+      replyBody: reply.reply_we_got || "",
+      replySubject: reply.email_subject || "",
+      leadEmail: reply.lead_email || "",
+      customVarPhone: reply.phone || "",
+    });
+    if (phones.length) phoneCell = phonesForSheet(phones);
+  } catch { /* keep the custom-var phone */ }
+
   const result = await pushToSheet(clientTag, {
     lead_email: reply.lead_email || "",
     lead_name: reply.lead_name || "",
@@ -39,7 +55,7 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
     state: reply.state || "",
     address: reply.address || "",
     google_maps_url: reply.google_maps_url || "",
-    phone: reply.phone || "",
+    phone: phoneCell,
     lead_category: category,
     client_tag: clientTag,
     sender_email: reply.sender_email || "",
@@ -55,6 +71,15 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
 
   if (result.ok) {
     await supabase.from("replies").update({ pushed_to_sheet: true, pushed_to_sheet_at: new Date().toISOString() }).eq("id", replyId);
+    // Persist the EXACT appended row so send-reply can update this lead's
+    // "Lead handoff email" cell precisely (Option B). Separate best-effort write
+    // — these columns may not exist pre-migration; if so we silently fall back
+    // to email-matching at send time (Option A).
+    if (result.row) {
+      try {
+        await supabase.from("replies").update({ sheet_row: result.row, sheet_id: result.sheetId }).eq("id", replyId);
+      } catch { /* sheet_row/sheet_id columns not migrated yet */ }
+    }
     await clearSheetPushFailure(replyId);
     return { ok: true };
   }
