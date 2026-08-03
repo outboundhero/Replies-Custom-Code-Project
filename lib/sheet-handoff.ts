@@ -20,6 +20,13 @@ import { getSheetForClient } from "@/lib/google-sheets-registry";
 
 export const HANDOFF_HEADER = "Lead handoff email";
 
+// pushToSheet appends data across A:W (23 columns) regardless of how many HEADER
+// cells a sheet has filled — several client sheets have sparse header rows (only
+// ~21-22 filled) while their data rows still occupy all 23. So a new column must
+// be placed at index ≥ 23 (col X), never merely "after the last filled header",
+// or we'd label/overwrite an existing data column.
+const PUSH_COLUMN_COUNT = 23;
+
 /** 0-based column index → A1 letter (0→A, 25→Z, 26→AA). */
 export function colLetter(idx: number): string {
   let s = "";
@@ -46,7 +53,8 @@ export async function ensureHandoffColumn(
   const existing = headers.findIndex((h) => h.trim().toLowerCase() === HANDOFF_HEADER.toLowerCase());
   if (existing !== -1) return existing;
 
-  const idx = headers.length; // next empty column (past the last populated header)
+  // Next empty column, but never inside the A:W data range (see PUSH_COLUMN_COUNT).
+  const idx = Math.max(headers.length, PUSH_COLUMN_COUNT);
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `'${sheetName}'!${colLetter(idx)}1`,
