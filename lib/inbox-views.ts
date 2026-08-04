@@ -47,6 +47,11 @@ const CHERRY_AI_ALLOWLIST = [
   "Internally Forwarded",
   "Unrecognizable by AI",
 ];
+// Base Clients (Cherry) additionally drops "Referral Given" — those AI-suggested
+// referral leads should NOT appear in the base view (they still show in Master
+// Inbox and the per-client cherry views). Removing it from the eligibility
+// allowlist hides them even when they're sitting in the Open Response bucket.
+const BASE_CHERRY_AI_ALLOWLIST = CHERRY_AI_ALLOWLIST.filter((c) => c !== "Referral Given");
 // Negative lead_category buckets hidden from the sidebar. Kept buckets:
 // Open Response, Interested, Meeting Set, Meeting-Ready Lead, Follow Up,
 // Referral Given, Internally Forwarded, Closed Won, Needs Review.
@@ -72,14 +77,15 @@ export const INBOX_VIEWS: InboxView[] = [
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
-    description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden. OH excluded (see OutboundHero (Cherry)); Referral Given hidden.",
+    description: "Positive + unrecognizable leads; bounce/auto-reply noise, negative buckets and Referral Given hidden. OH + DM4PM excluded (they have their own cherry views).",
     excludeNoise: true,
-    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
-    // Base Clients (Cherry) also hides the Referral Given bucket (still visible in
-    // Master Inbox and OutboundHero (Cherry)).
+    // No "Referral Given" — hides AI-suggested referral leads even in Open Response.
+    aiCategoryAllowlist: BASE_CHERRY_AI_ALLOWLIST,
+    // Also hide the Referral Given bucket (still visible in Master Inbox + the
+    // per-client cherry views).
     hiddenLeadCategories: [...CHERRY_HIDDEN, "Referral Given"],
-    // OH has its own dedicated OutboundHero (Cherry) view — keep it out of here.
-    excludeClientTags: ["OH"],
+    // OH and DM4PM have their own dedicated cherry views — keep them out of here.
+    excludeClientTags: ["OH", "DM4PM"],
   },
   {
     id: "outboundhero-cherry",
@@ -89,6 +95,15 @@ export const INBOX_VIEWS: InboxView[] = [
     aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
     hiddenLeadCategories: CHERRY_HIDDEN,
     clientTag: "OH",
+  },
+  {
+    id: "dm4pm-cherry",
+    label: "DM4PM (Cherry)",
+    description: "Base Clients (Cherry), restricted to the DM4PM client tag",
+    excludeNoise: true,
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
+    clientTag: "DM4PM",
   },
 ];
 
