@@ -7,19 +7,19 @@
     },
     {
       "path": "/api/cron/nurture-sync-sequence/outboundhero",
-      "schedule": "0 */2 * * *"
+      "schedule": "0,20,40 * * * *"
     },
     {
       "path": "/api/cron/nurture-sync-sequence/outboundclean",
-      "schedule": "15 */2 * * *"
+      "schedule": "5,25,45 * * * *"
     },
     {
       "path": "/api/cron/nurture-sync-sequence/cleaningoutbound",
-      "schedule": "30 */2 * * *"
+      "schedule": "10,30,50 * * * *"
     },
     {
       "path": "/api/cron/nurture-sync-sequence/facilityreach",
-      "schedule": "45 */2 * * *"
+      "schedule": "15,35,55 * * * *"
     },
     {
       "path": "/api/cron/retry-airtable-errors",

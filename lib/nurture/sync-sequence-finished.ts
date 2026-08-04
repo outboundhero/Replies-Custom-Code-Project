@@ -31,7 +31,7 @@ import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 // the resume cursor per campaign, so successive cron runs walk the whole campaign
 // and never re-scan already-covered leads. Once fully drained we periodically
 // re-sweep from the start to pick up newly-finished leads.
-const CURSOR_WINDOW_LEADS = 1000;          // leads per sweep request-window
+const CURSOR_WINDOW_LEADS = 2000;          // leads per sweep request-window
 const CURSOR_WINDOW_MS = 30_000;           // per request-window time cap
 const PER_CAMPAIGN_MS = 60_000;            // max time on ONE campaign per run (may span several windows)
 const RESWEEP_MS = 18 * 60 * 60 * 1000;    // re-scan a fully-drained campaign at most this often (for new finishers)
@@ -347,8 +347,12 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
     if (/\[nurture\s*\d*\]/i.test(name) || c.type === "nurture") return false;
     const total = c.total_leads ?? 0;
     if (total === 0) return false;
-    const exhausted = (c.replied ?? 0) + (c.bounced ?? 0);
-    if (exhausted >= total) return false;
+    // NOTE: we deliberately do NOT skip "exhausted" campaigns (replied+bounced >=
+    // total). Those "done" campaigns still hold sequence-FINISHED leads (leads
+    // that completed the sequence WITHOUT replying) — exactly what we nurture.
+    // The old exclusion made whole clients (JPPS, SBTB, …) invisible for weeks.
+    // The cursor/reswept mechanism sweeps a drained campaign cheaply then only
+    // re-checks it every RESWEEP_MS, so keeping them costs little.
     return true;
   });
 
