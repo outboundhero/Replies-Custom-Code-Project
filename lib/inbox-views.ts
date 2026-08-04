@@ -72,10 +72,12 @@ export const INBOX_VIEWS: InboxView[] = [
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
-    description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden. OH excluded (see OutboundHero (Cherry)).",
+    description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden. OH excluded (see OutboundHero (Cherry)); Referral Given hidden.",
     excludeNoise: true,
     aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
-    hiddenLeadCategories: CHERRY_HIDDEN,
+    // Base Clients (Cherry) also hides the Referral Given bucket (still visible in
+    // Master Inbox and OutboundHero (Cherry)).
+    hiddenLeadCategories: [...CHERRY_HIDDEN, "Referral Given"],
     // OH has its own dedicated OutboundHero (Cherry) view — keep it out of here.
     excludeClientTags: ["OH"],
   },

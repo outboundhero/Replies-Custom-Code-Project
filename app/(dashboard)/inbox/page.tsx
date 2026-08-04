@@ -250,6 +250,18 @@ function firstNameOf(name: string): string {
   return n ? n.split(/\s+/)[0] : "there";
 }
 
+// Change-of-Target destination name: the AI-extracted contact name, else a safe
+// "<Company> Team" fallback so the Name field is NEVER empty (the send needs it).
+// Company from the lead's company_name, else derived from the email domain.
+function cotTeamName(email: string | null | undefined, companyName: string | null | undefined): string {
+  let co = (companyName || "").trim();
+  if (!co) {
+    const dom = ((email || "").split("@")[1] || "").split(".")[0] || "";
+    co = dom ? dom.charAt(0).toUpperCase() + dom.slice(1) : "";
+  }
+  return co ? `${co} Team` : "Team";
+}
+
 // Pull the suggested CLIENT TAGS (+ their short reason) out of the stored
 // suggested_client string, dropping non-tags like "A". Works for both the new
 // concise format ("SI (serves nationwide) · PPS (...)") and old verbose rows
@@ -643,14 +655,17 @@ export default function InboxPage() {
     const d = await mutate({ action: "prepare-change-of-target", id: replyId });
     const cands = (d.candidates || []) as { email: string; name: string | null }[];
     const first = cands[0];
-    const toName = first?.name || "";
+    // Name field: AI name → "<Company> Team" fallback (never empty). Greeting is
+    // computed from the REAL name only, so a fallback team name still greets "Hi
+    // there," rather than "Hi <Company>,".
+    const toName = (first?.name || "").trim() || cotTeamName(first?.email, detail?.company_name);
     const messageTemplate = d.messageTemplate || "";
     setCotPreview((prev) => (prev && prev.replyId === replyId ? {
       ...prev, loading: false,
       error: d.ok ? undefined : (d.reason || "Could not prepare Change of Target"),
       candidates: cands, toEmail: first?.email || "", toName,
       subject: d.subject || "", messageTemplate,
-      message: messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(toName)),
+      message: messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(first?.name || "")),
       senderEmailId: d.senderEmailId ?? null,
       manual: !!d.manual,
     } : prev));
@@ -662,17 +677,20 @@ export default function InboxPage() {
     setCotPreview((prev) => {
       if (!prev) return prev;
       const c = prev.candidates.find((x) => x.email === email);
-      const toName = c?.name || "";
-      const message = prev.messageDirty ? prev.message : prev.messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(toName));
+      const toName = (c?.name || "").trim() || cotTeamName(email, detail?.company_name);
+      const message = prev.messageDirty ? prev.message : prev.messageTemplate.replaceAll("{FIRST_NAME}", firstNameOf(c?.name || ""));
       return { ...prev, toEmail: email, toName, message };
     });
   }
   async function sendCot() {
     if (!cotPreview?.toEmail || !cotPreview.senderEmailId) { toast.error("Pick a destination email first"); return; }
     cotPatch({ sending: true });
+    // Final guard: never send with an empty name (e.g. field cleared or a raw
+    // email typed) — fall back to "<Company> Team".
+    const toName = (cotPreview.toName || "").trim() || cotTeamName(cotPreview.toEmail, detail?.company_name);
     const d = await mutate({
       action: "send-change-of-target", id: cotPreview.replyId, senderEmailId: cotPreview.senderEmailId,
-      toEmail: cotPreview.toEmail, toName: cotPreview.toName, subject: cotPreview.subject, message: cotPreview.message,
+      toEmail: cotPreview.toEmail, toName, subject: cotPreview.subject, message: cotPreview.message,
     });
     if (d.ok) { toast.success(`Change of Target sent to ${cotPreview.toEmail}`); setCotPreview(null); }
     else { toast.error(d.error || "Send failed"); cotPatch({ sending: false }); }
