@@ -209,7 +209,11 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
         const res = await fetch("/api/leads/move/same-instance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: abortCtlRef.current?.signal });
         if (res.ok) { patchRow(runId, campaignId, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
         const err = await res.json().catch(() => ({}));
-        if (res.status !== 429 && res.status < 500) return { ok: false, error: err.error || `HTTP ${res.status}` };
+        // Retry 429/5xx AND transient auth blips (401/403): the admin session is
+        // occasionally not read on a single request during a long run; the same
+        // cookie succeeds on retry. Other hard 4xx (400/404/422) fail fast.
+        const retryable = res.status === 429 || res.status >= 500 || res.status === 401 || res.status === 403;
+        if (!retryable) return { ok: false, error: err.error || `HTTP ${res.status}` };
       } catch { if (abortRef.current) return { ok: false, error: "stopped" }; }
       if (attempt < MAX) {
         const wait = Math.min(20000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);

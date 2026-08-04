@@ -223,7 +223,12 @@ export default function MigratePage() {
         const res = await fetch("/api/leads/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: abortCtlRef.current?.signal });
         if (res.ok) { patchRow(runId, tag, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
         const err = await res.json().catch(() => ({}));
-        if (res.status !== 429 && res.status < 500) return { ok: false, error: err.error || `HTTP ${res.status}` }; // hard 4xx → don't retry
+        // Retry 429/5xx AND transient auth blips (401/403): during a long
+        // multi-window run the admin session is occasionally not read on a
+        // single request; the same cookie succeeds on retry. Other hard 4xx
+        // (400/404/422) still fail fast.
+        const retryable = res.status === 429 || res.status >= 500 || res.status === 401 || res.status === 403;
+        if (!retryable) return { ok: false, error: err.error || `HTTP ${res.status}` };
       } catch { if (abortRef.current) return { ok: false, error: "stopped" }; /* else network → retry */ }
       if (attempt < MAX) {
         const wait = Math.min(20000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
