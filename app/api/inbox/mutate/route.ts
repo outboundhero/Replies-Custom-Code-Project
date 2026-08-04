@@ -6,7 +6,7 @@ import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from
 import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
 import { setLeadHandoffEmail } from "@/lib/sheet-handoff";
-import { htmlToText } from "@/lib/html-text";
+import { htmlToText, textToHtml } from "@/lib/html-text";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
 import { regenerateReply } from "@/lib/processing/regenerate-reply";
@@ -607,16 +607,22 @@ async function prepareChangeOfTarget(replyId: number, instanceKey: string): Prom
       const firstEmail = await getFirstSentEmail(instanceKey, leadId, campaignId);
       if (firstEmail?.sender_email?.id) {
         const senderName = (firstEmail.sender_email.name || "").trim() || "the team";
-        const messageTemplate =
-          `<p>Hi {FIRST_NAME},</p>` +
-          `<p>We received your email from ${escapeHtml(originalLeadDisplayName)} — here's the email we sent them:</p>` +
-          `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
-          (firstEmail.email_body || "");
-          // No trailing sign-off — the wrapped original cold email already ends
-          // with the rep's own signature, so "Let me know, {sender}" was a dupe.
+        // Re-pitch: greet the new contact, then quote the FULL original cold email
+        // we sent the redirecting contact. Built as plain text (blank lines between
+        // paragraphs + surrounding double-quotes) so the editor and the sent email
+        // both read cleanly. {FIRST_NAME} is resolved per-recipient in the UI.
+        // Normal hyphen, not an em dash.
+        const originalText = htmlToText(firstEmail.email_body || "").trim();
+        const messageText = (
+          `Hi {FIRST_NAME},\n\n` +
+          `We received your email from ${originalLeadDisplayName} - here's the email we sent them. Let me know if you're interested.\n\n` +
+          `"${originalText}"`
+        ).replace(/\s*—\s*/g, " - "); // never let an em dash reach the recipient
+        const messageTemplate = textToHtml(messageText);
+        const origSubject = (firstEmail.email_subject || "").trim();
         return {
           ok: true, candidates,
-          subject: firstEmail.email_subject || "(no subject)",
+          subject: `Received your contact info from ${originalLeadDisplayName}'s automated email${origSubject ? ` - ${origSubject}` : ""}`,
           messageTemplate, senderEmailId: firstEmail.sender_email.id,
           senderName, originalLeadDisplayName,
         };
@@ -633,7 +639,7 @@ async function prepareChangeOfTarget(replyId: number, instanceKey: string): Prom
     const senderName = ((reply.sender_name as string | null) || "").trim() || "the team";
     const messageTemplate =
       `<p>Hi {FIRST_NAME},</p>` +
-      `<p>${escapeHtml(originalLeadDisplayName)} passed your details along to me. I'd love to share how we can help — would you be open to a quick chat?</p>` +
+      `<p>${escapeHtml(originalLeadDisplayName)} passed your details along to me. I'd love to share how we can help - would you be open to a quick chat?</p>` +
       `<p>Best,</p>` +
       `<p>${escapeHtml(senderName)}</p>`;
     return {
