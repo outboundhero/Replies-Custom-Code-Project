@@ -71,7 +71,9 @@ async function loadClients(): Promise<{ clients: QualClient[]; version: string }
   // active+cleaning set changes (synced_at on the qualifications table alone
   // wouldn't catch a status/type change). v3 = active+cleaning filter added.
   const roster = haveMeta ? `ac${[...activeCleaning].sort().join(",")}` : `c${[...churned].sort().join(",")}`;
-  const versioned = `v5|${version}|${roster}`;
+  // v6 = phrasing-robust industry verdict (aiPickClient prompt) — busts stale
+  // per-industry-string cache entries like a bad "financial services" no-match.
+  const versioned = `v6|${version}|${roster}`;
   return { clients, version: versioned };
 }
 

@@ -817,7 +817,9 @@ export default function InboxPage() {
     const isSend = isSendCategory(cat);
     const bucket = categoryLeads[oldCat] || [];
     const idx = bucket.findIndex((r) => r.id === detail.id);
-    const nextLead = idx >= 0 ? (bucket[idx + 1] || bucket[idx - 1] || null) : null;
+    // Advance to the lead ABOVE (idx-1 = the newer record in a newest-first
+    // list); fall back to the one below if we're already at the top.
+    const nextLead = idx >= 0 ? (bucket[idx - 1] || bucket[idx + 1] || null) : null;
     const prev = { id: detail.id, name: String(detail.lead_name || detail.from_name || detail.lead_email || ""), email: String(detail.lead_email || "") };
 
     // ── Optimistic local-state patch — NO refetches, NO page flash ──

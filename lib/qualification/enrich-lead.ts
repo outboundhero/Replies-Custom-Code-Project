@@ -55,10 +55,12 @@ DATA SOURCES — STRICT PRIORITY for LOCATION (city/state/address/zip):
 2. Company website (only if the reply has no location info) — search the web for the domain.
 3. CRM custom variables (city/state/address fields) — LEAST RELIABLE, often outdated. Use ONLY when the reply and website both yielded nothing.
 
-DATA SOURCES — for INDUSTRY:
+DATA SOURCES — for INDUSTRY (in priority order):
 1. Company website (most reliable — search the web for the domain)
 2. Email signature (titles, taglines, "Building Maintenance" etc.)
-3. CRM data is rarely useful for industry
+3. Company NAME — infer the industry from it when 1 & 2 give nothing
+   (e.g. "Wealthquest Financial Svc" → "financial services";
+   "Smith Dental Group" → "dental office"; "Oakwood Apartments" → "apartments").
 
 YOUR TASKS:
 1. Scan the ENTIRE reply text for any mention of the lead's location — body sentences, signature blocks, "Sent from my…" sigs included. If found, that IS the location, full stop.
@@ -68,6 +70,7 @@ YOUR TASKS:
 
 IMPORTANT:
 - Focus on determining the INDUSTRY accurately — this is critical for exclusion matching
+- NEVER leave "industry" blank. If the website and signature yield nothing, give your BEST-GUESS industry from the company name (a short generic description like "financial services", "restaurant", "law firm"). Only leave it empty if the name is truly opaque (e.g. "ABC LLC").
 - Focus on determining the LOCATION accurately — this is critical for proximity matching
 - If the company appears to be residential (house cleaning, maid service, Airbnb), note that in the industry field
 
