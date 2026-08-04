@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
-import { SHEET_PUSH_CATEGORIES } from "@/lib/push-to-sheet";
+import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
 import { setLeadHandoffEmail } from "@/lib/sheet-handoff";
 import { htmlToText } from "@/lib/html-text";
@@ -301,6 +301,21 @@ export async function POST(req: NextRequest) {
         const { client_tag } = body;
         const result = await applyReallocate(id, client_tag);
         if (!result.ok) throw new Error(result.error);
+        // Add the lead to the NEW client's tracking sheet so a reallocated lead
+        // shows up under the new client — but only when it's in a sheet-push
+        // category, and only if it isn't already there (dedup, so reallocating
+        // back and forth never doubles a row). Runs after the response so the
+        // button stays snappy; best-effort — never fails the reallocate.
+        if (rowLeadCategory && SHEET_PUSH_CATEGORIES.some((c) => c.toLowerCase() === rowLeadCategory!.toLowerCase())) {
+          after(async () => {
+            try {
+              const { data: r } = await supabase.from("replies").select("lead_email").eq("id", id).single();
+              const email = String(r?.lead_email || "");
+              if (await leadEmailInSheet(client_tag, email)) return; // already in the new sheet
+              await pushReplyToSheet(id, { category: rowLeadCategory! });
+            } catch { /* best-effort */ }
+          });
+        }
         return NextResponse.json({ ok: true });
       }
 

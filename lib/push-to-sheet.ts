@@ -50,6 +50,29 @@ interface ReplyData {
   notes: string;
 }
 
+/**
+ * True if a row with this lead email already exists in the client's sheet
+ * (column A). Used to avoid duplicate rows when re-pushing a lead — e.g. when a
+ * reallocated lead is added to the NEW client's sheet. On any read failure it
+ * returns false (don't block the push).
+ */
+export async function leadEmailInSheet(clientTag: string, leadEmail: string): Promise<boolean> {
+  const email = (leadEmail || "").trim().toLowerCase();
+  if (!email) return false;
+  const found = await getSheetForClient(clientTag);
+  if (!found) return false;
+  try {
+    const sheets = google.sheets({ version: "v4", auth: getAuth() });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: found.id,
+      range: `'${found.sheetName}'!A:A`,
+    });
+    return (res.data.values || []).some((r) => String(r[0] || "").trim().toLowerCase() === email);
+  } catch {
+    return false;
+  }
+}
+
 export async function pushToSheet(
   clientTag: string,
   data: ReplyData,
