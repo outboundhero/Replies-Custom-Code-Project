@@ -36,13 +36,13 @@ export async function GET(req: NextRequest) {
 
   const startedAt = Date.now();
 
-  // Newest-first: a positive-category lead, linked to Airtable, not yet audited.
+  // Newest-first: a positive-category lead, not yet audited. No longer requires
+  // an Airtable link (leads have none post-cutover) — the audit keys on the
+  // Supabase row id. This is the backstop for any ingest audit that failed.
   const { data: rows, error } = await supabase
     .from("replies")
     .select("id, client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, from_email, reply_we_got, email_subject, airtable_record_id, airtable_base_id, bison_instance, ai_categorized_lead_category")
     .in("ai_categorized_lead_category", QUALIFYING_CATEGORIES)
-    .not("airtable_record_id", "is", null)
-    .not("airtable_base_id", "is", null)
     .is("industry_audit", null)
     .neq("client_tag", "N/A")
     .not("client_tag", "is", null)
@@ -77,9 +77,10 @@ export async function GET(req: NextRequest) {
           leadEmail: (r.lead_email as string) || (r.from_email as string) || "",
           replyText: (r.reply_we_got as string) || "",
           replySubject: (r.email_subject as string) || "",
-          recordId: r.airtable_record_id as string,
-          airtableBaseId: r.airtable_base_id as string,
-          airtableTableId: AIRTABLE_TABLE_ID,
+          replyRowId: r.id as number,
+          recordId: (r.airtable_record_id as string) || undefined,
+          airtableBaseId: (r.airtable_base_id as string) || undefined,
+          airtableTableId: r.airtable_record_id ? AIRTABLE_TABLE_ID : undefined,
           bisonInstance: (r.bison_instance as string) || undefined,
         });
         audited++;

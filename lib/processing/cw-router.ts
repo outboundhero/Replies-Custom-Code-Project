@@ -5,7 +5,10 @@ import { applyReallocate } from "@/lib/processing/apply-reallocate";
 export type ZipSource = "reply_signature" | "enrichment" | "missing";
 
 interface CwRerouteArgs {
-  airtableRecordId: string;
+  /** Supabase replies.id — preferred, Airtable-independent. */
+  replyRowId?: number;
+  /** Legacy fallback lookup key. */
+  airtableRecordId?: string;
   currentClientTag: string;
   leadZip: string | null;
   zipSource: ZipSource;
@@ -69,19 +72,22 @@ export async function loadCwServiceAreas(): Promise<Record<string, Set<string>>>
  * never break the qualification flow that called it.
  */
 export async function runCwAutoReroute(args: CwRerouteArgs): Promise<CwRerouteResult> {
-  const { airtableRecordId, currentClientTag, leadZip, zipSource, leadEmail, bisonInstance } = args;
+  const { replyRowId, airtableRecordId, currentClientTag, leadZip, zipSource, leadEmail, bisonInstance } = args;
 
-  // Resolve the numeric replies.id once — applyReallocate keys off it, and
-  // we use it for every subsequent update so duplicate rows (shouldn't
-  // happen, but) only touch the one we care about.
-  const { data: idRow } = await supabase
-    .from("replies")
-    .select("id")
-    .eq("airtable_record_id", airtableRecordId)
-    .single();
-  const rowId = idRow?.id as number | undefined;
-  if (!rowId) {
-    console.warn("[cw-router] no replies row for airtable_record_id:", airtableRecordId);
+  // Resolve the numeric replies.id once — applyReallocate keys off it, and we
+  // use it for every subsequent update. Prefer the passed-in row id (Airtable-
+  // independent); fall back to the legacy airtable_record_id lookup.
+  let rowId = replyRowId;
+  if (rowId == null && airtableRecordId) {
+    const { data: idRow } = await supabase
+      .from("replies")
+      .select("id")
+      .eq("airtable_record_id", airtableRecordId)
+      .single();
+    rowId = idRow?.id as number | undefined;
+  }
+  if (rowId == null) {
+    console.warn("[cw-router] no replies row (replyRowId/airtable_record_id):", replyRowId, airtableRecordId);
     return { rerouted: false, note: "no_match" };
   }
 

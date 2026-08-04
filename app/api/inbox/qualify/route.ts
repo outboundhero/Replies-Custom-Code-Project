@@ -43,9 +43,6 @@ export async function POST(req: NextRequest) {
     if (!r.client_tag || r.client_tag === "N/A") {
       return NextResponse.json({ ok: false, error: "This lead has no client tag to audit against." }, { status: 400 });
     }
-    if (!r.airtable_record_id || !r.airtable_base_id) {
-      return NextResponse.json({ ok: false, error: "This lead isn't linked to an Airtable record, so it can't be audited." }, { status: 400 });
-    }
 
     await qualifyLead({
       campaignTag: r.client_tag as string,
@@ -59,9 +56,12 @@ export async function POST(req: NextRequest) {
       leadEmail: (r.lead_email as string) || (r.from_email as string) || "",
       replyText: (r.reply_we_got as string) || "",
       replySubject: (r.email_subject as string) || "",
-      recordId: r.airtable_record_id as string,
-      airtableBaseId: r.airtable_base_id as string,
-      airtableTableId: AIRTABLE_TABLE_ID,
+      // Audit keys on the Supabase row id — Airtable-independent. Airtable record
+      // ids are passed only if still present (the Airtable write is a no-op).
+      replyRowId: Number(id),
+      recordId: (r.airtable_record_id as string) || undefined,
+      airtableBaseId: (r.airtable_base_id as string) || undefined,
+      airtableTableId: r.airtable_record_id ? AIRTABLE_TABLE_ID : undefined,
     });
 
     // Return the freshly-written audit fields so the inbox can merge them into

@@ -319,9 +319,12 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     }
   }
 
-  // 5a. Store in Supabase (non-blocking, skip bounces)
+  // 5a. Store in Supabase (skip bounces). Awaited so we capture the row id for
+  // the ingest audit below — the reply is now inbox-visible before the audit runs.
   const replyStatus = action === "created" ? "Pending" : "Pending again";
-  if (!isBounce) supabase.from("replies").upsert({
+  let replyRowId: number | undefined;
+  if (!isBounce) {
+  const { data: _upserted, error: _upsertErr } = await supabase.from("replies").upsert({
     workflow: "tracked",
     bison_instance: bisonInstance,
     nurture_safety: nurtureClassification.safety,
@@ -394,11 +397,11 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     } : {}),
     our_reply: baseFields["Our reply"] ? String(baseFields["Our reply"]) : null,
     updated_at: new Date().toISOString(),
-  }, { onConflict: "reply_id,campaign_id,bison_instance" }).then(({ error }) => {
-    if (error) {
-      console.error("[tracked] Supabase upsert failed:", error.message);
-      return;
-    }
+  }, { onConflict: "reply_id,campaign_id,bison_instance" }).select("id").single();
+  if (_upsertErr) {
+    console.error("[tracked] Supabase upsert failed:", _upsertErr.message);
+  } else {
+    replyRowId = _upserted?.id as number | undefined;
     // Invalidate the inbox counts/tags cache so the next page load sees
     // the new row immediately (instead of waiting up to 60s for TTL).
     bumpCacheVersion();
@@ -429,13 +432,15 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
         })
       ).catch((e) => console.error("[tracked] esp detect failed:", e));
     }
-  });
+  }
+  } // end if (!isBounce)
 
-  // 5b. Lead qualification — runs AT INGEST (non-blocking, fire-and-forget) for
-  // the positive AI lead categories, so the audit is ready before anyone opens
-  // the lead. Mirrors the inbox's positive set (Interested / Meeting / Follow Up
-  // / Referral Given / Internally Forwarded); "Unrecognizable" audits uncertain
-  // leads to aid categorization.
+  // 5b. Lead qualification — runs AT INGEST, AWAITED so it reliably completes
+  // within the webhook (the fire-and-forget version silently died on serverless,
+  // which is why audits had to be run by hand). The reply is already upserted
+  // (inbox-visible) above; the audit then fills in industry/location/reason.
+  // Keyed on the Supabase row id (Airtable-independent). Positive set mirrors the
+  // inbox; "Unrecognizable" audits uncertain leads to aid categorization.
   const QUALIFYING_CATEGORIES = ["Interested", "Meeting Request", "Referral Given", "Internally Forwarded"];
   const QUALIFYING_CONTAINS = ["Follow Up", "Unrecognizable"];
 
@@ -444,30 +449,36 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     QUALIFYING_CONTAINS.some((p) => aiCategory.includes(p))
   );
 
-  if (shouldQualify && recordId) {
-    qualifyLead({
-      campaignTag,
-      companyName: lead.company,
-      city: customVars.city,
-      state: customVars.state,
-      address: customVars.address,
-      googleMapsUrl: customVars.google_maps_url,
-      phone: customVars.phone,
-      linkedin: customVars.linkedin,
-      leadEmail: reply.from_email_address,
-      replyText: cleanedReply,
-      replySubject: reply.email_subject,
-      recordId,
-      airtableBaseId: section.airtable_base_id,
-      airtableTableId: section.airtable_table_id,
-      bisonInstance,
-    }).catch(async (error) => {
+  if (shouldQualify && replyRowId) {
+    try {
+      await qualifyLead({
+        campaignTag,
+        companyName: lead.company,
+        city: customVars.city,
+        state: customVars.state,
+        address: customVars.address,
+        googleMapsUrl: customVars.google_maps_url,
+        phone: customVars.phone,
+        linkedin: customVars.linkedin,
+        leadEmail: reply.from_email_address,
+        replyText: cleanedReply,
+        replySubject: reply.email_subject,
+        replyRowId,
+        // Airtable is unplugged — pass the (no-op) record ids only if present.
+        recordId: recordId || undefined,
+        airtableBaseId: section.airtable_base_id,
+        airtableTableId: section.airtable_table_id,
+        bisonInstance,
+      });
+    } catch (error) {
+      // Never let an audit failure lose the reply — it's already saved; the
+      // audit-pending cron will re-audit it on its next run.
       await logError("tracked", "qualification", (error as Error).message, {
         tag: campaignTag,
-        record_id: recordId,
+        reply_row_id: replyRowId,
         lead_email: reply.from_email_address,
       });
-    });
+    }
   }
 
   // 6. Send to master Clay table (all sections) — only for qualified replies

@@ -36,9 +36,14 @@ interface QualifyLeadParams {
   leadEmail: string;
   replyText: string;
   replySubject: string;
-  recordId: string;
-  airtableBaseId: string;
-  airtableTableId: string;
+  /** Supabase replies.id — the audit's primary key for finding/updating the row.
+   *  Airtable-independent; always prefer this. */
+  replyRowId?: number;
+  /** Airtable record id — optional now that Airtable is unplugged. Only used to
+   *  update the (no-op) Airtable record when still present; NOT a Supabase key. */
+  recordId?: string;
+  airtableBaseId?: string;
+  airtableTableId?: string;
   /** Bison workspace the original reply came from — surfaced in the activity log. */
   bisonInstance?: string;
 }
@@ -46,7 +51,7 @@ interface QualifyLeadParams {
 export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   const {
     campaignTag, companyName, city, state, address, googleMapsUrl, phone,
-    leadEmail, replyText, replySubject, recordId, airtableBaseId, airtableTableId, bisonInstance,
+    leadEmail, replyText, replySubject, replyRowId, recordId, airtableBaseId, airtableTableId, bisonInstance,
   } = params;
 
   // 1. Get exclusion/inclusion rules from Supabase
@@ -180,40 +185,48 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     }
   }
 
-  // 7. Update Airtable record with audit results
-  try {
-    const updateFields: Record<string, string> = {
-      "Industry Audit": industryResult.result,
-      "Location Audit": locationResult.result,
-      "Qualification Reason": qualificationReason,
-    };
-    if (suggestedClients) updateFields["Suggested Client"] = suggestedClients;
+  // 7. Update Airtable record with audit results — only when still linked to an
+  //    Airtable record (updateRecord is a no-op while Airtable is unplugged).
+  if (recordId && airtableBaseId && airtableTableId) {
+    try {
+      const updateFields: Record<string, string> = {
+        "Industry Audit": industryResult.result,
+        "Location Audit": locationResult.result,
+        "Qualification Reason": qualificationReason,
+      };
+      if (suggestedClients) updateFields["Suggested Client"] = suggestedClients;
 
-    await updateRecord(airtableBaseId, airtableTableId, recordId, updateFields);
-  } catch (error) {
-    await logError("tracked", "qualification-airtable", (error as Error).message, {
-      tag: campaignTag, record_id: recordId,
-    });
+      await updateRecord(airtableBaseId, airtableTableId, recordId, updateFields);
+    } catch (error) {
+      await logError("tracked", "qualification-airtable", (error as Error).message, {
+        tag: campaignTag, record_id: recordId,
+      });
+    }
   }
 
-  // 7b. Also update Supabase replies table with audit results
-  // Single audit write (keyed on airtable_record_id — now indexed, so this is a
-  // one-row lookup, not a table scan). Includes the resolved location
-  // (reply-first) + verified industry so the inbox's "Find Best Fit Client"
-  // matcher auto-populates. audit_city/state/industry require the
-  // 2026-07_reply_sends migration.
-  supabase.from("replies").update({
-    industry_audit: industryResult.result,
-    location_audit: locationResult.result,
-    qualification_reason: qualificationReason,
-    suggested_client: suggestedClients || null,
-    audit_city: locResolved.city || null,
-    audit_state: locResolved.state || null,
-    audit_industry: enriched.industry || null,
-    updated_at: new Date().toISOString(),
-  }).eq("airtable_record_id", recordId).then(({ error }) => {
-    if (error) console.error("[qualification] Supabase update failed:", error.message);
-  });
+  // 7b. Also update Supabase replies table with audit results.
+  // Keyed on the reply row id (replyRowId) — Airtable-independent. Falls back to
+  // airtable_record_id only for legacy callers that still pass one. Includes the
+  // resolved location (reply-first) + verified industry so the inbox's "Find
+  // Best Fit Client" matcher auto-populates. audit_city/state/industry require
+  // the 2026-07_reply_sends migration.
+  {
+    const auditUpdate = {
+      industry_audit: industryResult.result,
+      location_audit: locationResult.result,
+      qualification_reason: qualificationReason,
+      suggested_client: suggestedClients || null,
+      audit_city: locResolved.city || null,
+      audit_state: locResolved.state || null,
+      audit_industry: enriched.industry || null,
+      updated_at: new Date().toISOString(),
+    };
+    const q = supabase.from("replies").update(auditUpdate);
+    (replyRowId != null ? q.eq("id", replyRowId) : q.eq("airtable_record_id", recordId as string))
+      .then(({ error }) => {
+        if (error) console.error("[qualification] Supabase update failed:", error.message);
+      });
+  }
 
   // 7c. CW ZIP auto-router. For City Wide tags (CWSJ/CWSV/…), check whether
   // the lead's resolved ZIP belongs to a DIFFERENT CW client and, if so,
@@ -231,6 +244,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
         ? "reply_signature"
         : "enrichment";
     await runCwAutoReroute({
+      replyRowId,
       airtableRecordId: recordId,
       currentClientTag: campaignTag,
       leadZip: locResolved.zip || null,
