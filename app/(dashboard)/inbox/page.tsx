@@ -275,7 +275,7 @@ function parseSuggestedTags(raw: string, validSet: Set<string>): { tag: string; 
       .replace(/^\[inactive[^\]]*\]\s*/i, "")
       .replace(/^\(|\)\s*$/g, "")                       // strip outer parens
       .trim();
-    if (reason.length > 240) reason = reason.slice(0, 240).replace(/[\s,.]+$/, "") + "…";
+    // No length cap — the hover bubble wraps + grows, so show the FULL reason.
     seen.add(tag);
     out.push({ tag, reason });
     if (out.length >= 5) break;
