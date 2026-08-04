@@ -590,10 +590,9 @@ async function prepareChangeOfTarget(replyId: number, instanceKey: string): Prom
           `<p>Hi {FIRST_NAME},</p>` +
           `<p>We received your email from ${escapeHtml(originalLeadDisplayName)} — here's the email we sent them:</p>` +
           `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
-          (firstEmail.email_body || "") +
-          `<hr style="margin:16px 0;border:0;border-top:1px solid #ddd;">` +
-          `<p>Let me know,</p>` +
-          `<p>${escapeHtml(senderName)}</p>`;
+          (firstEmail.email_body || "");
+          // No trailing sign-off — the wrapped original cold email already ends
+          // with the rep's own signature, so "Let me know, {sender}" was a dupe.
         return {
           ok: true, candidates,
           subject: firstEmail.email_subject || "(no subject)",

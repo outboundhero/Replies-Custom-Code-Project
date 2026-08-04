@@ -1666,7 +1666,7 @@ export default function InboxPage() {
       {/* Change-of-Target review (§22): pick the destination + edit + approve. */}
       {cotPreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !cotPreview.sending && setCotPreview(null)}>
-          <div className="w-full max-w-2xl rounded-xl border bg-white shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-3xl rounded-xl border bg-white shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b px-4 py-3">
               <div>
                 <h3 className="text-sm font-semibold">Change of Target — review before sending</h3>
@@ -1687,7 +1687,7 @@ export default function InboxPage() {
                   {detail && detail.id === cotPreview.replyId && (
                     <div className="space-y-1">
                       <label className="text-[11px] font-medium text-muted-foreground">Original reply</label>
-                      <div className="rounded border bg-muted/20 px-3 py-2 text-[12px] max-h-28 overflow-y-auto whitespace-pre-wrap">{detail.reply_we_got || "(no content)"}</div>
+                      <div className="rounded border bg-muted/20 px-3 py-2 text-[13px] leading-relaxed max-h-96 overflow-y-auto whitespace-pre-wrap">{detail.reply_we_got || "(no content)"}</div>
                     </div>
                   )}
 
