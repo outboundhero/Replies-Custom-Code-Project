@@ -45,7 +45,16 @@ async function loadRegistry(): Promise<RegistrySheet[]> {
     throw new Error(`Registry fetch failed: ${res.status} ${res.statusText}`);
   }
   const json = (await res.json()) as RegistryResponse;
-  const data = Array.isArray(json?.sheets) ? json.sheets : [];
+  // Some feed entries encode the id as "<spreadsheetId>::<tab>" (e.g.
+  // "18SX…OCHTbc::Leads"), which is not a valid spreadsheet id and makes every
+  // Google call 404 "Requested entity was not found". Strip anything after "::"
+  // to recover the real id (the tab already lives in sheetName). Clean ids —
+  // which never contain "::" — are unaffected.
+  const data = (Array.isArray(json?.sheets) ? json.sheets : []).map((s) => {
+    const rawId = String(s.id || "");
+    const cut = rawId.indexOf("::");
+    return cut === -1 ? s : { ...s, id: rawId.slice(0, cut).trim() };
+  });
   cache = { data, ts: now };
   return data;
 }
