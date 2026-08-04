@@ -190,7 +190,7 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
-    const allowed = session?.allowedClientTags ?? null;
+    let allowed = session?.allowedClientTags ?? null;
 
     const mode = req.nextUrl.searchParams.get("mode");
     const fresh = req.nextUrl.searchParams.get("fresh") === "1";
@@ -212,6 +212,15 @@ export async function GET(req: NextRequest) {
     // that tag (unscoped users always are).
     if (view?.clientTag && (!allowed || !allowed.length || allowed.includes(view.clientTag))) {
       clientTag = view.clientTag;
+    }
+    // A view can EXCLUDE client tags (Base Clients (Cherry) hides OH — OH has its
+    // own OutboundHero (Cherry) view). Express it as a narrowed allowlist so the
+    // counts RPC (p_allowed_tags), the leads query (.in), and the dropdown all
+    // honor it with no SQL change. Skipped when a single client tag is forced.
+    if (view?.excludeClientTags?.length && !clientTag) {
+      const base = (allowed && allowed.length) ? allowed : await resolveClientTags(null, fresh);
+      const ex = new Set(view.excludeClientTags);
+      allowed = base.filter((t) => !ex.has(t));
     }
     const aiCategory = req.nextUrl.searchParams.get("ai_category");  // §18 filter
 

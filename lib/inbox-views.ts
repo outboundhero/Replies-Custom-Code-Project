@@ -30,6 +30,10 @@ export interface InboxView {
   hiddenLeadCategories?: string[];
   /** Force the view to a single client tag (overrides the client dropdown). */
   clientTag?: string;
+  /** Client tags to EXCLUDE from this view (e.g. Base Clients hides OH, which
+   *  has its own dedicated OutboundHero (Cherry) view). Applied as a narrowed
+   *  allowlist so counts + leads + realtime all honor it. */
+  excludeClientTags?: string[];
 }
 
 // Shared "Cherry" filter config, reused by Base Clients (Cherry) and any
@@ -68,10 +72,12 @@ export const INBOX_VIEWS: InboxView[] = [
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
-    description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden",
+    description: "Positive + unrecognizable leads, bounce/auto-reply noise and negative buckets hidden. OH excluded (see OutboundHero (Cherry)).",
     excludeNoise: true,
     aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
     hiddenLeadCategories: CHERRY_HIDDEN,
+    // OH has its own dedicated OutboundHero (Cherry) view — keep it out of here.
+    excludeClientTags: ["OH"],
   },
   {
     id: "outboundhero-cherry",

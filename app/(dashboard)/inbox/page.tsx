@@ -524,6 +524,8 @@ export default function InboxPage() {
           if (activeView.excludeNoise && newRow.inbox_is_noise) return;
           if (activeView.aiCategoryAllowlist?.length &&
               !activeView.aiCategoryAllowlist.includes(newRow.ai_categorized_lead_category || "")) return;
+          // View excludes certain client tags (e.g. Base Clients hides OH).
+          if (activeView.excludeClientTags?.includes(newRow.client_tag || "")) return;
         }
         const cat = newRow.lead_category || "Open Response";
         if (activeView?.hiddenLeadCategories?.includes(cat)) return;
