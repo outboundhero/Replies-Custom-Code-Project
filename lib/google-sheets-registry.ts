@@ -55,10 +55,34 @@ export async function listRegistrySheets(): Promise<RegistrySheet[]> {
   return loadRegistry();
 }
 
-/** Look up a client's sheet by tag. Case-insensitive. Returns null if not found. */
+/**
+ * Real client-tag tokens for a registry field. The external registry is sloppy:
+ * some entries pollute the tag with a suffix ("CCHS: Leads") and some bundle
+ * several clients into one sheet ("JPCIN / JPCHI", "CVJLOU & CVJLEX"). We:
+ *   - drop anything after a ":" ("CCHS: Leads" → "CCHS"), then
+ *   - split on "/" or a SPACED " & " (multi-tag separators) — but NOT a bare "&",
+ *     so single tags like "K&LCS", "JPC&A", "TM&VC" stay intact.
+ */
+function tagTokens(raw: string | null | undefined): string[] {
+  return String(raw || "")
+    .split(":")[0]
+    .split(/\s*\/\s*|\s+&\s+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** Look up a client's sheet by tag. Case-insensitive, and tolerant of the
+ *  registry's malformed/bundled tags (see tagTokens). Returns null if not found. */
 export async function getSheetForClient(clientTag: string): Promise<RegistrySheet | null> {
   if (!clientTag || clientTag === "N/A") return null;
   const sheets = await loadRegistry();
   const wanted = clientTag.trim().toLowerCase();
-  return sheets.find((s) => (s.clientTag || "").trim().toLowerCase() === wanted) ?? null;
+  // 1. Exact clientTag match — the clean, common case.
+  const exact = sheets.find((s) => (s.clientTag || "").trim().toLowerCase() === wanted);
+  if (exact) return exact;
+  // 2. Tolerant token match on the clientTag OR the sheet name (multi-tag sheets
+  //    often name every client in `name`, e.g. "CVJLOU & CVJLEX: Leads").
+  return sheets.find(
+    (s) => tagTokens(s.clientTag).includes(wanted) || tagTokens(s.name).includes(wanted),
+  ) ?? null;
 }
