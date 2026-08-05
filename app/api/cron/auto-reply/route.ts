@@ -149,7 +149,7 @@ export async function GET(req: NextRequest) {
     .from("replies")
     .select(
       "id, reply_id, sender_id, lead_id, campaign_id, lead_email, lead_name, sender_name, " +
-      "lead_category, auto_reply_kind, auto_reply_due_at, bison_instance, " +
+      "lead_category, auto_reply_kind, auto_reply_due_at, bison_instance, email_subject, " +
       "cc_name_1, cc_email_1, cc_name_2, cc_email_2, cc_name_3, cc_email_3, " +
       "cc_name_4, cc_email_4, cc_name_5, cc_email_5, cc_name_6, cc_email_6, " +
       "bcc_name_1, bcc_email_1, bcc_name_2, bcc_email_2"
@@ -230,6 +230,7 @@ export async function GET(req: NextRequest) {
       toName: row.lead_name || "",
       ccEmails: ccEmails.length ? ccEmails : undefined,
       bccEmails: bccEmails.length ? bccEmails : undefined,
+      subject: (row as { email_subject?: string | null }).email_subject ?? undefined,
     });
 
     if (result.ok) {

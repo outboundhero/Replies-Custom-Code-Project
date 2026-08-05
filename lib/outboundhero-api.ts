@@ -104,6 +104,23 @@ export function plainTextToEmailHtml(s: string): string {
     .replace(/\n/g, "<br>\n");
 }
 
+/**
+ * Remove UNRESOLVED merge/custom-variable tokens ("{{first_name}}", "{EXT}") from
+ * a string. Bison rejects a whole send with 400 "Invalid custom variables (or
+ * missing from this lead): {EXT}" when the outgoing subject/body still contains a
+ * variable it can't fill for that lead — most often a leftover token in the
+ * campaign's SUBJECT line (e.g. "RE: {EXT} - ...") that Bison auto-carries onto
+ * the reply. Stripping the token lets the send go through.
+ */
+export function stripUnresolvedMergeVars(s: string): string {
+  return (s || "")
+    .replace(/\{\{[^}]*\}\}/g, "")                 // {{ handlebars }}
+    .replace(/\{[A-Za-z0-9_ .-]{1,40}\}/g, "")     // {SINGLE_BRACE}
+    .replace(/\s{2,}/g, " ")
+    .replace(/:\s*-\s*/g, ": ")                     // tidy "RE: - x" left behind
+    .trim();
+}
+
 export async function sendReply(
   instanceKey: string,
   params: {
@@ -114,6 +131,10 @@ export async function sendReply(
     toName: string;
     ccEmails?: EmailRecipient[];
     bccEmails?: EmailRecipient[];
+    /** Thread subject. Passed only so we can OVERRIDE it with a cleaned version
+     *  when it still holds an unresolved merge variable; otherwise Bison keeps
+     *  auto-deriving "Re: ..." exactly as before. */
+    subject?: string;
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
@@ -124,6 +145,12 @@ export async function sendReply(
     content_type: "html",
     to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
   };
+  // Only override the subject when it actually contains an unresolved variable —
+  // leaves every normal reply's subject handling untouched.
+  if (params.subject) {
+    const cleaned = stripUnresolvedMergeVars(params.subject);
+    if (cleaned && cleaned !== params.subject) payload.subject = cleaned;
+  }
 
   if (params.ccEmails?.length) payload.cc_emails = params.ccEmails;
   if (params.bccEmails?.length) payload.bcc_emails = params.bccEmails;
