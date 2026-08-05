@@ -5,7 +5,6 @@ import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/l
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
-import { setLeadHandoffEmail } from "@/lib/sheet-handoff";
 import { htmlToText, textToHtml } from "@/lib/html-text";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
@@ -365,18 +364,12 @@ export async function POST(req: NextRequest) {
           // both writes are best-effort and never affect the send result.
           after(async () => {
             await recordSend("sent");
-            // Record the SENT email into the client's sheet under "Lead handoff
-            // email" — only on a real send, never the template/draft. Uses the
-            // exact appended row (sheet_row/sheet_id) when known, else email-match.
-            if (rowClientTag && rowClientTag !== "N/A" && toEmail) {
-              try {
-                const { data: sr } = await supabase.from("replies")
-                  .select("sheet_row, sheet_id").eq("id", id).single();
-                await setLeadHandoffEmail(rowClientTag, toEmail, htmlToText(message || ""), {
-                  row: sr?.sheet_row ?? undefined, sheetId: sr?.sheet_id ?? undefined,
-                });
-              } catch { /* handoff-email sheet write is best-effort */ }
-            }
+            // NOTE: the "Lead handoff email" sheet write was intentionally removed
+            // (per client request 2026-08-06) — the sent email must NOT be written
+            // into the client's lead-tracking sheet. Leads still push to the sheet
+            // as normal via the categorize/push flow (pushReplyToSheet); only this
+            // handoff-email column write is disabled. recordSend above still keeps
+            // our own outbound history.
           });
         } else {
           // Persist the failure so it stays visible on the lead + in the error
