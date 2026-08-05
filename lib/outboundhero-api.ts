@@ -86,6 +86,24 @@ interface EmailRecipient {
   email_address: string;
 }
 
+/**
+ * Our reply drafts are composed as PLAIN TEXT (a textarea) with blank lines
+ * between paragraphs. Bison sends them as content_type:"html", and HTML collapses
+ * runs of whitespace/newlines into a single space — so the greeting, body,
+ * sign-off and signature all merged into one paragraph in the delivered email.
+ * Escape HTML entities and turn newlines into <br> so the spacing the operator
+ * typed is exactly what the recipient sees. Idempotent-safe for plain text; the
+ * drafts never contain real HTML markup.
+ */
+export function plainTextToEmailHtml(s: string): string {
+  return (s || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, "<br>\n");
+}
+
 export async function sendReply(
   instanceKey: string,
   params: {
@@ -101,7 +119,7 @@ export async function sendReply(
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const payload: Record<string, unknown> = {
     inject_previous_email_body: true,
-    message: params.message,
+    message: plainTextToEmailHtml(params.message),
     sender_email_id: params.senderEmailId,
     content_type: "html",
     to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
@@ -223,7 +241,7 @@ export async function forwardReply(
     headers: buildHeaders(token),
     body: JSON.stringify({
       inject_previous_email_body: true,
-      message: params.message,
+      message: plainTextToEmailHtml(params.message),
       sender_email_id: params.senderEmailId,
       content_type: "html",
       to_emails: [{ name: params.leadName || "", email_address: params.forwardTo }],
@@ -252,7 +270,7 @@ export async function sendOneOffReply(
     headers: buildHeaders(token),
     body: JSON.stringify({
       subject: params.subject,
-      message: params.message,
+      message: plainTextToEmailHtml(params.message),
       sender_email_id: params.senderEmailId,
       content_type: "html",
       to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
