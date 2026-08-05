@@ -20,6 +20,7 @@ import { listCampaigns, listCampaignLeads, sweepCampaignLeadsCursor, findLeadByE
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { detectCampaignEsp, pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
+import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 
 // ── Cursor-based, resumable per-campaign scan state (Turso) ───────────────────
@@ -205,22 +206,24 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
 }
 
 /** All client tags that should sync against the given Bison instance.
- *  Pulls from Turso client_tags (full catalogue) and joins to
- *  client_instances to map each to its instance. Tags without an
- *  explicit mapping fall back to DEFAULT_INSTANCE (outboundhero). */
+ *
+ *  Routing is derived from the authoritative GROUP mapping (Turso `client_groups`,
+ *  synced daily from the onboarding sheet's "Groups" tab) — NOT the old manual
+ *  `client_instances` table, which is empty in practice and silently defaulted
+ *  every client to outboundhero (so cleaningoutbound / facilityreach / outboundclean
+ *  were never swept, and every Group-2 client stayed at zero).
+ *
+ *  Each client belongs to a group whose leads live in TWO instances — a B2B
+ *  instance (business-email leads) and a B2C instance (personal-email leads):
+ *    Group 1 → outboundhero (B2B) + cleaningoutbound (B2C)
+ *    Group 2 → facilityreach (B2B) + outboundclean (B2C)
+ *  A client is swept on THIS instance if it's either its B2B or its B2C instance,
+ *  so both halves of every client get covered across the four per-instance crons. */
 async function listClientTagsForInstance(instanceKey: BisonInstanceKey): Promise<string[]> {
-  const { default: turso } = await import("@/lib/db");
-  const res = await turso.execute({
-    sql: `SELECT ct.tag, ci.instance_key
-          FROM client_tags ct
-          LEFT JOIN client_instances ci ON ci.client_tag = ct.tag`,
-    args: [],
-  });
+  const all = await getAllClientInstances();
   const out: string[] = [];
-  for (const row of res.rows) {
-    const tag = row.tag as string;
-    const mapped = (row.instance_key as string | null) || "outboundhero";
-    if (mapped === instanceKey) out.push(tag);
+  for (const [tag, inst] of all) {
+    if (inst.b2b === instanceKey || inst.b2c === instanceKey) out.push(tag);
   }
   return out;
 }
@@ -307,8 +310,10 @@ export async function syncOneClient(
   const usableCampaigns = exactCampaigns.filter((c) => {
     const total = c.total_leads ?? 0;
     if (total === 0) return false;
-    const exhausted = (c.replied ?? 0) + (c.bounced ?? 0);
-    if (exhausted >= total) return false;
+    // NOTE: do NOT skip "exhausted" campaigns (replied+bounced >= total). Those
+    // "done" campaigns still hold sequence-FINISHED leads (finished the sequence
+    // without ever replying) — skipping them was the coverage bug that made whole
+    // clients invisible. Matches syncOneInstance's filter.
     return true;
   });
 
