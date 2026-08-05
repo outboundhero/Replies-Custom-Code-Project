@@ -13,6 +13,15 @@ import supabase from "@/lib/supabase";
 import { pushToSheet } from "@/lib/push-to-sheet";
 import { recordSheetPushFailure, clearSheetPushFailure } from "@/lib/sheet-push-tracker";
 import { resolveLeadPhones, phonesForSheet } from "@/lib/processing/resolve-phones";
+import { loadClientContactEmails } from "@/lib/processing/cc-bcc-match";
+
+// Split a raw address cell ("a@x.com, b@y.com; c@z.com") into lowercased emails.
+function splitEmails(raw: unknown): string[] {
+  return String(raw || "")
+    .split(/[,;]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Reply = Record<string, any>;
@@ -28,6 +37,24 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
   if (!reply) return { ok: false, skipped: "reply not found" };
   const clientTag = reply.client_tag as string | null;
   if (!clientTag || clientTag === "N/A") return { ok: false, skipped: "no client tag" };
+
+  // Never add the client's OWN people to their lead-tracking sheet. If any
+  // address on the message — sender, recipient(s), CC or BCC — is one of the
+  // client's approved ReplyRouter template contacts (their configured CC/BCC
+  // emails), this is the client's team on the thread (an internal forward or
+  // their own reply), not a prospect. Exclude the message from the sheet.
+  const clientContacts = await loadClientContactEmails(clientTag);
+  if (clientContacts.size) {
+    const participants = [
+      ...splitEmails(reply.from_email),
+      ...splitEmails(reply.lead_email),
+      ...splitEmails(reply.to_email),
+      ...splitEmails(reply.prospect_cc_email),
+      ...splitEmails(reply.bcc_email),
+    ];
+    const hit = participants.find((e) => clientContacts.has(e));
+    if (hit) return { ok: false, skipped: `client contact on thread (${hit})` };
+  }
 
   const category = opts?.category || reply.lead_category || "";
 

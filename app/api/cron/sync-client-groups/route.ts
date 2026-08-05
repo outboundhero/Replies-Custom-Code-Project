@@ -1,10 +1,10 @@
 /**
  * GET /api/cron/sync-client-groups?secret=X
  *
- * Reads the instance-mapping sheet (Sheet1: col A = Group-1 tags, col C =
- * Group-2 tags) and replaces the Turso `client_groups` table. Nurture routing
- * (lib/nurture/group-routing.ts) reads it to send each client's leads to its
- * group's B2B/B2C Bison instance.
+ * Reads the "Groups" tab of the onboarding-form-responses spreadsheet (col A =
+ * Group-1 tags, col D = Group-2 tags) and replaces the Turso `client_groups`
+ * table. Nurture routing (lib/nurture/group-routing.ts) reads it to send each
+ * client's leads to its group's B2B/B2C Bison instance.
  *
  * Wire to a daily Vercel cron; also callable manually after the sheet changes.
  */

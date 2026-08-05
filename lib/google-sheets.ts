@@ -123,23 +123,24 @@ export async function fetchChurnedClientTags(): Promise<Set<string>> {
 }
 
 /**
- * Each client tag's nurture GROUP (1 or 2) from the instance-mapping sheet
- * (a SEPARATE spreadsheet). "Sheet1" is column-positional with a header row:
+ * Each client tag's nurture GROUP (1 or 2) — the client-tag allocation now lives
+ * on the "Groups" tab of the onboarding-form-responses spreadsheet (the same
+ * SPREADSHEET_ID as the Client Tracker / Onboarding Form). The tab is
+ * column-positional with a header row:
  *   col A = Group-1 client tags ("B2B #1 (OutboundHero) & B2C #1 (CleaningOutbound)")
- *   col B = Group-2 client tags ("B2B #2 (FacilityReach) & B2C #2 (OutboundClean)")
- * (The sheet previously had "DONE" boolean columns at B/D with Group 2 in col C;
- *  those were removed, so Group 2 now sits directly in column B.)
- * Combined abbreviations ("DBSM & DBSA") split like fetchChurnedClientTags.
- * Returns Map<TAG_UPPER, 1|2>.
+ *   col B = Status,  col C = Plan            (Group-1 metadata — ignored here)
+ *   col D = Group-2 client tags ("B2B #2 (FacilityReach) & B2C #2 (OutboundClean)")
+ *   col E = Status,  col F = Plan            (Group-2 metadata — ignored here)
+ * Only the two tag columns (A + D) are read; Status/Plan are not part of the
+ * allocation. Combined abbreviations ("DBSM & DBSA") split like
+ * fetchChurnedClientTags. Returns Map<TAG_UPPER, 1|2>.
  */
-const GROUPS_SPREADSHEET_ID = "1P-5H4pxB-cRO0i2tp6WjXNN77ibIB4hCnNTuyRzQOYw";
-
 export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
   const auth = getAuth();
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: GROUPS_SPREADSHEET_ID,
-    range: "'Sheet1'!A:C",
+    spreadsheetId: SPREADSHEET_ID,
+    range: "'Groups'!A:F",
   });
   const rows = res.data.values || [];
   const out = new Map<string, 1 | 2>();
@@ -148,15 +149,15 @@ export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
     if (!raw) return;
     for (const t of raw.split(/\s+&\s+|\s+and\s+/i)) {
       const tag = t.trim().toUpperCase();
-      // Skip header fragments / the DONE-column truthy values.
+      // Skip header fragments / any stray truthy tokens.
       if (!tag || tag === "TRUE" || tag === "FALSE" || tag === "DONE") continue;
       if (/B2B|B2C|OUTBOUNDHERO|CLEANINGOUTBOUND|FACILITYREACH|OUTBOUNDCLEAN/i.test(tag)) continue;
       out.set(tag, group);
     }
   };
   for (let i = 1; i < rows.length; i++) {   // skip header row
-    addCell(rows[i][0], 1); // col A → Group 1
-    addCell(rows[i][1], 2); // col B → Group 2
+    addCell(rows[i][0], 1); // col A → Group 1 tags
+    addCell(rows[i][3], 2); // col D → Group 2 tags
   }
   return out;
 }

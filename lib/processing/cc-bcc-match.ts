@@ -55,6 +55,28 @@ export async function loadAllClientContactEmails(): Promise<Set<string>> {
   return set;
 }
 
+// A single client's approved contact emails, cached 5 min per tag.
+const _byTag = new Map<string, { set: Set<string>; ts: number }>();
+export async function loadClientContactEmails(clientTag: string | null | undefined): Promise<Set<string>> {
+  const tag = (clientTag || "").trim();
+  if (!tag) return new Set();
+  const now = Date.now();
+  const hit = _byTag.get(tag);
+  if (hit && now - hit.ts < ALL_TTL_MS) return hit.set;
+  const set = new Set<string>();
+  try {
+    const r = await db.execute({
+      sql: `SELECT ${CONTACT_KEYS.join(", ")} FROM client_config WHERE client_tag = ?`,
+      args: [tag],
+    });
+    for (const row of r.rows) {
+      for (const e of collectConfigEmails(row as Record<string, unknown>)) set.add(e);
+    }
+  } catch { /* table missing / error → empty set */ }
+  _byTag.set(tag, { set, ts: now });
+  return set;
+}
+
 interface ReplyLike {
   from_email_address?: string | null;
   to?: Array<{ name?: string; address?: string }> | null;

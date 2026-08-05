@@ -213,6 +213,14 @@ export async function GET(req: NextRequest) {
     if (view?.clientTag && (!allowed || !allowed.length || allowed.includes(view.clientTag))) {
       clientTag = view.clientTag;
     }
+    // A view can RESTRICT to a set of tags (CWSJ (Cherry) → CWSJ + CWSJ-OS). Same
+    // narrowed-allowlist mechanism as excludeClientTags, but keeps only the listed
+    // tags — intersected with the user's own scoping so it never widens access.
+    if (view?.includeClientTags?.length && !clientTag) {
+      const want = new Set(view.includeClientTags);
+      const base = (allowed && allowed.length) ? allowed : await resolveClientTags(null, fresh);
+      allowed = base.filter((t) => want.has(t));
+    }
     // A view can EXCLUDE client tags (Base Clients (Cherry) hides OH — OH has its
     // own OutboundHero (Cherry) view). Express it as a narrowed allowlist so the
     // counts RPC (p_allowed_tags), the leads query (.in), and the dropdown all

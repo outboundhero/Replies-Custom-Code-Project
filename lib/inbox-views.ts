@@ -30,6 +30,11 @@ export interface InboxView {
   hiddenLeadCategories?: string[];
   /** Force the view to a single client tag (overrides the client dropdown). */
   clientTag?: string;
+  /** Restrict the view to this SET of client tags (e.g. CWSJ (Cherry) shows only
+   *  CWSJ + CWSJ-OS). Use when a dedicated team owns MORE THAN ONE tag — clientTag
+   *  handles the single-tag case. Applied as a narrowed allowlist so counts +
+   *  leads + dropdown all honor it (and still intersected with per-user scoping). */
+  includeClientTags?: string[];
   /** Client tags to EXCLUDE from this view (e.g. Base Clients hides OH, which
    *  has its own dedicated OutboundHero (Cherry) view). Applied as a narrowed
    *  allowlist so counts + leads + realtime all honor it. */
@@ -84,8 +89,9 @@ export const INBOX_VIEWS: InboxView[] = [
     // Also hide the Referral Given bucket (still visible in Master Inbox + the
     // per-client cherry views).
     hiddenLeadCategories: [...CHERRY_HIDDEN, "Referral Given"],
-    // OH and DM4PM have their own dedicated cherry views — keep them out of here.
-    excludeClientTags: ["OH", "DM4PM"],
+    // OH, DM4PM and CWSJ/CWSJ-OS have their own dedicated cherry views + logins —
+    // keep them out of the regular team's base view so work doesn't overlap.
+    excludeClientTags: ["OH", "DM4PM", "CWSJ", "CWSJ-OS"],
   },
   {
     id: "outboundhero-cherry",
@@ -104,6 +110,15 @@ export const INBOX_VIEWS: InboxView[] = [
     aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
     hiddenLeadCategories: CHERRY_HIDDEN,
     clientTag: "DM4PM",
+  },
+  {
+    id: "cwsj-cherry",
+    label: "CWSJ & CWSJ-OS (Cherry)",
+    description: "Base Clients (Cherry), restricted to the CWSJ + CWSJ-OS client tags (their own team owns both).",
+    excludeNoise: true,
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
+    includeClientTags: ["CWSJ", "CWSJ-OS"],
   },
 ];
 
