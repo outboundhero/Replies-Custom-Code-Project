@@ -82,6 +82,9 @@ async function computeCounts(args: {
   aiCategory?: string | null;
 }): Promise<{ counts: Record<string, number>; total: number }> {
   const { clientTag, allowed, workflow, search, view, viewParam, fresh, aiCategory } = args;
+  // Scoped user whose scope ∩ view is empty → no visible clients here. A non-null
+  // EMPTY allowlist means "none"; never let it fall through to "all clients".
+  if (!clientTag && Array.isArray(allowed) && allowed.length === 0) return { counts: {}, total: 0 };
   const cacheKey = `counts:v${getCacheVersion()}:${JSON.stringify({ clientTag, allowed, workflow, search, view: viewParam, ai: aiCategory || null })}`;
   if (!fresh) {
     const hit = getInboxCache<{ counts: Record<string, number>; total: number }>(cacheKey, COUNTS_TTL_MS);
@@ -165,6 +168,12 @@ async function fetchLeads(args: {
   limit: number; offset: number; aiCategory?: string | null;
 }): Promise<{ replies: unknown[]; page: { limit: number; offset: number; returned: number; hasMore: boolean } }> {
   const { clientTag, allowed, category, workflow, search, view, limit, offset, aiCategory } = args;
+  // Scoped user whose scope ∩ view is empty → they may see NOTHING here. A
+  // non-null EMPTY allowlist means "no clients", and must never fall through to
+  // the unfiltered ("all clients") path below.
+  if (!clientTag && Array.isArray(allowed) && allowed.length === 0) {
+    return { replies: [], page: { limit, offset, returned: 0, hasMore: false } };
+  }
   let q = supabase
     .from("replies")
     .select(LEADS_SELECT)
@@ -191,6 +200,11 @@ export async function GET(req: NextRequest) {
 
   try {
     let allowed = session?.allowedClientTags ?? null;
+    // The user's HARD scope (their session tags), kept CONSTANT while `allowed`
+    // gets narrowed by the view below. null = unscoped admin (sees all). Used for
+    // the client dropdown so it always shows the user's real tags, even on a view
+    // whose tag filter narrows `allowed` to empty.
+    const userScope: string[] | null = allowed && allowed.length ? allowed.slice() : null;
 
     const mode = req.nextUrl.searchParams.get("mode");
     const fresh = req.nextUrl.searchParams.get("fresh") === "1";
@@ -232,9 +246,10 @@ export async function GET(req: NextRequest) {
     }
     const aiCategory = req.nextUrl.searchParams.get("ai_category");  // §18 filter
 
-    // Mode: client_tags — distinct client tags for the dropdown.
+    // Mode: client_tags — distinct client tags for the dropdown. Always the
+    // user's OWN scope (not the view-narrowed `allowed`, which can be empty).
     if (mode === "client_tags") {
-      return NextResponse.json({ tags: await resolveClientTags(allowed, fresh) });
+      return NextResponse.json({ tags: await resolveClientTags(userScope ?? allowed, fresh) });
     }
 
     // Mode: counts — all category counts in one RPC round trip (60s cache).
@@ -248,7 +263,7 @@ export async function GET(req: NextRequest) {
     if (mode === "bootstrap") {
       const [{ counts, total }, clientTags] = await Promise.all([
         computeCounts({ clientTag, allowed, workflow, search, view, viewParam, fresh, aiCategory }),
-        resolveClientTags(allowed, fresh),
+        resolveClientTags(userScope ?? allowed, fresh),
       ]);
       const firstCategory = pickFirstCategory(counts);
       let leads: unknown[] = [];

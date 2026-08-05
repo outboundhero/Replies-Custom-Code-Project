@@ -320,7 +320,10 @@ export default function InboxPage() {
   const scopedTags = session?.allowedClientTags && session.allowedClientTags.length
     ? session.allowedClientTags : null;
   const initialClient = scopedTags && scopedTags.length === 1 ? scopedTags[0] : "";
-  const initialView = DEFAULT_VIEW;
+  // Scoped users (their own client login) default to Master Inbox — the base
+  // "Cherry" view excludes their tags, so it would show nothing. Admins keep the
+  // curated Cherry default.
+  const initialView = scopedTags ? "all" : DEFAULT_VIEW;
 
   // One-time synchronous hydrate from the app-load prefetch (fresh data only).
   // When present we paint the counts + first bucket instantly and skip the
@@ -1080,7 +1083,18 @@ export default function InboxPage() {
               <SelectValue placeholder="Master Inbox" />
             </SelectTrigger>
             <SelectContent>
-              {INBOX_VIEWS.map((v) => (
+              {INBOX_VIEWS.filter((v) => {
+                // Admins (no scope) see every view. Scoped users only see views
+                // that would surface THEIR leads: Master Inbox, plus any view
+                // whose tag filter overlaps their scope. Views that exclude all
+                // of their tags (e.g. Base Clients Cherry excludes CWSJ) are hidden.
+                if (!allowedClientTags || !allowedClientTags.length) return true;
+                if (v.id === "all") return true;
+                if (v.clientTag) return allowedClientTags.includes(v.clientTag);
+                if (v.includeClientTags) return v.includeClientTags.some((t) => allowedClientTags.includes(t));
+                if (v.excludeClientTags) return allowedClientTags.some((t) => !v.excludeClientTags!.includes(t));
+                return true;
+              }).map((v) => (
                 <SelectItem key={v.id} value={v.id} className="text-sm font-medium py-2">
                   {v.label}
                 </SelectItem>
