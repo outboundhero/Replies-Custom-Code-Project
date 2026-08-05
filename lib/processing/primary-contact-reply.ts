@@ -32,6 +32,8 @@
  * without explicit confirmation.
  */
 
+import { stripQuotedHistory } from "@/lib/qualification/strip-quoted";
+
 interface PrimaryContactInput {
   replyBody: string;
   /** Lead's first name (greeting). */
@@ -118,7 +120,7 @@ export async function generatePrimaryContactReply(
     `Normalized company/org from our data (FALLBACK only, may be the prospect's own company — use per rules 5/6): ${companyName || "(none)"}`,
     "",
     "Prospect's reply:",
-    replyBody.slice(0, 1500),
+    (stripQuotedHistory(replyBody) || replyBody).slice(0, 1500),
   ].join("\n");
 
   try {

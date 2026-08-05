@@ -19,6 +19,7 @@
  */
 
 import { resolveLeadPhones, phonesForTemplate } from "@/lib/processing/resolve-phones";
+import { stripQuotedHistory } from "@/lib/qualification/strip-quoted";
 
 interface TemplateVars {
   firstName: string;
@@ -140,6 +141,7 @@ async function extractReplyVars(
   replySubject: string,
   leadCompanyName: string,
   leadName: string,
+  senderFirstName: string,
 ): Promise<ExtractedVars | null> {
   if (!replyBody?.trim()) return null;
   if (!process.env.OPENAI_API_KEY) return null;
@@ -154,6 +156,9 @@ async function extractReplyVars(
     `  - If the CRM lead name (given below) is already a real person's first name, use that.`,
     `  - If the CRM lead name is a COMPANY / team / generic name (e.g. "L&D Millwork Team", "Info", "Sales"), find the actual person's first name from the reply's sign-off / signature — e.g. a reply ending "Thanks, Drew" → "Drew".`,
     `  - Just the first name, proper case. Return null if no real personal name is available in the CRM name OR the reply.`,
+    senderFirstName
+      ? `  - CRITICAL: The lead is the person who REPLIED to us. NEVER return OUR OWN sender's first name ("${senderFirstName}"). The reply often QUOTES our original outbound email — usually signed off by our sender ("${senderFirstName}") — and any quoted lines (starting with ">") or "On <date> ... wrote:" blocks are OURS, not the lead's. Ignore that quoted history and our sender's signature entirely. If the only personal name you can find is "${senderFirstName}", return null.`
+      : "",
     "",
     "FIELD: context",
     `  - A short, natural phrase (≤ 16 words) capturing what the lead wants AND any TIMING they mention.`,
@@ -247,17 +252,32 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
     resolved.includes("{PHONE}") ||
     (resolved.includes("{FIRST_NAME}") && !providedFirstOk);
 
+  // Strip the quoted history BEFORE extraction: a reply usually quotes OUR own
+  // original outbound email underneath (signed by our sender). If the AI reads
+  // that quoted block it can lift OUR sender's name / company / phone as if they
+  // were the lead's — the classic "Hi <our own rep's name>" greeting bug. We only
+  // ever want fields from the lead's NEW message.
+  const leadOnlyBody = stripQuotedHistory(vars.replyBody);
+
   let extracted: ExtractedVars | null = null;
   if (needsExtraction) {
-    extracted = await extractReplyVars(vars.replyBody, vars.replySubject, vars.companyName, vars.leadName || vars.firstName || "");
+    extracted = await extractReplyVars(leadOnlyBody, vars.replySubject, vars.companyName, vars.leadName || vars.firstName || "", vars.senderFirstName || "");
   }
 
   if (resolved.includes("{FIRST_NAME}")) {
     // Priority: a real first name from the CRM lead name → the person who signed
     // the reply (signature) → fall back to the raw CRM name.
     let greet = vars.firstName;
-    if (!providedFirstOk && extracted?.firstName) greet = extracted.firstName;
-    resolved = resolved.replaceAll("{FIRST_NAME}", greet || vars.firstName || "there");
+    // Deterministic safety net: never greet the lead with OUR OWN sender's name.
+    // Even with quoted history stripped + the prompt guard, if the AI still hands
+    // back a name matching our sender, discard it (it came from our signature).
+    const sender = (vars.senderFirstName || "").trim().toLowerCase();
+    const extractedFirst = extracted?.firstName || "";
+    const extractedOk = extractedFirst && (!sender || extractedFirst.toLowerCase() !== sender);
+    if (!providedFirstOk && extractedOk) greet = extractedFirst;
+    // If the CRM name itself is just our sender's name (bad CRM data), drop to "there".
+    if ((greet || "").trim().toLowerCase() === sender && sender) greet = "";
+    resolved = resolved.replaceAll("{FIRST_NAME}", greet || "there");
   }
 
   if (resolved.includes("{CONTEXT}")) {

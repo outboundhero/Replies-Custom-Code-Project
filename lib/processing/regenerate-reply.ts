@@ -12,6 +12,8 @@
  * it). Falls back to the current draft if the model is unavailable.
  */
 
+import { stripQuotedHistory } from "@/lib/qualification/strip-quoted";
+
 interface RegenerateInput {
   /** The lead's inbound message we're replying to (for context only). */
   replyBody: string;
@@ -51,7 +53,7 @@ export async function regenerateReply(input: RegenerateInput): Promise<{ ok: boo
     input.senderName ? `Rep's name (sign off as this): ${input.senderName}` : "",
     "",
     "Lead's inbound message (context — do NOT reply to quoted history):",
-    (input.replyBody || "(none)").slice(0, 2000),
+    (stripQuotedHistory(input.replyBody || "") || "(none)").slice(0, 2000),
     "",
     "Current draft:",
     currentDraft || "(empty — write a suitable reply)",
