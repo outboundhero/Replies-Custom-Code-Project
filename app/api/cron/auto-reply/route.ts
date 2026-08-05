@@ -231,6 +231,7 @@ export async function GET(req: NextRequest) {
       ccEmails: ccEmails.length ? ccEmails : undefined,
       bccEmails: bccEmails.length ? bccEmails : undefined,
       subject: (row as { email_subject?: string | null }).email_subject ?? undefined,
+      leadId: (row as { lead_id?: number | null }).lead_id ?? undefined,
     });
 
     if (result.ok) {

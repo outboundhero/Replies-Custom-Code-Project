@@ -46,11 +46,12 @@ export async function POST(req: NextRequest) {
     let rowLeadCategory: string | null = null;
     let rowCreatedAt: string | null = null;
     let rowSubject: string | null = null;
+    let rowLeadId: number | null = null;
     if (id) {
       const allowed = session?.allowedClientTags ?? null;
       const { data: row } = await supabase
         .from("replies")
-        .select("client_tag, bison_instance, reply_id, lead_category, created_at, email_subject")
+        .select("client_tag, bison_instance, reply_id, lead_category, created_at, email_subject, lead_id")
         .eq("id", id)
         .single();
       if (allowed && allowed.length) {
@@ -64,6 +65,7 @@ export async function POST(req: NextRequest) {
       rowLeadCategory = (row?.lead_category as string | null) ?? null;
       rowCreatedAt = (row?.created_at as string | null) ?? null;
       rowSubject = (row?.email_subject as string | null) ?? null;
+      rowLeadId = (row?.lead_id as number | null) ?? null;
     }
 
     switch (action) {
@@ -335,7 +337,7 @@ export async function POST(req: NextRequest) {
 
       case "send-reply": {
         const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply } = body;
-        const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined });
+        const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
         const nowIso = new Date().toISOString();
         // History row (success OR failure) so the inbox can show the full
         // outbound history + retry failures. Best-effort — never break the send.

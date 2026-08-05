@@ -104,21 +104,51 @@ export function plainTextToEmailHtml(s: string): string {
     .replace(/\n/g, "<br>\n");
 }
 
+/** Extract the NAMES of unresolved merge/custom-variable tokens
+ *  ("{{first_name}}", "{EXT}") from a string. */
+export function unresolvedVarNames(s: string): string[] {
+  const names = new Set<string>();
+  const re = /\{\{([^}]{1,40})\}\}|\{([A-Za-z0-9_ .\-]{1,40})\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s || "")) !== null) {
+    const n = (m[1] ?? m[2] ?? "").trim();
+    if (n) names.add(n);
+  }
+  return [...names];
+}
+
 /**
- * Remove UNRESOLVED merge/custom-variable tokens ("{{first_name}}", "{EXT}") from
- * a string. Bison rejects a whole send with 400 "Invalid custom variables (or
- * missing from this lead): {EXT}" when the outgoing subject/body still contains a
- * variable it can't fill for that lead — most often a leftover token in the
- * campaign's SUBJECT line (e.g. "RE: {EXT} - ...") that Bison auto-carries onto
- * the reply. Stripping the token lets the send go through.
+ * Make unresolved subject/quoted-history merge variables RESOLVABLE on a lead.
+ *
+ * Bison rejects a whole reply — 400 "Invalid custom variables (or missing from
+ * this lead): {EXT}" — when the thread SUBJECT still contains a custom variable
+ * this lead has no value for (a leftover token in the campaign subject, e.g.
+ * "RE: {EXT} - ..."). The reply endpoint has NO subject parameter, so we can't
+ * strip it there. Instead we add the variable to the LEAD with an EMPTY value —
+ * then Bison fills {EXT} -> "" everywhere it appears (subject + the quoted
+ * history it re-injects) and the send goes through.
+ *
+ * Merge-safe: we re-send the lead's EXISTING custom variables plus the additions,
+ * so nothing is lost. Only ADDS names the lead is missing (never overwrites a
+ * real value). Best-effort.
  */
-export function stripUnresolvedMergeVars(s: string): string {
-  return (s || "")
-    .replace(/\{\{[^}]*\}\}/g, "")                 // {{ handlebars }}
-    .replace(/\{[A-Za-z0-9_ .-]{1,40}\}/g, "")     // {SINGLE_BRACE}
-    .replace(/\s{2,}/g, " ")
-    .replace(/:\s*-\s*/g, ": ")                     // tidy "RE: - x" left behind
-    .trim();
+async function ensureLeadVarsResolvable(instanceKey: string, leadId: number, varNames: string[]): Promise<void> {
+  const wanted = varNames.map((n) => n.toLowerCase().trim()).filter(Boolean);
+  if (!wanted.length) return;
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${leadId}`, { headers: buildHeaders(token), timeoutMs: 15_000 });
+  if (!res.ok) return;
+  const j = await res.json().catch(() => null);
+  const lead = (j && (j.data ?? j)) || {};
+  const existing: Array<{ name: string; value: string }> = Array.isArray(lead.custom_variables)
+    ? lead.custom_variables
+        .map((v: { name?: string; value?: unknown }) => ({ name: String(v?.name ?? "").toLowerCase().trim(), value: String(v?.value ?? "") }))
+        .filter((v: { name: string }) => v.name)
+    : [];
+  const have = new Set(existing.map((v) => v.name));
+  const additions = wanted.filter((n) => !have.has(n)).map((name) => ({ name, value: "" }));
+  if (!additions.length) return; // already present → nothing to add
+  await updateLeadCustomVars(instanceKey, leadId, [...existing, ...additions]);
 }
 
 export async function sendReply(
@@ -131,12 +161,26 @@ export async function sendReply(
     toName: string;
     ccEmails?: EmailRecipient[];
     bccEmails?: EmailRecipient[];
-    /** Thread subject. Passed only so we can OVERRIDE it with a cleaned version
-     *  when it still holds an unresolved merge variable; otherwise Bison keeps
-     *  auto-deriving "Re: ..." exactly as before. */
+    /** Thread subject — used ONLY to DETECT an unresolved custom variable (e.g. a
+     *  leftover "{EXT}") so we can make it resolvable on the lead before sending.
+     *  The reply endpoint has no subject override, so it is not sent to Bison. */
     subject?: string;
+    /** Bison lead id — needed to set the missing variable on the lead. */
+    leadId?: number;
   },
 ): Promise<{ ok: boolean; error?: string }> {
+  // Pre-send guard: a leftover custom variable in the thread subject (e.g.
+  // "RE: {EXT} - ...") makes Bison reject the ENTIRE reply, and this endpoint has
+  // no subject override. So ensure the variable resolves on the lead (empty value)
+  // first. Best-effort, and only when a token is actually present.
+  if (params.subject && params.leadId) {
+    const names = unresolvedVarNames(params.subject);
+    if (names.length) {
+      try { await ensureLeadVarsResolvable(instanceKey, params.leadId, names); }
+      catch { /* best-effort — still attempt the send */ }
+    }
+  }
+
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const payload: Record<string, unknown> = {
     inject_previous_email_body: true,
@@ -145,12 +189,6 @@ export async function sendReply(
     content_type: "html",
     to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
   };
-  // Only override the subject when it actually contains an unresolved variable —
-  // leaves every normal reply's subject handling untouched.
-  if (params.subject) {
-    const cleaned = stripUnresolvedMergeVars(params.subject);
-    if (cleaned && cleaned !== params.subject) payload.subject = cleaned;
-  }
 
   if (params.ccEmails?.length) payload.cc_emails = params.ccEmails;
   if (params.bccEmails?.length) payload.bcc_emails = params.bccEmails;
