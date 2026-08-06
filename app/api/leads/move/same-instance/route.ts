@@ -76,9 +76,13 @@ export async function POST(req: NextRequest) {
   if (!anyDest) return NextResponse.json({ error: "no destination campaigns selected" }, { status: 400 });
 
   const campaignEsp = detectCampaignEsp(sourceCampaignName);
-  // Google (catch-all) or an un-ESP'd name → resolve each lead's ESP from its
-  // Bison tags. Outlook/SEGs names are specific enough to trust directly.
-  const needsLookup = campaignEsp !== "outlook" && campaignEsp !== "segs";
+  // ALWAYS resolve each lead's ESP from its real Bison mailbox tag — never trust
+  // the SOURCE campaign NAME. "Outlook"/"SEGs"-named source campaigns routinely
+  // contain non-matching leads (gmail/aol/comcast tagged "Custom Mail Server");
+  // trusting the name stamped them all as the source ESP and moved them into the
+  // Outlook/SEGs destination, mixing ESPs there. Per-lead lookup is heavier, but
+  // the smaller windows below absorb it and the cursor keeps the move resumable.
+  const needsLookup = true;
   // Service-area gate: skip leads whose CITY isn't in the client's allowed area.
   // Only when the filter is on AND an area is configured (else move all).
   const area = serviceAreaFilter ? await getServiceArea(clientTag) : null;

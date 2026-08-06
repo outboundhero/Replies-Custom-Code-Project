@@ -18,7 +18,7 @@ import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { listCampaigns, listCampaignLeads, sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
-import { detectCampaignEsp, pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
+import { pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
@@ -515,18 +515,18 @@ async function processLeadWindow(
         return;
       }
 
-      // Resolve ESP at INGESTION so every lead is routable the moment it lands:
-      //   • Outlook / SEGs campaign → the placement IS the mailbox provider, so
-      //     take ESP straight from the campaign name (no per-lead call needed).
-      //   • Google / "Gmail + Others" catch-all → a MIX of true Gmail/custom
-      //     domains AND SEG-gateway recipients (Mimecast/Proofpoint/Barracuda)
-      //     the name can't tell apart. Look the lead up in Bison and read its
-      //     mailbox TAGS (pickEspFromTags) to split google vs segs vs outlook;
-      //     fall back to the email-domain default so NO lead is ever left
-      //     without an ESP. (The /campaigns/{id}/leads list omits `tags`, so the
-      //     per-lead /api/leads/{email} lookup is the only tag source here.)
-      const campaignEsp = detectCampaignEsp(campaign.name);
-      const directEsp = campaignEsp === "outlook" || campaignEsp === "segs" ? campaignEsp : null;
+      // Resolve ESP at INGESTION so every lead is routable the moment it lands.
+      // ALWAYS resolve it PER-LEAD from the lead's real Bison mailbox TAGS
+      // (pickEspFromTags) — never trust the source campaign NAME. An "Outlook"/
+      // "SEGs"-named campaign routinely holds non-matching leads (gmail/aol/comcast
+      // tagged "Custom Mail Server"); taking ESP from the name stored the WRONG esp
+      // and routed those leads into the Outlook/SEGs nurture campaign, mixing ESPs.
+      // The /campaigns/{id}/leads list omits `tags`, so the per-lead
+      // /api/leads/{email} lookup is the only tag source. Lookups are capped per
+      // run (below); anything past the cap gets esp=null and the hourly ESP
+      // backfill cron (also tag-based) fills it — so no lead is misrouted OR left
+      // unrouted.
+      const directEsp: string | null = null;
 
       // For the google catch-all, resolve per-lead ESP from tags. newCandidates
       // are all brand-new (the gate above dropped anything already in our system),
