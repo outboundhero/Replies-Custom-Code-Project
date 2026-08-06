@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
+import supabase from "@/lib/supabase";
 import { requireAuth } from "@/lib/auth";
 import { processTrackedReply } from "@/lib/processing/tracked";
 import { processUntrackedReply } from "@/lib/processing/untracked";
 import { sendToClayWebhook } from "@/lib/clay";
 import { blacklistDomain, blacklistEmail } from "@/lib/processing/domain-blacklist";
 import { coerceInstance } from "@/lib/bison-instances";
+import { sendReply } from "@/lib/outboundhero-api";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAuth();
@@ -82,6 +84,73 @@ export async function POST(req: NextRequest) {
         { error: "Stored blacklist payload is malformed JSON" },
         { status: 400 }
       );
+    }
+  }
+
+  // ── Inbox send-reply errors — re-send the stored draft to the same recipients.
+  // These fail transiently (e.g. "Sending disabled due to billing over-use"); once
+  // the block clears, Retry / Retry All actually pushes the reply out. The draft +
+  // recipients live on the last reply_sends row for this reply. ──
+  if ((entry.workflow as string) === "inbox" && stage === "send-reply" && entryPayload) {
+    try {
+      const p = JSON.parse(entryPayload) as { row_id?: number; instance?: string; client_tag?: string };
+      const replyRowId = Number(p.row_id);
+      if (!replyRowId) throw new Error("no row_id stored on this error");
+
+      const { data: reply } = await supabase
+        .from("replies")
+        .select("reply_id, sender_id, bison_instance, lead_email, lead_name, email_subject, lead_id, client_tag")
+        .eq("id", replyRowId).single();
+      if (!reply) throw new Error("reply not found");
+
+      const { data: sends } = await supabase
+        .from("reply_sends")
+        .select("message, to_json, cc_json, bcc_json, status")
+        .eq("reply_row_id", replyRowId).order("id", { ascending: false }).limit(1);
+      const last = sends?.[0] as { message?: string; to_json?: Array<{ name?: string; email?: string }>; cc_json?: unknown; bcc_json?: unknown; status?: string } | undefined;
+
+      // Already sent since this error (e.g. a manual resend) → just clear it.
+      if (last?.status === "sent") {
+        await db.execute({ sql: "DELETE FROM error_log WHERE id = ?", args: [id] });
+        return NextResponse.json({ ok: true, message: "Already sent — cleared stale error" });
+      }
+
+      const message = String(last?.message || "").trim();
+      if (!message) throw new Error("no stored draft to re-send");
+      const toEmail = last?.to_json?.[0]?.email || (reply.lead_email as string) || "";
+      const toName = last?.to_json?.[0]?.name || (reply.lead_name as string) || "";
+      const toRecipients = (v: unknown) => Array.isArray(v)
+        ? (v as Array<{ name?: string; email_address?: string }>)
+            .map((c) => ({ name: c.name || "", email_address: c.email_address || "" }))
+            .filter((c) => c.email_address)
+        : undefined;
+      const ccEmails = toRecipients(last?.cc_json);
+      const bccEmails = toRecipients(last?.bcc_json);
+      const instance = coerceInstance((reply.bison_instance as string) || p.instance);
+
+      const result = await sendReply(instance, {
+        replyId: Number(reply.reply_id), senderEmailId: Number(reply.sender_id),
+        message, toEmail, toName, ccEmails, bccEmails,
+        subject: (reply.email_subject as string) || undefined,
+        leadId: reply.lead_id ? Number(reply.lead_id) : undefined,
+      });
+      if (!result.ok) {
+        return NextResponse.json({ error: `Send still failing: ${result.error}` }, { status: 502 });
+      }
+
+      const nowIso = new Date().toISOString();
+      await supabase.from("replies").update({ sent_reply: message, last_sent_at: nowIso, send_error: null, send_error_at: null, updated_at: nowIso }).eq("id", replyRowId);
+      try {
+        await supabase.from("reply_sends").insert({
+          reply_row_id: replyRowId, client_tag: reply.client_tag ?? null, lead_email: toEmail || null,
+          message, to_json: toEmail ? [{ name: toName, email: toEmail }] : null,
+          cc_json: ccEmails ?? null, bcc_json: bccEmails ?? null, status: "sent", error: null,
+        });
+      } catch { /* history is best-effort */ }
+      await db.execute({ sql: "DELETE FROM error_log WHERE id = ?", args: [id] });
+      return NextResponse.json({ ok: true, message: "Reply re-sent" });
+    } catch (error) {
+      return NextResponse.json({ error: `Send retry failed: ${(error as Error).message}` }, { status: 500 });
     }
   }
 

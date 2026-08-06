@@ -86,9 +86,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, ai_categorized_lead_category: aiCategory });
       }
 
-      // Relabel the client tag (NO template/CC-BCC reroute — that's Reallocate) and/or
-      // set a per-lead Google Sheet override (pasted URL). When this lead is later
-      // pushed, it goes to THIS sheet instead of the client's registered one.
+      // Relabel the client tag (NO template/CC-BCC reroute — that's Reallocate). The
+      // lead-tracking sheet is resolved AUTOMATICALLY from the tag's registry entry —
+      // so if the lead already fits a push category, we route it to that client's
+      // sheet right away. (An optional pasted sheetUrl still sets a per-lead override,
+      // but the UI no longer sends one.)
       case "set-tag-sheet": {
         const newTag = String((body as { client_tag?: string }).client_tag || "").trim().toUpperCase();
         const sheetUrl = String((body as { sheetUrl?: string }).sheetUrl || "").trim();
@@ -104,8 +106,18 @@ export async function POST(req: NextRequest) {
           try { const ov = await setReplySheetOverride(id, sheetUrl); sheet = { tabName: ov.tabName }; }
           catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
         }
+        const effectiveTag = newTag || rowClientTag || "";
+        // Auto-route to the client's (auto-resolved) sheet when the lead is already
+        // in a push category. pushReplyToSheet reads the fresh client_tag → resolves
+        // the sheet from the registry (or the per-lead override) → pushes. Dedup +
+        // verify + failure-recording all handled inside it.
+        let pushed = false;
+        if (effectiveTag && effectiveTag !== "N/A" && SHEET_PUSH_CATEGORIES.includes(String(rowLeadCategory || ""))) {
+          try { const pr = await pushReplyToSheet(id); pushed = pr.ok; }
+          catch { /* recorded in sheet_push_failures */ }
+        }
         bumpCacheVersion();
-        return NextResponse.json({ ok: true, client_tag: newTag || rowClientTag, sheet });
+        return NextResponse.json({ ok: true, client_tag: effectiveTag, sheet, pushed });
       }
 
       case "update-category": {

@@ -437,7 +437,6 @@ export default function InboxPage() {
   // Change-AI-category + client-tag/sheet-override editors (below the lead details).
   const [aiSaving, setAiSaving] = useState(false);
   const [tsTag, setTsTag] = useState("");
-  const [tsUrl, setTsUrl] = useState("");
   const [tsSaving, setTsSaving] = useState(false);
   // §29: inline sends require an explicit second click before firing.
   const [confirmInline, setConfirmInline] = useState<"reply" | "fwd" | "oo" | null>(null);
@@ -988,10 +987,9 @@ export default function InboxPage() {
     else toast.error(d.error);
   }
 
-  // Reset the client-tag / sheet-override editor to the open lead's current values.
+  // Reset the client-tag editor to the open lead's current tag.
   useEffect(() => {
     setTsTag(detail?.client_tag && detail.client_tag !== "N/A" ? String(detail.client_tag) : "");
-    setTsUrl(detail?.sheet_override?.url ? String(detail.sheet_override.url) : "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.id]);
 
@@ -1010,19 +1008,20 @@ export default function InboxPage() {
     } else toast.error(d.error || "Couldn't update the AI category");
   }
 
-  // Relabel the client tag (no template reroute) and/or point THIS lead's push at a
-  // pasted Google Sheet. Saved together.
+  // Relabel the client tag (no template reroute). The lead-tracking sheet is
+  // resolved automatically from the tag; if the lead fits a push category it's
+  // routed to that client's sheet on save.
   async function saveTagSheet() {
     if (!detail) return;
     const tag = (tsTag || "").trim().toUpperCase();
-    const url = (tsUrl || "").trim();
-    if (!tag && !url) { toast.error("Enter a client tag or paste a sheet URL."); return; }
+    if (!tag) { toast.error("Pick a client tag."); return; }
+    if (tag === detail.client_tag) return;
     setTsSaving(true);
-    const d = await mutate({ action: "set-tag-sheet", id: detail.id, client_tag: tag || undefined, sheetUrl: url || undefined });
+    const d = await mutate({ action: "set-tag-sheet", id: detail.id, client_tag: tag });
     setTsSaving(false);
     if (d.ok) {
       detailCache.current.delete(detail.id);
-      toast.success(d.sheet ? `Saved — tag ${d.client_tag}, sheet tab "${d.sheet.tabName}"` : `Saved — client tag ${d.client_tag}`);
+      toast.success(d.pushed ? `Client tag set to ${d.client_tag} — routed to its sheet.` : `Client tag set to ${d.client_tag}.`);
       loadBootstrap();
       loadDetail(detail.id);
     } else toast.error(d.error || "Couldn't save");
@@ -1416,27 +1415,23 @@ export default function InboxPage() {
                 />
                 <p className="text-[10px] text-muted-foreground">Moves this lead into the views that match — e.g. Interested → the Cherry views.</p>
               </div>
-              {/* Client tag + per-lead Google Sheet override. */}
+              {/* Client tag — its lead-tracking sheet is auto-resolved from the registry. */}
               <div className="rounded border bg-white px-4 py-3 space-y-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Client Tag &amp; Lead Sheet</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Client Tag</span>
                 <div className="flex items-center gap-2">
-                  <div className="w-36 shrink-0">
+                  <div className="flex-1">
                     <SearchableCombobox
                       value={tsTag}
                       onValueChange={(v) => setTsTag((v || "").toUpperCase())}
                       options={(allowedClientTags ?? clientTags)}
-                      placeholder="Client tag…"
+                      placeholder="Pick a client tag…"
                       searchPlaceholder="Search tags…"
                       triggerClassName="w-full h-8 text-xs"
                     />
                   </div>
-                  <Input value={tsUrl} onChange={(e) => setTsUrl(e.target.value)} placeholder="Paste this lead's Google Sheet URL…" className="h-8 text-[11px] flex-1" />
-                  <Button size="sm" className="h-8 text-xs shrink-0" onClick={saveTagSheet} disabled={tsSaving}>{tsSaving ? "Saving…" : "Save"}</Button>
+                  <Button size="sm" className="h-8 text-xs shrink-0" onClick={saveTagSheet} disabled={tsSaving || !tsTag || tsTag === detail.client_tag}>{tsSaving ? "Saving…" : "Save"}</Button>
                 </div>
-                {detail.sheet_override?.tabName && (
-                  <p className="text-[10px] text-emerald-700">✓ Custom sheet set — this lead pushes to tab &quot;{detail.sheet_override.tabName}&quot;.</p>
-                )}
-                <p className="text-[10px] text-muted-foreground">Relabels the tag (no template change) &amp; routes THIS lead&apos;s push to the pasted sheet. The sheet must be shared with our service account.</p>
+                <p className="text-[10px] text-muted-foreground">Relabels the lead&apos;s client tag (no template change). Its lead-tracking sheet is picked up automatically — if the lead fits a push category, it&apos;s routed to that client&apos;s sheet.</p>
               </div>
             </div>
 
