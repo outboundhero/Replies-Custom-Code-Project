@@ -92,6 +92,26 @@ export async function pushToSheet(
 
   const auth = getAuth();
   const sheets = google.sheets({ version: "v4", auth });
+  const email = (data.lead_email || "").trim().toLowerCase();
+
+  // Read the sheet's email column (A). Used for BOTH the idempotency check below
+  // and the post-write verification — so a re-push/retry never duplicates and a
+  // silent no-op is caught instead of being reported as a false success.
+  const readEmailsColA = async (): Promise<Set<string>> => {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheet.sheet_id,
+      range: `'${sheet.sheet_name}'!A:A`,
+    });
+    return new Set((res.data.values || []).map((r) => String(r[0] || "").trim().toLowerCase()).filter(Boolean));
+  };
+
+  // Idempotent: if this lead is already in the sheet, don't append a duplicate
+  // (makes retries + re-pushes safe). On a read failure, fall through to append.
+  if (email) {
+    try {
+      if ((await readEmailsColA()).has(email)) return { ok: true, sheetId: sheet.sheet_id };
+    } catch { /* read failed → proceed to append */ }
+  }
 
   // Map data to sheet columns (matching the column order from ABM sheet)
   const row = [
@@ -130,13 +150,30 @@ export async function pushToSheet(
         spreadsheetId: sheet.sheet_id,
         range: `'${sheet.sheet_name}'!A:W`,
         valueInputOption: "USER_ENTERED",
+        // INSERT_ROWS (not the default OVERWRITE): always INSERT a fresh row for
+        // the lead. The default overwrote the last row when the sheet's grid had
+        // no spare rows — so multiple leads all landed on the same row number,
+        // each silently clobbering the previous, while Google still reported
+        // "success". This was the root cause of "pushed to sheet" but missing.
+        insertDataOption: "INSERT_ROWS",
         requestBody: { values: [row] },
       });
       // Google returns the range it wrote, e.g. 'Sheet1'!A45:W45 → row 45. We
-      // capture it so the send-reply flow can update THIS exact row later
-      // (the "Lead handoff email" column) without guessing by email.
+      // capture it so the send-reply flow can update THIS exact row later.
       const updatedRange = resp.data.updates?.updatedRange || "";
       const rowNum = updatedRange.match(/![A-Z]+(\d+)/i)?.[1];
+
+      // VERIFY the write actually persisted. append can silently no-op / overwrite
+      // on some grid layouts and still return a range — so confirm the lead email
+      // is really present now. If not, fail LOUD (recorded + retryable) instead of
+      // reporting a false success. A verify-read error doesn't block (trust append).
+      if (email) {
+        let present: boolean | null = null;
+        try { present = (await readEmailsColA()).has(email); } catch { present = null; }
+        if (present === false) {
+          return { ok: false, error: `Sheet write did not persist — append reported "${updatedRange || "ok"}" but ${email} is not in '${sheet.sheet_name}' afterward (client ${clientTag}).` };
+        }
+      }
       return { ok: true, row: rowNum ? Number(rowNum) : undefined, sheetId: sheet.sheet_id };
     } catch (error) {
       lastErr = (error as Error).message || "unknown error";
