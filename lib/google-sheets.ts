@@ -123,41 +123,59 @@ export async function fetchChurnedClientTags(): Promise<Set<string>> {
 }
 
 /**
- * Each client tag's nurture GROUP (1 or 2) — the client-tag allocation now lives
- * on the "Groups" tab of the onboarding-form-responses spreadsheet (the same
- * SPREADSHEET_ID as the Client Tracker / Onboarding Form). The tab is
- * column-positional with a header row:
- *   col A = Group-1 client tags ("B2B #1 (OutboundHero) & B2C #1 (CleaningOutbound)")
- *   col B = Status,  col C = Plan            (Group-1 metadata — ignored here)
- *   col D = Group-2 client tags ("B2B #2 (FacilityReach) & B2C #2 (OutboundClean)")
- *   col E = Status,  col F = Plan            (Group-2 metadata — ignored here)
- * Only the two tag columns (A + D) are read; Status/Plan are not part of the
- * allocation. Combined abbreviations ("DBSM & DBSA") split like
- * fetchChurnedClientTags. Returns Map<TAG_UPPER, 1|2>.
+ * Each client tag's nurture GROUP (1 or 2) — the client-tag allocation lives on
+ * the "Groups" tab of the onboarding-form-responses spreadsheet (the same
+ * SPREADSHEET_ID as the Client Tracker / Onboarding Form).
+ *
+ * The tab has TWO tag columns separated by per-group metadata (Status / Churn
+ * Date / Plan) columns:
+ *   Group-1 tags → header "B2B #1 (OutboundHero) & B2C #1 (CleaningOutbound)"
+ *   Group-2 tags → header "B2B #2 (FacilityReach) & B2C #2 (OutboundClean)"
+ *
+ * We locate the two tag columns BY HEADER TEXT ("#1" / "#2"), NOT by fixed index
+ * — the metadata columns between them get inserted/removed over time (a "Churn
+ * Date" column was added 2026-08, shifting Group-2 tags from col D to col E and
+ * silently breaking a hard-coded index). Combined abbreviations ("DBSM & DBSA")
+ * are split. Returns Map<TAG_UPPER, 1|2>.
  */
 export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
   const auth = getAuth();
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'Groups'!A:F",
+    range: "'Groups'!A:Z",
   });
   const rows = res.data.values || [];
   const out = new Map<string, 1 | 2>();
+  if (rows.length < 2) return out;
+
+  // Find the two tag columns by header. "#1"/"#2" are the stable markers.
+  const header = (rows[0] || []).map((h) => (h?.toString() || "").toLowerCase());
+  const g1col = header.findIndex((h) => h.includes("#1") || /\bgroup\s*1\b/.test(h));
+  const g2col = header.findIndex((h) => h.includes("#2") || /\bgroup\s*2\b/.test(h));
+  if (g1col === -1 && g2col === -1) {
+    throw new Error("Groups tab: could not locate the #1/#2 tag columns by header");
+  }
+
   const addCell = (cell: unknown, group: 1 | 2) => {
     const raw = (cell?.toString() || "").trim();
     if (!raw) return;
     for (const t of raw.split(/\s+&\s+|\s+and\s+/i)) {
       const tag = t.trim().toUpperCase();
-      // Skip header fragments / any stray truthy tokens.
-      if (!tag || tag === "TRUE" || tag === "FALSE" || tag === "DONE") continue;
+      if (!tag) continue;
+      // Skip header fragments / instance names / status + plan values that could
+      // sneak in if a wrong column is ever read (defensive belt-and-suspenders).
+      if (tag === "TRUE" || tag === "FALSE" || tag === "DONE") continue;
       if (/B2B|B2C|OUTBOUNDHERO|CLEANINGOUTBOUND|FACILITYREACH|OUTBOUNDCLEAN/i.test(tag)) continue;
+      if (/^(ACTIVE|CHURNED?|PAUSED|NOT FOUND|N\/A)$/i.test(tag)) continue;          // Status
+      if (/\bTIER\b|\bTRIAL\b|\bBASE\b|\(BASE\)|\(TRIAL\)/i.test(tag)) continue;      // Plan
+      if (/^\d/.test(tag) && /\//.test(tag)) continue;                               // a date
       out.set(tag, group);
     }
   };
   for (let i = 1; i < rows.length; i++) {   // skip header row
-    addCell(rows[i][0], 1); // col A → Group 1 tags
-    addCell(rows[i][3], 2); // col D → Group 2 tags
+    if (g1col !== -1) addCell(rows[i][g1col], 1);
+    if (g2col !== -1) addCell(rows[i][g2col], 2);
   }
   return out;
 }
