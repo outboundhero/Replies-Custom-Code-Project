@@ -71,6 +71,7 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [serviceArea, setServiceArea] = useState<{ raw: string; cities: string[] } | null>(null);
+  const [syncingArea, setSyncingArea] = useState(false);
 
   const [sources, setSources] = useState<Set<number>>(new Set());
   const [destinations, setDestinations] = useState<Set<number>>(new Set());
@@ -150,6 +151,29 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
   // Re-pull the client's campaigns from Bison, bypassing the 60s cache (for
   // just-created / still-processing campaigns). Keeps current selections.
   function refreshCampaigns() { if (client) loadCampaigns(client.tag, { fresh: true }); }
+
+  // On-demand service-area sync for JUST the selected client — pulls its inclusion
+  // locations from the onboarding sheet now instead of waiting for the 12h cron.
+  async function syncServiceArea() {
+    if (!client || syncingArea) return;
+    setSyncingArea(true);
+    try {
+      const res = await fetch("/api/service-area/sync", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientTag: client.tag }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(d.error || "Service-area sync failed"); return; }
+      const area = (d.serviceArea as { raw: string; cities: string[] }) ?? null;
+      setServiceArea(area);
+      toast.success(area
+        ? `${client.tag}: service area synced — ${area.cities.length} ${area.cities.length === 1 ? "city" : "cities"}.`
+        : `${client.tag}: no service area found in the onboarding form.`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSyncingArea(false);
+    }
+  }
 
   const campMap = useMemo(() => new Map((campaigns || []).map((c) => [c.id, c])), [campaigns]);
   const toggleSource = (id: number) => setSources((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -471,6 +495,16 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
                   : "Off — every lead moves regardless of location."}
               </span>
             </label>
+            {client && (
+              <button
+                onClick={syncServiceArea}
+                disabled={syncingArea}
+                title={`Pull ${client.tag}'s inclusion locations from the onboarding sheet now (don't wait for the 12h sync)`}
+                className="inline-flex items-center gap-1.5 px-2.5 h-7 w-fit text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50"
+              >
+                <RefreshCw className={`size-3 ${syncingArea ? "animate-spin" : ""}`} /> {syncingArea ? "Syncing…" : `Sync ${client.tag} service area`}
+              </button>
+            )}
             {serviceAreaFilter && client && (
               <div className="rounded-md border bg-amber-50/40 px-3 py-2 text-xs">
                 {serviceArea ? (

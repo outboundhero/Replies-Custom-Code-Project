@@ -197,3 +197,37 @@ export async function syncServiceAreas(): Promise<{ count: number; withArea: num
   const tags = entries.filter(([, v]) => v.tokens.length).map(([t]) => t).sort();
   return { count: entries.length, withArea, tags };
 }
+
+/**
+ * Sync ONE client's service area from the Onboarding Form, on demand — powers the
+ * Move Leads "Sync service area" button so an operator needn't wait for the 12h
+ * cron after an onboarding-sheet edit. Upserts ONLY this client's row (everyone
+ * else is left untouched), clears it when the client has no usable area, and
+ * returns the parsed area (or null). Mirrors syncServiceAreas' parsing exactly.
+ */
+export async function syncServiceAreaForClient(tag: string | null | undefined): Promise<ServiceArea | null> {
+  const clean = (tag || "").trim().toUpperCase();
+  if (!clean) return null;
+  const { fetchOnboardingForm } = await import("@/lib/google-sheets");
+  const rows = await fetchOnboardingForm();
+  let found: ServiceArea | null = null;
+  for (const r of rows) {
+    const tags = r.clientAbbreviation.split(/[&/,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    if (tags.includes(clean)) { found = { tokens: parseServiceArea(r.inclusionLocations), raw: r.inclusionLocations || "" }; break; }
+  }
+  await db.execute(
+    "CREATE TABLE IF NOT EXISTS client_service_area (client_tag TEXT PRIMARY KEY, cities TEXT, raw TEXT, synced_at TEXT)",
+  );
+  const now = new Date().toISOString();
+  if (found && found.tokens.length) {
+    await db.execute({
+      sql: "INSERT OR REPLACE INTO client_service_area (client_tag, cities, raw, synced_at) VALUES (?, ?, ?, ?)",
+      args: [clean, JSON.stringify(found.tokens), found.raw, now],
+    });
+  } else {
+    // No onboarding row or no parseable area → drop any stale row so the UI reads "none set".
+    await db.execute({ sql: "DELETE FROM client_service_area WHERE client_tag = ?", args: [clean] });
+  }
+  invalidateServiceAreaCache();
+  return found && found.tokens.length >= MIN_AREA_TOKENS ? found : null;
+}
