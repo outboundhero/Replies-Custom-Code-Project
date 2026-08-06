@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown, UserX, Plus } from "lucide-react";
+import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown, UserX, Plus, RefreshCw } from "lucide-react";
 import { BISON_INSTANCES, getInstanceLane } from "@/lib/bison-instances-shared";
 import MigrationPanel, { type MigrationState, type MoveClientRow } from "./_components/MigrationPanel";
 import SameInstanceTab from "./_components/SameInstanceTab";
@@ -87,6 +87,7 @@ export default function MigratePage() {
   const [plan, setPlan] = useState<Map<string, ClientPlan>>(new Map());
   const [planning, setPlanning] = useState(false);
   const [serviceAreaFilter, setServiceAreaFilter] = useState(true);
+  const [syncingSheet, setSyncingSheet] = useState(false);
 
   // Serial queue of Cross-Instance migrations (mirrors the Same Instance tab):
   // each "Migrate" click freezes its From→To + planned clients into an entry and
@@ -124,8 +125,8 @@ export default function MigratePage() {
     abortCtlRef.current?.signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
   }), []);
 
-  useEffect(() => {
-    fetch("/api/config/clients").then((r) => (r.ok ? r.json() : [])).then((rows) => {
+  const loadClients = useCallback(() => {
+    return fetch("/api/config/clients").then((r) => (r.ok ? r.json() : [])).then((rows) => {
       if (!Array.isArray(rows)) return;
       const seen = new Set<string>();
       const list: ClientRow[] = [];
@@ -137,6 +138,27 @@ export default function MigratePage() {
       setAllClientRows(list);
     }).catch(() => {});
   }, []);
+  useEffect(() => { loadClients(); }, [loadClients]);
+
+  // Manual "Sync from sheet" — rebuild group allocation + churned status + service
+  // areas from the Groups tab NOW (don't wait for the cron), then refresh the list.
+  async function syncFromSheet() {
+    if (syncingSheet) return;
+    setSyncingSheet(true);
+    const tid = toast.loading("Syncing client directory from the Groups sheet…");
+    try {
+      const res = await fetch("/api/groups/sync", { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast.error(d.error || "Sync failed", { id: tid }); return; }
+      await loadClients();
+      const g = d.groups || {}; const c = d.churn || {};
+      toast.success(`Synced — ${g.count ?? 0} clients (G1 ${g.g1 ?? 0} · G2 ${g.g2 ?? 0}), ${c.count ?? 0} churned.`, { id: tid });
+    } catch (e) {
+      toast.error((e as Error).message, { id: tid });
+    } finally {
+      setSyncingSheet(false);
+    }
+  }
 
   // Tag list for the picker, gated by the Active / Returning / All toggle
   // (default "active" = churned hidden, the original behavior).
@@ -410,11 +432,21 @@ export default function MigratePage() {
 
   return (
     <div className="space-y-4 pb-16">
-      <div>
-        <h1 className="text-[26px] font-semibold tracking-tight">Move Leads</h1>
-        <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-          Move a client&apos;s leads between Bison instances (Cross Instance) or between campaigns within one instance (Same Instance). Each lead is routed by its lane (business→B2B, personal→B2C) and its ESP. Copy-only.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-[26px] font-semibold tracking-tight">Move Leads</h1>
+          <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
+            Move a client&apos;s leads between Bison instances (Cross Instance) or between campaigns within one instance (Same Instance). Each lead is routed by its lane (business→B2B, personal→B2C) and its ESP. Copy-only.
+          </p>
+        </div>
+        <button
+          onClick={syncFromSheet}
+          disabled={syncingSheet}
+          title="Rebuild group allocation, churned status and service areas from the Groups sheet now (instead of waiting for the scheduled sync)"
+          className="shrink-0 inline-flex items-center gap-1.5 px-3 h-9 text-sm font-medium rounded-md border hover:bg-muted/50 disabled:opacity-50"
+        >
+          <RefreshCw className={`size-3.5 ${syncingSheet ? "animate-spin" : ""}`} /> {syncingSheet ? "Syncing…" : "Sync from sheet"}
+        </button>
       </div>
 
       {/* Persistent progress panels — ABOVE the tabs, always visible so running/

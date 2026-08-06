@@ -1,18 +1,17 @@
 /**
  * GET /api/cron/sync-client-groups?secret=X
  *
- * Reads the "Groups" tab of the onboarding-form-responses spreadsheet (col A =
- * Group-1 tags, col D = Group-2 tags) and replaces the Turso `client_groups`
- * table. Nurture routing (lib/nurture/group-routing.ts) reads it to send each
- * client's leads to its group's B2B/B2C Bison instance.
+ * Rebuilds the client directory from the "Groups" tab of the onboarding-form-
+ * responses spreadsheet — group allocation (`client_groups`), churned status
+ * (`churned_clients`, Status=Churned AND churn date passed), and service areas
+ * (`client_service_area`). Nurture routing + the Lead Mover + the churn gate all
+ * read these tables.
  *
- * Wire to a daily Vercel cron; also callable manually after the sheet changes.
+ * Wired to a Vercel cron; also callable manually (and by the Move-Leads "Sync from
+ * sheet" button via /api/groups/sync, which shares the same syncClientDirectory).
  */
 import { NextRequest, NextResponse } from "next/server";
-import db from "@/lib/db";
-import { fetchClientGroups } from "@/lib/google-sheets";
-import { invalidateGroupCache } from "@/lib/nurture/group-routing";
-import { syncServiceAreas } from "@/lib/service-area";
+import { syncClientDirectory } from "@/lib/client-directory";
 
 export const maxDuration = 60;
 
@@ -25,35 +24,18 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let groups: Map<string, 1 | 2>;
   try {
-    groups = await fetchClientGroups();
+    const r = await syncClientDirectory();
+    return NextResponse.json({
+      ok: true,
+      groups: r.groups.count,
+      group1: r.groups.g1,
+      group2: r.groups.g2,
+      churned: r.churn.count,
+      churnedTags: r.churn.tags,
+      serviceAreaWithArea: r.serviceArea?.withArea ?? null,
+    });
   } catch (e) {
-    return NextResponse.json({ error: `sheet read failed: ${(e as Error).message}` }, { status: 502 });
+    return NextResponse.json({ error: `sync failed: ${(e as Error).message}` }, { status: 502 });
   }
-
-  await db.execute(
-    "CREATE TABLE IF NOT EXISTS client_groups (client_tag TEXT PRIMARY KEY, group_num INTEGER NOT NULL, synced_at TEXT)",
-  );
-  const now = new Date().toISOString();
-  await db.execute("DELETE FROM client_groups");
-  const entries = [...groups.entries()];
-  for (let i = 0; i < entries.length; i += 100) {
-    const chunk = entries.slice(i, i + 100);
-    await db.batch(
-      chunk.map(([tag, g]) => ({
-        sql: "INSERT OR REPLACE INTO client_groups (client_tag, group_num, synced_at) VALUES (?, ?, ?)",
-        args: [tag, g, now],
-      })),
-      "write",
-    );
-  }
-  invalidateGroupCache();
-
-  // Refresh the Lead Mover's service-area table on this sync too (non-fatal).
-  const serviceArea = await syncServiceAreas().catch(() => null);
-
-  const group1 = entries.filter(([, g]) => g === 1).map(([t]) => t).sort();
-  const group2 = entries.filter(([, g]) => g === 2).map(([t]) => t).sort();
-  return NextResponse.json({ ok: true, count: groups.size, group1: group1.length, group2: group2.length, sampleG1: group1.slice(0, 5), sampleG2: group2.slice(0, 5), serviceArea: serviceArea?.withArea ?? null });
 }

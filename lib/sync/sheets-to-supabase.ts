@@ -1,6 +1,7 @@
 /**
  * Sync Google Sheets data to Supabase.
- * Fetches Client Tracker + Onboarding Form and upserts into Supabase tables.
+ * Client STATUS comes from the "Groups" tab (single source of truth); qualification
+ * rules come from the Onboarding Form. Upserts into Supabase tables.
  *
  * Handles combined abbreviations in sheets (e.g. "JPDFW & JPK", "JPAR / JPSWM")
  * by splitting them into individual rows so each tag can be looked up directly.
@@ -8,7 +9,7 @@
 
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
-import { fetchClientTracker, fetchOnboardingForm } from "@/lib/google-sheets";
+import { fetchClientGroupRecords, fetchChurnedFromGroups, fetchOnboardingForm } from "@/lib/google-sheets";
 
 interface SyncResult {
   statusCount: number;
@@ -33,14 +34,16 @@ const MANUAL_OVERRIDE_TAGS = new Set(["QP"]);
 export async function syncAll(): Promise<SyncResult> {
   const now = new Date().toISOString();
 
-  // 1. Sync client status — split combined abbreviations, last row wins per tag
-  const trackerRows = await fetchClientTracker();
+  // 1. Sync client status FROM THE GROUPS TAB (single source of truth). A client
+  //    is "Churned" only when Status=Churned AND its churn date has PASSED (same
+  //    rule as the churn gate); everything else is "Active" — so a future-dated
+  //    (scheduled) churn like JPWM still reads "Active" here. Records are already
+  //    one-tag-per-row (combined abbreviations split upstream).
+  const records = await fetchClientGroupRecords();
+  const churnedNow = new Set((await fetchChurnedFromGroups()).map((c) => c.tag.toUpperCase()));
   const statusMap = new Map<string, { client_abbreviation: string; status: string; synced_at: string }>();
-  for (const r of trackerRows) {
-    const tags = splitAbbreviations(r.clientAbbreviation);
-    for (const tag of tags) {
-      statusMap.set(tag, { client_abbreviation: tag, status: r.status, synced_at: now });
-    }
+  for (const r of records) {
+    statusMap.set(r.tag, { client_abbreviation: r.tag, status: churnedNow.has(r.tag) ? "Churned" : "Active", synced_at: now });
   }
   const statusRecords = [...statusMap.values()];
 

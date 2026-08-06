@@ -1,9 +1,10 @@
 /**
  * Churned-client gate. The set of churned client tags (Status="Churned" AND a
- * Churn Date in the Client Tracker sheet) is synced into the Turso
- * `churned_clients` table by /api/cron/sync-churned-clients. Everything that
- * should skip churned clients (nurture page, backfill, auto-push, sync) reads
- * the set from here — cheap, with a short in-process cache.
+ * Churn Date that has PASSED, read from the "Groups" tab — the single source of
+ * truth) is synced into the Turso `churned_clients` table by the client-directory
+ * sync (cron + the Move-Leads "Sync from sheet" button). Everything that should
+ * skip churned clients (nurture page, backfill, auto-push, sync) reads the set
+ * from here — cheap, with a short in-process cache.
  */
 import db from "@/lib/db";
 
@@ -56,13 +57,14 @@ export async function getChurnedClients(): Promise<Map<string, string | null>> {
 }
 
 /**
- * Rebuild the Turso `churned_clients` table from the Client Tracker sheet —
- * Status="Churned" AND Churn Date on/before today (future dates stay active).
- * Stores the churn date too. Shared by the cron + the Automation-tab sync button.
+ * Rebuild the Turso `churned_clients` table from the "Groups" tab (the single
+ * source of truth) — Status="Churned" AND Churn Date on/before today (future
+ * dates stay active). Stores the churn date too. Shared by the cron, the manual
+ * sync button, and the Automation-tab sync button.
  */
 export async function rebuildChurnedClients(): Promise<{ count: number; tags: string[] }> {
-  const { fetchChurnedClients } = await import("@/lib/google-sheets");
-  const churned = await fetchChurnedClients();
+  const { fetchChurnedFromGroups } = await import("@/lib/google-sheets");
+  const churned = await fetchChurnedFromGroups();
   await db.execute("CREATE TABLE IF NOT EXISTS churned_clients (client_tag TEXT PRIMARY KEY, churn_date TEXT, synced_at TEXT)");
   // Upgrade older tables that predate the churn_date column (no-op if it exists).
   try { await db.execute("ALTER TABLE churned_clients ADD COLUMN churn_date TEXT"); } catch { /* already there */ }

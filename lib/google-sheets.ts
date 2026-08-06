@@ -122,23 +122,27 @@ export async function fetchChurnedClientTags(): Promise<Set<string>> {
   return new Set((await fetchChurnedClients()).map((c) => c.tag));
 }
 
+export interface ClientGroupRecord { tag: string; group: 1 | 2; status: string; churnDate: string }
+
 /**
- * Each client tag's nurture GROUP (1 or 2) — the client-tag allocation lives on
- * the "Groups" tab of the onboarding-form-responses spreadsheet (the same
- * SPREADSHEET_ID as the Client Tracker / Onboarding Form).
+ * The SINGLE SOURCE OF TRUTH for client directory data — group allocation,
+ * Status, and Churn Date — from the "Groups" tab of the onboarding-form-responses
+ * spreadsheet (replaces the old Client Tracker tab for all three).
  *
- * The tab has TWO tag columns separated by per-group metadata (Status / Churn
- * Date / Plan) columns:
+ * The tab has TWO client-tag columns, each followed by its own Status / Churn
+ * Date / Plan metadata columns:
  *   Group-1 tags → header "B2B #1 (OutboundHero) & B2C #1 (CleaningOutbound)"
  *   Group-2 tags → header "B2B #2 (FacilityReach) & B2C #2 (OutboundClean)"
  *
- * We locate the two tag columns BY HEADER TEXT ("#1" / "#2"), NOT by fixed index
- * — the metadata columns between them get inserted/removed over time (a "Churn
- * Date" column was added 2026-08, shifting Group-2 tags from col D to col E and
- * silently breaking a hard-coded index). Combined abbreviations ("DBSM & DBSA")
- * are split. Returns Map<TAG_UPPER, 1|2>.
+ * Every column is located BY HEADER, never by fixed index — the two tag columns
+ * by "#1"/"#2", and each group's Status/Churn Date by the first such header AFTER
+ * its tag column (bounded by the next group). This survives inserted/removed
+ * metadata columns (a "Churn Date" column added 2026-08 shifted Group-2 tags and
+ * silently broke a hard-coded index). Combined abbreviations ("DBSM & DBSA") are
+ * split; each split tag inherits that row's status + churn date. "Not Found"/"N/A"
+ * churn cells are treated as no date.
  */
-export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
+export async function fetchClientGroupRecords(): Promise<ClientGroupRecord[]> {
   const auth = getAuth();
   const sheets = google.sheets({ version: "v4", auth });
   const res = await sheets.spreadsheets.values.get({
@@ -146,36 +150,76 @@ export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
     range: "'Groups'!A:Z",
   });
   const rows = res.data.values || [];
-  const out = new Map<string, 1 | 2>();
-  if (rows.length < 2) return out;
+  if (rows.length < 2) return [];
 
-  // Find the two tag columns by header. "#1"/"#2" are the stable markers.
   const header = (rows[0] || []).map((h) => (h?.toString() || "").toLowerCase());
   const g1col = header.findIndex((h) => h.includes("#1") || /\bgroup\s*1\b/.test(h));
   const g2col = header.findIndex((h) => h.includes("#2") || /\bgroup\s*2\b/.test(h));
   if (g1col === -1 && g2col === -1) {
     throw new Error("Groups tab: could not locate the #1/#2 tag columns by header");
   }
+  // First header containing `kw` in (start, end) — the group's own Status/Churn col.
+  const colAfter = (start: number, end: number, kw: string): number => {
+    if (start === -1) return -1;
+    const stop = end === -1 ? header.length : end;
+    for (let i = start + 1; i < stop; i++) if (header[i].includes(kw)) return i;
+    return -1;
+  };
+  const g1status = colAfter(g1col, g2col, "status"), g1churn = colAfter(g1col, g2col, "churn");
+  const g2status = colAfter(g2col, header.length, "status"), g2churn = colAfter(g2col, header.length, "churn");
 
-  const addCell = (cell: unknown, group: 1 | 2) => {
-    const raw = (cell?.toString() || "").trim();
-    if (!raw) return;
-    for (const t of raw.split(/\s+&\s+|\s+and\s+/i)) {
+  // Defensive: a real client tag, not a header fragment / instance / status / plan / date.
+  const isTag = (t: string): boolean =>
+    !!t
+    && !/^(TRUE|FALSE|DONE|ACTIVE|CHURNED?|PAUSED|NOT FOUND|N\/A)$/i.test(t)
+    && !/B2B|B2C|OUTBOUNDHERO|CLEANINGOUTBOUND|FACILITYREACH|OUTBOUNDCLEAN/i.test(t)
+    && !/\bTIER\b|\bTRIAL\b|\bBASE\b/i.test(t)
+    && !(/^\d/.test(t) && /\//.test(t));
+
+  const out: ClientGroupRecord[] = [];
+  const addGroup = (row: string[], tagCol: number, stCol: number, chCol: number, group: 1 | 2) => {
+    if (tagCol === -1) return;
+    const rawTag = (row[tagCol]?.toString() || "").trim();
+    if (!rawTag) return;
+    const status = stCol !== -1 ? (row[stCol]?.toString() || "").trim() : "";
+    const churnRaw = chCol !== -1 ? (row[chCol]?.toString() || "").trim() : "";
+    const churnDate = /^(not found|n\/a|-|—)$/i.test(churnRaw) ? "" : churnRaw;
+    for (const t of rawTag.split(/\s+&\s+|\s+and\s+/i)) {
       const tag = t.trim().toUpperCase();
-      if (!tag) continue;
-      // Skip header fragments / instance names / status + plan values that could
-      // sneak in if a wrong column is ever read (defensive belt-and-suspenders).
-      if (tag === "TRUE" || tag === "FALSE" || tag === "DONE") continue;
-      if (/B2B|B2C|OUTBOUNDHERO|CLEANINGOUTBOUND|FACILITYREACH|OUTBOUNDCLEAN/i.test(tag)) continue;
-      if (/^(ACTIVE|CHURNED?|PAUSED|NOT FOUND|N\/A)$/i.test(tag)) continue;          // Status
-      if (/\bTIER\b|\bTRIAL\b|\bBASE\b|\(BASE\)|\(TRIAL\)/i.test(tag)) continue;      // Plan
-      if (/^\d/.test(tag) && /\//.test(tag)) continue;                               // a date
-      out.set(tag, group);
+      if (!isTag(tag)) continue;
+      out.push({ tag, group, status, churnDate });
     }
   };
   for (let i = 1; i < rows.length; i++) {   // skip header row
-    if (g1col !== -1) addCell(rows[i][g1col], 1);
-    if (g2col !== -1) addCell(rows[i][g2col], 2);
+    addGroup(rows[i], g1col, g1status, g1churn, 1);
+    addGroup(rows[i], g2col, g2status, g2churn, 2);
+  }
+  return out;
+}
+
+/** Each client tag's nurture GROUP (1 or 2), derived from fetchClientGroupRecords. */
+export async function fetchClientGroups(): Promise<Map<string, 1 | 2>> {
+  const out = new Map<string, 1 | 2>();
+  for (const r of await fetchClientGroupRecords()) out.set(r.tag, r.group);
+  return out;
+}
+
+/**
+ * Churned clients per the Groups tab (the new source of truth). A client is
+ * churned ONLY when Status contains "Churn" AND its Churn Date is present AND on/
+ * before today. Future churn dates → still active (scheduled). Missing/unparseable
+ * date → NOT churned (the rule requires a date that has actually passed).
+ */
+export async function fetchChurnedFromGroups(): Promise<ChurnedClient[]> {
+  const recs = await fetchClientGroupRecords();
+  const endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999);
+  const out: ChurnedClient[] = [];
+  for (const r of recs) {
+    if (!/churn/i.test(r.status)) continue;
+    const d = parseChurnDate(r.churnDate);
+    if (!d) continue;                                    // no/invalid date → needs a passed date → active
+    if (d.getTime() > endOfToday.getTime()) continue;    // future churn → still active
+    out.push({ tag: r.tag, churnDate: r.churnDate.trim() });
   }
   return out;
 }

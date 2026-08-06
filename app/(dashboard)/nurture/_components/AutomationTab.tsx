@@ -427,7 +427,7 @@ export default function AutomationTab() {
         <button
           onClick={syncChurn}
           disabled={churnSyncing}
-          title="Re-read the Client Tracker sheet and refresh which clients are churned (Status=Churned and Churn Date on/before today)"
+          title="Re-read the Groups sheet and refresh which clients are churned (Status=Churned and Churn Date on/before today)"
           className="flex items-center gap-2 px-3 h-9 text-sm rounded-md border bg-white hover:bg-muted/50 disabled:opacity-50"
         >
           {churnSyncing ? <Loader2 className="size-3.5 animate-spin" /> : <UserX className="size-3.5" />} Sync churned
