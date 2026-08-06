@@ -94,14 +94,37 @@ interface EmailRecipient {
  * Escape HTML entities and turn newlines into <br> so the spacing the operator
  * typed is exactly what the recipient sees. Idempotent-safe for plain text; the
  * drafts never contain real HTML markup.
+ *
+ * Also AUTO-LINKS plain URLs so a link the operator types is clickable in every
+ * email client — no anchor/HTML code needed. Deliberately conservative:
+ *   • Only explicit "http(s)://…" or "www.…" URLs are linked. Bare domains
+ *     (e.g. "lefflercleaning.com") are NOT — that would risk matching inside an
+ *     email address like name@company.com.
+ *   • The match is anchored to a boundary (start / whitespace / "("), so it can
+ *     never trigger inside an email address or mid-word.
+ *   • Runs AFTER entity-escaping, so the URL text is already safe and any "&" is
+ *     now "&amp;", which is valid inside an href.
  */
 export function plainTextToEmailHtml(s: string): string {
-  return (s || "")
+  let out = (s || "")
     .replace(/\r\n?/g, "\n")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\n/g, "<br>\n");
+    .replace(/>/g, "&gt;");
+
+  out = out.replace(
+    /(^|[\s(])((?:https?:\/\/|www\.)[^\s"'<>]+)/gi,
+    (_full, pre: string, raw: string) => {
+      // Trailing sentence punctuation ("visit https://x.com.") isn't part of the URL.
+      const trailMatch = raw.match(/[.,)\]!?]+$/);
+      const trail = trailMatch ? trailMatch[0] : "";
+      const url = trail ? raw.slice(0, -trail.length) : raw;
+      const href = /^https?:\/\//i.test(url) ? url : `http://${url}`;
+      return `${pre}<a href="${href}">${url}</a>${trail}`;
+    },
+  );
+
+  return out.replace(/\n/g, "<br>\n");
 }
 
 /** Extract the NAMES of unresolved merge/custom-variable tokens
