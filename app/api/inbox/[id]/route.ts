@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
+import { getReplySheetOverride } from "@/lib/sheet-override";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   // Single session read (was requireAuth() + getSession() = two JWT verifies).
@@ -51,6 +52,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         if (row) for (const k of Object.keys(row)) data[k] = row[k as keyof typeof row] ?? null;
       }
     } catch { /* keep the row's snapshot columns */ }
+
+    // Per-lead sheet override (if the operator pointed this lead at a specific sheet).
+    try {
+      const ov = await getReplySheetOverride(Number(id));
+      (data as Record<string, unknown>).sheet_override = ov ? { url: ov.url, tabName: ov.tabName } : null;
+    } catch { /* best-effort */ }
 
     return NextResponse.json(data);
   } catch (error) {

@@ -434,6 +434,11 @@ export default function InboxPage() {
   const [ooCc, setOoCc] = useState<Recipient[]>([]);
   const [reallocTag, setReallocTag] = useState("");
   const [sending, setSending] = useState<string | null>(null);
+  // Change-AI-category + client-tag/sheet-override editors (below the lead details).
+  const [aiSaving, setAiSaving] = useState(false);
+  const [tsTag, setTsTag] = useState("");
+  const [tsUrl, setTsUrl] = useState("");
+  const [tsSaving, setTsSaving] = useState(false);
   // §29: inline sends require an explicit second click before firing.
   const [confirmInline, setConfirmInline] = useState<"reply" | "fwd" | "oo" | null>(null);
   // Client qualification rules drawer (search audits/locations from the inbox).
@@ -983,6 +988,46 @@ export default function InboxPage() {
     else toast.error(d.error);
   }
 
+  // Reset the client-tag / sheet-override editor to the open lead's current values.
+  useEffect(() => {
+    setTsTag(detail?.client_tag && detail.client_tag !== "N/A" ? String(detail.client_tag) : "");
+    setTsUrl(detail?.sheet_override?.url ? String(detail.sheet_override.url) : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.id]);
+
+  // Change the AI-classified category → the lead moves into the views that match
+  // (e.g. Interested → the Cherry views). Works for scoped users too (server-enforced).
+  async function updateAiCategory(cat: string) {
+    if (!detail || !cat || cat === detail.ai_categorized_lead_category) return;
+    setAiSaving(true);
+    const d = await mutate({ action: "set-ai-category", id: detail.id, aiCategory: cat });
+    setAiSaving(false);
+    if (d.ok) {
+      setDetail((prev) => (prev ? { ...prev, ai_categorized_lead_category: cat } : prev));
+      detailCache.current.delete(detail.id);
+      toast.success(`AI category set to "${cat}" — views updated`);
+      loadBootstrap(); // the lead may enter/leave the current view
+    } else toast.error(d.error || "Couldn't update the AI category");
+  }
+
+  // Relabel the client tag (no template reroute) and/or point THIS lead's push at a
+  // pasted Google Sheet. Saved together.
+  async function saveTagSheet() {
+    if (!detail) return;
+    const tag = (tsTag || "").trim().toUpperCase();
+    const url = (tsUrl || "").trim();
+    if (!tag && !url) { toast.error("Enter a client tag or paste a sheet URL."); return; }
+    setTsSaving(true);
+    const d = await mutate({ action: "set-tag-sheet", id: detail.id, client_tag: tag || undefined, sheetUrl: url || undefined });
+    setTsSaving(false);
+    if (d.ok) {
+      detailCache.current.delete(detail.id);
+      toast.success(d.sheet ? `Saved — tag ${d.client_tag}, sheet tab "${d.sheet.tabName}"` : `Saved — client tag ${d.client_tag}`);
+      loadBootstrap();
+      loadDetail(detail.id);
+    } else toast.error(d.error || "Couldn't save");
+  }
+
   // Generate Reply — use the client's template as the core and adapt it to the
   // actual conversation. Fills the composer; does not send.
   async function handleGenerateReply() {
@@ -1350,6 +1395,48 @@ export default function InboxPage() {
                     )}
                   </div>
                 ))}
+              </div>
+            </div>
+
+            {/* ── Change AI category (left) + Client tag & lead sheet (right) ── */}
+            <div className="grid grid-cols-2 gap-3">
+              {/* AI Lead Category — moves the lead into the views that match. */}
+              <div className="rounded border bg-white px-4 py-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">AI Lead Category</span>
+                  {aiSaving && <span className="text-[10px] text-muted-foreground">saving…</span>}
+                </div>
+                <SearchableCombobox
+                  value={detail.ai_categorized_lead_category || ""}
+                  onValueChange={updateAiCategory}
+                  options={AI_FILTER_CATEGORIES}
+                  placeholder="Set AI category…"
+                  searchPlaceholder="Search categories…"
+                  triggerClassName="w-full h-8 text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground">Moves this lead into the views that match — e.g. Interested → the Cherry views.</p>
+              </div>
+              {/* Client tag + per-lead Google Sheet override. */}
+              <div className="rounded border bg-white px-4 py-3 space-y-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Client Tag &amp; Lead Sheet</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-36 shrink-0">
+                    <SearchableCombobox
+                      value={tsTag}
+                      onValueChange={(v) => setTsTag((v || "").toUpperCase())}
+                      options={(allowedClientTags ?? clientTags)}
+                      placeholder="Client tag…"
+                      searchPlaceholder="Search tags…"
+                      triggerClassName="w-full h-8 text-xs"
+                    />
+                  </div>
+                  <Input value={tsUrl} onChange={(e) => setTsUrl(e.target.value)} placeholder="Paste this lead's Google Sheet URL…" className="h-8 text-[11px] flex-1" />
+                  <Button size="sm" className="h-8 text-xs shrink-0" onClick={saveTagSheet} disabled={tsSaving}>{tsSaving ? "Saving…" : "Save"}</Button>
+                </div>
+                {detail.sheet_override?.tabName && (
+                  <p className="text-[10px] text-emerald-700">✓ Custom sheet set — this lead pushes to tab &quot;{detail.sheet_override.tabName}&quot;.</p>
+                )}
+                <p className="text-[10px] text-muted-foreground">Relabels the tag (no template change) &amp; routes THIS lead&apos;s push to the pasted sheet. The sheet must be shared with our service account.</p>
               </div>
             </div>
 

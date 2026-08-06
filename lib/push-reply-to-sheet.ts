@@ -14,6 +14,7 @@ import { pushToSheet } from "@/lib/push-to-sheet";
 import { recordSheetPushFailure, clearSheetPushFailure } from "@/lib/sheet-push-tracker";
 import { resolveLeadPhones, phonesForSheet } from "@/lib/processing/resolve-phones";
 import { loadClientContactEmails } from "@/lib/processing/cc-bcc-match";
+import { getReplySheetOverride } from "@/lib/sheet-override";
 
 // Split a raw address cell ("a@x.com, b@y.com; c@z.com") into lowercased emails.
 function splitEmails(raw: unknown): string[] {
@@ -73,6 +74,10 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
     if (phones.length) phoneCell = phonesForSheet(phones);
   } catch { /* keep the custom-var phone */ }
 
+  // Per-lead sheet override (set from the inbox) takes precedence over the
+  // client-tag → sheet registry for THIS lead only.
+  const sheetOverride = await getReplySheetOverride(replyId);
+
   const result = await pushToSheet(clientTag, {
     lead_email: reply.lead_email || "",
     lead_name: reply.lead_name || "",
@@ -94,7 +99,7 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
     cc_email_3: reply.cc_email_3 || "",
     bcc_email_1: reply.bcc_email_1 || "",
     notes: reply.notes || "",
-  });
+  }, sheetOverride ? { spreadsheetId: sheetOverride.spreadsheetId, tabName: sheetOverride.tabName } : null);
 
   if (result.ok) {
     await supabase.from("replies").update({ pushed_to_sheet: true, pushed_to_sheet_at: new Date().toISOString() }).eq("id", replyId);

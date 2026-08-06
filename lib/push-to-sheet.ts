@@ -76,14 +76,20 @@ export async function leadEmailInSheet(clientTag: string, leadEmail: string): Pr
 export async function pushToSheet(
   clientTag: string,
   data: ReplyData,
+  override?: { spreadsheetId: string; tabName: string } | null,
 ): Promise<{ ok: boolean; error?: string; row?: number; sheetId?: string }> {
-  // Look up client's sheet from the canonical external registry.
-  let sheet: { sheet_id: string; sheet_name: string } | null = null;
-  try {
-    const found = await getSheetForClient(clientTag);
-    if (found) sheet = { sheet_id: found.id, sheet_name: found.sheetName };
-  } catch (err) {
-    return { ok: false, error: `Sheet registry fetch failed: ${(err as Error).message}` };
+  // A per-lead sheet override (set from the inbox) wins over the registry — the
+  // operator explicitly pointed THIS lead at a specific sheet/tab.
+  let sheet: { sheet_id: string; sheet_name: string } | null = override
+    ? { sheet_id: override.spreadsheetId, sheet_name: override.tabName }
+    : null;
+  if (!sheet) {
+    try {
+      const found = await getSheetForClient(clientTag);
+      if (found) sheet = { sheet_id: found.id, sheet_name: found.sheetName };
+    } catch (err) {
+      return { ok: false, error: `Sheet registry fetch failed: ${(err as Error).message}` };
+    }
   }
 
   if (!sheet) {

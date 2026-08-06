@@ -5,6 +5,7 @@ import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/l
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
+import { setReplySheetOverride } from "@/lib/sheet-override";
 import { htmlToText, textToHtml } from "@/lib/html-text";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
@@ -69,6 +70,44 @@ export async function POST(req: NextRequest) {
     }
 
     switch (action) {
+      // Change the AI-classified category (ai_categorized_lead_category). Views key
+      // eligibility on this (aiCategoryAllowlist), so e.g. Not Interested → Interested
+      // moves the lead into Base Clients (Cherry) / the client's cherry view. Scope is
+      // already enforced above (a scoped user can only act on their own leads).
+      case "set-ai-category": {
+        const aiCategory = String((body as { aiCategory?: string }).aiCategory || "").trim();
+        if (!aiCategory) return NextResponse.json({ error: "aiCategory required" }, { status: 400 });
+        const { error } = await supabase
+          .from("replies")
+          .update({ ai_categorized_lead_category: aiCategory, updated_at: new Date().toISOString() })
+          .eq("id", id);
+        if (error) throw new Error(error.message);
+        bumpCacheVersion(); // view eligibility changed
+        return NextResponse.json({ ok: true, ai_categorized_lead_category: aiCategory });
+      }
+
+      // Relabel the client tag (NO template/CC-BCC reroute — that's Reallocate) and/or
+      // set a per-lead Google Sheet override (pasted URL). When this lead is later
+      // pushed, it goes to THIS sheet instead of the client's registered one.
+      case "set-tag-sheet": {
+        const newTag = String((body as { client_tag?: string }).client_tag || "").trim().toUpperCase();
+        const sheetUrl = String((body as { sheetUrl?: string }).sheetUrl || "").trim();
+        if (newTag && newTag !== "N/A" && newTag !== (rowClientTag || "")) {
+          const { error } = await supabase
+            .from("replies")
+            .update({ client_tag: newTag, updated_at: new Date().toISOString() })
+            .eq("id", id);
+          if (error) throw new Error(error.message);
+        }
+        let sheet: { tabName: string } | null = null;
+        if (sheetUrl) {
+          try { const ov = await setReplySheetOverride(id, sheetUrl); sheet = { tabName: ov.tabName }; }
+          catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
+        }
+        bumpCacheVersion();
+        return NextResponse.json({ ok: true, client_tag: newTag || rowClientTag, sheet });
+      }
+
       case "update-category": {
         const { category } = body;
         const nowIso = new Date().toISOString();
