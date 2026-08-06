@@ -128,6 +128,42 @@ export function getView(id: string | null | undefined): InboxView | null {
 }
 
 /**
+ * Does a reply row belong in `view`? The SINGLE source of truth for view
+ * membership, mirroring the server-side query (client tag scope + include/exclude,
+ * noise, AI allowlist, hidden buckets). The realtime INSERT handler MUST use this
+ * so a new reply can never leak into a view the server would have filtered out
+ * (e.g. a non-OH reply appearing in the OutboundHero (Cherry) view). Browser-safe.
+ */
+export function replyMatchesView(
+  view: InboxView | null,
+  row: {
+    client_tag?: string | null;
+    inbox_is_noise?: boolean | null;
+    ai_categorized_lead_category?: string | null;
+    lead_category?: string | null;
+  },
+  allowedClientTags?: string[] | null,
+): boolean {
+  const tag = row.client_tag || "";
+  // Per-user hard scope (a scoped user never sees other clients' rows).
+  if (allowedClientTags && allowedClientTags.length && !allowedClientTags.includes(tag)) return false;
+  if (!view) return true;
+  // Client-tag restriction — single tag (OutboundHero/DM4PM Cherry) or a set
+  // (CWSJ Cherry), and exclusions (Base Clients Cherry). This is what was missing
+  // from the realtime path and let other clients' replies leak into a scoped view.
+  if (view.clientTag && tag !== view.clientTag) return false;
+  if (view.includeClientTags?.length && !view.includeClientTags.includes(tag)) return false;
+  if (view.excludeClientTags?.length && view.excludeClientTags.includes(tag)) return false;
+  // Noise / AI eligibility / hidden buckets.
+  if (view.excludeNoise && row.inbox_is_noise) return false;
+  if (view.aiCategoryAllowlist?.length &&
+      !view.aiCategoryAllowlist.includes(row.ai_categorized_lead_category || "")) return false;
+  const cat = row.lead_category || "Open Response";
+  if (view.hiddenLeadCategories?.includes(cat)) return false;
+  return true;
+}
+
+/**
  * The positive-engagement lead_category buckets, in priority order. Shared by
  * the inbox sidebar and the server bootstrap so both agree on which bucket to
  * auto-open first. Browser-safe (no server deps).

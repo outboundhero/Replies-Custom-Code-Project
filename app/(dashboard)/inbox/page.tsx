@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
-import { INBOX_VIEWS, getView, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
+import { INBOX_VIEWS, getView, replyMatchesView, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { useSession } from "@/components/session-provider";
 import { peekFreshBootstrap, DEFAULT_VIEW, type InboxBootstrap } from "@/lib/inbox-prefetch";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -530,20 +530,12 @@ export default function InboxPage() {
       .channel("inbox-realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "replies" }, (payload) => {
         const newRow = payload.new as ReplyListItem & { inbox_is_noise?: boolean; ai_categorized_lead_category?: string | null };
-        if (allowedClientTags && allowedClientTags.length) {
-          if (!newRow.client_tag || !allowedClientTags.includes(newRow.client_tag)) return;
-        }
-        // Mirror the active view's server-side filter so realtime doesn't add
-        // rows the view would hide (noise, non-allowlisted AI, negative bucket).
-        if (activeView) {
-          if (activeView.excludeNoise && newRow.inbox_is_noise) return;
-          if (activeView.aiCategoryAllowlist?.length &&
-              !activeView.aiCategoryAllowlist.includes(newRow.ai_categorized_lead_category || "")) return;
-          // View excludes certain client tags (e.g. Base Clients hides OH).
-          if (activeView.excludeClientTags?.includes(newRow.client_tag || "")) return;
-        }
+        // Single source of truth for view membership (client-tag scope +
+        // include/exclude, noise, AI allowlist, hidden buckets) — identical to the
+        // server query, so a new reply can never leak into a view it doesn't
+        // belong to (e.g. a non-OH reply into OutboundHero (Cherry)).
+        if (!replyMatchesView(activeView, newRow, allowedClientTags)) return;
         const cat = newRow.lead_category || "Open Response";
-        if (activeView?.hiddenLeadCategories?.includes(cat)) return;
         // Respect ACTIVE search + filters — when the user has filtered the inbox
         // they should only see matching leads, not every new arrival.
         const f = filtersRef.current;
