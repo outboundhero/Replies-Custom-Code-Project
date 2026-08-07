@@ -548,7 +548,9 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: false, error: "Missing recipient, sender, or message" }, { status: 400 });
         }
         const result = await sendOneOffReply(rowInstance, {
-          senderEmailId, subject: subject || "(no subject)", message, toEmail, toName: toName || "",
+          // The COT message is already HTML (built with textToHtml + shown in the
+          // live preview) — send it as-is, don't re-escape it.
+          senderEmailId, subject: subject || "(no subject)", message, toEmail, toName: toName || "", html: true,
         });
         if (result.ok) {
           await logActivity("inbox", "change-of-target-sent", {

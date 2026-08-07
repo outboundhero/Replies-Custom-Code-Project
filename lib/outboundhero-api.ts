@@ -350,6 +350,11 @@ export async function sendOneOffReply(
     toEmail: string;
     toName: string;
     ccEmails?: EmailRecipient[];
+    /** Set when `message` is ALREADY HTML (e.g. the Change-of-Target re-pitch, whose
+     *  body is built with textToHtml). Then it's sent as-is; otherwise it's treated
+     *  as plain text and converted (escape + newlines→<br> + auto-link). Escaping
+     *  already-HTML would double-encode it (literal <br> / &amp; in the email). */
+    html?: boolean;
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
@@ -358,7 +363,7 @@ export async function sendOneOffReply(
     headers: buildHeaders(token),
     body: JSON.stringify({
       subject: params.subject,
-      message: plainTextToEmailHtml(params.message),
+      message: params.html ? params.message : plainTextToEmailHtml(params.message),
       sender_email_id: params.senderEmailId,
       content_type: "html",
       to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
