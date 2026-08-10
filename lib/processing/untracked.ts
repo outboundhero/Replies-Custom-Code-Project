@@ -1,6 +1,7 @@
 import { shouldFilter } from "./bounce-filter";
 import { detectCompanyCode } from "./company-code-resolver";
 import { resolveRedirectLink } from "./redirect-resolver";
+import { lookupClientTagByDomain } from "./domain-client-tag";
 import { extractRecipients } from "./recipient-extractor";
 import { cleanReply } from "./reply-cleaner";
 import { categorizeReply, CC_BCC_CATEGORIES, getLeadCategory } from "./lead-categorizer";
@@ -55,16 +56,35 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     return;
   }
 
-  // 2. Resolve redirect link from the CLIENT's sending domain (sender_email),
-  //    NOT the prospect's from_email_address. e.g. tdawson@elitecustodialcare.co
-  //    redirects to https://absolutefsinc.com/ which identifies the client.
+  // 2. Resolve the client tag from the CLIENT's sending domain (sender_email),
+  //    NOT the prospect's from_email_address. e.g. the reply arrived on the
+  //    client inbox tdawson@elitecustodialcare.co, so we tag by that domain.
+  //
+  //    Primary: look the sending domain up in the deliverability dashboard's
+  //    domain→tag map (lib/processing/domain-client-tag.ts). This replaces the
+  //    old "follow the sending domain's redirect to a website + regex-match it"
+  //    approach for the common case.
+  //
+  //    Fallback: if the domain isn't in the map (found:false / no tag) OR the
+  //    lookup errors, drop back to the redirect-resolver + regex so a reply
+  //    never loses a tag it would have gotten before.
   const senderDomain = sender_email.email.split("@")[1] || "";
-  const redirectLink = await resolveRedirectLink(senderDomain);
-  const { code: companyCode } = await detectCompanyCode(
-    reply.from_email_address,
-    reply.text_body,
-    redirectLink
-  );
+  let companyCode = "N/A";
+  let tagSource: "domain-api" | "redirect-regex" = "domain-api";
+
+  const domainTag = await lookupClientTagByDomain(senderDomain);
+  if (domainTag.clientTag) {
+    companyCode = domainTag.clientTag;
+  } else {
+    tagSource = "redirect-regex";
+    const redirectLink = await resolveRedirectLink(senderDomain);
+    const detected = await detectCompanyCode(
+      reply.from_email_address,
+      reply.text_body,
+      redirectLink
+    );
+    companyCode = detected.code;
+  }
 
   // 3. Resolve routing destination:
   //    - If client tag matched → route to that client's section (Airtable base + Clay URL)
@@ -435,6 +455,6 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     client_tag: companyCode,
     section_name: sectionName,
     lead_email: reply.from_email_address,
-    details: { airtable_base_id: airtableBaseId, record_id: recordId, ai_category: aiCategory, bison_instance: bisonInstance },
+    details: { airtable_base_id: airtableBaseId, record_id: recordId, ai_category: aiCategory, bison_instance: bisonInstance, sender_domain: senderDomain, tag_source: tagSource },
   });
 }
