@@ -8,6 +8,7 @@ import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
 import { setReplySheetOverride } from "@/lib/sheet-override";
 import { htmlToText, textToHtml } from "@/lib/html-text";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
+import { pushOhLeadToClose, OH_CLOSE_CATEGORIES } from "@/lib/close-crm";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
 import { regenerateReply } from "@/lib/processing/regenerate-reply";
 import { generatePrimaryContactReply } from "@/lib/processing/primary-contact-reply";
@@ -302,6 +303,25 @@ export async function POST(req: NextRequest) {
             } else if (result.error && !result.error.startsWith("no GHL config")) {
               extras.ghl_error = result.error;
             }
+          }
+        }
+
+        // OH → Close.com CRM when marked Interested / Needs Review (manual
+        // categorization). Replaces the Airtable automation; excluded-domain skip
+        // + create-once dedup are handled inside pushOhLeadToClose.
+        if (rowClientTag === "OH" && OH_CLOSE_CATEGORIES.has(String(category))) {
+          try {
+            const { data: reply } = await supabase
+              .from("replies")
+              .select("id, lead_email, lead_name, first_name, last_name, company_name, phone")
+              .eq("id", id).single();
+            if (reply) {
+              const r = await pushOhLeadToClose(reply);
+              if (r.ok && !r.skipped) extras.pushed_to_close = true;
+              else if (r.error) extras.close_error = r.error;
+            }
+          } catch (e) {
+            extras.close_error = (e as Error).message;
           }
         }
 

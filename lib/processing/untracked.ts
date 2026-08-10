@@ -8,6 +8,7 @@ import { isNoiseReply } from "@/lib/inbox-noise";
 import { searchRecords, createRecord, updateRecord, AIRTABLE_WRITES_ENABLED } from "@/lib/airtable";
 import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
+import { sendDm4pmWebhooks, dm4pmShouldPush } from "@/lib/dm4pm-webhook";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { isKnownClientReply } from "./cc-bcc-match";
@@ -365,6 +366,24 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
       await logError("untracked", "master-clay", (error as Error).message, {
         company_code: companyCode,
         record_id: recordId,
+      });
+    }
+  }
+
+  // DM4PM: Clay + Slack (new reply only, actionable AI category). Untracked replies
+  // rarely carry a client tag, but honor it if this one does.
+  if (companyCode === "DM4PM" && dm4pmShouldPush(aiCategory)) {
+    try {
+      await sendDm4pmWebhooks({
+        email: reply.from_email_address,
+        leadName: reply.from_name || reply.from_email_address,
+        leadResponse: cleanedReply,
+        replyId: reply.id,
+      });
+    } catch (error) {
+      await logError("untracked", "dm4pm-webhook", (error as Error).message, {
+        company_code: companyCode,
+        lead_email: reply.from_email_address,
       });
     }
   }

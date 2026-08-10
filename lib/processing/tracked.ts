@@ -11,6 +11,7 @@ import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
+import { sendDm4pmWebhooks, dm4pmShouldPush } from "@/lib/dm4pm-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { isKnownClientReply } from "./cc-bcc-match";
@@ -579,6 +580,26 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     } catch (error) {
       await logError("tracked", "esj-clay", (error as Error).message, {
         campaign_tag: campaignTag,
+        lead_email: reply.from_email_address,
+      });
+    }
+  }
+
+  // 6b-2. DM4PM: Clay + Slack notifier (new reply only, actionable AI category).
+  if (campaignTag === "DM4PM" && dm4pmShouldPush(aiCategory)) {
+    try {
+      await sendDm4pmWebhooks({
+        email: reply.from_email_address,
+        leadName: `${lead.first_name || ""} ${lead.last_name || ""}`.trim() || reply.from_name || reply.from_email_address,
+        company: lead.company,
+        linkedin: customVars.linkedin,
+        leadResponse: cleanedReply,
+        campaignName: campaign.name,
+        replyId: reply.id,
+      });
+    } catch (error) {
+      await logError("tracked", "dm4pm-webhook", (error as Error).message, {
+        client_tag: campaignTag,
         lead_email: reply.from_email_address,
       });
     }
