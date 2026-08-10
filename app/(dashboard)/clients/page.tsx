@@ -71,6 +71,7 @@ export default function ClientsPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<ConfigForm>(emptyForm());
   const [saving, setSaving] = useState(false);
+  const [forcing, setForcing] = useState(false);
   const [search, setSearch] = useState("");
 
   // Onboard dialog
@@ -147,6 +148,61 @@ export default function ClientsPage() {
       toast.error(`Network error saving ${tag}: ${(err as Error).message}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Save the current config AND backfill it onto existing "Open Response" leads
+  // that have a positive AI category (the ones templates auto-apply for) — for
+  // when a template is set up AFTER leads have already come in. Previews the
+  // affected count and confirms before overwriting.
+  async function forceUpsert(tag: string) {
+    let count = 0;
+    try {
+      const res = await fetch("/api/config/clients/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "force-upsert-template", tag, preview: true }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Preview failed for ${tag}: ${data.error || res.statusText}`);
+        return;
+      }
+      count = data.count ?? 0;
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+      return;
+    }
+
+    if (count === 0) {
+      toast.info(`No "Open Response" leads with a positive AI category for ${tag} to update.`);
+      return;
+    }
+    if (!confirm(
+      `Apply this reply template + CC/BCC to ${count} existing "Open Response" lead${count === 1 ? "" : "s"} for ${tag}?\n\n` +
+      `These are leads with a positive AI category (Interested, Meeting Request, Follow Up, Referral Given, Unrecognizable). ` +
+      `It overwrites their current template/CC/BCC with what's in the editor above, and saves the config.`,
+    )) return;
+
+    setForcing(true);
+    try {
+      const res = await fetch("/api/config/clients/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "force-upsert-template", tag, ...editForm }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        toast.error(`Force upsert failed for ${tag}: ${data.error || res.statusText}`);
+        return;
+      }
+      toast.success(`Applied template to ${data.updated} lead${data.updated === 1 ? "" : "s"} for ${tag}`);
+      setEditing(null);
+      loadClients();
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+    } finally {
+      setForcing(false);
     }
   }
 
@@ -478,14 +534,28 @@ export default function ClientsPage() {
                             </p>
                           </div>
 
-                          <div className="flex gap-2">
-                            <Button size="sm" onClick={() => saveConfig(client.tag)} disabled={saving}>
+                          <div className="flex gap-2 items-center">
+                            <Button size="sm" onClick={() => saveConfig(client.tag)} disabled={saving || forcing}>
                               {saving ? "Saving..." : "Save"}
                             </Button>
-                            <Button size="sm" variant="outline" onClick={() => setEditing(null)}>
+                            <Button size="sm" variant="outline" onClick={() => setEditing(null)} disabled={forcing}>
                               Cancel
                             </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="ml-auto"
+                              onClick={() => forceUpsert(client.tag)}
+                              disabled={forcing || saving}
+                              title="Save this config AND apply the template + CC/BCC to existing 'Open Response' leads that have a positive AI category (Interested, Meeting Request, Follow Up, Referral Given, Unrecognizable)."
+                            >
+                              {forcing ? "Applying..." : "Save & apply to Open Response leads"}
+                            </Button>
                           </div>
+                          <p className="text-xs text-muted-foreground">
+                            &quot;Save &amp; apply to Open Response leads&quot; also backfills this template + CC/BCC onto existing
+                            Open-Response leads with a positive AI category — use it when a template was set up after leads came in.
+                          </p>
                         </div>
                       ) : (
                         <div className="space-y-3">
