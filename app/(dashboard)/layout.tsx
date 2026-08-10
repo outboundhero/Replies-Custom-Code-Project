@@ -2,6 +2,7 @@ import { Nav } from "@/components/nav";
 import { getSession } from "@/lib/auth";
 import { SessionProvider } from "@/components/session-provider";
 import { InboxPrefetcher } from "@/components/inbox-prefetcher";
+import { SessionKeepAlive } from "@/components/session-keepalive";
 
 export default async function DashboardLayout({
   children,
@@ -28,6 +29,8 @@ export default async function DashboardLayout({
       </div>
       {/* Prefetch fresh inbox data on app load so the first open is instant. */}
       <InboxPrefetcher />
+      {/* Keep an active session alive so long-open tabs don't 401 mid-action. */}
+      <SessionKeepAlive />
     </SessionProvider>
   );
 }

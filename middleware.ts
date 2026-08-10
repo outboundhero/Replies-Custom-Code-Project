@@ -1,10 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
-import { jwtVerify } from "jose";
+import { jwtVerify, SignJWT, type JWTPayload } from "jose";
 
 const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "default-secret-change-me");
+const SESSION_MAX_AGE = 60 * 60 * 24 * 7; // 7 days
 
 /** Routes accessible by inbox_manager role */
 const INBOX_MANAGER_ROUTES = ["/inbox", "/clients", "/qualification"];
+
+/**
+ * Sliding-session renew: re-sign the same identity with a fresh 7-day window and
+ * attach it to the response, so an actively-navigating user's cookie never
+ * lapses. (API routes are skipped by middleware, so the inbox SPA also pings
+ * /api/auth/refresh — see SessionKeepAlive.)
+ */
+async function nextWithRenewedSession(payload: JWTPayload): Promise<NextResponse> {
+  const res = NextResponse.next();
+  try {
+    const token = await new SignJWT({
+      email: payload.email,
+      role: payload.role,
+      allowedClientTags: payload.allowedClientTags ?? null,
+    })
+      .setProtectedHeader({ alg: "HS256" })
+      .setExpirationTime("7d")
+      .sign(SECRET);
+    res.cookies.set("oh-session", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: SESSION_MAX_AGE,
+      path: "/",
+    });
+  } catch {
+    /* renew is best-effort — the existing valid cookie still works */
+  }
+  return res;
+}
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -36,7 +67,7 @@ export async function middleware(req: NextRequest) {
 
     // Admin can access everything
     if (role === "admin") {
-      return NextResponse.next();
+      return nextWithRenewedSession(payload);
     }
 
     // Inbox manager: restrict to allowed routes
@@ -50,7 +81,7 @@ export async function middleware(req: NextRequest) {
       if (isScoped) {
         const isInbox = pathname === "/inbox" || pathname.startsWith("/inbox/");
         if (!isInbox) return NextResponse.redirect(new URL("/inbox", req.url));
-        return NextResponse.next();
+        return nextWithRenewedSession(payload);
       }
 
       const allowed = INBOX_MANAGER_ROUTES.some((r) => pathname === r || pathname.startsWith(r + "/"));
@@ -58,7 +89,7 @@ export async function middleware(req: NextRequest) {
         return NextResponse.redirect(new URL("/inbox", req.url));
       }
 
-      return NextResponse.next();
+      return nextWithRenewedSession(payload);
     }
 
     // Unknown role — redirect to login
