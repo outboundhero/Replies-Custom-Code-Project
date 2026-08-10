@@ -12,7 +12,7 @@
  *   { monday..sunday: bool, start_time: "HH:MM:SS", end_time: "HH:MM:SS",
  *     timezone: "America/…" }  (GET/POST /api/campaigns/{id}/schedule)
  */
-import { getCampaignSchedule, createCampaignSchedule } from "@/lib/outboundhero-api";
+import { getCampaignSchedule, setCampaignSchedule } from "@/lib/outboundhero-api";
 import { listNurtureCampaigns, listMainCampaigns, type InstanceCampaign } from "@/lib/nurture/campaign-inventory";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
@@ -24,19 +24,26 @@ const MIN_WINDOW_MIN = 30; // never compress the nurture window below this
 export interface NurtureSchedule {
   monday: boolean; tuesday: boolean; wednesday: boolean; thursday: boolean;
   friday: boolean; saturday: boolean; sunday: boolean;
+  // Bison's POST /schedule requires "H:i" (HH:MM, NO seconds) and a
+  // save_as_template flag — a payload with "HH:MM:SS" (what GET returns) 422s.
   start_time: string; end_time: string; timezone: string;
+  save_as_template: boolean;
 }
 
 function toSec(hhmmss: string): number {
   const [h = 0, m = 0, s = 0] = String(hhmmss || "").split(":").map(Number);
   return h * 3600 + m * 60 + s;
 }
-function toHHMMSS(sec: number): string {
+/** Seconds-of-day → "HH:MM" (Bison's required H:i format; no seconds). */
+function secToHM(sec: number): string {
   const clamped = Math.max(0, Math.min(sec, 86399));
   const h = Math.floor(clamped / 3600);
   const m = Math.floor((clamped % 3600) / 60);
-  const s = clamped % 60;
-  return [h, m, s].map((n) => String(n).padStart(2, "0")).join(":");
+  return [h, m].map((n) => String(n).padStart(2, "0")).join(":");
+}
+/** Any "HH:MM[:SS]" → "HH:MM". */
+function toHM(hhmmss: string): string {
+  return secToHM(toSec(hhmmss));
 }
 
 /**
@@ -60,9 +67,10 @@ export function shiftSchedule(main: Record<string, unknown> | null): NurtureSche
   const days = Object.fromEntries(DAYS.map((d) => [d, main[d] === true])) as Record<(typeof DAYS)[number], boolean>;
   return {
     ...days,
-    start_time: toHHMMSS(newStart),
-    end_time: endRaw,
+    start_time: secToHM(newStart), // "HH:MM" — Bison rejects seconds
+    end_time: toHM(endRaw),        // "HH:MM"
     timezone: String(main.timezone ?? "") || "America/Chicago",
+    save_as_template: false,       // required by POST /schedule
   };
 }
 
@@ -133,9 +141,9 @@ export async function applyOffsetForClient(tag: string, opts?: { dryRun?: boolea
     }
 
     if (!dry) {
-      const ok = await createCampaignSchedule(n.instance, n.id, shifted as unknown as Record<string, unknown>);
+      const ok = await setCampaignSchedule(n.instance, n.id, shifted as unknown as Record<string, unknown>);
       if (!ok) {
-        out.skipped.push({ instance: n.instance, campaignId: n.id, name: n.name, reason: "createCampaignSchedule failed" });
+        out.skipped.push({ instance: n.instance, campaignId: n.id, name: n.name, reason: "schedule write failed" });
         continue;
       }
     }
@@ -162,5 +170,5 @@ export async function applyOffsetToClone(
 ): Promise<boolean> {
   const shifted = shiftSchedule(mainSchedule);
   if (!shifted) return false;
-  return createCampaignSchedule(instance, cloneId, shifted as unknown as Record<string, unknown>);
+  return setCampaignSchedule(instance, cloneId, shifted as unknown as Record<string, unknown>);
 }

@@ -1364,7 +1364,32 @@ export async function createCampaignSchedule(instanceKey: string, campaignId: nu
   const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/schedule`, {
     method: "POST", headers: buildHeaders(token), body: JSON.stringify(schedule), timeoutMs: 30_000,
   });
-  return res.ok;
+  if (!res.ok) return false;
+  return scheduleWriteOk(await res.json().catch(() => null));
+}
+
+// Bison returns HTTP 200 with { data: { success: false, message } } on a
+// schedule write it declined (e.g. POST when a schedule already exists), so a
+// bare res.ok check reports false success. Treat success:false as a failure.
+function scheduleWriteOk(body: unknown): boolean {
+  const d = (body as { data?: { success?: unknown } } | null)?.data;
+  return !(d && (d.success === false || d.success === "false"));
+}
+
+/**
+ * Set (update-or-create) a campaign's schedule. Payload must use "H:i" times
+ * (HH:MM, no seconds) + `save_as_template`. PUT updates an existing schedule
+ * (the case for every nurture campaign — the Bison duplicate carries one);
+ * POST only creates when none exists. We PUT first, then fall back to POST.
+ */
+export async function setCampaignSchedule(instanceKey: string, campaignId: number, schedule: Record<string, unknown>): Promise<boolean> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const url = `${baseUrl}/api/campaigns/${campaignId}/schedule`;
+  const put = await fetchWithTimeout(url, { method: "PUT", headers: buildHeaders(token), body: JSON.stringify(schedule), timeoutMs: 30_000 });
+  if (put.ok && scheduleWriteOk(await put.json().catch(() => null))) return true;
+  // No existing schedule → create it.
+  const post = await fetchWithTimeout(url, { method: "POST", headers: buildHeaders(token), body: JSON.stringify(schedule), timeoutMs: 30_000 });
+  return post.ok && scheduleWriteOk(await post.json().catch(() => null));
 }
 
 export interface CampaignSenderInbox { id: number; email: string; type: string; status: string; tags: string[] }
