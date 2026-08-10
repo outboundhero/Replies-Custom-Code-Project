@@ -53,7 +53,12 @@ interface CloseLeadInput {
 export async function createCloseLead(lead: CloseLeadInput): Promise<{ ok: boolean; id?: string; error?: string }> {
   const rawKey = process.env.CLOSE_API_KEY;
   if (!rawKey) return { ok: false, error: "CLOSE_API_KEY not set" };
-  const auth = `Basic ${Buffer.from(`${rawKey}:`).toString("base64")}`;
+  // Accept either key form: a RAW "api_…" key (Close uses Basic with the key as the
+  // username + empty password → base64("<key>:")), OR an already-base64-encoded
+  // Basic value (used as-is — this is what the Airtable setup provided).
+  const auth = rawKey.startsWith("api_")
+    ? `Basic ${Buffer.from(`${rawKey}:`).toString("base64")}`
+    : `Basic ${rawKey}`;
 
   const payload: Record<string, unknown> = {
     name: lead.name,
