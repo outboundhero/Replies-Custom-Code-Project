@@ -16,6 +16,8 @@ import { extractReturnDate } from "@/lib/processing/extract-return-date";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance, DEFAULT_INSTANCE } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
+import { reconnectInbox, isReconnectableSendError } from "@/lib/inboxing-upload";
+import { enqueueSendRetry } from "@/lib/send-retry";
 import { applyReallocate } from "@/lib/processing/apply-reallocate";
 import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
 
@@ -58,11 +60,12 @@ export async function POST(req: NextRequest) {
     let rowCreatedAt: string | null = null;
     let rowSubject: string | null = null;
     let rowLeadId: number | null = null;
+    let rowSenderEmail: string | null = null;
     if (id) {
       const allowed = session?.allowedClientTags ?? null;
       const { data: row } = await supabase
         .from("replies")
-        .select("client_tag, bison_instance, reply_id, lead_category, created_at, email_subject, lead_id")
+        .select("client_tag, bison_instance, reply_id, lead_category, created_at, email_subject, lead_id, sender_email")
         .eq("id", id)
         .single();
       if (allowed && allowed.length) {
@@ -77,6 +80,7 @@ export async function POST(req: NextRequest) {
       rowCreatedAt = (row?.created_at as string | null) ?? null;
       rowSubject = (row?.email_subject as string | null) ?? null;
       rowLeadId = (row?.lead_id as number | null) ?? null;
+      rowSenderEmail = (row?.sender_email as string | null) ?? null;
     }
 
     switch (action) {
@@ -463,6 +467,18 @@ export async function POST(req: NextRequest) {
             await supabase.from("replies").update({ send_error: result.error || "Send failed", send_error_at: nowIso, updated_at: nowIso }).eq("id", id);
           } catch { /* columns may not exist pre-migration */ }
           await recordSend("failed", result.error);
+          // SMTP-auth failure ("re-connect this email account"): auto-reconnect
+          // the inbox now, and queue the SAME reply to auto-retry at +1h, then
+          // +2h (lib/send-retry.ts). No operator action needed.
+          if (isReconnectableSendError(result.error)) {
+            if (rowSenderEmail) reconnectInbox(rowSenderEmail, rowInstance).catch(() => {});
+            await enqueueSendRetry({
+              replyRowId: id, bisonInstance: rowInstance, replyId, senderEmailId,
+              senderEmail: rowSenderEmail, message, toEmail, toName, ccEmails, bccEmails,
+              subject: rowSubject, leadId: rowLeadId, clientTag: rowClientTag,
+              lastError: result.error || "send failed",
+            }).catch((e) => logError("inbox", "send-reply-enqueue-retry", (e as Error).message, { row_id: id }));
+          }
         }
         return NextResponse.json(result);
       }
