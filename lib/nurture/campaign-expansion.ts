@@ -16,17 +16,38 @@ import { getCampaignMap, getMapConfirmedAt, type CampaignMapEntry } from "@/lib/
 import { getChurnedTags } from "@/lib/churn";
 import {
   getCampaignDetails, duplicateCampaign, updateCampaign,
-  getCampaignSenderEmails, attachSenderEmails, resumeCampaign,
+  getCampaignSenderEmails, attachSenderEmails, resumeCampaign, getCampaignSchedule,
 } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
-import type { Esp } from "@/lib/nurture/esp";
+import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
+import { isFired } from "@/lib/nurture/activation-state";
+import { applyOffsetToClone } from "@/lib/nurture/nurture-schedule";
+import { listMainCampaigns, type InstanceCampaign } from "@/lib/nurture/campaign-inventory";
+import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 
 // "Contacted 50% of the contacts" = total_leads_contacted / total_leads >= 50%.
 // (NOT Bison's `completion_percentage`, which is a stricter sequence-completion
 // metric — e.g. a 77%-contacted campaign can report completion_percentage ~50.)
 export const CONTACTED_MIN = 50;
 export const COMBINED_LEADS_MIN = 5000;
+// Per-client expansion cooldown: after a client spawns a batch, it can't spawn
+// another for this many days — stops "Nurture 2/3/4/5" piling up day-after-day.
+export const EXPANSION_COOLDOWN_DAYS = 7;
+const COOLDOWN_MS = EXPANSION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
 const ESPS: Esp[] = ["google", "outlook", "segs"];
+
+/** Most recent expansion time for a client (ms epoch), or null if never. */
+async function lastExpansionAt(tag: string): Promise<number | null> {
+  const r = await db.execute({
+    sql: "SELECT MAX(created_at) c FROM nurture_campaign_expansions WHERE UPPER(client_tag)=UPPER(?)",
+    args: [tag],
+  });
+  const c = (r.rows[0] as { c?: string })?.c;
+  if (!c) return null;
+  // SQLite datetime('now') → "YYYY-MM-DD HH:MM:SS" in UTC.
+  const ms = new Date(String(c).replace(" ", "T") + "Z").getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
 
 /** % of a campaign's contacts that have been contacted. */
 function contactedPct(total?: number, contacted?: number): number {
@@ -96,6 +117,32 @@ export async function expandCampaignsForClient(
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { result.error = "no map"; return result; }
 
+  // Expansion gates, evaluated once for this run (health snapshots below still
+  // run regardless so the monitoring tab stays live):
+  //  1. fired — nurture must have passed the 80% activation gate, else it's
+  //     paused and shouldn't grow.
+  //  2. cooldown — a client can spawn at most one batch per EXPANSION_COOLDOWN_DAYS.
+  const fired = await isFired(TAG);
+  const lastExp = await lastExpansionAt(TAG);
+  const inCooldown = lastExp != null && Date.now() - lastExp < COOLDOWN_MS;
+
+  // Matching MAIN schedule for a clone (same instance + ESP, non-draft), so the
+  // clone gets the +4h offset from the main — not the inherited nurture schedule.
+  // Lazily loaded (only when we actually expand) + cached.
+  let mainsCache: InstanceCampaign[] | null = null;
+  const mainScheduleCache = new Map<string, Record<string, unknown> | null>();
+  const mainScheduleFor = async (instance: BisonInstanceKey, esp: Esp): Promise<Record<string, unknown> | null> => {
+    const key = `${instance}:${esp}`;
+    if (mainScheduleCache.has(key)) return mainScheduleCache.get(key) ?? null;
+    mainsCache ??= await listMainCampaigns(TAG);
+    const m = mainsCache.find(
+      (mm) => mm.instance === instance && detectCampaignEsp(mm.name) === esp && String(mm.status).toLowerCase() !== "draft",
+    );
+    const sched = m ? await getCampaignSchedule(instance, m.id) : null;
+    mainScheduleCache.set(key, sched);
+    return sched;
+  };
+
   // Group mapped entries by instance.
   const byInstance = new Map<string, Map<Esp, CampaignMapEntry>>();
   for (const e of map) {
@@ -130,6 +177,8 @@ export async function expandCampaignsForClient(
     row.allAbove50 = details.every((x) => x.completion >= CONTACTED_MIN);
     const shouldExpand = row.allAbove50 && row.combinedLeads > COMBINED_LEADS_MIN;
     if (!shouldExpand) { row.reason = "below threshold"; result.instances.push(row); continue; }
+    if (!fired) { row.reason = "not fired (nurture gated off)"; result.instances.push(row); continue; }
+    if (inCooldown) { row.reason = `expansion cooldown (<${EXPANSION_COOLDOWN_DAYS}d since last)`; result.instances.push(row); continue; }
     if (opts.dryRun) { row.reason = "would expand (dry-run)"; result.instances.push(row); continue; }
 
     // EXPAND: clone each campaign in the trio.
@@ -149,6 +198,14 @@ export async function expandCampaignsForClient(
         const n = x.batch + 1;
         const name = nextBatchName(x.name, n);
         await updateCampaign(instance, clone.id, { name });
+        // Set the +4h offset on the clone from its matching MAIN schedule (start
+        // +4h, keep main's end) — don't rely on the inherited nurture schedule.
+        try {
+          const mainSched = await mainScheduleFor(instance as BisonInstanceKey, x.esp);
+          if (mainSched) await applyOffsetToClone(instance as BisonInstanceKey, clone.id, mainSched);
+        } catch (e) {
+          await logError("nurture-expand", `${TAG}/${instance}/${x.esp}/offset`, (e as Error).message);
+        }
         // Activate so it sends, then re-point the routing map to the clone.
         await resumeCampaign(instance, clone.id);
         await db.execute({

@@ -14,6 +14,7 @@
  */
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getChurnedTags } from "@/lib/churn";
+import { isFired } from "@/lib/nurture/activation-state";
 import {
   getCampaignSenderEmails, attachSenderEmails, resumeCampaign, getCampaignLeadCount,
 } from "@/lib/outboundhero-api";
@@ -113,6 +114,8 @@ export async function activateMappedCampaigns(clientTag: string): Promise<Activa
 
   if (!(await getMapConfirmedAt(TAG))) { result.error = "target-campaign map not confirmed"; return result; }
   if ((await getChurnedTags()).has(TAG)) { result.error = "churned"; return result; }
+  // 80% activation gate: never turn a client's nurture on before it's fired.
+  if (!(await isFired(TAG))) { result.error = "not fired (below 80% main completion)"; return result; }
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { result.error = "no campaigns mapped"; return result; }
 
@@ -169,6 +172,10 @@ export async function autoActivateReadyCampaigns(clientTag: string): Promise<Aut
 
   if (!(await getMapConfirmedAt(TAG))) { out.error = "map not confirmed"; return out; }
   if ((await getChurnedTags()).has(TAG)) { out.error = "churned"; return out; }
+  // 80% activation gate: never auto-activate nurture before the client is fired.
+  // The gate itself calls this function right after firing (isFired → true), so
+  // activation still happens the moment a client crosses 80%.
+  if (!(await isFired(TAG))) { out.error = "not fired (below 80% main completion)"; return out; }
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { out.error = "no campaigns mapped"; return out; }
 

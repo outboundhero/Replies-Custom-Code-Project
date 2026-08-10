@@ -957,6 +957,29 @@ export async function resumeCampaign(
 }
 
 /**
+ * Pause a campaign so it stops sending (queued leads stay queued).
+ *   PATCH /api/campaigns/{id}/pause
+ * The mirror of resumeCampaign — verified live: flips an active campaign to
+ * "paused" (200). Idempotent; pausing a draft/paused campaign is harmless.
+ * Restore with resumeCampaign (paused → queued → active).
+ */
+export async function pauseCampaign(
+  instanceKey: string,
+  campaignId: number,
+): Promise<{ ok: boolean; status?: number; error?: string; raw?: unknown }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/pause`, {
+    method: "PATCH",
+    headers: buildHeaders(token),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    return { ok: false, status: res.status, error: `${res.status}: ${JSON.stringify(body)}`, raw: body };
+  }
+  return { ok: true, status: res.status, raw: body };
+}
+
+/**
  * Sent-email record returned by GET /leads/{leadId}/sent-emails.
  * Only the fields we currently consume are typed — the upstream payload is
  * much larger.

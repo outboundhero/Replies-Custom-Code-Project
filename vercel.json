@@ -58,6 +58,10 @@
       "schedule": "0 7 * * *"
     },
     {
+      "path": "/api/cron/nurture-activation-gate",
+      "schedule": "30 0-22/2 * * *"
+    },
+    {
       "path": "/api/cron/sync-service-areas",
       "schedule": "0 */12 * * *"
     },
