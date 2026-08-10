@@ -143,6 +143,27 @@ export function getView(id: string | null | undefined): InboxView | null {
 }
 
 /**
+ * The id of a dedicated NON-cherry master view (e.g. "SBSPO Master Inbox") that
+ * covers a scoped user's FULL tag scope, or null if none. Used to (a) hide the
+ * generic "Master Inbox" duplicate for that user and (b) pick their default view.
+ * A client whose scope has no such view (e.g. CWSJ) returns null → keeps generic.
+ */
+export function dedicatedMasterViewId(allowedClientTags?: string[] | null): string | null {
+  if (!allowedClientTags || !allowedClientTags.length) return null;
+  const v = INBOX_VIEWS.find((vv) => {
+    if (vv.id === "all" || vv.aiCategoryAllowlist?.length) return false; // must be a non-cherry master
+    const tags = vv.clientTag ? [vv.clientTag] : vv.includeClientTags ?? [];
+    return tags.length > 0 && allowedClientTags.every((t) => tags.includes(t));
+  });
+  return v?.id ?? null;
+}
+
+/** True when {@link dedicatedMasterViewId} exists for this scope. */
+export function hasDedicatedMasterView(allowedClientTags?: string[] | null): boolean {
+  return dedicatedMasterViewId(allowedClientTags) !== null;
+}
+
+/**
  * Does a reply row belong in `view`? The SINGLE source of truth for view
  * membership, mirroring the server-side query (client tag scope + include/exclude,
  * noise, AI allowlist, hidden buckets). The realtime INSERT handler MUST use this

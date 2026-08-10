@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
-import { INBOX_VIEWS, getView, replyMatchesView, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
+import { INBOX_VIEWS, getView, replyMatchesView, hasDedicatedMasterView, dedicatedMasterViewId, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { useSession } from "@/components/session-provider";
 import { peekFreshBootstrap, DEFAULT_VIEW, type InboxBootstrap } from "@/lib/inbox-prefetch";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -320,10 +320,12 @@ export default function InboxPage() {
   const scopedTags = session?.allowedClientTags && session.allowedClientTags.length
     ? session.allowedClientTags : null;
   const initialClient = scopedTags && scopedTags.length === 1 ? scopedTags[0] : "";
-  // Scoped users (their own client login) default to Master Inbox — the base
-  // "Cherry" view excludes their tags, so it would show nothing. Admins keep the
-  // curated Cherry default.
-  const initialView = scopedTags ? "all" : DEFAULT_VIEW;
+  // Scoped users (their own client login) default to their Master Inbox — the
+  // base "Cherry" view excludes their tags, so it would show nothing. If they
+  // have a dedicated master (e.g. "SBSPO Master Inbox") default to it (the
+  // generic "all" is hidden for them); otherwise fall back to the generic one.
+  // Admins keep the curated Cherry default.
+  const initialView = scopedTags ? (dedicatedMasterViewId(scopedTags) ?? "all") : DEFAULT_VIEW;
 
   // One-time synchronous hydrate from the app-load prefetch (fresh data only).
   // When present we paint the counts + first bucket instantly and skip the
@@ -1125,7 +1127,9 @@ export default function InboxPage() {
                 // whose tag filter overlaps their scope. Views that exclude all
                 // of their tags (e.g. Base Clients Cherry excludes CWSJ) are hidden.
                 if (!allowedClientTags || !allowedClientTags.length) return true;
-                if (v.id === "all") return true;
+                // Hide the generic Master Inbox when a dedicated one (e.g. "SBSPO
+                // Master Inbox") already covers this user's whole scope — no dupe.
+                if (v.id === "all") return !hasDedicatedMasterView(allowedClientTags);
                 if (v.clientTag) return allowedClientTags.includes(v.clientTag);
                 if (v.includeClientTags) return v.includeClientTags.some((t) => allowedClientTags.includes(t));
                 if (v.excludeClientTags) return allowedClientTags.some((t) => !v.excludeClientTags!.includes(t));
