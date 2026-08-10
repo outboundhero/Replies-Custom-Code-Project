@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { createClient } from "@supabase/supabase-js";
 import { INBOX_VIEWS, getView, replyMatchesView, hasDedicatedMasterView, dedicatedMasterViewId, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
+import { isReconnectableSendError } from "@/lib/inboxing-upload";
 import { useSession } from "@/components/session-provider";
 import { peekFreshBootstrap, DEFAULT_VIEW, type InboxBootstrap } from "@/lib/inbox-prefetch";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -952,6 +953,32 @@ export default function InboxPage() {
     }
   }
 
+  // Reconnect the sending inbox when a send failed with an SMTP auth error.
+  // Re-uploads it to Inboxing (a queued job); the operator retries the send once
+  // it reconnects. The draft is untouched.
+  async function handleReconnectInbox(id: number) {
+    setSending("reconnect");
+    try {
+      const res = await fetch("/api/inbox/reconnect-inbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const d = await res.json();
+      if (!res.ok || !d.ok) {
+        toast.error(d.error ? `Reconnect failed: ${d.error}` : "Reconnect failed");
+        return;
+      }
+      toast.success(
+        `Reconnect started for ${d.email ?? "the inbox"}${d.jobsCreated ? ` (${d.jobsCreated} job)` : ""} — wait a few minutes, then retry the send.`,
+      );
+    } catch (err) {
+      toast.error(`Network error: ${(err as Error).message}`);
+    } finally {
+      setSending(null);
+    }
+  }
+
   async function handleFwd() {
     if (!detail || !fwdTo) return;
     if (confirmInline !== "fwd") { setConfirmInline("fwd"); return; } // §29 confirm
@@ -1658,8 +1685,23 @@ export default function InboxPage() {
               </div>
               {/* Persistent send status: failure stays until the next success. */}
               {detail.send_error && (
-                <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800">
-                  <span className="font-semibold">⚠ Last send failed:</span> {detail.send_error}. Your draft is kept — fix and retry.
+                <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800 space-y-1.5">
+                  <div><span className="font-semibold">⚠ Last send failed:</span> {detail.send_error}. Your draft is kept — fix and retry.</div>
+                  {isReconnectableSendError(detail.send_error) && (
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 text-[11px] border-rose-300"
+                        onClick={() => handleReconnectInbox(detail.id)}
+                        disabled={sending === "reconnect"}
+                        title="Reconnect this sending inbox to Inboxing (fixes the SMTP auth error), then retry the send in a few minutes."
+                      >
+                        {sending === "reconnect" ? "Reconnecting…" : "🔌 Reconnect inbox"}
+                      </Button>
+                      <span className="text-[10px] text-rose-700/80">This inbox needs reconnecting before it can send.</span>
+                    </div>
+                  )}
                 </div>
               )}
               {detail.last_sent_at && !detail.send_error && (
