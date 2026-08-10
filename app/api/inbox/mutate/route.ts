@@ -30,8 +30,17 @@ const DEFAULT_OOO_DELAY_DAYS = 7;
 
 export async function POST(req: NextRequest) {
   // Single session read (was requireAuth() + a second getSession() below).
+  // A null session = the login cookie is missing/expired. Return an actionable
+  // message (not a bare "Unauthorized"): the operator should re-auth in a NEW
+  // tab and retry here WITHOUT reloading, so the typed draft (client-only state)
+  // isn't lost. Nothing was sent — the request was rejected before any action.
   const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session) {
+    return NextResponse.json(
+      { error: "Your login session expired — sign in again in a new tab, then click Send again here (don't reload this page, or your draft clears)." },
+      { status: 401 },
+    );
+  }
 
   try {
     const body = await req.json();
