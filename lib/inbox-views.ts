@@ -89,9 +89,9 @@ export const INBOX_VIEWS: InboxView[] = [
     // Also hide the Referral Given bucket (still visible in Master Inbox + the
     // per-client cherry views).
     hiddenLeadCategories: [...CHERRY_HIDDEN, "Referral Given"],
-    // OH, DM4PM and CWSJ/CWSJ-OS have their own dedicated cherry views + logins —
-    // keep them out of the regular team's base view so work doesn't overlap.
-    excludeClientTags: ["OH", "DM4PM", "CWSJ", "CWSJ-OS"],
+    // OH, DM4PM, CWSJ/CWSJ-OS and SBSPO have their own dedicated cherry views +
+    // logins — keep them out of the regular team's base view so work doesn't overlap.
+    excludeClientTags: ["OH", "DM4PM", "CWSJ", "CWSJ-OS", "SBSPO"],
   },
   {
     id: "outboundhero-cherry",
@@ -119,6 +119,21 @@ export const INBOX_VIEWS: InboxView[] = [
     aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
     hiddenLeadCategories: CHERRY_HIDDEN,
     includeClientTags: ["CWSJ", "CWSJ-OS"],
+  },
+  {
+    id: "sbspo-cherry",
+    label: "SBSPO (Cherry)",
+    description: "Base Clients (Cherry), restricted to the SBSPO client tag",
+    excludeNoise: true,
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
+    clientTag: "SBSPO",
+  },
+  {
+    id: "sbspo-all",
+    label: "SBSPO Master Inbox",
+    description: "All SBSPO leads (every bucket + noise), restricted to the SBSPO client tag.",
+    clientTag: "SBSPO",
   },
 ];
 
