@@ -119,32 +119,64 @@ export async function pushToSheet(
     } catch { /* read failed → proceed to append */ }
   }
 
-  // Map data to sheet columns (matching the column order from ABM sheet)
-  const row = [
-    data.lead_email || "",
-    data.lead_name || "",
-    data.company_name || "",
-    new Date().toISOString(), // Time We Got Reply
-    data.reply_time || "",
-    data.city || "",
-    data.state || "",
-    data.address || "",
-    data.google_maps_url || "",
-    data.phone || "",
-    data.lead_category || "",
-    data.client_tag || "",
-    data.sender_email || "",
-    data.reply_we_got || "",
-    data.prospect_cc_email || "",
-    data.our_reply || "",
-    data.cc_email_1 || "",
-    data.cc_email_2 || "",
-    data.cc_email_3 || "",
-    data.bcc_email_1 || "",
-    "", // Duplicate Check
-    "New", // Status (Required)
-    data.notes || "", // Notes (Required)
-  ];
+  // Map each value to its column BY HEADER NAME, not by fixed position. Client
+  // sheets differ — some omit the "Our last reply" column, add Zip/Zoho columns,
+  // reorder, etc. — so a positional row silently lands values in the wrong
+  // columns (our reply text in a CC column, "New" in Notes). Reading the header
+  // row and matching by name makes it correct for every layout.
+  const H = (s: unknown) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  const valueByHeader: Record<string, string> = {
+    "lead email": data.lead_email || "",
+    "lead name": data.lead_name || "",
+    "company name": data.company_name || "",
+    "time we got reply": new Date().toISOString(),
+    "reply time": data.reply_time || "",
+    "city": data.city || "",
+    "state": data.state || "",
+    "address": data.address || "",
+    "google maps url": data.google_maps_url || "",
+    "phone": data.phone || "",
+    "current lead category": data.lead_category || "",
+    "lead category": data.lead_category || "",
+    "client tag": data.client_tag || "",
+    "sender email": data.sender_email || "",
+    "reply we got": data.reply_we_got || "",
+    "prospect cc email": data.prospect_cc_email || "",
+    "cc email 1": data.cc_email_1 || "",
+    "cc email 2": data.cc_email_2 || "",
+    "cc email 3": data.cc_email_3 || "",
+    "bcc email 1": data.bcc_email_1 || "",
+  };
+  // Columns we intentionally NEVER fill — left blank for the client to own:
+  //  · "Our last reply" / "Lead handoff email" — the handoff-email feature was
+  //    removed (do NOT write our reply text into client sheets).
+  //  · "Status (Required)" / "Notes (Required)" — client-filled (writing "New"
+  //    put an invalid value into their validated dropdown).
+  //  · "Duplicate Check", "# Of Attempts…", "Quality Lead Criteria…", etc.
+
+  const colLetter = (n: number): string => {
+    let s = "";
+    while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+    return s;
+  };
+
+  // Read the header row and build the row in the sheet's own column order.
+  let headers: string[];
+  try {
+    const hres = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheet.sheet_id,
+      range: `'${sheet.sheet_name}'!1:1`,
+    });
+    headers = (hres.data.values?.[0] || []).map((h) => String(h ?? ""));
+  } catch (err) {
+    return { ok: false, error: `Could not read header row for ${clientTag}'s sheet: ${(err as Error).message}` };
+  }
+  if (!headers.some((h) => H(h) === "lead email")) {
+    // No recognizable layout — refuse rather than write a misaligned/blank row.
+    return { ok: false, error: `Sheet for ${clientTag} has no "Lead Email" header (found: ${headers.slice(0, 8).map((h) => `"${h}"`).join(", ")}) — refusing to write a misaligned row.` };
+  }
+  const row = headers.map((h) => valueByHeader[H(h)] ?? "");
+  const lastCol = colLetter(Math.max(headers.length, 1));
 
   // Retry transient Google API failures (rate limit / 5xx / network) a few
   // times before giving up, so a blip never drops a lead. Permanent errors
@@ -154,7 +186,7 @@ export async function pushToSheet(
     try {
       const resp = await sheets.spreadsheets.values.append({
         spreadsheetId: sheet.sheet_id,
-        range: `'${sheet.sheet_name}'!A:W`,
+        range: `'${sheet.sheet_name}'!A:${lastCol}`,
         valueInputOption: "USER_ENTERED",
         // INSERT_ROWS (not the default OVERWRITE): always INSERT a fresh row for
         // the lead. The default overwrote the last row when the sheet's grid had
