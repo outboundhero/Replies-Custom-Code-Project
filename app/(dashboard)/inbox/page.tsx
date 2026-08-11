@@ -507,6 +507,34 @@ export default function InboxPage() {
     setLoadingCat(null);
   }
 
+  // Keep a ref of which categories are expanded so the realtime refresh can
+  // update them in place without re-subscribing on every expand/collapse.
+  const expandedRef = useRef<Set<string>>(new Set());
+  useEffect(() => { expandedRef.current = expanded; }, [expanded]);
+
+  // Live refresh (realtime). Re-pulls counts + total and refreshes the currently
+  // expanded buckets IN PLACE (no collapse), all through the authenticated
+  // /api/inbox route — so realtime carries no data itself, just a "refresh" nudge.
+  const refreshLive = useCallback(async () => {
+    try {
+      const p = new URLSearchParams({ mode: "bootstrap" });
+      if (debouncedSearch) p.set("search", debouncedSearch);
+      if (filterClient) p.set("client_tag", filterClient);
+      if (filterAi) p.set("ai_category", filterAi);
+      if (view && view !== "all") p.set("view", view);
+      const res = await fetch(`/api/inbox?${p}`);
+      if (res.ok) {
+        const d = await res.json();
+        setCounts(d.counts || {});
+        setTotal(d.total || 0);
+      }
+    } catch { /* transient — next signal refreshes */ }
+    for (const cat of expandedRef.current) loadCategoryLeads(cat);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, filterClient, filterAi, view]);
+  const refreshLiveRef = useRef<() => void>(() => {});
+  useEffect(() => { refreshLiveRef.current = refreshLive; }, [refreshLive]);
+
   // Toggle category expand/collapse
   function toggleCategory(cat: string) {
     setExpanded((prev) => {
@@ -527,46 +555,40 @@ export default function InboxPage() {
   // (Filter/view resets + first-bucket auto-expand are handled inside
   // loadBootstrap, which re-runs whenever view / client / debounced search change.)
 
-  // Realtime: listen for new inserts. Realtime uses the anon key directly
-  // (bypasses our /api/inbox auth), so for client-scoped users we MUST
-  // drop any row whose client_tag isn't in their allowed list — otherwise
-  // their counts and lists would silently leak other clients' inserts.
+  // Realtime: the server BROADCASTS a minimal, non-PII "reply-change" signal on
+  // every reply ingest (lib/realtime-broadcast.ts). We can't use the old
+  // postgres_changes subscription anymore — that needed the anon key to read the
+  // `replies` table, and RLS now denies anon all access (the anon key was
+  // publicly exposed). Broadcast carries NO lead data; on a signal that could
+  // belong to the active view we do a debounced refresh through the
+  // authenticated /api/inbox route (which enforces per-user client scoping).
   useEffect(() => {
     const activeView = getView(view);
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const channel = realtimeSupabase
       .channel("inbox-realtime")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "replies" }, (payload) => {
-        const newRow = payload.new as ReplyListItem & { inbox_is_noise?: boolean; ai_categorized_lead_category?: string | null };
-        // Single source of truth for view membership (client-tag scope +
-        // include/exclude, noise, AI allowlist, hidden buckets) — identical to the
-        // server query, so a new reply can never leak into a view it doesn't
-        // belong to (e.g. a non-OH reply into OutboundHero (Cherry)).
-        if (!replyMatchesView(activeView, newRow, allowedClientTags)) return;
-        const cat = newRow.lead_category || "Open Response";
-        // Respect ACTIVE search + filters — when the user has filtered the inbox
-        // they should only see matching leads, not every new arrival.
+      .on("broadcast", { event: "reply-change" }, ({ payload }) => {
+        const sig = (payload || {}) as {
+          client_tag?: string | null;
+          lead_category?: string | null;
+          ai_categorized_lead_category?: string | null;
+          inbox_is_noise?: boolean;
+        };
+        // Same membership gate as before (all non-PII fields) — skip signals that
+        // couldn't appear in this view / the active client-tag scope, so we don't
+        // refresh needlessly. Scoped users never react to other clients' signals.
+        if (!replyMatchesView(activeView, sig, allowedClientTags)) return;
         const f = filtersRef.current;
-        if (f.client && newRow.client_tag !== f.client) return;
-        if (f.category && cat !== f.category) return;
-        if (f.ai && (newRow.ai_categorized_lead_category || "") !== f.ai) return;
-        if (f.search) {
-          const s = f.search.toLowerCase();
-          const hay = `${newRow.lead_email || ""} ${newRow.company_name || ""} ${newRow.lead_name || ""}`.toLowerCase();
-          if (!hay.includes(s)) return;
-        }
-        // Update counts
-        setCounts((prev) => ({ ...prev, [cat]: (prev[cat] || 0) + 1 }));
-        setTotal((t) => t + 1);
-        // If category is expanded, prepend the lead
-        setCategoryLeads((prev) => {
-          if (!prev[cat]) return prev;
-          if (prev[cat].some((r) => r.id === newRow.id)) return prev;
-          return { ...prev, [cat]: [newRow, ...prev[cat]] };
-        });
+        if (f.client && sig.client_tag !== f.client) return;
+        if (f.category && (sig.lead_category || "Open Response") !== f.category) return;
+        if (f.ai && (sig.ai_categorized_lead_category || "") !== f.ai) return;
+        // Coalesce bursts, then refresh via the authenticated route.
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => refreshLiveRef.current?.(), 600);
       })
       .subscribe();
 
-    return () => { realtimeSupabase.removeChannel(channel); };
+    return () => { if (timer) clearTimeout(timer); realtimeSupabase.removeChannel(channel); };
   }, [allowedClientTags, view]);
 
   // Non-blocking Google-Sheet URL (cached per client tag) — pops the Sheet

@@ -24,6 +24,7 @@ import db from "@/lib/db";
 import type { EmailBisonWebhookPayload } from "@/lib/types";
 import { coerceInstance } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
+import { broadcastReplyChange } from "@/lib/realtime-broadcast";
 
 interface ClientConfig {
   cc_name_1?: string | null; cc_email_1?: string | null;
@@ -325,6 +326,12 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   const replyStatus = action === "created" ? "Pending" : "Pending again";
   let replyRowId: number | undefined;
   if (!isBounce) {
+  const replyIsNoise = isNoiseReply({
+    reply_we_got: cleanedReply,
+    lead_email: reply.from_email_address,
+    to_email: recipients.toEmails,
+    email_subject: reply.email_subject,
+  });
   const { data: _upserted, error: _upsertErr } = await supabase.from("replies").upsert({
     workflow: "tracked",
     bison_instance: bisonInstance,
@@ -368,12 +375,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     ai_categorized_lead_category: aiCategory,
     // Precompute inbox "noise" (bounce/auto-reply junk) once at ingest so the
     // curated views filter an indexed boolean instead of ~30 ILIKEs per read.
-    inbox_is_noise: isNoiseReply({
-      reply_we_got: cleanedReply,
-      lead_email: reply.from_email_address,
-      to_email: recipients.toEmails,
-      email_subject: reply.email_subject,
-    }),
+    inbox_is_noise: replyIsNoise,
     reply_status: replyStatus,
     airtable_record_id: recordId,
     airtable_base_id: section.airtable_base_id,
@@ -406,6 +408,13 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     // Invalidate the inbox counts/tags cache so the next page load sees
     // the new row immediately (instead of waiting up to 60s for TTL).
     bumpCacheVersion();
+    // Nudge open inboxes to refresh (secure broadcast — carries no PII).
+    void broadcastReplyChange({
+      client_tag: campaignTag,
+      lead_category: leadCategoryValue,
+      ai_categorized_lead_category: aiCategory,
+      inbox_is_noise: replyIsNoise,
+    });
     // Capture the reply's BCC (almost always empty) as a best-effort follow-up
     // so a missing prospect_bcc_* column (pre-migration) can never break the
     // main upsert above. Only fires when a BCC is actually present.

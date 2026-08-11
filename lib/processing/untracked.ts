@@ -19,6 +19,7 @@ import supabase from "@/lib/supabase";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
 import { coerceInstance } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
+import { broadcastReplyChange } from "@/lib/realtime-broadcast";
 
 async function getUntrackedConfig(): Promise<UntrackedConfig> {
   const result = await db.execute("SELECT * FROM untracked_config WHERE id = 1");
@@ -253,6 +254,12 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
 
   // 7b. Store in Supabase (non-blocking)
   const untrackedReplyStatus = action === "created" ? "Pending" : "Pending again";
+  const replyIsNoise = isNoiseReply({
+    reply_we_got: cleanedReply,
+    lead_email: reply.from_email_address,
+    to_email: recipients.toEmails,
+    email_subject: reply.email_subject,
+  });
   supabase.from("replies").upsert({
     workflow: "untracked",
     bison_instance: bisonInstance,
@@ -274,12 +281,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     prospect_cc_name: recipients.ccNames,
     lead_category: leadCategoryValue,
     ai_categorized_lead_category: aiCategory,
-    inbox_is_noise: isNoiseReply({
-      reply_we_got: cleanedReply,
-      lead_email: reply.from_email_address,
-      to_email: recipients.toEmails,
-      email_subject: reply.email_subject,
-    }),
+    inbox_is_noise: replyIsNoise,
     reply_status: untrackedReplyStatus,
     airtable_record_id: recordId,
     airtable_base_id: airtableBaseId,
@@ -306,6 +308,15 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     campaign_id: 0, // untracked has no campaign — use 0 for unique constraint
     updated_at: new Date().toISOString(),
   }, { onConflict: "reply_id,campaign_id,bison_instance" }).then(({ error }) => {
+    if (!error) {
+      // Nudge open inboxes to refresh (secure broadcast — carries no PII).
+      void broadcastReplyChange({
+        client_tag: companyCode,
+        lead_category: leadCategoryValue,
+        ai_categorized_lead_category: aiCategory,
+        inbox_is_noise: replyIsNoise,
+      });
+    }
     if (error) {
       console.error("[untracked] Supabase upsert failed:", error.message);
       return;
