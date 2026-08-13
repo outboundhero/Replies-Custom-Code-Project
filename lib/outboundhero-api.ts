@@ -861,6 +861,42 @@ export async function attachLeadsToCampaign(
   return { ok: allOk, attachedCount: attached, requestedCount: leadIds.length, error: firstErr };
 }
 
+export interface RemoveLeadsResult { ok: boolean; removedCount: number; requestedCount: number; error?: string }
+
+/**
+ * Remove leads from a campaign — DELETE /api/campaigns/{id}/leads { lead_ids }.
+ * PERMANENT on Bison's side (re-adding later resets their history). Master-inbox
+ * conversations for these leads are unaffected. Batches large sets.
+ */
+export async function removeLeadsFromCampaign(
+  instanceKey: string,
+  campaignId: number,
+  leadIds: number[],
+  chunkSize = 500,
+): Promise<RemoveLeadsResult> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  let removed = 0;
+  let ok = true;
+  let firstErr: string | undefined;
+  for (let i = 0; i < leadIds.length; i += chunkSize) {
+    const chunk = leadIds.slice(i, i + chunkSize);
+    try {
+      const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}/leads`, {
+        method: "DELETE",
+        headers: buildHeaders(token),
+        timeoutMs: 120_000,
+        body: JSON.stringify({ lead_ids: chunk }),
+      });
+      if (res.ok) removed += chunk.length;
+      else { ok = false; if (!firstErr) firstErr = `${res.status}: ${(await res.text()).slice(0, 200)}`; }
+    } catch (e) {
+      ok = false;
+      if (!firstErr) firstErr = (e as Error).message;
+    }
+  }
+  return { ok, removedCount: removed, requestedCount: leadIds.length, error: firstErr };
+}
+
 async function attachLeadsBatch(
   instanceKey: string,
   campaignId: number,
