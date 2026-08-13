@@ -23,7 +23,7 @@ const ESPS: Esp[] = ["google", "outlook", "segs"];
 type Cell = { campaignId: number | null; name: string | null; completion: number; total: number; status: string };
 interface Routing {
   clientTag: string; group: number | null; instance: string; lane: "b2b" | "b2c" | null;
-  esps: Record<Esp, Cell | null>; combinedLeads: number; allAbove50: boolean; readyToExpand: boolean;
+  esps: Record<Esp, Cell | null>; combinedLeads: number; combinedContacted: number; allAbove50: boolean; readyToExpand: boolean;
   batch: number; checkedAt: string | null;
 }
 
@@ -53,7 +53,7 @@ export async function GET(req: NextRequest) {
     if (!map.has(key)) {
       const inst = instances.get(TAG);
       const lane = inst ? (r.bison_instance === inst.b2b ? "b2b" : r.bison_instance === inst.b2c ? "b2c" : null) : null;
-      map.set(key, { clientTag: TAG, group: inst?.group ?? null, instance: r.bison_instance, lane, esps: { google: null, outlook: null, segs: null }, combinedLeads: 0, allAbove50: false, readyToExpand: false, batch: 1, checkedAt: null });
+      map.set(key, { clientTag: TAG, group: inst?.group ?? null, instance: r.bison_instance, lane, esps: { google: null, outlook: null, segs: null }, combinedLeads: 0, combinedContacted: 0, allAbove50: false, readyToExpand: false, batch: 1, checkedAt: null });
     }
     const routing = map.get(key)!;
     routing.esps[r.esp] = { campaignId: r.campaign_id ?? null, name: r.campaign_name ?? null, completion: Number(r.completion_percentage) || 0, total: Number(r.total_leads) || 0, status: String(r.status || "") };
@@ -65,6 +65,7 @@ export async function GET(req: NextRequest) {
     const cells = ESPS.map((e) => r.esps[e]).filter(Boolean) as Cell[];
     const gate = trioReadyToExpand(cells);
     r.combinedLeads = gate.combinedTotal;
+    r.combinedContacted = gate.combinedContacted;
     r.allAbove50 = gate.pct >= CONTACTED_MIN_PCT;
     r.readyToExpand = gate.ready;
     return r;

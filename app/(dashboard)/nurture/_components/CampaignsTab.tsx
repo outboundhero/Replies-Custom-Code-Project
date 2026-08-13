@@ -3,8 +3,9 @@
 /**
  * Campaigns monitoring tab — watch nurture campaigns fill up and auto-expand.
  * Per routing (client × workspace) shows the trio's completion-% bars, a
- * combined-leads-vs-5,000 meter, and a status (Building / Ready to expand /
- * Batch N). Reads the cached /api/nurture/expansion-status (Turso-only, fast).
+ * contacted-vs-8,000 meter, and a status (Building / Ready to expand / Batch N).
+ * A batch spawns the next only when the trio has ≥8,000 contacted AND ≥80%
+ * contacted. Reads the cached /api/nurture/expansion-status (Turso-only, fast).
  * "Check now" runs a dry-run evaluation on demand to verify it live.
  */
 import { useEffect, useMemo, useState, useCallback } from "react";
@@ -18,14 +19,14 @@ type Esp = "google" | "outlook" | "segs";
 type Cell = { campaignId: number | null; name: string | null; completion: number; total: number; status: string };
 interface Routing {
   clientTag: string; group: number | null; instance: string; lane: "b2b" | "b2c" | null;
-  esps: Record<Esp, Cell | null>; combinedLeads: number; allAbove50: boolean; readyToExpand: boolean;
+  esps: Record<Esp, Cell | null>; combinedLeads: number; combinedContacted: number; allAbove50: boolean; readyToExpand: boolean;
   batch: number; checkedAt: string | null;
 }
 interface Expansion { clientTag: string; instance: string; esp: string; batch: number; createdAt: string }
 interface Data {
   routings: Routing[]; recentExpansions: Expansion[];
   stats: { routingsWatched: number; readyToExpand: number; totalClones: number; largestCombined: number };
-  thresholds: { completion: number; combinedLeads: number };
+  thresholds: { completionPct: number; contactedLeads: number };
 }
 
 const ESPS: Esp[] = ["google", "outlook", "segs"];
@@ -66,8 +67,8 @@ export default function CampaignsTab() {
     return q ? data.routings.filter((r) => r.clientTag.toLowerCase().includes(q)) : data.routings;
   }, [data, search]);
 
-  const combinedMin = data?.thresholds.combinedLeads ?? 5000;
-  const compMin = data?.thresholds.completion ?? 50;
+  const combinedMin = data?.thresholds.contactedLeads ?? 8000;
+  const compMin = data?.thresholds.completionPct ?? 80;
 
   async function checkNow(tag: string) {
     setChecking(tag);
@@ -159,7 +160,7 @@ function Tile({ label, value, accent }: { label: string; value: string; accent: 
 function RoutingRow({ r, combinedMin, compMin, onOpen, onCheck, checking }: {
   r: Routing; combinedMin: number; compMin: number; onOpen: () => void; onCheck: () => void; checking: boolean;
 }) {
-  const combinedPct = Math.min(100, (r.combinedLeads / combinedMin) * 100);
+  const combinedPct = Math.min(100, (r.combinedContacted / combinedMin) * 100);
   const status = r.readyToExpand
     ? { label: "Ready to expand", cls: "bg-violet-100 text-violet-700" }
     : r.batch > 1
@@ -201,14 +202,14 @@ function RoutingRow({ r, combinedMin, compMin, onOpen, onCheck, checking }: {
         })}
       </div>
 
-      {/* Combined meter */}
+      {/* Contacted meter (vs the 8,000-contacted expand threshold) */}
       <div className="w-28 shrink-0">
         <div className="flex items-center justify-between text-[11px] mb-1">
-          <span className="text-muted-foreground">combined</span>
-          <span className="tabular-nums font-medium">{r.combinedLeads.toLocaleString()}</span>
+          <span className="text-muted-foreground" title={`${combinedMin.toLocaleString()} contacted needed to expand`}>contacted</span>
+          <span className="tabular-nums font-medium">{r.combinedContacted.toLocaleString()}</span>
         </div>
         <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-          <div className={`h-full rounded-full ${r.combinedLeads > combinedMin ? "bg-violet-500" : "bg-slate-400"}`} style={{ width: `${combinedPct}%` }} />
+          <div className={`h-full rounded-full ${r.combinedContacted >= combinedMin ? "bg-violet-500" : "bg-slate-400"}`} style={{ width: `${combinedPct}%` }} />
         </div>
         <p className="text-[10px] text-muted-foreground mt-0.5">of {combinedMin.toLocaleString()}</p>
       </div>
