@@ -170,7 +170,7 @@ export async function syncServiceAreas(): Promise<{ count: number; withArea: num
   const rows = await fetchOnboardingForm();
   const map = new Map<string, ServiceArea>();
   for (const r of rows) {
-    const tags = r.clientAbbreviation.split(/[&/,]+/).map((s) => s.trim()).filter(Boolean);
+    const tags = r.clientAbbreviation.split(/\s*[/,]\s*|\s+&\s+/).map((s) => s.trim()).filter(Boolean);
     const tokens = parseServiceArea(r.inclusionLocations);
     for (const tag of tags) map.set(tag.toUpperCase(), { tokens, raw: r.inclusionLocations || "" });
   }
@@ -212,7 +212,7 @@ export async function syncServiceAreaForClient(tag: string | null | undefined): 
   const rows = await fetchOnboardingForm();
   let found: ServiceArea | null = null;
   for (const r of rows) {
-    const tags = r.clientAbbreviation.split(/[&/,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const tags = r.clientAbbreviation.split(/\s*[/,]\s*|\s+&\s+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
     if (tags.includes(clean)) { found = { tokens: parseServiceArea(r.inclusionLocations), raw: r.inclusionLocations || "" }; break; }
   }
   await db.execute(
