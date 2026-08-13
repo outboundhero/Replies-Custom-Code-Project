@@ -646,24 +646,43 @@ function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle
           : <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600" title={c.missingCells.map((m) => `${ESP_FULL[m.esp]} @ ${getInstanceLabel(m.instance)}`).join("\n")}><AlertTriangle className="size-3.5" /> {c.missingCells.length} gap{c.missingCells.length === 1 ? "" : "s"}</span>}
       </div>
 
-      {/* Expansion status: current batch, highest completion %, and a live
-          "Expand" action when the trio is ≥50% + >5k (ready for [Nurture N]). */}
-      <div className="shrink-0 flex items-center justify-end gap-1.5 w-[132px]">
-        {c.currentBatch > 1 && <span title="Current nurture batch" className="text-[9px] font-medium rounded bg-violet-100 px-1.5 py-0.5 text-violet-700">Nurture {c.currentBatch}</span>}
-        {c.combinedTotal > 0 && (
-          <span
-            title={`Nurture batch: ${c.combinedContacted.toLocaleString()} of ${c.combinedTotal.toLocaleString()} contacted (${Math.round(c.aggPct)}%). Splits at ≥8,000 contacted & ≥80%.`}
-            className="text-[10px] tabular-nums text-muted-foreground"
+      {/* Expansion: current batch + progress toward the 8,000-contacted split
+          (new batch at ≥8,000 contacted AND ≥80%), with a live Expand when ready. */}
+      <div className="shrink-0 flex items-center justify-end gap-2 w-[172px]">
+        {(c.currentBatch > 1 || c.combinedTotal > 0) && (
+          <div
+            className="flex flex-col items-end gap-1"
+            title={c.combinedTotal > 0
+              ? `${c.combinedContacted.toLocaleString()} of ${c.combinedTotal.toLocaleString()} contacted (${Math.round(c.aggPct)}%). New batch at ≥8,000 contacted & ≥80%.`
+              : "Current nurture batch"}
           >
-            {Math.round(c.aggPct)}% · {c.combinedContacted.toLocaleString()}/8k
-          </span>
+            <div className="flex items-center gap-1.5 whitespace-nowrap leading-none">
+              {c.currentBatch > 1 && (
+                <span className="text-[9px] font-semibold rounded-full bg-violet-100 px-1.5 py-[2px] text-violet-700">N{c.currentBatch}</span>
+              )}
+              {c.combinedTotal > 0 && (
+                <>
+                  <span className="text-[11px] tabular-nums font-semibold text-foreground/80">{Math.round(c.aggPct)}%</span>
+                  <span className="text-[9px] tabular-nums text-muted-foreground/70">{c.combinedContacted.toLocaleString()}/8k</span>
+                </>
+              )}
+            </div>
+            {c.combinedTotal > 0 && (
+              <div className="h-1 w-[108px] rounded-full bg-muted overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${c.readyToExpand ? "bg-violet-500" : "bg-emerald-400"}`}
+                  style={{ width: `${Math.max(3, Math.min(100, (c.combinedContacted / 8000) * 100))}%` }}
+                />
+              </div>
+            )}
+          </div>
         )}
         {c.readyToExpand && (
           <button
             onClick={(e) => { stop(e); onExpand(); }}
             disabled={expanding}
             title="Create the next nurture campaign ([Nurture N]), re-attach senders, activate, and re-point routing"
-            className="inline-flex items-center gap-1 rounded-md bg-violet-600 text-white px-2 h-6 text-[10px] font-semibold hover:bg-violet-700 disabled:opacity-50"
+            className="shrink-0 inline-flex items-center gap-1 rounded-md bg-violet-600 text-white px-2 h-6 text-[10px] font-semibold hover:bg-violet-700 disabled:opacity-50"
           >
             {expanding ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />} Expand
           </button>
