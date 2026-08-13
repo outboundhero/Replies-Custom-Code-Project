@@ -25,34 +25,39 @@ import { applyOffsetToClone } from "@/lib/nurture/nurture-schedule";
 import { listMainCampaigns, type InstanceCampaign } from "@/lib/nurture/campaign-inventory";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 
-// "Contacted 50% of the contacts" = total_leads_contacted / total_leads >= 50%.
-// (NOT Bison's `completion_percentage`, which is a stricter sequence-completion
-// metric — e.g. a 77%-contacted campaign can report completion_percentage ~50.)
-export const CONTACTED_MIN = 50;
-export const COMBINED_LEADS_MIN = 5000;
-// Per-client expansion cooldown: after a client spawns a batch, it can't spawn
-// another for this many days — stops "Nurture 2/3/4/5" piling up day-after-day.
-export const EXPANSION_COOLDOWN_DAYS = 7;
-const COOLDOWN_MS = EXPANSION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+// A nurture batch (its 3 ESP campaigns combined) spawns the next batch ONLY when
+// it's both genuinely full AND worked through:
+//   • >= CONTACTED_LEADS_MIN leads CONTACTED across the trio, AND
+//   • >= CONTACTED_MIN_PCT % of the trio's leads contacted.
+// This never splits a low-lead batch (e.g. 100 leads at 80% = 80 contacted, well
+// under 8,000) and effectively caps each batch around CONTACTED_LEADS_MIN /
+// (CONTACTED_MIN_PCT/100) ≈ 10,000 leads before overflowing to a fresh batch.
+// (`completion` = total_leads_contacted / total_leads, NOT Bison's
+// `completion_percentage`, which is a stricter sequence-completion metric.)
+export const CONTACTED_MIN_PCT = 80;
+export const CONTACTED_LEADS_MIN = 8000;
 const ESPS: Esp[] = ["google", "outlook", "segs"];
-
-/** Most recent expansion time for a client (ms epoch), or null if never. */
-async function lastExpansionAt(tag: string): Promise<number | null> {
-  const r = await db.execute({
-    sql: "SELECT MAX(created_at) c FROM nurture_campaign_expansions WHERE UPPER(client_tag)=UPPER(?)",
-    args: [tag],
-  });
-  const c = (r.rows[0] as { c?: string })?.c;
-  if (!c) return null;
-  // SQLite datetime('now') → "YYYY-MM-DD HH:MM:SS" in UTC.
-  const ms = new Date(String(c).replace(" ", "T") + "Z").getTime();
-  return Number.isFinite(ms) ? ms : null;
-}
 
 /** % of a campaign's contacts that have been contacted. */
 function contactedPct(total?: number, contacted?: number): number {
   if (!total || total <= 0) return 0;
   return ((contacted ?? 0) / total) * 100;
+}
+
+/**
+ * Is a nurture trio ready to spawn the next batch? Combined CONTACTED leads
+ * >= CONTACTED_LEADS_MIN AND aggregate contacted % >= CONTACTED_MIN_PCT. Accepts
+ * each ESP cell's completion (%) + total leads — the shape both the expander and
+ * the monitoring routes already have.
+ */
+export function trioReadyToExpand(cells: { completion: number; total: number }[]): {
+  ready: boolean; combinedContacted: number; combinedTotal: number; pct: number;
+} {
+  const combinedTotal = cells.reduce((s, c) => s + (c.total || 0), 0);
+  const combinedContacted = cells.reduce((s, c) => s + Math.round(((c.completion || 0) / 100) * (c.total || 0)), 0);
+  const pct = combinedTotal > 0 ? (combinedContacted / combinedTotal) * 100 : 0;
+  const ready = cells.length === 3 && combinedContacted >= CONTACTED_LEADS_MIN && pct >= CONTACTED_MIN_PCT;
+  return { ready, combinedContacted, combinedTotal, pct };
 }
 
 export interface InstanceResult {
@@ -117,14 +122,12 @@ export async function expandCampaignsForClient(
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { result.error = "no map"; return result; }
 
-  // Expansion gates, evaluated once for this run (health snapshots below still
-  // run regardless so the monitoring tab stays live):
-  //  1. fired — nurture must have passed the 80% activation gate, else it's
-  //     paused and shouldn't grow.
-  //  2. cooldown — a client can spawn at most one batch per EXPANSION_COOLDOWN_DAYS.
+  // Expansion gate: the client must be fired (past the 80% MAIN-completion
+  // activation gate) — else nurture is paused and shouldn't grow. The per-batch
+  // "full + worked-through" test (>=8k contacted & >=80%) is applied per trio
+  // below. No time cooldown. (Health snapshots below still run regardless so the
+  // monitoring tab stays live.)
   const fired = await isFired(TAG);
-  const lastExp = await lastExpansionAt(TAG);
-  const inCooldown = lastExp != null && Date.now() - lastExp < COOLDOWN_MS;
 
   // Matching MAIN schedule for a clone (same instance + ESP, non-draft), so the
   // clone gets the +4h offset from the main — not the inherited nurture schedule.
@@ -173,12 +176,14 @@ export async function expandCampaignsForClient(
       details.push(rec);
     }
 
-    row.combinedLeads = details.reduce((s, x) => s + x.total, 0);
-    row.allAbove50 = details.every((x) => x.completion >= CONTACTED_MIN);
-    const shouldExpand = row.allAbove50 && row.combinedLeads > COMBINED_LEADS_MIN;
-    if (!shouldExpand) { row.reason = "below threshold"; result.instances.push(row); continue; }
+    const gate = trioReadyToExpand(details);
+    row.combinedLeads = gate.combinedTotal;
+    row.allAbove50 = gate.pct >= CONTACTED_MIN_PCT; // field kept for the monitoring routes; now = aggregate ≥80%
+    if (!gate.ready) {
+      row.reason = `below threshold (${gate.combinedContacted} contacted, ${gate.pct.toFixed(0)}%; need ≥${CONTACTED_LEADS_MIN} contacted & ≥${CONTACTED_MIN_PCT}%)`;
+      result.instances.push(row); continue;
+    }
     if (!fired) { row.reason = "not fired (nurture gated off)"; result.instances.push(row); continue; }
-    if (inCooldown) { row.reason = `expansion cooldown (<${EXPANSION_COOLDOWN_DAYS}d since last)`; result.instances.push(row); continue; }
     if (opts.dryRun) { row.reason = "would expand (dry-run)"; result.instances.push(row); continue; }
 
     // EXPAND: clone each campaign in the trio.

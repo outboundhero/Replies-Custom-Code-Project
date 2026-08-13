@@ -16,7 +16,7 @@ import db from "@/lib/db";
 import { isCanonicalNurtureCampaign, detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedClients } from "@/lib/churn";
-import { CONTACTED_MIN, COMBINED_LEADS_MIN } from "@/lib/nurture/campaign-expansion";
+import { trioReadyToExpand } from "@/lib/nurture/campaign-expansion";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 
 export const dynamic = "force-dynamic";
@@ -148,16 +148,9 @@ export async function GET(req: NextRequest) {
     const instHealth = healthByTag.get(TAG);
     if (instHealth) {
       for (const [, espMapH] of instHealth) {
-        let combined = 0;
-        let allAbove = espMapH.size === ESPS.length;
-        for (const esp of ESPS) {
-          const h = espMapH.get(esp);
-          if (!h) { allAbove = false; continue; }
-          if (h.completion > maxCompletion) maxCompletion = h.completion;
-          combined += h.total;
-          if (h.completion < CONTACTED_MIN) allAbove = false;
-        }
-        if (allAbove && combined > COMBINED_LEADS_MIN) readyToExpand = true;
+        const cells = ESPS.map((esp) => espMapH.get(esp)).filter(Boolean) as { completion: number; total: number }[];
+        for (const c of cells) if (c.completion > maxCompletion) maxCompletion = c.completion;
+        if (trioReadyToExpand(cells).ready) readyToExpand = true;
       }
     }
     const currentBatch = batchByTag.get(TAG) ?? 1;

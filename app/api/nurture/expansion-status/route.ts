@@ -14,7 +14,7 @@ import { requireAuth } from "@/lib/auth";
 import db from "@/lib/db";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedTags } from "@/lib/churn";
-import { CONTACTED_MIN, COMBINED_LEADS_MIN } from "@/lib/nurture/campaign-expansion";
+import { CONTACTED_MIN_PCT, CONTACTED_LEADS_MIN, trioReadyToExpand } from "@/lib/nurture/campaign-expansion";
 import type { Esp } from "@/lib/nurture/esp";
 
 export const dynamic = "force-dynamic";
@@ -63,9 +63,10 @@ export async function GET(req: NextRequest) {
 
   const routings = [...map.values()].map((r) => {
     const cells = ESPS.map((e) => r.esps[e]).filter(Boolean) as Cell[];
-    r.combinedLeads = cells.reduce((s, c) => s + c.total, 0);
-    r.allAbove50 = cells.length === 3 && cells.every((c) => c.completion >= CONTACTED_MIN);
-    r.readyToExpand = r.allAbove50 && r.combinedLeads > COMBINED_LEADS_MIN;
+    const gate = trioReadyToExpand(cells);
+    r.combinedLeads = gate.combinedTotal;
+    r.allAbove50 = gate.pct >= CONTACTED_MIN_PCT;
+    r.readyToExpand = gate.ready;
     return r;
   });
 
@@ -85,7 +86,7 @@ export async function GET(req: NextRequest) {
       totalClones: expRes.rows.length,
       largestCombined: routings.reduce((m, r) => Math.max(m, r.combinedLeads), 0),
     },
-    thresholds: { completion: CONTACTED_MIN, combinedLeads: COMBINED_LEADS_MIN },
+    thresholds: { completionPct: CONTACTED_MIN_PCT, contactedLeads: CONTACTED_LEADS_MIN },
     cached: false,
   };
   cache = { ts: Date.now(), data };
