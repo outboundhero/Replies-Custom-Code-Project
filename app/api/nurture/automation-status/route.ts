@@ -110,7 +110,7 @@ export async function GET(req: NextRequest) {
     missingCells: Array<{ instance: string; esp: Esp }>;
     mapConfirmed: boolean; mapConfirmedAt: string | null;
     hasMap: boolean; churned: boolean; churnDate: string | null;
-    maxCompletion: number; readyToExpand: boolean; currentBatch: number;
+    aggPct: number; combinedContacted: number; combinedTotal: number; readyToExpand: boolean; currentBatch: number;
   };
   const sections = new Map<number, { id: number; name: string; clients: ClientOut[] }>();
 
@@ -139,18 +139,21 @@ export async function GET(req: NextRequest) {
     }
     const configured = neededInstances.length > 0 && missingCells.length === 0;
 
-    // Completion / ready-to-expand from the health snapshots. maxCompletion =
-    // highest contacted-% across the client's mapped campaigns. readyToExpand =
-    // any instance whose full ESP trio is ≥50% AND >5k combined (the expansion
-    // engine's exact criterion).
-    let maxCompletion = 0;
-    let readyToExpand = false;
+    // Aggregate contacted % + combined contacted of the client's most-progressed
+    // nurture trio — this matches the expand rule (≥8,000 contacted AND ≥80%),
+    // so the number reflects what actually triggers a new batch. readyToExpand =
+    // any trio that clears both thresholds.
+    let aggPct = 0, combinedContacted = 0, combinedTotal = 0, readyToExpand = false;
     const instHealth = healthByTag.get(TAG);
     if (instHealth) {
       for (const [, espMapH] of instHealth) {
         const cells = ESPS.map((esp) => espMapH.get(esp)).filter(Boolean) as { completion: number; total: number }[];
-        for (const c of cells) if (c.completion > maxCompletion) maxCompletion = c.completion;
-        if (trioReadyToExpand(cells).ready) readyToExpand = true;
+        const g = trioReadyToExpand(cells);
+        if (g.ready) readyToExpand = true;
+        // Headline = the trio furthest toward the 8,000-contacted threshold.
+        if (g.combinedContacted > combinedContacted) {
+          combinedContacted = g.combinedContacted; combinedTotal = g.combinedTotal; aggPct = g.pct;
+        }
       }
     }
     const currentBatch = batchByTag.get(TAG) ?? 1;
@@ -163,7 +166,7 @@ export async function GET(req: NextRequest) {
       matrix, configured, missingCells,
       mapConfirmed: !!cfg?.mapConfirmedAt, mapConfirmedAt: cfg?.mapConfirmedAt ?? null,
       hasMap: hasMapSet.has(TAG), churned, churnDate,
-      maxCompletion, readyToExpand, currentBatch,
+      aggPct, combinedContacted, combinedTotal, readyToExpand, currentBatch,
     });
   }
 

@@ -26,7 +26,7 @@ interface ClientRow {
   missingCells: Array<{ instance: string; esp: Esp }>;
   mapConfirmed: boolean; mapConfirmedAt: string | null;
   hasMap: boolean; churned: boolean; churnDate: string | null;
-  maxCompletion: number; readyToExpand: boolean; currentBatch: number;
+  aggPct: number; combinedContacted: number; combinedTotal: number; readyToExpand: boolean; currentBatch: number;
 }
 interface Section { id: number; name: string; clients: ClientRow[] }
 
@@ -650,7 +650,14 @@ function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle
           "Expand" action when the trio is ≥50% + >5k (ready for [Nurture N]). */}
       <div className="shrink-0 flex items-center justify-end gap-1.5 w-[132px]">
         {c.currentBatch > 1 && <span title="Current nurture batch" className="text-[9px] font-medium rounded bg-violet-100 px-1.5 py-0.5 text-violet-700">Nurture {c.currentBatch}</span>}
-        {c.maxCompletion > 0 && <span title="Highest campaign completion (contacted %)" className="text-[10px] tabular-nums text-muted-foreground">{Math.round(c.maxCompletion)}%</span>}
+        {c.combinedTotal > 0 && (
+          <span
+            title={`Nurture batch: ${c.combinedContacted.toLocaleString()} of ${c.combinedTotal.toLocaleString()} contacted (${Math.round(c.aggPct)}%). Splits at ≥8,000 contacted & ≥80%.`}
+            className="text-[10px] tabular-nums text-muted-foreground"
+          >
+            {Math.round(c.aggPct)}% · {c.combinedContacted.toLocaleString()}/8k
+          </span>
+        )}
         {c.readyToExpand && (
           <button
             onClick={(e) => { stop(e); onExpand(); }}
