@@ -279,11 +279,20 @@ export async function updateVars(
   await patch(id, set);
 }
 
-/** Advance to a sent step and schedule the next one (or clear when finished). */
+/** Advance to a sent step and schedule the next one (or clear when finished).
+ *  Also clears any continuation timer — a fresh step supersedes it. */
 export async function advanceStep(id: number, newStep: number, nextDueAt: string | null): Promise<void> {
-  await patch(id, { step: newStep, next_step_due_at: nextDueAt });
+  await patch(id, { step: newStep, next_step_due_at: nextDueAt, continuation_due_at: null });
   const row = await getById(id);
   if (row) await mirrorToReply(row.reply_row_id, row.status, newStep);
+}
+
+/** Activate a paused row for immediate continuation (§12), firing its next
+ *  unsent step now (leaves next_step_due_at for advanceStep to reset). */
+export async function activateForContinuation(id: number): Promise<void> {
+  await patch(id, { status: "active", paused_reason: null, continuation_due_at: null });
+  const row = await getById(id);
+  if (row) await mirrorToReply(row.reply_row_id, "active", row.step);
 }
 
 export async function setMeetingState(id: number, state: MeetingState): Promise<void> {

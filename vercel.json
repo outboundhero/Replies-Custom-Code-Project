@@ -88,6 +88,14 @@
     {
       "path": "/api/cron/audit-pending",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/dm4pm-subsequence",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/dm4pm-meeting-sync",
+      "schedule": "0 * * * *"
     }
   ]
 }

@@ -356,7 +356,7 @@ export async function sendOneOffReply(
      *  already-HTML would double-encode it (literal <br> / &amp; in the email). */
     html?: boolean;
   },
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; replyId?: number }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const res = await fetchWithTimeout(`${baseUrl}/api/replies/new`, {
     method: "POST",
@@ -376,8 +376,19 @@ export async function sendOneOffReply(
     }),
   });
 
-  if (res.ok) return { ok: true };
   const body = await res.text();
+  if (res.ok) {
+    // The /replies/new response carries the created thread's reply id
+    // ({ data: { reply: { id } } }) — the DM4PM failover threads later steps
+    // into it. Best-effort parse; existing callers ignore the field.
+    let replyId: number | undefined;
+    try {
+      const j = JSON.parse(body);
+      const id = j?.data?.reply?.id;
+      if (typeof id === "number") replyId = id;
+    } catch { /* non-JSON body → no id */ }
+    return { ok: true, replyId };
+  }
   return { ok: false, error: `${res.status}: ${body}` };
 }
 
@@ -1483,6 +1494,25 @@ export async function getCampaignSenderEmails(instanceKey: string, campaignId: n
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, lastPage - 1) }, worker));
   }
   return out;
+}
+
+export interface SenderEmailDetail { id: number; name: string; email: string; status: string }
+
+/**
+ * Fetch a single sender inbox — GET /api/sender-emails/{id}. Unlike the
+ * campaign sender-emails LIST (which omits the display name), this returns the
+ * account's `name` (used for {SENDER_NAME} when the DM4PM subsequence fails over
+ * to a replacement sender) and its `status` ("Connected" = healthy). Returns
+ * null on 404 / error so callers can fall back safely.
+ */
+export async function getSenderEmail(instanceKey: string, senderEmailId: number): Promise<SenderEmailDetail | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/sender-emails/${senderEmailId}`, { headers: buildHeaders(token), timeoutMs: 15_000 });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const d = (body?.data ?? body) as { id?: number; name?: string; email?: string; status?: string } | undefined;
+  if (!d || typeof d.id !== "number") return null;
+  return { id: d.id, name: String(d.name ?? ""), email: String(d.email ?? ""), status: String(d.status ?? "") };
 }
 
 /** Classify a Bison inbox to its ESP bucket from its connection type + tags. */
