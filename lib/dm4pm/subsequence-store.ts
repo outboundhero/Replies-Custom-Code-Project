@@ -154,8 +154,15 @@ export interface EnrollParams {
  */
 export async function enroll(p: EnrollParams): Promise<SubsequenceRow> {
   await ensureTables();
+  // Dedup (§24): an enrollment already on this reply row, or any LIVE
+  // enrollment for this prospect's email (repeat replies spawn new reply rows,
+  // so the email is the stable identity).
   const existing = await getByReplyRowId(p.replyRowId);
   if (existing) return existing;
+  if (p.leadEmail) {
+    const byEmail = await getByEmail(p.leadEmail);
+    if (byEmail && LIVE_STATUSES.includes(byEmail.status)) return byEmail;
+  }
 
   const now = nowIso();
   const due = scheduleFrom(new Date(), STEP_CADENCE[0]).toISOString();
@@ -227,6 +234,21 @@ export async function pause(id: number, reason: PausedReason): Promise<void> {
   await patch(id, { status: "paused", paused_reason: reason });
   const row = await getById(id);
   if (row) await mirrorToReply(row.reply_row_id, "paused", row.step);
+}
+
+/** Pause because the prospect replied (§11): preserve step, reset the
+ *  continuation timer (a fresh reply restarts the wait for our response). */
+export async function pauseForProspectReply(id: number): Promise<void> {
+  await patch(id, { status: "paused", paused_reason: "prospect_reply", continuation_due_at: null });
+  const row = await getById(id);
+  if (row) await mirrorToReply(row.reply_row_id, "paused", row.step);
+}
+
+/** Stamp the subsequence badge (status/step) onto a specific reply row — used
+ *  when a repeat prospect reply lands on a NEW reply row that should also show
+ *  the "In Subsequence" pill / appear in the DM4PM Subsequence view. */
+export async function setReplyBadge(replyRowId: number, status: SubStatus | null, step: number): Promise<void> {
+  await mirrorToReply(replyRowId, status, step);
 }
 
 /**

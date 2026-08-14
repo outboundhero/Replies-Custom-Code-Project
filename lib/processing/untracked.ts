@@ -260,7 +260,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     to_email: recipients.toEmails,
     email_subject: reply.email_subject,
   });
-  supabase.from("replies").upsert({
+  const _untrackedUpsert = supabase.from("replies").upsert({
     workflow: "untracked",
     bison_instance: bisonInstance,
     lead_email: reply.from_email_address,
@@ -337,6 +337,24 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     // doing one findLeadByEmail per row (whichever Bison instance
     // recognises the email returns the tag set).
   });
+
+  // §11/§13: a DM4PM prospect reply pauses their subsequence, resets the
+  // continuation timer, and returns the reply to Open Responses. Untracked
+  // ingest is otherwise fire-and-forget, so await the upsert (ensuring the row
+  // exists), resolve its id by the unique key, then run the hook. Best-effort.
+  if (companyCode === "DM4PM") {
+    try {
+      await _untrackedUpsert;
+      const { data: prow } = await supabase
+        .from("replies").select("id")
+        .eq("reply_id", reply.id).eq("campaign_id", 0).eq("bison_instance", bisonInstance)
+        .single();
+      if (prow?.id) {
+        const { pauseSubsequenceOnReply } = await import("@/lib/dm4pm/reply-pause");
+        await pauseSubsequenceOnReply({ replyRowId: prow.id as number, leadEmail: reply.from_email_address, clientTag: companyCode });
+      }
+    } catch { /* best-effort — never break untracked ingest */ }
+  }
 
   // 8. Send to master Clay table (all sections) — only for qualified replies
   const replyBodyLower = (reply.text_body || "").toLowerCase();

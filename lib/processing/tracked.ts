@@ -415,6 +415,14 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       ai_categorized_lead_category: aiCategory,
       inbox_is_noise: replyIsNoise,
     });
+    // §11/§13: a DM4PM prospect reply pauses their subsequence (preserve step),
+    // resets the continuation timer, and returns the reply to Open Responses.
+    // Awaited (fire-and-forget silently dies on serverless) but best-effort
+    // internally, so it can never break ingest.
+    if (campaignTag === "DM4PM" && replyRowId) {
+      const { pauseSubsequenceOnReply } = await import("@/lib/dm4pm/reply-pause");
+      await pauseSubsequenceOnReply({ replyRowId, leadEmail: reply.from_email_address, clientTag: campaignTag });
+    }
     // Capture the reply's BCC (almost always empty) as a best-effort follow-up
     // so a missing prospect_bcc_* column (pre-migration) can never break the
     // main upsert above. Only fires when a BCC is actually present.

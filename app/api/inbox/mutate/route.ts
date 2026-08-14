@@ -20,6 +20,8 @@ import { reconnectInbox, isReconnectableSendError } from "@/lib/inboxing-upload"
 import { enqueueSendRetry } from "@/lib/send-retry";
 import { applyReallocate } from "@/lib/processing/apply-reallocate";
 import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
+import { handleDm4pmSubsequenceAction } from "@/lib/dm4pm/inbox-actions";
+import * as dm4pmSub from "@/lib/dm4pm/subsequence-store";
 
 // Category change + send-reply now do extra best-effort work (phone waterfall:
 // reply AI + optional website scrape for the sheet; the handoff-email sheet
@@ -84,6 +86,22 @@ export async function POST(req: NextRequest) {
     }
 
     switch (action) {
+      // ── DM4PM interested-reply subsequence (§4/§14/§15/§16/§19) ──────────
+      // Enrollment + manual controls, delegated to the subsequence handler.
+      // All are DM4PM-only (enforced inside) and keyed on the reply row id.
+      case "enroll-subsequence":
+      case "set-subsequence-vars":
+      case "pause-subsequence":
+      case "resume-subsequence":
+      case "stop-subsequence":
+      case "snooze-subsequence":
+      case "subsequence-meeting-booked":
+      case "set-do-not-call": {
+        const result = await handleDm4pmSubsequenceAction(action, id, body, { clientTag: rowClientTag });
+        if (result.error) return NextResponse.json({ error: result.error }, { status: result.status || 400 });
+        return NextResponse.json(result.data);
+      }
+
       // Change the AI-classified category (ai_categorized_lead_category). Views key
       // eligibility on this (aiCategoryAllowlist), so e.g. Not Interested → Interested
       // moves the lead into Base Clients (Cherry) / the client's cherry view. Scope is
@@ -215,6 +233,13 @@ export async function POST(req: NextRequest) {
               (reply.workflow as string) || "inbox",
               { client_tag: reply.client_tag as string | undefined },
             );
+          }
+          // §22: a full opt-out STOPS any DM4PM subsequence (no resume).
+          if ((rowClientTag || "").toUpperCase() === "DM4PM" && reply?.lead_email) {
+            try {
+              const sub = await dm4pmSub.getByEmail(reply.lead_email as string);
+              if (sub && ["active", "paused", "snoozed"].includes(sub.status)) await dm4pmSub.stop(sub.id);
+            } catch { /* best-effort */ }
           }
         }
 
@@ -456,6 +481,19 @@ export async function POST(req: NextRequest) {
             // as normal via the categorize/push flow (pushReplyToSheet); only this
             // handoff-email column write is disabled. recordSend above still keeps
             // our own outbound history.
+
+            // §12: our team responding to a DM4PM subsequence reply that the
+            // prospect paused starts the 5-business-day inactivity continuation
+            // timer — silence after that fires the next unsent step immediately.
+            try {
+              if ((rowClientTag || "").toUpperCase() === "DM4PM" && toEmail) {
+                const sub = await dm4pmSub.getByEmail(toEmail);
+                if (sub && sub.status === "paused" && sub.paused_reason === "prospect_reply") {
+                  const { scheduleFrom } = await import("@/lib/business-days");
+                  await dm4pmSub.setContinuation(sub.id, scheduleFrom(new Date(), { businessDays: 5 }).toISOString());
+                }
+              }
+            } catch { /* best-effort — never affects the send */ }
           });
         } else {
           // Persist the failure so it stays visible on the lead + in the error
