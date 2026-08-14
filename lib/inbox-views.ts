@@ -92,9 +92,11 @@ export const INBOX_VIEWS: InboxView[] = [
     // Also hide the Referral Given bucket (still visible in Master Inbox + the
     // per-client cherry views).
     hiddenLeadCategories: [...CHERRY_HIDDEN, "Referral Given"],
-    // OH, DM4PM, CWSJ/CWSJ-OS and SBSPO have their own dedicated cherry views +
-    // logins — keep them out of the regular team's base view so work doesn't overlap.
-    excludeClientTags: ["OH", "DM4PM", "CWSJ", "CWSJ-OS", "SBSPO"],
+    // OH, DM4PM and SBSPO have their own dedicated cherry views + logins — keep
+    // them out of the regular team's base view so work doesn't overlap. CWSJ /
+    // CWSJ-OS are worked by the regular inbox team now, so they stay INCLUDED
+    // here (they still also have their own CWSJ (Cherry) view).
+    excludeClientTags: ["OH", "DM4PM", "SBSPO"],
   },
   {
     id: "outboundhero-cherry",
