@@ -71,13 +71,17 @@ export async function handleDm4pmSubsequenceAction(
   if (action === "enroll-subsequence") {
     const { data: row } = await supabase
       .from("replies")
-      .select("reply_id, sender_id, sender_name, sender_email, lead_email, lead_name, lead_id, campaign_id, bison_instance, email_subject")
+      .select("reply_id, sender_id, sender_name, sender_email, lead_email, lead_name, from_name, from_email, lead_id, campaign_id, bison_instance, email_subject")
       .eq("id", id)
       .single();
     if (!row) return { error: "reply not found", status: 404 };
     const r = row as Record<string, unknown>;
-    const leadEmail = s(r.lead_email);
+    // Address the person who actually REPLIED (from_email/from_name), falling
+    // back to the lead record. For DM4PM the lead record is often a generic
+    // cold-campaign target, not the real respondent.
+    const leadEmail = s(r.from_email) || s(r.lead_email);
     if (!leadEmail) return { error: "This reply has no lead email to send to.", status: 400 };
+    const toName = s(r.from_name) || s(r.lead_name) || null;
 
     const firstName = s(body.firstName);
     const phone = s(body.phone);
@@ -92,7 +96,7 @@ export async function handleDm4pmSubsequenceAction(
       senderEmailId: (r.sender_id as number | null) ?? null,
       senderEmail: (r.sender_email as string | null) ?? null,
       senderName: (r.sender_name as string | null) ?? null,
-      toName: (r.lead_name as string | null) ?? null,
+      toName,
       subject: (r.email_subject as string | null) ?? null,
       firstName,
       firstNameConfirmed: b(body.firstNameConfirmed) || firstName.length > 0,

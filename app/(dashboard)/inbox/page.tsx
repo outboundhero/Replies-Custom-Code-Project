@@ -132,6 +132,17 @@ function leadFirstName(d: ReplyDetail): string {
   const name = String(d.lead_name || d.from_name || "").trim();
   return name ? name.split(/\s+/)[0] : "there";
 }
+/**
+ * First name for the DM4PM subsequence greeting. Prefers the person who ACTUALLY
+ * replied (`from_name`) over the cold-campaign lead record's first_name/lead_name,
+ * which for DM4PM is often a generic/stale value ("… (General Email)", a company
+ * name) — the reply frequently comes from a different, real person.
+ */
+function subsequenceFirstName(d: ReplyDetail): string {
+  const from = String(d.from_name || "").replace(/\s*\(.*?\)\s*/g, " ").trim();
+  if (from) return from.split(/\s+/)[0];
+  return leadFirstName(d);
+}
 function resolvePrimaryContactTemplate(d: ReplyDetail): string {
   return primaryContactFallback(leadFirstName(d), String(d.sender_name || "").trim().split(/\s+/)[0] || "");
 }
@@ -1689,7 +1700,7 @@ export default function InboxPage() {
             {String(detail.client_tag || "").toUpperCase() === "DM4PM" && (
               <SubsequenceCard
                 replyId={detail.id}
-                suggestedFirstName={leadFirstName(detail)}
+                suggestedFirstName={subsequenceFirstName(detail)}
                 initial={(detail.dm4pm_subsequence as SubsequenceState | null) ?? null}
                 onChanged={() => { detailCache.current.delete(detail.id); loadDetail(detail.id); loadBootstrap(); }}
               />
