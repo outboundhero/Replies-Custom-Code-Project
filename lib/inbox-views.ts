@@ -124,6 +124,13 @@ export const INBOX_VIEWS: InboxView[] = [
     subsequenceOnly: true,
   },
   {
+    id: "oh-subsequence",
+    label: "OH Subsequence",
+    description: "OutboundHero leads currently in the interested-reply follow-up subsequence (active, paused, snoozed, or completed).",
+    clientTag: "OH",
+    subsequenceOnly: true,
+  },
+  {
     id: "cwsj-cherry",
     label: "CWSJ & CWSJ-OS (Cherry)",
     description: "Base Clients (Cherry), restricted to the CWSJ + CWSJ-OS client tags (their own team owns both).",

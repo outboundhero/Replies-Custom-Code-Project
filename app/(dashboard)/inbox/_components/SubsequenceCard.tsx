@@ -41,8 +41,9 @@ function fmtDate(iso: string | null): string {
  * enrolled; status + Pause/Resume/Stop/Snooze/DNC controls when enrolled.
  * Self-contained — posts to /api/inbox/mutate and calls onChanged() to refresh.
  */
-export function SubsequenceCard({ replyId, suggestedFirstName, initial, onChanged }: {
+export function SubsequenceCard({ replyId, clientLabel, suggestedFirstName, initial, onChanged }: {
   replyId: number;
+  clientLabel: string;
   suggestedFirstName: string;
   initial: SubsequenceState | null;
   onChanged: () => void;
@@ -78,7 +79,7 @@ export function SubsequenceCard({ replyId, suggestedFirstName, initial, onChange
     return (
       <div className="rounded border bg-white px-4 py-3 space-y-2">
         <div className="flex items-center justify-between">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">DM4PM Follow-up Subsequence</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{clientLabel} Follow-up Subsequence</span>
           {wasTerminal && <span className="text-[10px] text-muted-foreground">Previously {STATUS_LABEL[sub!.status]}</span>}
         </div>
         <p className="text-[11px] text-muted-foreground">Automatic 7-step follow-up that pauses the moment they reply or book. Confirm the name and phone before enrolling.</p>
@@ -129,7 +130,7 @@ export function SubsequenceCard({ replyId, suggestedFirstName, initial, onChange
   return (
     <div className="rounded border bg-white px-4 py-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">DM4PM Subsequence</span>
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{clientLabel} Subsequence</span>
         <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium ${
           s.status === "active" ? "border-blue-200 bg-blue-50 text-blue-700"
           : s.status === "paused" ? "border-amber-200 bg-amber-50 text-amber-800"

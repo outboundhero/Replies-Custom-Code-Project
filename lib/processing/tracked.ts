@@ -13,6 +13,7 @@ import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { sendDm4pmWebhooks, dm4pmShouldPush } from "@/lib/dm4pm-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
+import { isSubsequenceTag } from "@/lib/subsequence/config";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { isKnownClientReply } from "./cc-bcc-match";
 import { markReplyInterested } from "@/lib/outboundhero-api";
@@ -419,7 +420,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     // resets the continuation timer, and returns the reply to Open Responses.
     // Awaited (fire-and-forget silently dies on serverless) but best-effort
     // internally, so it can never break ingest.
-    if (campaignTag === "DM4PM" && replyRowId) {
+    if (isSubsequenceTag(campaignTag) && replyRowId) {
       const { pauseSubsequenceOnReply } = await import("@/lib/dm4pm/reply-pause");
       await pauseSubsequenceOnReply({ replyRowId, leadEmail: reply.from_email_address, clientTag: campaignTag });
     }
@@ -642,7 +643,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   // 6d-DM4PM. §22 opt-out: an explicit unsubscribe (blacklist trigger phrase) or
   // an AI "Do Not Contact" classification permanently STOPS the DM4PM subsequence
   // (not just the reply-pause above) — no resume. Suppression is handled by 6c/6d.
-  if (campaignTag === "DM4PM" && (blacklistMatch || aiCategory === "Do Not Contact")) {
+  if (isSubsequenceTag(campaignTag) && (blacklistMatch || aiCategory === "Do Not Contact")) {
     try {
       const store = await import("@/lib/dm4pm/subsequence-store");
       const sub = await store.getByEmail(reply.from_email_address);

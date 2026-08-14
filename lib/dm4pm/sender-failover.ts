@@ -13,14 +13,6 @@ import { getSenderEmail, getCampaignSenderEmails } from "@/lib/outboundhero-api"
 
 const isHealthy = (status: string): boolean => status.trim().toLowerCase() === "connected";
 
-/**
- * Any DM4PM cold campaign on `outboundhero` — used ONLY to fetch the DM4PM
- * client-tag inbox pool for untracked replies (campaign_id 0/null). The
- * sender-emails endpoint returns the tag pool, not that one campaign's senders,
- * so which DM4PM campaign we pass doesn't matter.
- */
-const DEFAULT_DM4PM_CAMPAIGN = 663;
-
 export interface SenderPick { id: number; email: string; name: string }
 
 /** Health + display name for one sender inbox. Null if it can't be fetched. */
@@ -42,8 +34,9 @@ export async function pickHealthySender(
   instanceKey: string,
   campaignId: number | null,
   excludeId: number | null,
+  fallbackCampaign: number,
 ): Promise<SenderPick | null> {
-  const poolCampaign = campaignId && campaignId > 0 ? campaignId : DEFAULT_DM4PM_CAMPAIGN;
+  const poolCampaign = campaignId && campaignId > 0 ? campaignId : fallbackCampaign;
   const pool = await getCampaignSenderEmails(instanceKey, poolCampaign);
   const healthy = pool.filter((s) => isHealthy(s.status) && s.id !== excludeId);
   if (!healthy.length) return null;

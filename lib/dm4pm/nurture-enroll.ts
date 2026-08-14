@@ -22,18 +22,18 @@ export interface NurtureEnrollResult {
 }
 
 /**
- * Enroll a DM4PM lead (by email) into its correct nurture campaign. Returns a
- * result object; never throws. The b2b path (business email → outboundhero,
- * where DM4PM leads already live) resolves fully; a b2c lead not yet placed on
- * the b2c instance is reported as `lead not found` for manual handling.
+ * Enroll a subsequence lead (by email) into its client's correct nurture
+ * campaign. Returns a result object; never throws. The b2b path (business email
+ * → outboundhero, where the leads already live) resolves fully; a b2c lead not
+ * yet placed on the b2c instance is reported as `lead not found`.
  */
-export async function enrollDm4pmInNurture(email: string): Promise<NurtureEnrollResult> {
+export async function enrollInNurture(tag: string, email: string): Promise<NurtureEnrollResult> {
   try {
     if (!email?.trim()) return { ok: false, reason: "no email" };
-    const target = await targetInstanceForLead("DM4PM", email);
-    if (!target) return { ok: false, reason: "DM4PM has no group mapping" };
+    const target = await targetInstanceForLead(tag, email);
+    if (!target) return { ok: false, reason: `${tag} has no group mapping` };
     const esp = detectEsp(email);
-    const entry = pickFromMap(await getCampaignMap("DM4PM"), target.instance, esp);
+    const entry = pickFromMap(await getCampaignMap(tag), target.instance, esp);
     if (!entry) return { ok: false, reason: `no nurture campaign mapped for ${target.instance}/${esp}` };
 
     const lead = await findLeadByEmail(target.instance, email);
@@ -41,16 +41,16 @@ export async function enrollDm4pmInNurture(email: string): Promise<NurtureEnroll
 
     const res = await attachLeadsToCampaign(target.instance, entry.campaign_id, [lead.id]);
     if (!res.ok) {
-      await logError("dm4pm-subsequence", "nurture-enroll", res.error || "attach failed", { lead_email: email, instance: target.instance, esp, campaign_id: entry.campaign_id });
+      await logError("subsequence", "nurture-enroll", res.error || "attach failed", { tag, lead_email: email, instance: target.instance, esp, campaign_id: entry.campaign_id });
       return { ok: false, reason: res.error || "attach failed", instance: target.instance, esp, campaignId: entry.campaign_id };
     }
-    await logActivity("dm4pm-subsequence", "nurture-enrolled", {
+    await logActivity("subsequence", "nurture-enrolled", {
       lead_email: email,
-      details: { instance: target.instance, esp, campaign_id: entry.campaign_id },
+      details: { tag, instance: target.instance, esp, campaign_id: entry.campaign_id },
     });
     return { ok: true, instance: target.instance, esp, campaignId: entry.campaign_id };
   } catch (e) {
-    await logError("dm4pm-subsequence", "nurture-enroll", (e as Error).message, { lead_email: email }).catch(() => {});
+    await logError("subsequence", "nurture-enroll", (e as Error).message, { tag, lead_email: email }).catch(() => {});
     return { ok: false, reason: (e as Error).message };
   }
 }

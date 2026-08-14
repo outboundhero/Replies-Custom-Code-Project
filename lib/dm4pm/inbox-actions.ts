@@ -7,6 +7,7 @@ import supabase from "@/lib/supabase";
 import * as store from "@/lib/dm4pm/subsequence-store";
 import type { SubsequenceRow } from "@/lib/dm4pm/subsequence-store";
 import { coerceInstance } from "@/lib/bison-instances";
+import { isSubsequenceTag } from "@/lib/subsequence/config";
 
 export interface SubsequenceCtx {
   clientTag: string | null;
@@ -64,8 +65,8 @@ export async function handleDm4pmSubsequenceAction(
   ctx: SubsequenceCtx,
 ): Promise<ActionResult> {
   if (!id) return { error: "id required", status: 400 };
-  if ((ctx.clientTag || "").toUpperCase() !== "DM4PM") {
-    return { error: "The follow-up subsequence is available for DM4PM leads only.", status: 400 };
+  if (!isSubsequenceTag(ctx.clientTag)) {
+    return { error: "The follow-up subsequence is available for DM4PM and OH leads only.", status: 400 };
   }
 
   if (action === "enroll-subsequence") {

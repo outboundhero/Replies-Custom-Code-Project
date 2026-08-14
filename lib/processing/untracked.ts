@@ -12,6 +12,7 @@ import { sendToClayWebhook } from "@/lib/clay";
 import { sendDm4pmWebhooks, dm4pmShouldPush } from "@/lib/dm4pm-webhook";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
+import { isSubsequenceTag } from "@/lib/subsequence/config";
 import { isKnownClientReply } from "./cc-bcc-match";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
@@ -342,7 +343,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
   // continuation timer, and returns the reply to Open Responses. Untracked
   // ingest is otherwise fire-and-forget, so await the upsert (ensuring the row
   // exists), resolve its id by the unique key, then run the hook. Best-effort.
-  if (companyCode === "DM4PM") {
+  if (isSubsequenceTag(companyCode)) {
     try {
       await _untrackedUpsert;
       const { data: prow } = await supabase
@@ -480,7 +481,7 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
   }
 
   // 8d-DM4PM. §22 opt-out → permanently STOP the DM4PM subsequence (no resume).
-  if (companyCode === "DM4PM" && (blacklistMatch || aiCategory === "Do Not Contact")) {
+  if (isSubsequenceTag(companyCode) && (blacklistMatch || aiCategory === "Do Not Contact")) {
     try {
       const store = await import("@/lib/dm4pm/subsequence-store");
       const sub = await store.getByEmail(reply.from_email_address);

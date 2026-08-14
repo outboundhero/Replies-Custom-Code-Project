@@ -22,6 +22,7 @@ import { applyReallocate } from "@/lib/processing/apply-reallocate";
 import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
 import { handleDm4pmSubsequenceAction } from "@/lib/dm4pm/inbox-actions";
 import * as dm4pmSub from "@/lib/dm4pm/subsequence-store";
+import { isSubsequenceTag } from "@/lib/subsequence/config";
 
 // Category change + send-reply now do extra best-effort work (phone waterfall:
 // reply AI + optional website scrape for the sheet; the handoff-email sheet
@@ -235,7 +236,7 @@ export async function POST(req: NextRequest) {
             );
           }
           // §22: a full opt-out STOPS any DM4PM subsequence (no resume).
-          if ((rowClientTag || "").toUpperCase() === "DM4PM" && reply?.lead_email) {
+          if (isSubsequenceTag(rowClientTag) && reply?.lead_email) {
             try {
               const sub = await dm4pmSub.getByEmail(reply.lead_email as string);
               if (sub && ["active", "paused", "snoozed"].includes(sub.status)) await dm4pmSub.stop(sub.id);
@@ -486,7 +487,7 @@ export async function POST(req: NextRequest) {
             // prospect paused starts the 5-business-day inactivity continuation
             // timer — silence after that fires the next unsent step immediately.
             try {
-              if ((rowClientTag || "").toUpperCase() === "DM4PM" && toEmail) {
+              if (isSubsequenceTag(rowClientTag) && toEmail) {
                 const sub = await dm4pmSub.getByEmail(toEmail);
                 if (sub && sub.status === "paused" && sub.paused_reason === "prospect_reply") {
                   const { scheduleFrom } = await import("@/lib/business-days");

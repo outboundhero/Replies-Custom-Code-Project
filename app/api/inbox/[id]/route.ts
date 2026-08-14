@@ -4,6 +4,7 @@ import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { getReplySheetOverride } from "@/lib/sheet-override";
+import { isSubsequenceTag } from "@/lib/subsequence/config";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   // Single session read (was requireAuth() + getSession() = two JWT verifies).
@@ -59,9 +60,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       (data as Record<string, unknown>).sheet_override = ov ? { url: ov.url, tabName: ov.tabName } : null;
     } catch { /* best-effort */ }
 
-    // DM4PM interested-reply subsequence state, for the Add-to-Subsequence card.
+    // Interested-reply subsequence state, for the Add-to-Subsequence card.
     // Resolved by reply row then by email (repeat replies spawn new rows).
-    if (String(data.client_tag || "").toUpperCase() === "DM4PM") {
+    if (isSubsequenceTag(data.client_tag)) {
       try {
         const store = await import("@/lib/dm4pm/subsequence-store");
         const { subsequencePublicView } = await import("@/lib/dm4pm/inbox-actions");

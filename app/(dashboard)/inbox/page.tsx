@@ -23,6 +23,7 @@ import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 import { InstanceBadge } from "@/components/instance-badge";
 import { SubsequenceCard, type SubsequenceState } from "./_components/SubsequenceCard";
+import { isSubsequenceTag, getSubsequenceConfig } from "@/lib/subsequence/config";
 import { EmailParticipants, initials } from "@/components/email-participants";
 import { QualificationLookup } from "@/components/qualification-lookup";
 import { InboxBestFit } from "@/components/inbox-best-fit";
@@ -1696,10 +1697,11 @@ export default function InboxPage() {
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
-            {/* DM4PM interested-reply subsequence — enroll + manual controls (§4/§19). */}
-            {String(detail.client_tag || "").toUpperCase() === "DM4PM" && (
+            {/* Interested-reply subsequence — enroll + manual controls (§4/§19). */}
+            {isSubsequenceTag(detail.client_tag) && (
               <SubsequenceCard
                 replyId={detail.id}
+                clientLabel={getSubsequenceConfig(detail.client_tag)?.label || "Follow-up"}
                 suggestedFirstName={subsequenceFirstName(detail)}
                 initial={(detail.dm4pm_subsequence as SubsequenceState | null) ?? null}
                 onChanged={() => { detailCache.current.delete(detail.id); loadDetail(detail.id); loadBootstrap(); }}

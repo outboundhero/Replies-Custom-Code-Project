@@ -12,6 +12,7 @@
  */
 import * as store from "@/lib/dm4pm/subsequence-store";
 import { returnReplyToOpenResponse } from "@/lib/dm4pm/reply-sync";
+import { isSubsequenceTag } from "@/lib/subsequence/config";
 
 export async function pauseSubsequenceOnReply(params: {
   replyRowId: number | null;
@@ -19,7 +20,7 @@ export async function pauseSubsequenceOnReply(params: {
   clientTag: string | null;
 }): Promise<void> {
   try {
-    if ((params.clientTag || "").toUpperCase() !== "DM4PM") return;
+    if (!isSubsequenceTag(params.clientTag)) return;
     const email = (params.leadEmail || "").trim();
     if (!email) return;
 

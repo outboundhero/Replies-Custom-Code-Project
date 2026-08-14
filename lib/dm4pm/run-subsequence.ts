@@ -12,10 +12,11 @@
 import * as store from "@/lib/dm4pm/subsequence-store";
 import type { SubsequenceRow } from "@/lib/dm4pm/subsequence-store";
 import { checkMeeting, meetingOutcome, type MeetingOutcome } from "@/lib/dm4pm/meeting-tracker";
-import { renderStep, DM4PM_STEP_COUNT } from "@/lib/dm4pm/subsequence-templates";
+import { renderStep, SUBSEQUENCE_STEP_COUNT } from "@/lib/dm4pm/subsequence-templates";
 import { scheduleFrom, STEP_CADENCE, isBusinessDay, nextBusinessDay, ctaDays } from "@/lib/business-days";
 import { getSenderHealth, pickHealthySender, senderFirstName } from "@/lib/dm4pm/sender-failover";
-import { enrollDm4pmInNurture } from "@/lib/dm4pm/nurture-enroll";
+import { enrollInNurture } from "@/lib/dm4pm/nurture-enroll";
+import { getSubsequenceConfig } from "@/lib/subsequence/config";
 import { returnReplyToOpenResponse } from "@/lib/dm4pm/reply-sync";
 import { sendReply, sendOneOffReply } from "@/lib/outboundhero-api";
 import { reconnectInbox, isReconnectableSendError } from "@/lib/inboxing-upload";
@@ -47,7 +48,7 @@ function failoverSubject(orig: string | null): string {
 export async function applyMeetingOutcome(row: SubsequenceRow): Promise<{ handled: boolean; outcome: MeetingOutcome }> {
   const email = row.lead_email || "";
   if (!email) return { handled: false, outcome: "none" };
-  const outcome = meetingOutcome(await checkMeeting(email));
+  const outcome = meetingOutcome(await checkMeeting(row.client_tag || "", email));
 
   switch (outcome) {
     case "none":
@@ -77,7 +78,7 @@ export async function applyMeetingOutcome(row: SubsequenceRow): Promise<{ handle
 
     case "not_interested": // passed / not interested / franchise → stop → nurture
       await store.stop(row.id);
-      await enrollDm4pmInNurture(email);
+      await enrollInNurture(row.client_tag || "", email);
       return { handled: true, outcome };
 
     case "duplicate":
@@ -104,7 +105,7 @@ async function sendStep(row: SubsequenceRow, targetStep: number): Promise<SendRe
   const toName = row.to_name || "";
   const cta = ctaDays(new Date());
   const render = (name: string) =>
-    renderStep(targetStep, {
+    renderStep(row.client_tag || "", targetStep, {
       firstName: row.first_name || "",
       phone: row.phone || "",
       senderName: senderFirstName(name),
@@ -135,7 +136,8 @@ async function sendStep(row: SubsequenceRow, targetStep: number): Promise<SendRe
   //    healthy same-campaign sender, then send a NEW thread (a reassigned
   //    sender can't continue the original thread — confirmed vs Bison API).
   if (row.sender_email) reconnectInbox(row.sender_email, instance).catch(() => {});
-  const pick = await pickHealthySender(instance, row.campaign_id, senderEmailId);
+  const fallbackCampaign = getSubsequenceConfig(row.client_tag)?.defaultFailoverCampaign ?? (row.campaign_id || 0);
+  const pick = await pickHealthySender(instance, row.campaign_id, senderEmailId, fallbackCampaign);
   if (!pick) return { ok: false, error: lastError || "no healthy sender available", senderEmailId, bisonReplyId: null };
   await store.reassignSender(row.id, { senderEmailId: pick.id, senderEmail: pick.email, senderName: pick.name });
   const r2 = await sendOneOffReply(instance, {
@@ -155,23 +157,23 @@ async function sendStep(row: SubsequenceRow, targetStep: number): Promise<SendRe
 // ── Step processing ──────────────────────────────────────────────────────────
 
 async function scheduleNext(id: number, sentStep: number): Promise<void> {
-  if (sentStep >= DM4PM_STEP_COUNT) return completeAndNurture(id);
+  if (sentStep >= SUBSEQUENCE_STEP_COUNT) return completeAndNurture(id);
   const nextDue = scheduleFrom(new Date(), STEP_CADENCE[sentStep]).toISOString();
   await store.advanceStep(id, sentStep, nextDue);
 }
 
 async function completeAndNurture(id: number): Promise<void> {
-  await store.advanceStep(id, DM4PM_STEP_COUNT, null);
+  await store.advanceStep(id, SUBSEQUENCE_STEP_COUNT, null);
   await store.markCompleted(id);
   const row = await store.getById(id);
-  if (row?.lead_email) await enrollDm4pmInNurture(row.lead_email); // §23 → nurture soft-no
+  if (row?.lead_email) await enrollInNurture(row.client_tag || "", row.lead_email); // §23 → nurture soft-no
 }
 
 export type ProcessResult = { status: "sent" | "handled" | "skipped" | "retry" | "failed" | "completed"; reason?: string };
 
 export async function processDueStep(row: SubsequenceRow): Promise<ProcessResult> {
   const targetStep = row.step + 1;
-  if (targetStep > DM4PM_STEP_COUNT) {
+  if (targetStep > SUBSEQUENCE_STEP_COUNT) {
     await completeAndNurture(row.id);
     return { status: "completed" };
   }
