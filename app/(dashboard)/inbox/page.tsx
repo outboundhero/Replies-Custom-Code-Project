@@ -133,16 +133,40 @@ function leadFirstName(d: ReplyDetail): string {
   const name = String(d.lead_name || d.from_name || "").trim();
   return name ? name.split(/\s+/)[0] : "there";
 }
+// A candidate name containing any of these is a COMPANY / general inbox, not a
+// person — commercial-cleaning (OH) replies very often come from a business
+// display name. Stems (no trailing boundary) catch plurals/variants.
+const NOT_A_PERSON_NAME = /\b(clean|servic|janitor|maid|llc|\binc\b|corp|compan|group|solution|enterpris|facilit|team|general|depart|sales|info|admin|support|marketing|contact|billing|account|window|carpet|floor|office|hello)/i;
+// Generic first-tokens that aren't real given names.
+const GENERIC_FIRST_TOKEN = new Set(["the", "a", "an", "pro", "go", "master", "keep", "greater", "best", "top", "quality", "elite", "premier", "prime", "first", "all", "new", "my", "your", "we", "us", "mr", "mrs", "ms", "dr"]);
+
+/** Return a plausible person's FIRST name from one candidate string, or null if
+ *  it looks like a company / general inbox / email / acronym. */
+function personFirstName(candidate: string): string | null {
+  const s = String(candidate || "").replace(/\([^)]*\)/g, " ").trim();
+  if (!s || s.includes("@") || NOT_A_PERSON_NAME.test(s)) return null;
+  const token = s.split(/[\s&,./]+/)[0] || "";
+  if (!/^[A-Za-z][A-Za-z'’-]{1,19}$/.test(token)) return null;           // alphabetic, 2–20 chars
+  if (token.length >= 2 && token === token.toUpperCase()) return null;   // ALLCAPS acronym (LDC, CPR)
+  if (/[a-z][A-Z]/.test(token)) return null;                             // camelCase handle (CheckItCleanIt)
+  if (token === token.toLowerCase() && token.length > 12) return null;   // long lowercase handle
+  if (GENERIC_FIRST_TOKEN.has(token.toLowerCase())) return null;
+  return token;
+}
+
 /**
- * First name for the DM4PM subsequence greeting. Prefers the person who ACTUALLY
- * replied (`from_name`) over the cold-campaign lead record's first_name/lead_name,
- * which for DM4PM is often a generic/stale value ("… (General Email)", a company
- * name) — the reply frequently comes from a different, real person.
+ * Suggested greeting first name for the subsequence card. Tries the reply sender
+ * (from_name), then the lead record's first/last name, skipping anything that
+ * looks like a company or general inbox. For OH/DM4PM the display name is often a
+ * business or a stale placeholder — a wrong guess ("Neat", "Pro") is worse than
+ * none, so we return "" (→ greeting "Hi,") when nothing looks like a real person.
  */
 function subsequenceFirstName(d: ReplyDetail): string {
-  const from = String(d.from_name || "").replace(/\s*\(.*?\)\s*/g, " ").trim();
-  if (from) return from.split(/\s+/)[0];
-  return leadFirstName(d);
+  for (const candidate of [d.from_name, d.first_name, d.lead_name]) {
+    const name = personFirstName(String(candidate || ""));
+    if (name) return name;
+  }
+  return "";
 }
 function resolvePrimaryContactTemplate(d: ReplyDetail): string {
   return primaryContactFallback(leadFirstName(d), String(d.sender_name || "").trim().split(/\s+/)[0] || "");
