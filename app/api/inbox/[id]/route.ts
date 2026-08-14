@@ -59,6 +59,18 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       (data as Record<string, unknown>).sheet_override = ov ? { url: ov.url, tabName: ov.tabName } : null;
     } catch { /* best-effort */ }
 
+    // DM4PM interested-reply subsequence state, for the Add-to-Subsequence card.
+    // Resolved by reply row then by email (repeat replies spawn new rows).
+    if (String(data.client_tag || "").toUpperCase() === "DM4PM") {
+      try {
+        const store = await import("@/lib/dm4pm/subsequence-store");
+        const { subsequencePublicView } = await import("@/lib/dm4pm/inbox-actions");
+        let sub = await store.getByReplyRowId(Number(id));
+        if (!sub && data.lead_email) sub = await store.getByEmail(String(data.lead_email));
+        (data as Record<string, unknown>).dm4pm_subsequence = sub ? subsequencePublicView(sub) : null;
+      } catch { /* best-effort — card just won't show enrollment state */ }
+    }
+
     return NextResponse.json(data);
   } catch (error) {
     console.error("[api/inbox/[id]] GET failed:", error);

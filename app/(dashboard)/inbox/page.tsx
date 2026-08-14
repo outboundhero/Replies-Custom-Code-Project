@@ -22,6 +22,7 @@ import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 import { InstanceBadge } from "@/components/instance-badge";
+import { SubsequenceCard, type SubsequenceState } from "./_components/SubsequenceCard";
 import { EmailParticipants, initials } from "@/components/email-participants";
 import { QualificationLookup } from "@/components/qualification-lookup";
 import { InboxBestFit } from "@/components/inbox-best-fit";
@@ -48,6 +49,22 @@ interface ReplyListItem {
   ai_categorized_lead_category: string; lead_category: string;
   reply_status: string; industry_audit: string | null; location_audit: string | null;
   created_at: string; reply_id: number;
+  dm4pm_subseq_status?: string | null; dm4pm_subseq_step?: number | null;
+}
+
+/** Small "In Subseq · Step N" pill for the DM4PM subsequence (§11). */
+function SubseqBadge({ status, step }: { status?: string | null; step?: number | null }) {
+  if (!status) return null;
+  const map: Record<string, { label: string; cls: string }> = {
+    active: { label: `Subseq · Step ${step ?? 0}`, cls: "border-blue-200 bg-blue-50 text-blue-700" },
+    paused: { label: "Subseq paused", cls: "border-amber-200 bg-amber-50 text-amber-800" },
+    snoozed: { label: "Subseq snoozed", cls: "border-slate-200 bg-slate-50 text-slate-600" },
+    completed: { label: "Subseq done", cls: "border-green-200 bg-green-50 text-green-700" },
+    stopped: { label: "Subseq stopped", cls: "border-gray-200 bg-gray-50 text-gray-500" },
+  };
+  const m = map[status];
+  if (!m) return null;
+  return <span className={`inline-flex items-center rounded border px-1 py-px text-[10px] font-medium ${m.cls}`}>{m.label}</span>;
 }
 
 // Order: Open Response on top, then the three positive-engagement values
@@ -1274,6 +1291,7 @@ export default function InboxPage() {
                         <span className="text-[10px] text-muted-foreground truncate">{r.ai_categorized_lead_category || "—"}</span>
                         <span className="text-[10px] font-mono font-bold text-primary/60">{r.client_tag || "N/A"}</span>
                         <InstanceBadge instance={r.bison_instance} size="xs" />
+                        <SubseqBadge status={r.dm4pm_subseq_status} step={r.dm4pm_subseq_step} />
                       </div>
                     </button>
                     );
@@ -1330,6 +1348,7 @@ export default function InboxPage() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-1.5 items-center justify-end">
+                <SubseqBadge status={detail.dm4pm_subsequence?.status} step={detail.dm4pm_subsequence?.step} />
                 {/* Live collision warning: teammates also viewing this lead. */}
                 {otherViewers.length > 0 && (
                   <span
@@ -1665,6 +1684,16 @@ export default function InboxPage() {
               />
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
+
+            {/* DM4PM interested-reply subsequence — enroll + manual controls (§4/§19). */}
+            {String(detail.client_tag || "").toUpperCase() === "DM4PM" && (
+              <SubsequenceCard
+                replyId={detail.id}
+                suggestedFirstName={leadFirstName(detail)}
+                initial={(detail.dm4pm_subsequence as SubsequenceState | null) ?? null}
+                onChanged={() => { detailCache.current.delete(detail.id); loadDetail(detail.id); loadBootstrap(); }}
+              />
+            )}
 
             {/* ── Send Reply (with CC/BCC pre-populated) ── */}
             <div className="rounded border bg-white px-4 py-3 space-y-2">

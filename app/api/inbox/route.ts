@@ -19,6 +19,17 @@ const CLIENT_TAGS_TTL_MS = 5 * 60 * 1000; // 5min — tags barely change
 const LEADS_SELECT =
   "id, workflow, lead_email, lead_name, company_name, client_tag, bison_instance, ai_categorized_lead_category, lead_category, reply_status, industry_audit, location_audit, created_at, reply_id";
 
+// DM4PM subsequence badge/view columns are optional until the migration
+// (sql/2026-08_dm4pm_subsequence.sql) runs. Feature-detect once per lambda so
+// selecting/filtering them can never break the inbox pre-migration.
+let _subseqCols: boolean | null = null;
+async function hasSubseqColumns(): Promise<boolean> {
+  if (_subseqCols !== null) return _subseqCols;
+  const { error } = await supabase.from("replies").select("dm4pm_subseq_status").limit(1);
+  _subseqCols = !error;
+  return _subseqCols;
+}
+
 /**
  * Mirror of LEAD_CATEGORIES in app/(dashboard)/inbox/page.tsx — keep in sync.
  * Used by the slow-path COUNT fallback only.
@@ -48,12 +59,15 @@ async function hasArchivedColumn(): Promise<boolean> {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyView(q: any, view: InboxView | null): any {
+function applyView(q: any, view: InboxView | null, hasSubseqCols = false): any {
   if (!view) return q;
   if (view.excludeNoise) q = q.eq("inbox_is_noise", false);
   if (view.aiCategoryAllowlist && view.aiCategoryAllowlist.length > 0) {
     q = q.in("ai_categorized_lead_category", view.aiCategoryAllowlist);
   }
+  // Subsequence view — only rows with a subsequence status (guarded on the
+  // column existing so it's a no-op pre-migration).
+  if (view.subsequenceOnly && hasSubseqCols) q = q.not("dm4pm_subseq_status", "is", null);
   return q;
 }
 
@@ -96,14 +110,18 @@ async function computeCounts(args: {
 
   // Fast path: one RPC call. Noise + AI-allowlist are index-backed params.
   // An explicit user AI-category filter (§18) narrows the allowlist to just it.
-  const { data: rpcRows, error: rpcErr } = await supabase.rpc("inbox_category_counts", {
-    p_client_tag: clientTag,
-    p_allowed_tags: clientTag ? null : (allowed && allowed.length ? allowed : null),
-    p_workflow: workflow,
-    p_search: search,
-    p_exclude_noise: !!view?.excludeNoise,
-    p_ai_allowlist: aiCategory ? [aiCategory] : (view?.aiCategoryAllowlist ?? null),
-  });
+  // The subsequence view can't be expressed in the RPC, so force the slow path
+  // (which applies the dm4pm_subseq_status filter) for accurate counts.
+  const { data: rpcRows, error: rpcErr } = view?.subsequenceOnly
+    ? { data: null, error: { message: "subsequence view → slow path" } as { message: string } }
+    : await supabase.rpc("inbox_category_counts", {
+        p_client_tag: clientTag,
+        p_allowed_tags: clientTag ? null : (allowed && allowed.length ? allowed : null),
+        p_workflow: workflow,
+        p_search: search,
+        p_exclude_noise: !!view?.excludeNoise,
+        p_ai_allowlist: aiCategory ? [aiCategory] : (view?.aiCategoryAllowlist ?? null),
+      });
 
   if (!rpcErr && Array.isArray(rpcRows)) {
     const counts: Record<string, number> = {};
@@ -125,6 +143,7 @@ async function computeCounts(args: {
   if (rpcErr) console.warn("[inbox/counts] RPC failed, falling back:", rpcErr.message);
 
   const archivedOk = await hasArchivedColumn();
+  const subseqOk = await hasSubseqColumns();
   const baseQuery = () => {
     let q = supabase.from("replies").select("id", { count: "estimated", head: true });
     if (archivedOk) q = q.eq("archived", false); // active inbox only
@@ -133,7 +152,7 @@ async function computeCounts(args: {
     if (workflow) q = q.eq("workflow", workflow);
     if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
     if (aiCategory) q = q.eq("ai_categorized_lead_category", aiCategory);
-    q = applyView(q, view);
+    q = applyView(q, view, subseqOk);
     return q;
   };
 
@@ -174,9 +193,11 @@ async function fetchLeads(args: {
   if (!clientTag && Array.isArray(allowed) && allowed.length === 0) {
     return { replies: [], page: { limit, offset, returned: 0, hasMore: false } };
   }
+  const subseqOk = await hasSubseqColumns();
+  const select = subseqOk ? `${LEADS_SELECT}, dm4pm_subseq_status, dm4pm_subseq_step` : LEADS_SELECT;
   let q = supabase
     .from("replies")
-    .select(LEADS_SELECT)
+    .select(select)
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
   if (await hasArchivedColumn()) q = q.eq("archived", false); // active inbox only
@@ -186,7 +207,7 @@ async function fetchLeads(args: {
   if (workflow) q = q.eq("workflow", workflow);
   if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
   if (aiCategory) q = q.eq("ai_categorized_lead_category", aiCategory);  // §18 filter
-  q = applyView(q, view) as typeof q;
+  q = applyView(q, view, subseqOk) as typeof q;
   const { data: rows, error } = await q;
   if (error) throw new Error(error.message);
   const returned = rows?.length || 0;

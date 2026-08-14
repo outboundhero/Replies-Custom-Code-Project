@@ -39,6 +39,9 @@ export interface InboxView {
    *  has its own dedicated OutboundHero (Cherry) view). Applied as a narrowed
    *  allowlist so counts + leads + realtime all honor it. */
   excludeClientTags?: string[];
+  /** Only rows currently in a DM4PM subsequence (dm4pm_subseq_status set). The
+   *  server forces the slow-path counts for this so the sidebar stays accurate. */
+  subsequenceOnly?: boolean;
 }
 
 // Shared "Cherry" filter config, reused by Base Clients (Cherry) and any
@@ -112,6 +115,13 @@ export const INBOX_VIEWS: InboxView[] = [
     clientTag: "DM4PM",
   },
   {
+    id: "dm4pm-subsequence",
+    label: "DM4PM Subsequence",
+    description: "DM4PM leads currently in the interested-reply follow-up subsequence (active, paused, snoozed, or completed).",
+    clientTag: "DM4PM",
+    subsequenceOnly: true,
+  },
+  {
     id: "cwsj-cherry",
     label: "CWSJ & CWSJ-OS (Cherry)",
     description: "Base Clients (Cherry), restricted to the CWSJ + CWSJ-OS client tags (their own team owns both).",
@@ -177,6 +187,7 @@ export function replyMatchesView(
     inbox_is_noise?: boolean | null;
     ai_categorized_lead_category?: string | null;
     lead_category?: string | null;
+    dm4pm_subseq_status?: string | null;
   },
   allowedClientTags?: string[] | null,
 ): boolean {
@@ -184,6 +195,8 @@ export function replyMatchesView(
   // Per-user hard scope (a scoped user never sees other clients' rows).
   if (allowedClientTags && allowedClientTags.length && !allowedClientTags.includes(tag)) return false;
   if (!view) return true;
+  // Subsequence view: only rows currently carrying a subsequence status.
+  if (view.subsequenceOnly && !row.dm4pm_subseq_status) return false;
   // Client-tag restriction — single tag (OutboundHero/DM4PM Cherry) or a set
   // (CWSJ Cherry), and exclusions (Base Clients Cherry). This is what was missing
   // from the realtime path and let other clients' replies leak into a scoped view.
