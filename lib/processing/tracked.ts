@@ -639,6 +639,17 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     });
   }
 
+  // 6d-DM4PM. §22 opt-out: an explicit unsubscribe (blacklist trigger phrase) or
+  // an AI "Do Not Contact" classification permanently STOPS the DM4PM subsequence
+  // (not just the reply-pause above) — no resume. Suppression is handled by 6c/6d.
+  if (campaignTag === "DM4PM" && (blacklistMatch || aiCategory === "Do Not Contact")) {
+    try {
+      const store = await import("@/lib/dm4pm/subsequence-store");
+      const sub = await store.getByEmail(reply.from_email_address);
+      if (sub && ["active", "paused", "snoozed"].includes(sub.status)) await store.stop(sub.id);
+    } catch { /* best-effort — never break ingest */ }
+  }
+
   // 6e. CC/BCC-sender auto-mark → also mark the lead interested in Bison
   // (tracked replies always have an attached contact). Idempotent; best-effort.
   if (ccBccMeetingReady) {

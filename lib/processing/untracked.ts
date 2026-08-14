@@ -479,6 +479,15 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     });
   }
 
+  // 8d-DM4PM. §22 opt-out → permanently STOP the DM4PM subsequence (no resume).
+  if (companyCode === "DM4PM" && (blacklistMatch || aiCategory === "Do Not Contact")) {
+    try {
+      const store = await import("@/lib/dm4pm/subsequence-store");
+      const sub = await store.getByEmail(reply.from_email_address);
+      if (sub && ["active", "paused", "snoozed"].includes(sub.status)) await store.stop(sub.id);
+    } catch { /* best-effort */ }
+  }
+
   // 9. Log activity with the resolved section name
   await logActivity("untracked", action, {
     client_tag: companyCode,
