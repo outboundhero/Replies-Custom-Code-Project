@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth";
 import { SessionProvider } from "@/components/session-provider";
 import { InboxPrefetcher } from "@/components/inbox-prefetcher";
 import { SessionKeepAlive } from "@/components/session-keepalive";
+import { MoveJobsBanner } from "@/components/move-jobs-banner";
 
 export default async function DashboardLayout({
   children,
@@ -25,7 +26,10 @@ export default async function DashboardLayout({
           initialEmail={session?.email ?? null}
           initialAllowedClientTags={session?.allowedClientTags ?? null}
         />
-        <main className="flex-1 p-6 overflow-auto">{children}</main>
+        <main className="flex-1 p-6 overflow-auto">
+          <MoveJobsBanner />
+          {children}
+        </main>
       </div>
       {/* Prefetch fresh inbox data on app load so the first open is instant. */}
       <InboxPrefetcher />

@@ -3,18 +3,16 @@
 /**
  * Same Instance tab (lane + per-lead-ESP). Pick a client → auto-load campaigns
  * from BOTH group instances (B2B1 + B2C1). Bulk-select SOURCE + DESTINATION
- * campaigns. On move, each source campaign's leads are split by email type
- * (business→B2B, personal→B2C) AND by each lead's ESP (from its Bison tag for
- * Google catch-all sources — so SEGs/Outlook leads hidden inside a "Google +
- * Custom" campaign route correctly) into the chosen destinations.
+ * campaigns, then Move. Each source campaign's leads are split by email type
+ * (business→B2B, personal→B2C) AND by each lead's ESP into the chosen
+ * destinations. The move runs as a durable SERVER-SIDE background job (finishes
+ * on its own even if you close the tab); this tab just enqueues it — progress
+ * shows in the shared panels at the top of the page.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Search, Loader2, Zap, AlertTriangle, UserX, MapPin, RefreshCw } from "lucide-react";
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
-import SameInstancePanel, { type SameInstanceState, type SameSourceRow } from "./SameInstancePanel";
-import { SkippedViewer } from "./SkippedViewer";
 
 type Esp = "google" | "outlook" | "segs";
 type Lane = "b2b" | "b2c";
@@ -22,44 +20,16 @@ type ClientStatus = "active" | "returning" | "all";
 interface ClientRow { tag: string; churned: boolean; churnDate: string | null; group: number | null; b2b: string | null; b2c: string | null }
 interface PlanCampaign { id: number; name: string; status: string; esp: Esp; total_leads: number; isNurture: boolean; instance: string; lane: Lane }
 interface Job { campaignId: number; name: string; esp: Esp; sourceInstance: string; sourceSlot: string; totalLeads: number }
-type DestMap = { b2b: Partial<Record<Esp, number>>; b2c: Partial<Record<Esp, number>> };
-
-// One client move in the serial queue. Its run params (dest/names/jobs/instances/
-// serviceAreaFilter/runId) are FROZEN at enqueue time so nothing mixes between
-// clients, and `state` drives its own progress panel.
-type MoveStatus = "queued" | "running" | "done";
-interface MoveEntry {
-  runId: string;
-  status: MoveStatus;
-  clientTag: string;
-  b2bInstance: string;
-  b2cInstance: string;
-  dest: DestMap;
-  names: Map<string, string>;
-  jobs: Job[];
-  serviceAreaFilter: boolean;
-  state: SameInstanceState;
-}
 
 const ESP_LABEL: Record<Esp, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
 const ESPS: Esp[] = ["google", "outlook", "segs"];
-const CAMPAIGN_CONCURRENCY = 3;
 const INSTANCE_SLOT: Record<string, string> = {
   outboundhero: "B2B 1", facilityreach: "B2B 2", cleaningoutbound: "B2C 1", outboundclean: "B2C 2",
 };
 const slot = (instance: string) => INSTANCE_SLOT[instance] || instance;
-// A Google (catch-all) source can contain leads of ANY ESP → resolved per-lead.
-// Outlook/SEGs sources are trusted from the name → only that ESP.
 const reachableEsps = (sourceEsp: Esp): Esp[] => (sourceEsp === "google" ? ESPS : [sourceEsp]);
 
-async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>) {
-  let i = 0;
-  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
-    while (i < items.length) { const idx = i++; try { await fn(items[idx]); } catch { /* row-level */ } }
-  }));
-}
-
-export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement | null }) {
+export default function SameInstanceTab({ onEnqueued }: { onEnqueued?: () => void }) {
   const [allClients, setAllClients] = useState<ClientRow[]>([]);
   const [clientStatus, setClientStatus] = useState<ClientStatus>("active");
   const [clientSearch, setClientSearch] = useState("");
@@ -75,35 +45,8 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
 
   const [sources, setSources] = useState<Set<number>>(new Set());
   const [destinations, setDestinations] = useState<Set<number>>(new Set());
-  const [moves, setMoves] = useState<MoveEntry[]>([]);
   const [serviceAreaFilter, setServiceAreaFilter] = useState(true);
-  const movesRef = useRef<MoveEntry[]>([]);                    // authoritative queue (state mirrors it)
-  const chainRef = useRef<Promise<void>>(Promise.resolve());   // serial executor — ONE move at a time
-  const abortRef = useRef(false);                              // aborts the currently-executing move
-  const abortCtlRef = useRef<AbortController | null>(null);
-
-  // Update the queue state + ref together so the serial executor always reads fresh data.
-  const setMovesSynced = useCallback((updater: (prev: MoveEntry[]) => MoveEntry[]) => {
-    movesRef.current = updater(movesRef.current);
-    setMoves(movesRef.current);
-  }, []);
-
-  // Stop a RUNNING move (abort in-flight requests) or cancel a QUEUED one (remove it).
-  const stopMove = useCallback((runId: string) => {
-    const entry = movesRef.current.find((m) => m.runId === runId);
-    if (!entry) return;
-    if (entry.status === "running") { abortRef.current = true; abortCtlRef.current?.abort(); }
-    else if (entry.status === "queued") setMovesSynced((prev) => prev.filter((m) => m.runId !== runId));
-  }, [setMovesSynced]);
-
-  const closeMove = useCallback((runId: string) => {
-    setMovesSynced((prev) => prev.filter((m) => m.runId !== runId));
-  }, [setMovesSynced]);
-  const abortableSleep = useCallback((ms: number) => new Promise<void>((resolve) => {
-    if (abortRef.current) return resolve();
-    const t = setTimeout(resolve, ms);
-    abortCtlRef.current?.signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
-  }), []);
+  const [enqueuing, setEnqueuing] = useState(false);
 
   useEffect(() => {
     fetch("/api/config/clients").then((r) => (r.ok ? r.json() : [])).then((rows) => {
@@ -133,7 +76,7 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
   const loadCampaigns = useCallback(async (tag: string, opts?: { fresh?: boolean }) => {
     const fresh = opts?.fresh ?? false;
     setLoadingCampaigns(true); setPlanError(null);
-    if (!fresh) setCampaigns(null); // on refresh keep the current list visible while re-pulling
+    if (!fresh) setCampaigns(null);
     try {
       const res = await fetch("/api/leads/move/same-instance/plan", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientTag: tag, fresh }),
@@ -148,12 +91,8 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
   }, []);
 
   function pickClient(c: ClientRow) { setClient(c); setSources(new Set()); setDestinations(new Set()); loadCampaigns(c.tag); }
-  // Re-pull the client's campaigns from Bison, bypassing the 60s cache (for
-  // just-created / still-processing campaigns). Keeps current selections.
   function refreshCampaigns() { if (client) loadCampaigns(client.tag, { fresh: true }); }
 
-  // On-demand service-area sync for JUST the selected client — pulls its inclusion
-  // locations from the onboarding sheet now instead of waiting for the 12h cron.
   async function syncServiceArea() {
     if (!client || syncingArea) return;
     setSyncingArea(true);
@@ -179,7 +118,6 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
   const toggleSource = (id: number) => setSources((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleDest = (id: number) => setDestinations((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  // Resolve destinations per (lane × ESP); build jobs / skipped / errors / warnings.
   const plan = useMemo(() => {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -193,8 +131,6 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
       else destByKey.set(k, cs[0]);
     }
 
-    // Which (lane, ESP) destinations CAN be fed by the selected sources? A Google
-    // source can feed any ESP; an Outlook/SEGs source only its own.
     const feedableEsps = new Set<Esp>();
     for (const id of sources) { const c = campMap.get(id); if (c) for (const e of reachableEsps(c.esp)) feedableEsps.add(e); }
     for (const [k] of destByKey) { const [lane, esp] = k.split(":"); if (!feedableEsps.has(esp as Esp)) warnings.push(`${lane === "b2c" ? "B2C" : "B2B"} ${ESP_LABEL[esp as Esp]} destination selected, but no selected source can produce ${ESP_LABEL[esp as Esp]} leads — it will receive 0.`); }
@@ -204,7 +140,6 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
     let leadsToMove = 0;
     for (const id of sources) {
       const c = campMap.get(id); if (!c) continue;
-      // Movable if at least one reachable-ESP destination exists (either lane).
       const hasDest = reachableEsps(c.esp).some((e) => destByKey.has(`b2b:${e}`) || destByKey.has(`b2c:${e}`));
       if (!hasDest) { skipped.push(c); continue; }
       jobs.push({ campaignId: c.id, name: c.name, esp: c.esp, sourceInstance: c.instance, sourceSlot: slot(c.instance), totalLeads: c.total_leads });
@@ -213,174 +148,34 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
     return { errors, warnings, jobs, skipped, destByKey, leadsToMove };
   }, [sources, destinations, campMap]);
 
-  // ── Driver (serial queue: exactly one move executes at a time) ──
-  const patchRow = useCallback((runId: string, campaignId: number, patch: Partial<SameSourceRow> | ((r: SameSourceRow) => Partial<SameSourceRow>)) => {
-    setMovesSynced((prev) => prev.map((m) => (m.runId !== runId ? m : {
-      ...m,
-      state: { ...m.state, rows: m.state.rows.map((r) => (r.campaignId === campaignId ? { ...r, ...(typeof patch === "function" ? patch(r) : patch) } : r)) },
-    })));
-  }, [setMovesSynced]);
-
-  const setEntryStatus = useCallback((runId: string, status: MoveStatus) => {
-    setMovesSynced((prev) => prev.map((m) => (m.runId !== runId ? m : { ...m, status, state: { ...m.state, status } })));
-  }, [setMovesSynced]);
-
-  async function postMoveWithRetry(runId: string, campaignId: number, body: object): Promise<{ ok: boolean; data?: { movedByKey: Record<string, number>; skipped: number; skippedArea: number; done: boolean; nextCursor: string | null }; error?: string }> {
-    const MAX = 5;
-    for (let attempt = 1; attempt <= MAX; attempt++) {
-      if (abortRef.current) return { ok: false, error: "stopped" };
-      try {
-        const res = await fetch("/api/leads/move/same-instance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: abortCtlRef.current?.signal });
-        if (res.ok) { patchRow(runId, campaignId, { retryAttempt: null }); return { ok: true, data: await res.json() }; }
-        const err = await res.json().catch(() => ({}));
-        // Retry 429/5xx AND transient auth blips (401/403): the admin session is
-        // occasionally not read on a single request during a long run; the same
-        // cookie succeeds on retry. Other hard 4xx (400/404/422) fail fast.
-        const retryable = res.status === 429 || res.status >= 500 || res.status === 401 || res.status === 403;
-        if (!retryable) return { ok: false, error: err.error || `HTTP ${res.status}` };
-      } catch { if (abortRef.current) return { ok: false, error: "stopped" }; }
-      if (attempt < MAX) {
-        const wait = Math.min(20000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 400);
-        patchRow(runId, campaignId, (r) => ({ state: "retrying", retryAttempt: attempt, retries: r.retries + 1 }));
-        await abortableSleep(wait);
-      }
-    }
-    return { ok: false, error: "failed after 5 retries" };
-  }
-
-  async function moveOne(entry: MoveEntry, job: Job) {
-    if (abortRef.current) return;
-    patchRow(entry.runId, job.campaignId, { state: "moving", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined });
-    const acc: Record<string, number> = {};
-    let sk = 0, ska = 0;
-    let cursor: string | null = null;
-    for (;;) {
-      if (abortRef.current) { patchRow(entry.runId, job.campaignId, { state: "error", error: "stopped" }); return; }
-      const r = await postMoveWithRetry(entry.runId, job.campaignId, {
-        clientTag: entry.clientTag, sourceInstance: job.sourceInstance, sourceCampaignId: job.campaignId, sourceCampaignName: job.name,
-        b2bInstance: entry.b2bInstance, b2cInstance: entry.b2cInstance, dest: entry.dest, cursor,
-        serviceAreaFilter: entry.serviceAreaFilter, runId: entry.runId,
-      });
-      if (!r.ok) { patchRow(entry.runId, job.campaignId, { state: "error", error: r.error }); return; }
-      for (const [k, n] of Object.entries(r.data!.movedByKey || {})) acc[k] = (acc[k] || 0) + n;
-      sk += r.data!.skipped || 0;
-      ska += r.data!.skippedArea || 0;
-      const buckets = Object.entries(acc).map(([key, moved]) => { const [lane, esp] = key.split(":"); return { key, lane: lane as Lane, esp, destName: entry.names.get(key) || "", moved }; });
-      const moved = Object.values(acc).reduce((a, b) => a + b, 0);
-      patchRow(entry.runId, job.campaignId, { moved, skipped: sk, skippedArea: ska, buckets, state: "moving" });
-      if (r.data!.done || !r.data!.nextCursor) break;
-      cursor = r.data!.nextCursor;
-    }
-    patchRow(entry.runId, job.campaignId, { state: "done" });
-  }
-
-  // Run ONE whole client move to completion. Called only from the serial chain,
-  // so exactly one runs at a time — no cross-client mixing.
-  async function executeMove(runId: string) {
-    const entry = movesRef.current.find((m) => m.runId === runId);
-    if (!entry) return; // cancelled while queued
-    abortRef.current = false;
-    abortCtlRef.current = new AbortController();
-    setEntryStatus(runId, "running");
-    try {
-      await pool(entry.jobs, CAMPAIGN_CONCURRENCY, (job) => moveOne(entry, job));
-    } finally {
-      setEntryStatus(runId, "done");
-    }
-    if (!abortRef.current) toast.success(`${entry.clientTag}: move finished — sources unchanged (copy-only).`);
-  }
-
-  // Append a unit of work to the serial chain — guarantees one-at-a-time ordering.
-  function runExclusive(fn: () => Promise<void>) {
-    chainRef.current = chainRef.current.then(fn, fn).catch(() => {});
-  }
-
-  function enqueueMove() {
+  // ── Enqueue (server-side background job) ──
+  async function enqueueMove() {
     if (!client) return;
     if (plan.errors.length) { toast.error(plan.errors[0]); return; }
     if (!plan.jobs.length) { toast.error("Select at least one source campaign that has a matching-ESP destination."); return; }
 
-    // Freeze EVERY run parameter now, so later client selections can't leak in.
+    const dest = { b2b: {} as Partial<Record<Esp, number>>, b2c: {} as Partial<Record<Esp, number>> };
+    for (const [key, c] of plan.destByKey) { const [lane, esp] = key.split(":") as [Lane, Esp]; dest[lane][esp] = c.id; }
+    const jobs = plan.jobs.map((j) => ({ sourceInstance: j.sourceInstance, sourceCampaignId: j.campaignId, sourceCampaignName: j.name, totalLeads: j.totalLeads, dest }));
+    const skipped = plan.skipped.map((c) => ({ sourceCampaignName: c.name, reason: "no matching-ESP destination" }));
     const runId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    const dest: DestMap = { b2b: {}, b2c: {} };
-    const names = new Map<string, string>();
-    for (const [key, c] of plan.destByKey) { const [lane, esp] = key.split(":") as [Lane, Esp]; dest[lane][esp] = c.id; names.set(key, c.name); }
 
-    const rows: SameSourceRow[] = [
-      ...plan.jobs.map((j) => ({ campaignId: j.campaignId, name: j.name, esp: j.esp, sourceSlot: j.sourceSlot, totalLeads: j.totalLeads, moved: 0, skipped: 0, skippedArea: 0, buckets: [], state: "queued" as const, retries: 0 })),
-      ...plan.skipped.map((c) => ({ campaignId: c.id, name: c.name, esp: c.esp, sourceSlot: slot(c.instance), totalLeads: c.total_leads, moved: 0, skipped: c.total_leads, skippedArea: 0, buckets: [], state: "skipped" as const, retries: 0 })),
-    ];
-    const entry: MoveEntry = {
-      runId, status: "queued", clientTag: client.tag, b2bInstance, b2cInstance,
-      dest, names, jobs: plan.jobs.slice(), serviceAreaFilter,
-      state: { status: "queued", clientTag: client.tag, b2bLabel: slot(b2bInstance), b2cLabel: slot(b2cInstance), rows },
-    };
-    setMovesSynced((prev) => [...prev, entry]);
-    runExclusive(() => executeMove(runId));
-    const active = movesRef.current.filter((m) => m.status === "queued" || m.status === "running").length;
-    toast.success(active > 1 ? `${client.tag} queued — position ${active}.` : `${client.tag} started.`);
+    setEnqueuing(true);
+    try {
+      const res = await fetch("/api/leads/move/enqueue", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "same", clientTag: client.tag, b2bInstance, b2cInstance, serviceAreaFilter, runId, jobs, skipped }),
+      });
+      const d = await res.json();
+      if (!res.ok) { toast.error(d.error || "Couldn't start the move"); return; }
+      toast.success(`${client.tag} move started in the background — it'll finish on its own, even if you close this tab.`);
+      onEnqueued?.();
+    } catch (e) { toast.error((e as Error).message); } finally { setEnqueuing(false); }
   }
-
-  // Retry one failed source campaign — also serialized through the chain so it
-  // never runs alongside another client's move.
-  function retryCampaign(runId: string, campaignId: number) {
-    runExclusive(async () => {
-      const entry = movesRef.current.find((m) => m.runId === runId);
-      if (!entry) return;
-      const job = entry.jobs.find((j) => j.campaignId === campaignId);
-      if (!job) return;
-      abortRef.current = false;
-      abortCtlRef.current = new AbortController();
-      setEntryStatus(runId, "running");
-      patchRow(runId, campaignId, { state: "queued", moved: 0, skipped: 0, skippedArea: 0, buckets: [], error: undefined, retryAttempt: null });
-      try { await moveOne(entry, job); } finally { setEntryStatus(runId, "done"); }
-    });
-  }
-
-  const exportSkipped = useCallback((runId: string) => {
-    if (!runId) return;
-    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(runId)}`, "_blank");
-  }, []);
 
   const lanes: Array<{ lane: Lane; instance: string; label: string }> = [];
   if (b2bInstance) lanes.push({ lane: "b2b", instance: b2bInstance, label: `${slot(b2bInstance)} · ${getInstanceLabel(b2bInstance)}` });
   if (b2cInstance) lanes.push({ lane: "b2c", instance: b2cInstance, label: `${slot(b2cInstance)} · ${getInstanceLabel(b2cInstance)}` });
-
-  // A move is queued or running → the button label flips to "Queue".
-  const anyActive = moves.some((m) => m.status === "running" || m.status === "queued");
-
-  // Moves run in THIS browser tab — closing/reloading stops them. Warn on leave.
-  useEffect(() => {
-    if (!anyActive) return;
-    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [anyActive]);
-
-  // Show running first, then queued (in order), then done — active work stays on
-  // top. Stable sort keeps enqueue order within each group; keyed by runId so
-  // reordering never remounts a panel.
-  const orderedMoves = useMemo(() => {
-    const rank = (s: MoveStatus) => (s === "running" ? 0 : s === "queued" ? 1 : 2);
-    return [...moves].sort((a, b) => rank(a.status) - rank(b.status));
-  }, [moves]);
-
-  const panelsUI = orderedMoves.length > 0 ? (
-    <div className="space-y-3">
-      {orderedMoves.map((m) => (
-        <div key={m.runId} className="space-y-2">
-          <SameInstancePanel
-            state={m.state}
-            running={m.status === "running"}
-            onStop={() => stopMove(m.runId)}
-            onClose={() => closeMove(m.runId)}
-            onRetry={(cid) => retryCampaign(m.runId, cid)}
-          />
-          {m.status !== "queued" && <SkippedViewer runId={m.runId} onExport={() => exportSkipped(m.runId)} />}
-        </div>
-      ))}
-    </div>
-  ) : null;
 
   return (
     <div className="space-y-4">
@@ -425,11 +220,6 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
         {loadingCampaigns && <p className="text-xs text-muted-foreground flex items-center gap-1.5"><Loader2 className="size-3 animate-spin" /> Loading {client?.tag} campaigns from both instances…</p>}
         {planError && <p className="text-xs text-amber-700 flex items-start gap-1.5"><AlertTriangle className="size-3.5 shrink-0 mt-px" /> {planError}</p>}
       </div>
-
-      {/* Progress panels render into the page-level slot (above the tabs) so a
-          running/queued move stays visible across Cross/Same tab switches.
-          Falls back to inline if no slot is provided. */}
-      {panelSlot ? createPortal(panelsUI, panelSlot) : panelsUI}
 
       {/* Campaign selection */}
       {campaigns && campaigns.length > 0 && (
@@ -525,8 +315,8 @@ export default function SameInstanceTab({ panelSlot }: { panelSlot?: HTMLElement
                 {plan.jobs.length} source{plan.jobs.length === 1 ? "" : "s"} · <span className="text-foreground font-semibold">{plan.leadsToMove.toLocaleString()}</span> leads
                 {plan.skipped.length > 0 && <span className="text-amber-600"> · {plan.skipped.length} skipped (no ESP dest)</span>}
               </span>
-              <button onClick={enqueueMove} disabled={plan.errors.length > 0 || plan.jobs.length === 0} className="ml-auto inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-                <Zap className="size-3.5" /> {anyActive ? "Queue" : "Move"} {plan.leadsToMove > 0 ? plan.leadsToMove.toLocaleString() : ""} leads
+              <button onClick={enqueueMove} disabled={plan.errors.length > 0 || plan.jobs.length === 0 || enqueuing} className="ml-auto inline-flex items-center gap-2 px-3 h-9 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                {enqueuing ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />} Move {plan.leadsToMove > 0 ? plan.leadsToMove.toLocaleString() : ""} leads
               </button>
             </div>
           </div>

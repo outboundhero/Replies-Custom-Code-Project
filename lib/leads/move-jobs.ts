@@ -28,6 +28,7 @@ async function ensureTables(): Promise<void> {
     kind TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_by TEXT,
+    source_instance TEXT,
     target_instance TEXT,
     target_label TEXT,
     target_lane TEXT,
@@ -74,6 +75,8 @@ async function ensureTables(): Promise<void> {
   )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_move_job_status ON move_job(status)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_move_task_job ON move_job_task(job_id, status)`);
+  // Added after the table's first release — safe to run repeatedly.
+  try { await db.execute("ALTER TABLE move_job ADD COLUMN source_instance TEXT"); } catch { /* already exists */ }
   ready = true;
 }
 
@@ -100,6 +103,7 @@ export interface CreateJobInput {
   runId: string;
   kind: MoveJobKind;
   createdBy: string | null;
+  sourceInstance: string | null;
   targetInstance: string | null;
   targetLabel: string | null;
   targetLane: string | null;
@@ -120,10 +124,10 @@ export async function createJob(input: CreateJobInput): Promise<string> {
   const tasksTotal = input.tasks.length;
   await db.execute({
     sql: `INSERT INTO move_job
-      (id, run_id, kind, status, created_by, target_instance, target_label, target_lane, service_area_filter,
+      (id, run_id, kind, status, created_by, source_instance, target_instance, target_label, target_lane, service_area_filter,
        tasks_total, leads_total, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    args: [jobId, input.runId, input.kind, "pending", input.createdBy, input.targetInstance, input.targetLabel, input.targetLane,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    args: [jobId, input.runId, input.kind, "pending", input.createdBy, input.sourceInstance, input.targetInstance, input.targetLabel, input.targetLane,
       input.serviceAreaFilter ? 1 : 0, tasksTotal, leadsTotal, now, now],
   });
 
@@ -333,6 +337,7 @@ export async function retryFailedTasks(jobId: string): Promise<number> {
 
 export interface JobStatusView {
   id: string; runId: string; kind: MoveJobKind; status: MoveJobStatus;
+  sourceInstance: string | null; targetInstance: string | null;
   targetLabel: string | null; targetLane: string | null; createdBy: string | null;
   leadsTotal: number; movedTotal: number; skippedAreaTotal: number; skippedLaneTotal: number; skippedNoDestTotal: number;
   tasksTotal: number; tasksDone: number; tasksFailed: number;
@@ -347,6 +352,7 @@ export interface JobStatusView {
 function toJobView(j: Row, tasks: Row[]): JobStatusView {
   return {
     id: String(j.id), runId: String(j.run_id), kind: String(j.kind) as MoveJobKind, status: String(j.status) as MoveJobStatus,
+    sourceInstance: j.source_instance ?? null, targetInstance: j.target_instance ?? null,
     targetLabel: j.target_label ?? null, targetLane: j.target_lane ?? null, createdBy: j.created_by ?? null,
     leadsTotal: num(j.leads_total), movedTotal: num(j.moved_total), skippedAreaTotal: num(j.skipped_area_total),
     skippedLaneTotal: num(j.skipped_lane_total), skippedNoDestTotal: num(j.skipped_nodest_total),

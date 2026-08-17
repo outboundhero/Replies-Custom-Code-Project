@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
     if (!tasks.length) return NextResponse.json({ error: "no source campaigns to move" }, { status: 400 });
 
     const jobId = await createJob({
-      runId, kind: "cross", createdBy, targetInstance: to, targetLabel: String(body.toLabel || to), targetLane, serviceAreaFilter, tasks,
+      runId, kind: "cross", createdBy, sourceInstance: from, targetInstance: to, targetLabel: String(body.toLabel || to), targetLane, serviceAreaFilter, tasks,
     });
     triggerRunner(jobId);
     return NextResponse.json({ ok: true, jobId, runId });
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
     if (!tasks.length) return NextResponse.json({ error: "no source campaigns to move" }, { status: 400 });
 
     const jobId = await createJob({
-      runId, kind: "same", createdBy, targetInstance: null, targetLabel: `${clientTag} — same instance`, targetLane: null, serviceAreaFilter, tasks,
+      runId, kind: "same", createdBy, sourceInstance: b2bInstance, targetInstance: b2cInstance, targetLabel: `${clientTag} — same instance`, targetLane: null, serviceAreaFilter, tasks,
     });
     triggerRunner(jobId);
     return NextResponse.json({ ok: true, jobId, runId });
