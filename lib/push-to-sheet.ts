@@ -1,7 +1,8 @@
 /**
  * Push a qualified lead to the client's Google Sheet.
- * Called when lead is marked as: Interested, Meeting Ready Lead, Follow Up,
- * Referral Given, or Internally Forwarded.
+ * Called when lead is marked as: Interested, Meeting Ready Lead, or Follow Up.
+ * (Referral Given / Internally Forwarded no longer auto-push — per client request
+ * 2026-08-18 — but the manual "Push to sheet" action still works for any lead.)
  */
 
 import { google } from "googleapis";
@@ -23,8 +24,6 @@ export const SHEET_PUSH_CATEGORIES = [
   "Meeting Ready Lead",
   "Meeting-Ready Lead",
   "Follow Up",
-  "Referral Given",
-  "Internally Forwarded",
 ];
 
 interface ReplyData {
