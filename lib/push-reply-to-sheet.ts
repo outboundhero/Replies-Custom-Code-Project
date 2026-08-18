@@ -60,12 +60,18 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
   const category = opts?.category || reply.lead_category || "";
 
   // Duplicate guard (fast path): if ANOTHER reply for the SAME lead email under
-  // the same client is already in the sheet, don't append a second row. One
-  // prospect's reply often arrives as several separate records seconds apart, and
-  // Google Sheets doesn't reflect a just-appended row instantly — so relying only
-  // on the sheet read-back (below) lets those bursts double-append. This DB check
-  // is instant + consistent and catches them; the sheet read still catches legacy
-  // rows that predate our DB. Either way we mark this reply present and notify.
+  // the same client was pushed VERY RECENTLY, don't append a second row. One
+  // prospect's reply often arrives as several separate records seconds/minutes
+  // apart, and Google Sheets doesn't reflect a just-appended row instantly — so
+  // relying only on the sheet read-back (below) lets those bursts double-append.
+  // This DB check is instant + consistent and catches the burst.
+  //
+  // It is deliberately time-boxed: `pushed_to_sheet=true` is NOT a reliable proxy
+  // for "currently in the sheet" (clients edit/clean these sheets — leads pushed
+  // days ago can be gone), so an OLD sibling must not block re-adding a lead whose
+  // row was removed. Only a recent sibling means "we just added it this run". The
+  // sheet read-back below remains the authoritative de-dup for everything else.
+  const RECENT_PUSH_MS = 30 * 60 * 1000;
   const normEmail = (reply.lead_email || "").trim().toLowerCase();
   if (normEmail) {
     const escaped = normEmail.replace(/[\\%_]/g, (m: string) => `\\${m}`); // LIKE-escape _ and %
@@ -76,6 +82,7 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
       .eq("pushed_to_sheet", true)
       .ilike("lead_email", escaped)
       .neq("id", replyId)
+      .gte("pushed_to_sheet_at", new Date(Date.now() - RECENT_PUSH_MS).toISOString())
       .limit(1);
     if (sibling && sibling.length) {
       await supabase.from("replies").update({ pushed_to_sheet: true, pushed_to_sheet_at: new Date().toISOString() }).eq("id", replyId);
