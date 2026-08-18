@@ -27,7 +27,7 @@ function splitEmails(raw: unknown): string[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Reply = Record<string, any>;
 
-export interface PushOutcome { ok: boolean; error?: string; skipped?: string }
+export interface PushOutcome { ok: boolean; error?: string; skipped?: string; alreadyInSheet?: boolean }
 
 export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; category?: string }): Promise<PushOutcome> {
   let reply = opts?.reply;
@@ -58,6 +58,31 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
   }
 
   const category = opts?.category || reply.lead_category || "";
+
+  // Duplicate guard (fast path): if ANOTHER reply for the SAME lead email under
+  // the same client is already in the sheet, don't append a second row. One
+  // prospect's reply often arrives as several separate records seconds apart, and
+  // Google Sheets doesn't reflect a just-appended row instantly — so relying only
+  // on the sheet read-back (below) lets those bursts double-append. This DB check
+  // is instant + consistent and catches them; the sheet read still catches legacy
+  // rows that predate our DB. Either way we mark this reply present and notify.
+  const normEmail = (reply.lead_email || "").trim().toLowerCase();
+  if (normEmail) {
+    const escaped = normEmail.replace(/[\\%_]/g, (m: string) => `\\${m}`); // LIKE-escape _ and %
+    const { data: sibling } = await supabase
+      .from("replies")
+      .select("id")
+      .eq("client_tag", clientTag)
+      .eq("pushed_to_sheet", true)
+      .ilike("lead_email", escaped)
+      .neq("id", replyId)
+      .limit(1);
+    if (sibling && sibling.length) {
+      await supabase.from("replies").update({ pushed_to_sheet: true, pushed_to_sheet_at: new Date().toISOString() }).eq("id", replyId);
+      await clearSheetPushFailure(replyId);
+      return { ok: true, alreadyInSheet: true };
+    }
+  }
 
   // Phone: waterfall — the lead's reply/signature first, then their website
   // (scraped from the email domain), then the Bison company-phone custom var.
@@ -103,6 +128,13 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
 
   if (result.ok) {
     await supabase.from("replies").update({ pushed_to_sheet: true, pushed_to_sheet_at: new Date().toISOString() }).eq("id", replyId);
+    // The lead was already in the sheet (matched on lead email) — no new row was
+    // appended. Report it so the UI shows an "already in sheet" notice, not a
+    // "pushed" one.
+    if (result.alreadyExists) {
+      await clearSheetPushFailure(replyId);
+      return { ok: true, alreadyInSheet: true };
+    }
     // Persist the EXACT appended row so send-reply can update this lead's
     // "Lead handoff email" cell precisely (Option B). Separate best-effort write
     // — these columns may not exist pre-migration; if so we silently fall back

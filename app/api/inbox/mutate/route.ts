@@ -144,13 +144,13 @@ export async function POST(req: NextRequest) {
         // in a push category. pushReplyToSheet reads the fresh client_tag → resolves
         // the sheet from the registry (or the per-lead override) → pushes. Dedup +
         // verify + failure-recording all handled inside it.
-        let pushed = false;
+        let pushed = false, alreadyInSheet = false;
         if (effectiveTag && effectiveTag !== "N/A" && SHEET_PUSH_CATEGORIES.includes(String(rowLeadCategory || ""))) {
-          try { const pr = await pushReplyToSheet(id); pushed = pr.ok; }
+          try { const pr = await pushReplyToSheet(id); pushed = pr.ok; alreadyInSheet = !!pr.alreadyInSheet; }
           catch { /* recorded in sheet_push_failures */ }
         }
         bumpCacheVersion();
-        return NextResponse.json({ ok: true, client_tag: effectiveTag, sheet, pushed });
+        return NextResponse.json({ ok: true, client_tag: effectiveTag, sheet, pushed, already_in_sheet: alreadyInSheet });
       }
 
       case "update-category": {
@@ -305,7 +305,9 @@ export async function POST(req: NextRequest) {
         // ever silently lost — retried until it succeeds or is dismissed.
         if (SHEET_PUSH_CATEGORIES.some((c) => c.toLowerCase() === category?.toLowerCase())) {
           const result = await pushReplyToSheet(id, { category });
-          if (!result.skipped) {
+          if (result.alreadyInSheet) {
+            extras.already_in_sheet = true;
+          } else if (!result.skipped) {
             extras.pushed_to_sheet = result.ok;
             if (result.error) extras.sheet_error = result.error;
           }

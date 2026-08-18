@@ -949,6 +949,7 @@ export default function InboxPage() {
     if (d.ok) {
       toast.success(`Category: ${cat}`);
       if (d.pushed_to_sheet) toast.success("Auto-pushed to Google Sheet");
+      if (d.already_in_sheet) toast.info("Already in the Google Sheet — not pushed again");
       if (d.sheet_error) toast.error(`Sheet: ${d.sheet_error}`);
       // Out Of Office auto-reschedule outcome (server extracted the
       // return date from the lead's reply; cron re-sends the original
@@ -1099,7 +1100,13 @@ export default function InboxPage() {
     setTsSaving(false);
     if (d.ok) {
       detailCache.current.delete(detail.id);
-      toast.success(d.pushed ? `Client tag set to ${d.client_tag} — routed to its sheet.` : `Client tag set to ${d.client_tag}.`);
+      toast.success(
+        d.already_in_sheet
+          ? `Client tag set to ${d.client_tag} — already in its sheet, not pushed again.`
+          : d.pushed
+            ? `Client tag set to ${d.client_tag} — routed to its sheet.`
+            : `Client tag set to ${d.client_tag}.`,
+      );
       loadBootstrap();
       loadDetail(detail.id);
     } else toast.error(d.error || "Couldn't save");

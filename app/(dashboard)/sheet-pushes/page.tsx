@@ -56,7 +56,7 @@ export default function SheetPushesPage() {
     const res = await fetch("/api/sheet-pushes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "retry", replyId }) });
     const d = await res.json();
     setBusy(null);
-    if (d.ok) { toast.success("Pushed to sheet ✓"); setRows((r) => r.filter((x) => x.reply_id !== replyId)); }
+    if (d.ok) { toast.success(d.alreadyInSheet ? "Already in the sheet — not pushed again" : "Pushed to sheet ✓"); setRows((r) => r.filter((x) => x.reply_id !== replyId)); }
     else toast.error(d.error || "Still failing — will keep retrying");
     load();
   }

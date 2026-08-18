@@ -76,7 +76,7 @@ export async function pushToSheet(
   clientTag: string,
   data: ReplyData,
   override?: { spreadsheetId: string; tabName: string } | null,
-): Promise<{ ok: boolean; error?: string; row?: number; sheetId?: string }> {
+): Promise<{ ok: boolean; error?: string; row?: number; sheetId?: string; alreadyExists?: boolean }> {
   // A per-lead sheet override (set from the inbox) wins over the registry — the
   // operator explicitly pointed THIS lead at a specific sheet/tab.
   let sheet: { sheet_id: string; sheet_name: string } | null = override
@@ -111,10 +111,12 @@ export async function pushToSheet(
   };
 
   // Idempotent: if this lead is already in the sheet, don't append a duplicate
-  // (makes retries + re-pushes safe). On a read failure, fall through to append.
+  // (makes retries + re-pushes safe) and report it back as `alreadyExists` so the
+  // caller can surface a "already in the sheet" notification instead of a false
+  // "pushed". On a read failure, fall through to append.
   if (email) {
     try {
-      if ((await readEmailsColA()).has(email)) return { ok: true, sheetId: sheet.sheet_id };
+      if ((await readEmailsColA()).has(email)) return { ok: true, alreadyExists: true, sheetId: sheet.sheet_id };
     } catch { /* read failed → proceed to append */ }
   }
 
