@@ -1721,9 +1721,13 @@ export default function InboxPage() {
               {detail.pushed_to_sheet && <span className="text-[10px] text-green-600">Pushed to sheet</span>}
             </div>
 
-            {/* Interested-reply subsequence — enroll + manual controls (§4/§19). */}
+            {/* Interested-reply subsequence — enroll + manual controls (§4/§19).
+                key=detail.id remounts the card per lead so its internal state
+                (enrolled/step + the enroll form) always reflects the SELECTED
+                lead — never leaks a previously-viewed lead's enrollment. */}
             {isSubsequenceTag(detail.client_tag) && (
               <SubsequenceCard
+                key={detail.id}
                 replyId={detail.id}
                 clientLabel={getSubsequenceConfig(detail.client_tag)?.label || "Follow-up"}
                 suggestedFirstName={subsequenceFirstName(detail)}
