@@ -33,6 +33,17 @@ export const maxDuration = 60;
 // Default OOO requeue delay when the reply gives no clear return date (§21).
 const DEFAULT_OOO_DELAY_DAYS = 7;
 
+// Categories that require resolving a paused-by-reply subsequence first (see the
+// gate in the "update-category" case). Both "Meeting-Ready" spellings included.
+const SUBSEQ_GATE_CATEGORIES = new Set([
+  "Follow Up",
+  "Interested",
+  "Meeting-Ready Lead",
+  "Meeting Ready Lead",
+  "Meeting Set",
+  "Referral Given",
+]);
+
 export async function POST(req: NextRequest) {
   // Single session read (was requireAuth() + a second getSession() below).
   // A null session = the login cookie is missing/expired. Return an actionable
@@ -64,11 +75,12 @@ export async function POST(req: NextRequest) {
     let rowSubject: string | null = null;
     let rowLeadId: number | null = null;
     let rowSenderEmail: string | null = null;
+    let rowLeadEmail: string | null = null;
     if (id) {
       const allowed = session?.allowedClientTags ?? null;
       const { data: row } = await supabase
         .from("replies")
-        .select("client_tag, bison_instance, reply_id, lead_category, created_at, email_subject, lead_id, sender_email")
+        .select("client_tag, bison_instance, reply_id, lead_category, created_at, email_subject, lead_id, sender_email, lead_email")
         .eq("id", id)
         .single();
       if (allowed && allowed.length) {
@@ -84,6 +96,7 @@ export async function POST(req: NextRequest) {
       rowSubject = (row?.email_subject as string | null) ?? null;
       rowLeadId = (row?.lead_id as number | null) ?? null;
       rowSenderEmail = (row?.sender_email as string | null) ?? null;
+      rowLeadEmail = (row?.lead_email as string | null) ?? null;
     }
 
     switch (action) {
@@ -156,6 +169,40 @@ export async function POST(req: NextRequest) {
       case "update-category": {
         const { category } = body;
         const nowIso = new Date().toISOString();
+
+        // ── Subsequence gate (client decision 2026-08-18) ──────────────────
+        // A lead whose interested-reply subsequence is PAUSED because the
+        // prospect replied (they moved back to Open Response) must be explicitly
+        // resolved — End the subsequence, or Continue where it left off with an
+        // optional business-day delay — BEFORE it can be re-categorized to a
+        // positive bucket (Follow Up / Interested / Meeting-Ready / Referral
+        // Given / Meeting Set). Applies to every subsequence client (DM4PM + OH).
+        // The decision arrives on the same request as `subsequenceDecision`;
+        // without it we block and tell the UI to prompt. This is authoritative —
+        // it cannot be bypassed by the client.
+        if (SUBSEQ_GATE_CATEGORIES.has(String(category || ""))) {
+          const gate = await dm4pmSub.getReplyPauseGate(id, rowLeadEmail);
+          if (gate) {
+            const decision = body.subsequenceDecision as
+              | { action?: string; delayDays?: number }
+              | undefined;
+            if (!decision || !decision.action) {
+              return NextResponse.json({
+                ok: false,
+                requiresSubsequenceDecision: true,
+                subsequence: { id: gate.id, step: gate.step, clientTag: gate.client_tag, leadEmail: gate.lead_email },
+              });
+            }
+            if (decision.action === "end") {
+              await dm4pmSub.stop(gate.id);
+            } else if (decision.action === "continue") {
+              await dm4pmSub.resumeWithDelay(gate.id, Number(decision.delayDays) || 0);
+            } else {
+              return NextResponse.json({ ok: false, error: "Invalid subsequence decision." }, { status: 400 });
+            }
+          }
+        }
+
         const { error } = await supabase
           .from("replies")
           .update({ lead_category: category, updated_at: nowIso })

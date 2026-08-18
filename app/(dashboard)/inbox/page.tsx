@@ -120,6 +120,12 @@ const catDot: Record<string, string> = {
 // Categories that trigger a send/approval flow — do NOT auto-advance to the
 // next lead after these (the user must review/send the outgoing email).
 const PRIMARY_CONTACT_CATEGORY = "Request for Primary Point of Contact (Send Reply)";
+
+// Positive categories that require resolving a paused-by-reply subsequence first
+// (mirrors the server gate in /api/inbox/mutate). Both "Meeting-Ready" spellings.
+const SUBSEQ_GATE_CATEGORIES_UI = new Set([
+  "Follow Up", "Interested", "Meeting-Ready Lead", "Meeting Ready Lead", "Meeting Set", "Referral Given",
+]);
 function isSendCategory(cat: string): boolean {
   return cat === "Change Of Target" || /\(send reply\)/i.test(cat);
 }
@@ -448,6 +454,12 @@ export default function InboxPage() {
   const [cotPreview, setCotPreview] = useState<CotState | null>(null);
   // Send-Reply preview (spec §15): staged draft awaiting review + approval.
   const [sendPreview, setSendPreview] = useState<SendPrevState | null>(null);
+
+  // Subsequence gate: when a paused-by-reply lead is re-categorized, prompt for
+  // End vs Continue (+ business-day delay) before the category change is applied.
+  const [subseqGate, setSubseqGate] = useState<{ cat: string } | null>(null);
+  const [subseqDelay, setSubseqDelay] = useState(0);
+  const [subseqBusy, setSubseqBusy] = useState(false);
   const detailReqRef = useRef(0);
   const sheetCache = useRef<Record<string, string | null>>({});
   // Hover-prefetched full details, so a click paints instantly.
@@ -901,10 +913,27 @@ export default function InboxPage() {
     );
   }
 
-  async function updateCategory(cat: string) {
+  async function updateCategory(
+    cat: string,
+    subsequenceDecision?: { action: "end" | "continue"; delayDays?: number },
+  ) {
     if (!detail) return;
     const oldCat = detail.lead_category || "Open Response";
-    if (oldCat === cat) return;
+    if (oldCat === cat && !subsequenceDecision) return;
+
+    // Subsequence gate (client decision 2026-08-18): a lead whose interested-reply
+    // subsequence is paused because they replied must be explicitly resolved —
+    // End, or Continue where it left off (+ business-day delay) — before it can
+    // move to a positive category. Prompt first; the chosen decision + the
+    // category change are then applied together. The server enforces this too.
+    if (!subsequenceDecision) {
+      const sub = detail.dm4pm_subsequence as SubsequenceState | null;
+      if (SUBSEQ_GATE_CATEGORIES_UI.has(cat) && sub && sub.status === "paused" && sub.pausedReason === "prospect_reply") {
+        setSubseqDelay(0);
+        setSubseqGate({ cat });
+        return;
+      }
+    }
 
     // Auto-advance target: the next lead in the bucket we're working (captured
     // BEFORE the optimistic patch removes the current one). Send/approval
@@ -945,7 +974,17 @@ export default function InboxPage() {
       return next;
     });
 
-    const d = await mutate({ action: "update-category", id: detail.id, category: cat });
+    const d = await mutate({ action: "update-category", id: detail.id, category: cat, subsequenceDecision });
+    if (d.requiresSubsequenceDecision) {
+      // Server-side gate (client state was stale) — revert the optimistic move
+      // and prompt for the End/Continue decision.
+      setDetail((prev) => (prev ? { ...prev, lead_category: oldCat } : prev));
+      setCounts((prev) => { const next = { ...prev }; next[cat] = Math.max(0, (next[cat] || 0) - 1); next[oldCat] = (next[oldCat] || 0) + 1; return next; });
+      setCategoryLeads((prev) => { const next = { ...prev }; if (next[cat]) next[cat] = next[cat].filter((r) => r.id !== detail.id); if (next[oldCat]) next[oldCat] = [{ ...detail, lead_category: oldCat } as unknown as ReplyListItem, ...next[oldCat]]; return next; });
+      setSubseqDelay(0);
+      setSubseqGate({ cat });
+      return;
+    }
     if (d.ok) {
       toast.success(`Category: ${cat}`);
       if (d.pushed_to_sheet) toast.success("Auto-pushed to Google Sheet");
@@ -995,6 +1034,18 @@ export default function InboxPage() {
         if (next[oldCat]) next[oldCat] = [{ ...detail, lead_category: oldCat } as unknown as ReplyListItem, ...next[oldCat]];
         return next;
       });
+    }
+  }
+
+  async function resolveSubseqGate(decision: { action: "end" | "continue"; delayDays?: number }) {
+    if (!subseqGate || subseqBusy) return;
+    const cat = subseqGate.cat;
+    setSubseqBusy(true);
+    try {
+      await updateCategory(cat, decision);
+    } finally {
+      setSubseqBusy(false);
+      setSubseqGate(null);
     }
   }
 
@@ -1881,6 +1932,56 @@ export default function InboxPage() {
       )}
 
       {/* Change-of-Target review (§22): pick the destination + edit + approve. */}
+      {subseqGate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !subseqBusy && setSubseqGate(null)}>
+          <div className="w-full max-w-md rounded-xl border bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold">Resolve the follow-up subsequence</h3>
+                <p className="text-[11px] text-muted-foreground">This lead replied, so their subsequence is paused.</p>
+              </div>
+              <button onClick={() => !subseqBusy && setSubseqGate(null)} className="text-lg leading-none text-muted-foreground hover:text-foreground">×</button>
+            </div>
+            <div className="space-y-4 p-4 text-xs">
+              <p className="text-muted-foreground">
+                Choose what happens to the automatic follow-up before moving this lead to <span className="font-medium text-foreground">{subseqGate.cat}</span>.
+              </p>
+              <div className="space-y-2 rounded-lg border p-3">
+                <div className="text-[11px] font-medium">Continue where it left off</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Wait</span>
+                  <Input
+                    type="number" min={0} max={60} value={subseqDelay}
+                    onChange={(e) => setSubseqDelay(Math.max(0, Math.min(60, Number(e.target.value) || 0)))}
+                    className="h-8 w-16 text-xs"
+                  />
+                  <span className="text-muted-foreground">business day(s) before the next step</span>
+                </div>
+                <button
+                  disabled={subseqBusy}
+                  onClick={() => resolveSubseqGate({ action: "continue", delayDays: subseqDelay })}
+                  className="w-full rounded-md bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                >{subseqBusy ? "Working…" : `Continue subsequence & set ${subseqGate.cat}`}</button>
+              </div>
+              <div className="space-y-2 rounded-lg border p-3">
+                <div className="text-[11px] font-medium">End the subsequence</div>
+                <p className="text-[11px] text-muted-foreground">Stops all remaining follow-up emails for this lead.</p>
+                <button
+                  disabled={subseqBusy}
+                  onClick={() => resolveSubseqGate({ action: "end" })}
+                  className="w-full rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                >{subseqBusy ? "Working…" : `End subsequence & set ${subseqGate.cat}`}</button>
+              </div>
+              <button
+                disabled={subseqBusy}
+                onClick={() => setSubseqGate(null)}
+                className="w-full rounded-md px-3 py-2 text-xs text-muted-foreground hover:bg-muted"
+              >Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {cotPreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !cotPreview.sending && setCotPreview(null)}>
           <div className="w-full max-w-3xl rounded-xl border bg-white shadow-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>

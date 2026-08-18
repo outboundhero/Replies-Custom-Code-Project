@@ -269,6 +269,33 @@ export async function stop(id: number): Promise<void> {
   if (row) await mirrorToReply(row.reply_row_id, "stopped", row.step);
 }
 
+/**
+ * Resume from the next unsent step, waiting `businessDays` business days before
+ * it fires (0 = next business day, like resume()). Used by the inbox
+ * "Continue subsequence" decision when a paused-by-reply lead is re-categorized.
+ */
+export async function resumeWithDelay(id: number, businessDays: number): Promise<void> {
+  const days = Math.max(0, Math.floor(Number(businessDays) || 0));
+  const due = scheduleFrom(new Date(), { businessDays: days }).toISOString();
+  await patch(id, { status: "active", paused_reason: null, continuation_due_at: null, next_step_due_at: due });
+  const row = await getById(id);
+  if (row) await mirrorToReply(row.reply_row_id, "active", row.step);
+}
+
+/**
+ * Inbox re-categorize gate: return the lead's live enrollment IF it is paused
+ * because the prospect replied (moved back to Open Response) — meaning it must be
+ * explicitly ended or continued before the lead is re-categorized to a positive
+ * bucket. Resolves by the stable email first (a repeat reply the operator is
+ * viewing can be a different row than the enrollment), then the reply row.
+ * Returns null when there is nothing to resolve.
+ */
+export async function getReplyPauseGate(replyRowId: number, leadEmail: string | null): Promise<SubsequenceRow | null> {
+  const row = (leadEmail ? await getByEmail(leadEmail) : null) || (await getByReplyRowId(replyRowId));
+  if (row && row.status === "paused" && row.paused_reason === "prospect_reply") return row;
+  return null;
+}
+
 export async function markCompleted(id: number): Promise<void> {
   await patch(id, { status: "completed", next_step_due_at: null, continuation_due_at: null });
   const row = await getById(id);
