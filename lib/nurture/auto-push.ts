@@ -23,6 +23,7 @@ import { getClientInstances } from "@/lib/nurture/group-routing";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate, type BucketResult } from "@/lib/nurture/route-candidates";
+import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 import { logActivity, logError } from "@/lib/errors";
 
 const NURTURE_DAYS = 45;
@@ -56,6 +57,9 @@ export interface AutoPushResult {
   nextLegAfterId: number;
   exhausted: boolean; // no rows scanned this batch from any source
   error?: string;
+  // Candidates dropped this batch because the client's lead-tracking sheet marks
+  // them "Meeting-Ready Lead" (delivered to the client — never re-nurture).
+  sheetMeetingReadyExcluded?: number;
 }
 
 export async function runAutoPushForClient(
@@ -227,10 +231,29 @@ export async function runAutoPushForClient(
   result.scanned = candidates.length;
   if (candidates.length === 0) return result;
 
+  // 3b. Sheet-authoritative Meeting-Ready gate. The client's lead-tracking sheet
+  // is the source of truth for what was DELIVERED to them as a hot/meeting-ready
+  // lead, and it often disagrees with our stored category (edited sheets, legacy
+  // leads not in `replies`). Never nurture a lead the sheet marks Meeting-Ready.
+  // Only that category excludes — mere presence under Interested/Follow Up/etc.
+  // does not. If the client has a sheet we can't read this run, skip the push
+  // (fail closed) so we never re-target a delivered lead; it retries next tick.
+  const sheetMR = await getSheetMeetingReadyEmails(clientTag);
+  if (!sheetMR.ok) {
+    result.error = "lead-tracking sheet unreadable — skipped this run to avoid re-nurturing Meeting-Ready leads";
+    return result;
+  }
+  let routable = candidates;
+  if (sheetMR.emails.size) {
+    routable = candidates.filter((c) => !sheetMR.emails.has((c.email || "").trim().toLowerCase()));
+    result.sheetMeetingReadyExcluded = candidates.length - routable.length;
+  }
+  if (routable.length === 0) return result;
+
   // 4+5. Route via the shared core: partition by (instance, esp) → create in
   // the target instance → attach to the mapped campaign. The onAttached
   // callback stamps our source rows (added_at + nurture_campaign_id) per bucket.
-  const routed = await routeCandidates(clientTag, candidates, map, {
+  const routed = await routeCandidates(clientTag, routable, map, {
     onAttached: async (campaignId, resolved) => {
       const stamp = new Date().toISOString();
       const seqIds = resolved.filter((i) => i.source === "seq").map((i) => i.rowId);
@@ -250,6 +273,7 @@ export async function runAutoPushForClient(
     details: {
       scanned: result.scanned,
       total_attached: result.totalAttached,
+      sheet_meeting_ready_excluded: result.sheetMeetingReadyExcluded ?? 0,
       per_bucket: result.perBucket.map((b) => ({
         esp: b.esp, instance: b.instance, lane: b.lane,
         requested: b.requested, attached: b.attached,
