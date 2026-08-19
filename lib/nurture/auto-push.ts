@@ -29,7 +29,10 @@ const NURTURE_DAYS = 45;
 const PER_CLIENT_CAP = 200;
 
 const EXCLUDED_AI_CATEGORIES = [
-  "Interested", "Meeting Request", "Meeting Set", "Do Not Contact",
+  "Interested", "Meeting Request", "Meeting Set",
+  // Meeting-Ready Lead = interested leads already delivered to the client
+  // (CC/BCC known-client match + AI). Never re-target these in nurture.
+  "Meeting-Ready Lead", "Meeting Ready Lead", "Do Not Contact",
   "Wrong Person", "Wrong Person (Change of Target)", "Not Interested",
   "Mailbox No Longer Active", "Automated Error Message",
   "Automated Catch-All Message", "Referral Given", "Internally Forwarded",

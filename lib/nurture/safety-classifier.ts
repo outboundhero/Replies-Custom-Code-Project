@@ -57,6 +57,11 @@ const HARD_BLOCK_AI_CATEGORIES = new Set([
   "Interested",
   "Meeting Request",
   "Meeting Set",
+  // Meeting-Ready Lead is the system's most common hot-lead category (CC/BCC
+  // known-client match + AI). These were delivered to the client as interested
+  // leads — nurturing them again re-targets a lead sales already owns.
+  "Meeting-Ready Lead",
+  "Meeting Ready Lead",
   // Hard opt-outs / bad contacts
   "Do Not Contact",
   "Wrong Person",
