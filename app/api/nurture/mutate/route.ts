@@ -16,6 +16,7 @@ import supabase from "@/lib/supabase";
 import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { classifyOneBatch } from "@/lib/nurture/auto-classify";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
+import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 import { coerceInstance } from "@/lib/bison-instances";
 
 // classify-all-unclassified / classify-reset-safe each run up to 400 GPT
@@ -341,7 +342,7 @@ export async function POST(req: NextRequest) {
         seqRowIds.length
           ? supabase
               .from("nurture_sequence_finished")
-              .select("id, ob_lead_id, added_at, skipped")
+              .select("id, ob_lead_id, email, added_at, skipped")
               .in("id", seqRowIds)
           : Promise.resolve({ data: [], error: null }),
         legacyRowIds.length
@@ -363,12 +364,30 @@ export async function POST(req: NextRequest) {
       const seqRowMap = new Map((seqRowsRes.data || []).map((r) => [r.id as number, r]));
       const legacyRowMap = new Map((legacyRowsRes.data || []).map((r) => [r.id as number, r]));
 
+      // Sheet-authoritative Meeting-Ready gate: never push a lead the client's
+      // lead-tracking sheet marks "Meeting-Ready Lead" — even on a manual
+      // "Select for push". The sheet is the source of truth (it disagrees with
+      // our stored category and covers legacy leads). Fail CLOSED if the sheet
+      // can't be read. Skipped only when clientTag is known (the per-client
+      // review always sends it; the legacy global path can't target a sheet).
+      let sheetMRSet = new Set<string>();
+      if (clientTag) {
+        const smr = await getSheetMeetingReadyEmails(clientTag);
+        if (!smr.ok) {
+          return NextResponse.json({ error: "Lead-tracking sheet unreadable — try again shortly (avoiding re-nurturing Meeting-Ready leads)." }, { status: 503 });
+        }
+        sheetMRSet = smr.emails;
+      }
+      const isSheetMeetingReady = (email: string | null | undefined) =>
+        !!email && sheetMRSet.has(email.trim().toLowerCase());
+
       // Validate seq rows synchronously (no email lookup needed — ob_lead_id is on the row)
       for (const [rowId, it] of seqItemsByRowId) {
         const row = seqRowMap.get(rowId);
         if (!row || !row.ob_lead_id) { failures.push({ id: it.id, reason: "Lead not found" }); continue; }
         if (row.added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
         if (row.skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
+        if (isSheetMeetingReady(row.email as string | null)) { failures.push({ id: it.id, reason: "Marked Meeting-Ready in lead sheet" }); continue; }
         leadIds.push(row.ob_lead_id as number);
         seqIdsBeingAdded.push(rowId);
       }
@@ -403,6 +422,7 @@ export async function POST(req: NextRequest) {
         if (row.nurture_added_at) { failures.push({ id: it.id, reason: "Already added" }); return; }
         if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); return; }
         if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); return; }
+        if (isSheetMeetingReady(row.lead_email)) { failures.push({ id: it.id, reason: "Marked Meeting-Ready in lead sheet" }); return; }
 
         // Prefer the stored OB lead id from the row itself — replies have
         // it from the original webhook (`lead_id`), legacy rows have it

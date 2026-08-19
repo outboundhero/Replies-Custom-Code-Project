@@ -21,6 +21,7 @@ import { getChurnedTags } from "@/lib/churn";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
+import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -127,6 +128,22 @@ export async function POST(req: NextRequest) {
       if (added.size) await recordRouted([...added]);
     }
 
+    // 2c. Sheet-authoritative Meeting-Ready gate: never route a lead the client's
+    //     lead-tracking sheet marks "Meeting-Ready Lead" (delivered as a hot
+    //     lead). Fail CLOSED if the sheet can't be read — retry shortly.
+    let sheetMeetingReadyExcluded = 0;
+    {
+      const smr = await getSheetMeetingReadyEmails(clientTag);
+      if (!smr.ok) {
+        return NextResponse.json({ error: "Lead-tracking sheet unreadable — try again shortly (avoiding re-nurturing Meeting-Ready leads)." }, { status: 503 });
+      }
+      if (smr.emails.size) {
+        const before = fresh.length;
+        fresh = fresh.filter((c) => !smr.emails.has((c.email || "").trim().toLowerCase()));
+        sheetMeetingReadyExcluded = before - fresh.length;
+      }
+    }
+
     // 3. Route via the shared core. Stamp the matching nurture_sequence_finished
     //    rows added_at + nurture_campaign_id (by ob_lead_id in the source
     //    instance) so the READY/ADDED tiles update and "Route all ready" doesn't
@@ -155,6 +172,7 @@ export async function POST(req: NextRequest) {
       eligible: candidates.length,  // after dropping replied/bounced
       fresh: fresh.length,          // not already routed
       alreadyRouted,                // skipped — already added in a prior run
+      sheetMeetingReadyExcluded,    // skipped — marked Meeting-Ready in lead sheet
       skipped,
       added: routed.totalAttached,
       perBucket: routed.perBucket,
