@@ -23,6 +23,7 @@ import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { primaryContactFallback } from "@/lib/processing/primary-contact-reply";
 import { InstanceBadge } from "@/components/instance-badge";
 import { SubsequenceCard, type SubsequenceState } from "./_components/SubsequenceCard";
+import { NeedsAttentionBanner } from "./_components/NeedsAttentionBanner";
 import { isSubsequenceTag, getSubsequenceConfig } from "@/lib/subsequence/config";
 import { EmailParticipants, initials } from "@/components/email-participants";
 import { QualificationLookup } from "@/components/qualification-lookup";
@@ -1245,7 +1246,10 @@ export default function InboxPage() {
     : sortedCategories;
 
   return (
-    <div className="flex h-[calc(100vh-3rem)]">
+    <div className="flex flex-col h-[calc(100vh-3rem)]">
+      {/* Top strip: reply/handoff sends that failed to auto-recover (manual resend). */}
+      <NeedsAttentionBanner onOpen={(rid) => loadDetail(rid)} />
+      <div className="flex flex-1 min-h-0">
       {/* ── LEFT PANEL ── */}
       <div className="w-72 border-r flex flex-col bg-white shrink-0">
         {/* View selector — clean header style */}
@@ -2159,6 +2163,7 @@ export default function InboxPage() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
