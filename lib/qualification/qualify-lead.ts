@@ -21,7 +21,7 @@ import { auditLocation } from "./location-audit";
 import { extractReplyLocation } from "./extract-reply-location";
 import { stripQuotedHistory } from "./strip-quoted";
 import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
-import { getOffboardedTags } from "@/lib/churn";
+import { getChurnedTags } from "@/lib/churn";
 import { geminiJSON } from "@/lib/gemini";
 
 interface QualifyLeadParams {
@@ -347,7 +347,7 @@ async function findFittingClients(
   // Status="Churned" AND its churn date is on/before today (future churn dates
   // stay active). This is date-based and authoritative; it also catches clients
   // whose onboarding-form Status still reads "Active" but who have since churned.
-  const churnedByDate = await getOffboardedTags();
+  const churnedByDate = await getChurnedTags();
 
   // Candidates: any OTHER client with a location signal that is Active+Cleaning.
   // (When meta isn't available, fall back to the old rule: non-churned.)

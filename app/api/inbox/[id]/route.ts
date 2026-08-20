@@ -78,8 +78,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     // it here so the inbox never shows (or lets an operator click) a churned tag.
     if (data.suggested_client) {
       try {
-        const { getOffboardedTags } = await import("@/lib/churn");
-        const churned = await getOffboardedTags();
+        const { getChurnedTags } = await import("@/lib/churn");
+        const churned = await getChurnedTags();
         if (churned.size) {
           const segments = String(data.suggested_client)
             .split(/\s+·\s+|,\s*(?=[A-Za-z][A-Za-z0-9&-]{1,11}\s*[(⚠])/);

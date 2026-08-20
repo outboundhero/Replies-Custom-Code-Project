@@ -25,40 +25,12 @@ export async function getChurnedTags(): Promise<Set<string>> {
   return set;
 }
 
-export function invalidateChurnCache() { cache = null; clientsCache = null; offboardedCache = null; }
+export function invalidateChurnCache() { cache = null; clientsCache = null; }
 
 /** True when this tag is a churned client (case-insensitive). */
 export async function isChurned(tag: string | null | undefined): Promise<boolean> {
   if (!tag) return false;
   return (await getChurnedTags()).has(tag.toUpperCase());
-}
-
-let offboardedCache: { set: Set<string>; ts: number } | null = null;
-
-/**
- * Broader "offboarded — do not route/suggest/send" set: the date-based churned
- * tags (Groups tab) UNION any client explicitly marked "Churned" in the
- * onboarding status (`client_meta`). The second signal catches clients that were
- * REMOVED from the Groups tab entirely when they offboarded (so they carry no
- * churn DATE there) but are still marked churned — e.g. SQFT. Use this anywhere a
- * churned client must never be surfaced or sent a lead (suggested-tag display,
- * the reallocate guard, suggestion generation).
- */
-export async function getOffboardedTags(): Promise<Set<string>> {
-  if (offboardedCache && Date.now() - offboardedCache.ts < TTL_MS) return offboardedCache.set;
-  const set = new Set(await getChurnedTags());
-  try {
-    const res = await db.execute("SELECT client_tag FROM client_meta WHERE lower(trim(status)) = 'churned'");
-    for (const r of res.rows) set.add(String(r.client_tag).toUpperCase());
-  } catch { /* client_meta missing → fall back to the date-based set only */ }
-  offboardedCache = { set, ts: Date.now() };
-  return set;
-}
-
-/** True when this tag is offboarded (churned by date OR marked Churned in meta). */
-export async function isOffboarded(tag: string | null | undefined): Promise<boolean> {
-  if (!tag) return false;
-  return (await getOffboardedTags()).has(tag.toUpperCase());
 }
 
 /**
@@ -91,20 +63,33 @@ export async function getChurnedClients(): Promise<Map<string, string | null>> {
  * sync button, and the Automation-tab sync button.
  */
 export async function rebuildChurnedClients(): Promise<{ count: number; tags: string[] }> {
-  const { fetchChurnedFromGroups } = await import("@/lib/google-sheets");
-  const churned = await fetchChurnedFromGroups();
+  const { fetchChurnedFromGroups, fetchChurnedClients } = await import("@/lib/google-sheets");
+  // Churn is DATE-BASED in BOTH tabs — Status~"Churn" AND a Churn Date on/before
+  // today (a FUTURE date means scheduled-to-churn but still active; no date means
+  // waitlisted/returning, also active). Read the Groups tab AND the Client Tracker
+  // tab and union them: a client removed from the Groups tab when it offboarded
+  // (e.g. SQFT) is still listed churned-with-a-passed-date in the Client Tracker.
+  const [fromGroups, fromTracker] = await Promise.all([
+    fetchChurnedFromGroups().catch(() => []),
+    fetchChurnedClients().catch(() => []),
+  ]);
+  const byTag = new Map<string, string>(); // tag → churn date (first non-empty wins)
+  for (const c of [...fromGroups, ...fromTracker]) {
+    const tag = c.tag.toUpperCase();
+    if (!byTag.has(tag) || (!byTag.get(tag) && c.churnDate)) byTag.set(tag, c.churnDate || "");
+  }
   await db.execute("CREATE TABLE IF NOT EXISTS churned_clients (client_tag TEXT PRIMARY KEY, churn_date TEXT, synced_at TEXT)");
   // Upgrade older tables that predate the churn_date column (no-op if it exists).
   try { await db.execute("ALTER TABLE churned_clients ADD COLUMN churn_date TEXT"); } catch { /* already there */ }
   const now = new Date().toISOString();
   await db.execute("DELETE FROM churned_clients"); // replace the whole set (clients can un-churn)
-  for (const c of churned) {
+  for (const [tag, churnDate] of byTag) {
     await db.execute({
       sql: "INSERT OR IGNORE INTO churned_clients (client_tag, churn_date, synced_at) VALUES (?, ?, ?)",
-      args: [c.tag, c.churnDate, now],
+      args: [tag, churnDate, now],
     });
   }
   invalidateChurnCache();
-  const tags = [...new Set(churned.map((c) => c.tag))].sort();
+  const tags = [...byTag.keys()].sort();
   return { count: tags.length, tags };
 }
