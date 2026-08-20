@@ -72,6 +72,26 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       } catch { /* best-effort — card just won't show enrollment state */ }
     }
 
+    // Never surface a SUGGESTED client tag that has CHURNED (past its churn
+    // date). Suggestions are stored at audit time, so a client that churned
+    // afterward can still be sitting in an old `suggested_client` string — strip
+    // it here so the inbox never shows (or lets an operator click) a churned tag.
+    if (data.suggested_client) {
+      try {
+        const { getOffboardedTags } = await import("@/lib/churn");
+        const churned = await getOffboardedTags();
+        if (churned.size) {
+          const segments = String(data.suggested_client)
+            .split(/\s+·\s+|,\s*(?=[A-Za-z][A-Za-z0-9&-]{1,11}\s*[(⚠])/);
+          const kept = segments.filter((seg) => {
+            const m = seg.trim().match(/^([A-Za-z][A-Za-z0-9&-]{1,11})\b/);
+            return !m || !churned.has(m[1].toUpperCase());
+          });
+          data.suggested_client = kept.join(" · ");
+        }
+      } catch { /* churn lookup failed → leave the suggestion as-is */ }
+    }
+
     return NextResponse.json(data);
   } catch (error) {
     console.error("[api/inbox/[id]] GET failed:", error);

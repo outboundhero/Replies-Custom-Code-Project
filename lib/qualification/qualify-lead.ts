@@ -21,7 +21,7 @@ import { auditLocation } from "./location-audit";
 import { extractReplyLocation } from "./extract-reply-location";
 import { stripQuotedHistory } from "./strip-quoted";
 import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
-import { getChurnedTags } from "@/lib/churn";
+import { getOffboardedTags } from "@/lib/churn";
 import { geminiJSON } from "@/lib/gemini";
 
 interface QualifyLeadParams {
@@ -347,7 +347,7 @@ async function findFittingClients(
   // Status="Churned" AND its churn date is on/before today (future churn dates
   // stay active). This is date-based and authoritative; it also catches clients
   // whose onboarding-form Status still reads "Active" but who have since churned.
-  const churnedByDate = await getChurnedTags();
+  const churnedByDate = await getOffboardedTags();
 
   // Candidates: any OTHER client with a location signal that is Active+Cleaning.
   // (When meta isn't available, fall back to the old rule: non-churned.)
@@ -412,7 +412,7 @@ ${clientsList}`,
         // strip the "·" separator char so it can't break the stored format.
         reason: String(f.reason || "").replace(/\[inactive[^\]]*\]/i, "").replace(/\s*·\s*/g, "; ").trim(),
       }))
-      .filter((f) => f.tag && validTags.has(f.tag) && f.tag !== excludeTag.toUpperCase() && !seen.has(f.tag) && seen.add(f.tag))
+      .filter((f) => f.tag && validTags.has(f.tag) && !churnedByDate.has(f.tag) && f.tag !== excludeTag.toUpperCase() && !seen.has(f.tag) && seen.add(f.tag))
       .sort((a, b) => (activeTags.has(b.tag) ? 1 : 0) - (activeTags.has(a.tag) ? 1 : 0))
       .slice(0, 3);
     if (!clean.length) return "";

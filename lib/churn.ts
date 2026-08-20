@@ -25,12 +25,40 @@ export async function getChurnedTags(): Promise<Set<string>> {
   return set;
 }
 
-export function invalidateChurnCache() { cache = null; clientsCache = null; }
+export function invalidateChurnCache() { cache = null; clientsCache = null; offboardedCache = null; }
 
 /** True when this tag is a churned client (case-insensitive). */
 export async function isChurned(tag: string | null | undefined): Promise<boolean> {
   if (!tag) return false;
   return (await getChurnedTags()).has(tag.toUpperCase());
+}
+
+let offboardedCache: { set: Set<string>; ts: number } | null = null;
+
+/**
+ * Broader "offboarded — do not route/suggest/send" set: the date-based churned
+ * tags (Groups tab) UNION any client explicitly marked "Churned" in the
+ * onboarding status (`client_meta`). The second signal catches clients that were
+ * REMOVED from the Groups tab entirely when they offboarded (so they carry no
+ * churn DATE there) but are still marked churned — e.g. SQFT. Use this anywhere a
+ * churned client must never be surfaced or sent a lead (suggested-tag display,
+ * the reallocate guard, suggestion generation).
+ */
+export async function getOffboardedTags(): Promise<Set<string>> {
+  if (offboardedCache && Date.now() - offboardedCache.ts < TTL_MS) return offboardedCache.set;
+  const set = new Set(await getChurnedTags());
+  try {
+    const res = await db.execute("SELECT client_tag FROM client_meta WHERE lower(trim(status)) = 'churned'");
+    for (const r of res.rows) set.add(String(r.client_tag).toUpperCase());
+  } catch { /* client_meta missing → fall back to the date-based set only */ }
+  offboardedCache = { set, ts: Date.now() };
+  return set;
+}
+
+/** True when this tag is offboarded (churned by date OR marked Churned in meta). */
+export async function isOffboarded(tag: string | null | undefined): Promise<boolean> {
+  if (!tag) return false;
+  return (await getOffboardedTags()).has(tag.toUpperCase());
 }
 
 /**

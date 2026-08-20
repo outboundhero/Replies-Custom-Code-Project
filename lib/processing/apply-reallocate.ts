@@ -2,6 +2,7 @@ import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { resolveTemplate } from "@/lib/processing/template-resolver";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
+import { isOffboarded } from "@/lib/churn";
 
 /**
  * Move a replies row to a different client tag and rewrite its CC/BCC + reply
@@ -15,6 +16,14 @@ export async function applyReallocate(
   rowId: number,
   newClientTag: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Never move a lead to a CHURNED client (past its churn date) — they no longer
+  // receive leads. Guards EVERY reallocate path: the suggested-tag click, the
+  // Reallocate picker, and the CW ZIP auto-router. This is the hard stop that
+  // prevents a lead being sent to a client who has offboarded.
+  if (await isOffboarded(newClientTag)) {
+    return { ok: false, error: `${newClientTag} has churned and can no longer receive leads.` };
+  }
+
   const configResult = await db.execute({
     sql: "SELECT * FROM client_config WHERE client_tag = ?",
     args: [newClientTag],
