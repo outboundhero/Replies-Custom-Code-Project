@@ -92,6 +92,22 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       } catch { /* churn lookup failed → leave the suggestion as-is */ }
     }
 
+    // Auto-resend recovery state (from the Turso retry queue) so the inbox can
+    // show an explicit "auto-resent ✓" / "auto-resend failed — resend manually"
+    // banner instead of the operator inferring it from the error banner clearing.
+    // status: pending = still retrying, recovered = auto-resent OK, exhausted =
+    // couldn't recover (a matching error-log row exists), done = sent manually.
+    try {
+      const rr = await db.execute({
+        sql: "SELECT status, attempt, last_error, updated_at FROM send_reply_retries WHERE reply_row_id = ? ORDER BY id DESC LIMIT 1",
+        args: [Number(id)],
+      });
+      const row = rr.rows[0];
+      (data as Record<string, unknown>).send_retry = row
+        ? { status: row.status, attempt: row.attempt, lastError: row.last_error, updatedAt: row.updated_at }
+        : null;
+    } catch { /* retry table missing → no recovery banner */ }
+
     return NextResponse.json(data);
   } catch (error) {
     console.error("[api/inbox/[id]] GET failed:", error);

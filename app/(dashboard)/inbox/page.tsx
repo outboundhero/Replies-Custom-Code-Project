@@ -1811,14 +1811,24 @@ export default function InboxPage() {
               {detail.send_error && (
                 <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800 space-y-1">
                   <div><span className="font-semibold">⚠ Last send failed:</span> {detail.send_error}. Your draft is kept — fix and retry.</div>
-                  {isReconnectableSendError(detail.send_error) && (
+                  {detail.send_retry?.status === "exhausted" ? (
+                    <div className="text-[10px] font-medium text-rose-700">
+                      ✗ Auto-resend failed after reconnect attempts — the sending inbox likely needs manual reconnection (e.g. the domain was removed at the inbox vendor). Resend manually once it&apos;s fixed. This is recorded in Error Logs.
+                    </div>
+                  ) : isReconnectableSendError(detail.send_error) && (
                     <div className="text-[10px] text-rose-700">
                       🔌 This inbox lost its connection — we&apos;re reconnecting it and will automatically retry your reply (in ~1 hour, then ~2 hours). No action needed; your draft is kept.
                     </div>
                   )}
                 </div>
               )}
-              {detail.last_sent_at && !detail.send_error && (
+              {/* Explicit confirmation that the auto-recovery resent this reply. */}
+              {detail.send_retry?.status === "recovered" && !detail.send_error && (
+                <div className="rounded border border-green-300 bg-green-50 px-2.5 py-1.5 text-[11px] font-medium text-green-800">
+                  ✓ Automatically re-sent{detail.send_retry.updatedAt ? ` ${new Date(detail.send_retry.updatedAt).toLocaleString()}` : ""} after the inbox reconnected — no action needed.
+                </div>
+              )}
+              {detail.last_sent_at && !detail.send_error && detail.send_retry?.status !== "recovered" && (
                 <p className="text-[11px] text-green-700">✓ Reply sent {new Date(detail.last_sent_at).toLocaleString()}</p>
               )}
               <Textarea value={replyMsg} onChange={(e) => { setReplyMsg(e.target.value); setConfirmInline(null); }} rows={4} placeholder="Type reply..." className="text-sm" />

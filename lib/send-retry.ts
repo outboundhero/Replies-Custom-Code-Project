@@ -163,7 +163,10 @@ export async function processSendRetries(): Promise<{ processed: number; sent: n
           message: r.message, status: "sent", error: null,
         });
       } catch { /* table may not exist */ }
-      await setStatus(r.id, "done", "sent on retry");
+      // "recovered" (not plain "done") marks an actual AUTO-resend after the
+      // inbox reconnected — the inbox surfaces a green "auto-resent" confirmation
+      // for it. ("done" is reserved for the already-sent-manually skip.)
+      await setStatus(r.id, "recovered", "sent on retry");
       await logActivity("inbox", "send-reply-retry-sent", {
         client_tag: r.client_tag ?? undefined, lead_email: r.to_email,
         details: { reply_row_id: r.reply_row_id, attempt: r.attempt + 1 },
@@ -193,8 +196,12 @@ export async function processSendRetries(): Promise<{ processed: number; sent: n
       rescheduled++;
     } else {
       await setStatus(r.id, "exhausted", result.error ?? "retry exhausted");
+      // Surface the deeper failure in the ERROR LOGS so it can be monitored —
+      // the auto-recovery couldn't complete (e.g. the inbox/domain was removed at
+      // the vendor and never reconnected), so this lead needs a manual resend.
       await logError("inbox", "send-reply-retry-exhausted", result.error ?? "retry exhausted", {
         reply_row_id: r.reply_row_id, client_tag: r.client_tag, attempts: nextAttempt,
+        lead_email: r.to_email, sender_email: r.sender_email,
       });
       exhausted++;
     }
