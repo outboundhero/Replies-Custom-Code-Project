@@ -12,7 +12,7 @@
  */
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
-import { sendReply } from "@/lib/outboundhero-api";
+import { sendReply, findSenderEmailByAddress } from "@/lib/outboundhero-api";
 import { reconnectInbox, isReconnectableSendError } from "@/lib/inboxing-upload";
 import { logError, logActivity } from "@/lib/errors";
 
@@ -127,9 +127,22 @@ export async function processSendRetries(): Promise<{ processed: number; sent: n
 
     const ccEmails = r.cc_json ? JSON.parse(r.cc_json) ?? undefined : undefined;
     const bccEmails = r.bcc_json ? JSON.parse(r.bcc_json) ?? undefined : undefined;
+
+    // Re-resolve the sender id by email. A reconnect (or manual re-add) gives the
+    // inbox a NEW id, so the stored one can be dead ("sender email id is
+    // invalid"). Using the live id makes the retry self-healing; fall back to the
+    // stored id if the lookup fails or the inbox isn't back in the instance yet.
+    let senderEmailId = r.sender_email_id as number;
+    if (r.sender_email) {
+      try {
+        const live = await findSenderEmailByAddress(String(r.bison_instance), String(r.sender_email));
+        if (live) senderEmailId = live.id;
+      } catch { /* keep the stored id */ }
+    }
+
     const result = await sendReply(r.bison_instance, {
       replyId: r.reply_id as number,
-      senderEmailId: r.sender_email_id as number,
+      senderEmailId,
       message: r.message,
       toEmail: r.to_email,
       toName: r.to_name,

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
-import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail } from "@/lib/outboundhero-api";
+import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail, findSenderEmailByAddress } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
@@ -496,7 +496,18 @@ export async function POST(req: NextRequest) {
 
       case "send-reply": {
         const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply } = body;
-        const result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
+        let result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
+        // "The selected sender email id is invalid": the stored inbox id is stale
+        // (the inbox was removed or re-added under a NEW id). If the inbox is still
+        // in the instance under a new id, re-resolve it by email and resend
+        // immediately — no wait. If it's gone, fall through to reconnect + the
+        // queued retry (below), which re-resolves once the inbox is back.
+        if (!result.ok && /sender email id is invalid/i.test(result.error || "") && rowSenderEmail) {
+          const live = await findSenderEmailByAddress(rowInstance, rowSenderEmail).catch(() => null);
+          if (live && live.id !== senderEmailId) {
+            result = await sendReply(rowInstance, { replyId, senderEmailId: live.id, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
+          }
+        }
         const nowIso = new Date().toISOString();
         // History row (success OR failure) so the inbox can show the full
         // outbound history + retry failures. Best-effort — never break the send.

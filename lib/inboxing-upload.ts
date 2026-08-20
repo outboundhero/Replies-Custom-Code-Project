@@ -76,5 +76,8 @@ export async function reconnectInbox(email: string, instance: string): Promise<R
 /** True when a send error means the sender inbox needs reconnecting. */
 export function isReconnectableSendError(err: string | null | undefined): boolean {
   const s = String(err || "");
-  return /re-?connect this email account|could not authenticate|smtp error/i.test(s);
+  // "sender email id is invalid" = the inbox was removed/re-added in the instance
+  // (its id changed or it's gone). Reconnect it + the retry re-resolves the live
+  // id by email before resending (see lib/send-retry.ts).
+  return /re-?connect this email account|could not authenticate|smtp error|sender email id is invalid/i.test(s);
 }

@@ -1515,6 +1515,36 @@ export async function getSenderEmail(instanceKey: string, senderEmailId: number)
   return { id: d.id, name: String(d.name ?? ""), email: String(d.email ?? ""), status: String(d.status ?? "") };
 }
 
+/**
+ * Find a sender inbox by its email ADDRESS within an instance —
+ * GET /api/sender-emails?filters[email]=. Used to RE-RESOLVE a sender's current
+ * id after the inbox was removed + re-added (which changes the id), so a resend
+ * uses the live id instead of a stale one ("The selected sender email id is
+ * invalid"). Prefers a Connected match. Returns null if the address isn't in the
+ * instance (→ the inbox needs reconnecting first).
+ */
+export async function findSenderEmailByAddress(
+  instanceKey: string,
+  email: string,
+): Promise<SenderEmailDetail | null> {
+  const addr = (email || "").trim().toLowerCase();
+  if (!addr) return null;
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(
+    `${baseUrl}/api/sender-emails?filters[email]=${encodeURIComponent(addr)}&per_page=25`,
+    { headers: buildHeaders(token), timeoutMs: 15_000 },
+  );
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const rows = (body?.data ?? []) as Array<{ id?: number; name?: string; email?: string; status?: string }>;
+  const matches = rows.filter(
+    (r) => typeof r.id === "number" && String(r.email ?? "").trim().toLowerCase() === addr,
+  );
+  if (!matches.length) return null;
+  const pick = matches.find((r) => /connect/i.test(String(r.status ?? ""))) ?? matches[0];
+  return { id: pick.id as number, name: String(pick.name ?? ""), email: String(pick.email ?? ""), status: String(pick.status ?? "") };
+}
+
 /** Classify a Bison inbox to its ESP bucket from its connection type + tags. */
 export function inboxEsp(inbox: { type?: string; tags?: string[] }): "outlook" | "google" | "segs" {
   const type = (inbox.type || "").toLowerCase();
