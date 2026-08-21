@@ -78,6 +78,10 @@
       "schedule": "*/15 * * * *"
     },
     {
+      "path": "/api/cron/retry-close-pushes",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/retry-send-replies",
       "schedule": "*/15 * * * *"
     },
