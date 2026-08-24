@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
 
     const { data: r, error } = await supabase
       .from("replies")
-      .select("client_tag, first_name, lead_name, company_name, phone, sender_name, reply_we_got, email_subject, reply_id, lead_id, campaign_id, bison_instance, lead_email")
+      .select("client_tag, first_name, lead_name, company_name, phone, sender_name, reply_we_got, email_subject, reply_id, lead_id, campaign_id, bison_instance, lead_email, from_name")
       .eq("id", id)
       .single();
     if (error || !r) return NextResponse.json({ error: "Reply not found" }, { status: 404 });
@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
       replySubject: String(r.email_subject || ""),
       leadName: String(r.lead_name || ""),
       leadEmail: String(r.lead_email || ""),
+      fromName: String(r.from_name || ""),
     });
 
     // 2. Build the full conversation (campaign email + follow-ups + replies) so

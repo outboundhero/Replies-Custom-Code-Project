@@ -30,6 +30,7 @@ interface TemplateVars {
   replySubject: string;
   leadName?: string;          // full lead name from CRM (e.g. "L&D Millwork Team") — used to detect company/team names
   leadEmail?: string;         // lead's email — its domain is scraped for phones when the reply has none
+  fromName?: string;          // the email From display name (e.g. "Aubre Murphy") — a reliable person-name source
 }
 
 interface ExtractedVars {
@@ -266,16 +267,28 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
 
   if (resolved.includes("{FIRST_NAME}")) {
     // Priority: a real first name from the CRM lead name → the person who signed
-    // the reply (signature) → fall back to the raw CRM name.
-    let greet = vars.firstName;
-    // Deterministic safety net: never greet the lead with OUR OWN sender's name.
-    // Even with quoted history stripped + the prompt guard, if the AI still hands
-    // back a name matching our sender, discard it (it came from our signature).
+    // the reply (signature) → the email From display name (e.g. "Aubre Murphy" →
+    // "Aubre") → "there". Crucially, when the CRM name is a company/team we do NOT
+    // keep it — otherwise the greeting becomes "Hi Anna Arts Council Team,".
     const sender = (vars.senderFirstName || "").trim().toLowerCase();
+    // Start from the CRM name ONLY if it's a real person; else start empty so a
+    // company/team value can never leak into the greeting.
+    let greet = providedFirstOk ? vars.firstName : "";
+    // Deterministic safety net: never greet the lead with OUR OWN sender's name.
     const extractedFirst = extracted?.firstName || "";
     const extractedOk = extractedFirst && (!sender || extractedFirst.toLowerCase() !== sender);
-    if (!providedFirstOk && extractedOk) greet = extractedFirst;
-    // If the CRM name itself is just our sender's name (bad CRM data), drop to "there".
+    // The From display name is a reliable person-name source when the CRM name is
+    // a company and the signature has no personal sign-off. Reject it when the
+    // full display name reads as a company/team (e.g. "L&D Millwork Team").
+    const fromFirst = sanitizeFirstName(vars.fromName);
+    const fromOk = fromFirst
+      && !COMPANY_MARKERS.test(vars.fromName || "")
+      && (!sender || fromFirst.toLowerCase() !== sender);
+    if (!providedFirstOk) {
+      if (extractedOk) greet = extractedFirst;
+      else if (fromOk) greet = fromFirst as string;
+    }
+    // If whatever we landed on is just our sender's name (bad data), drop to "there".
     if ((greet || "").trim().toLowerCase() === sender && sender) greet = "";
     resolved = resolved.replaceAll("{FIRST_NAME}", greet || "there");
   }
