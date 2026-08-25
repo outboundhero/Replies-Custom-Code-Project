@@ -16,10 +16,16 @@ interface SyncResult {
   qualificationCount: number;
 }
 
-/** Split combined abbreviations like "JPDFW & JPK" or "JPAR / JPSWM" into individual tags */
+/**
+ * Split combined abbreviations like "JPDFW & JPK" or "JPAR / JPSWM" into
+ * individual tags. Splits on "/", ",", " and ", and a SPACED " & " — but NOT a
+ * bare "&", so single tags that contain an ampersand (K&LCS, JPC&A, TM&VC, L&D)
+ * stay intact. (The old /[&\/,]+/ split "K&LCS" into "K"+"LCS", so its rules were
+ * stored under the wrong tags and the audit found none.)
+ */
 function splitAbbreviations(raw: string): string[] {
   return raw
-    .split(/[&\/,]+/)
+    .split(/\s*\/\s*|\s+&\s+|\s+and\s+|\s*,\s*/i)
     .map((s) => s.trim())
     .filter(Boolean);
 }
