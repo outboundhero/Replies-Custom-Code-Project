@@ -51,10 +51,10 @@ const CHERRY_AI_ALLOWLIST = [
   "Interested",
   "Meeting Request",
   "Follow Up at a Later Date",
-  // "Referral Given" is HIDDEN from the cherry views for now — the AI is
-  // over-classifying automated replies (out-of-office, "no longer employed")
-  // as Referral Given. Re-add once the categorizer prompt is fixed to only tag a
-  // genuine human referral (see lib/processing/lead-categorizer.ts).
+  // "Referral Given" restored to the cherry views: the categorizer prompt now
+  // routes automated out-of-office / "no longer employed" replies away from
+  // Referral Given, so this bucket is genuine human referrals only.
+  "Referral Given",
   "Internally Forwarded",
   "Unrecognizable by AI",
 ];
