@@ -55,11 +55,6 @@ const CHERRY_AI_ALLOWLIST = [
   "Internally Forwarded",
   "Unrecognizable by AI",
 ];
-// Base Clients (Cherry) additionally drops "Referral Given" — those AI-suggested
-// referral leads should NOT appear in the base view (they still show in Master
-// Inbox and the per-client cherry views). Removing it from the eligibility
-// allowlist hides them even when they're sitting in the Open Response bucket.
-const BASE_CHERRY_AI_ALLOWLIST = CHERRY_AI_ALLOWLIST.filter((c) => c !== "Referral Given");
 // Negative lead_category buckets hidden from the sidebar. Kept buckets:
 // Open Response, Interested, Meeting Set, Meeting-Ready Lead, Follow Up,
 // Referral Given, Internally Forwarded, Closed Won, Needs Review.
@@ -85,13 +80,14 @@ export const INBOX_VIEWS: InboxView[] = [
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
-    description: "Positive + unrecognizable leads; bounce/auto-reply noise, negative buckets and Referral Given hidden. OH + DM4PM excluded (they have their own cherry views).",
+    description: "Positive + unrecognizable leads; bounce/auto-reply noise and negative buckets hidden. OH + DM4PM excluded (they have their own cherry views).",
     excludeNoise: true,
-    // No "Referral Given" — hides AI-suggested referral leads even in Open Response.
-    aiCategoryAllowlist: BASE_CHERRY_AI_ALLOWLIST,
-    // Also hide the Referral Given bucket (still visible in Master Inbox + the
-    // per-client cherry views).
-    hiddenLeadCategories: [...CHERRY_HIDDEN, "Referral Given"],
+    // "Referral Given" is surfaced here (AI-suggested + its bucket) so the team
+    // can review referrals — they're still NOT auto-pushed to client sheets
+    // (SHEET_PUSH_CATEGORIES excludes them); the team re-marks worthwhile ones as
+    // Meeting-Ready Lead when they should go to the client.
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
     // OH, DM4PM and SBSPO have their own dedicated cherry views + logins — keep
     // them out of the regular team's base view so work doesn't overlap. CWSJ /
     // CWSJ-OS are worked by the regular inbox team now, so they stay INCLUDED
