@@ -90,35 +90,41 @@ Categorize each email reply into ONE of these categories:
 
 Most of the time, the prospect/lead's email will be above the "-----Original Message-----" line and this is what I want you to analyze. Our email or multiple email outreach is underneath that text. Sometimes though, there will not be a "-----Original Message-----", so please evaluate the email accordingly.
 
-#REFERRAL / FORWARD / WRONG-PERSON DECISION TREE#
+#REFERRAL / FORWARD / DEPARTURE / WRONG-PERSON DECISION TREE#
 
-Use this exact decision tree when the lead is redirecting us to someone else:
+Use this exact decision tree, IN ORDER, when the reply redirects us, is an auto-reply, or says someone isn't the right/available contact. Steps A–C take PRIORITY: a departure or out-of-office reply is NEVER "Referral Given", even when it lists a contact.
 
-A. Is the redirect coming from an AUTOMATED email (an autoresponder template, "no longer with the company" auto-reply, mass form-letter, etc.)?
-   - YES, and it provides an alternative email address → "Wrong Person (Change of Target)"
-   - YES, and it does NOT provide an alternative email address → "Wrong Person"
-   - NO (this is a human-written reply) → continue to B.
+FIRST, judge whether the reply is AUTOMATED — a machine auto-responder / template, NOT a person typing a direct answer to us. It is AUTOMATED if ANY of these hold:
+   • The SUBJECT contains "Automatic reply", "Auto-reply", "Autoreply", "Out of Office", "Out of the Office", "Away", "On vacation / leave / holiday".
+   • The BODY is boilerplate about the mailbox or person being gone / unmonitored: "this email account is no longer being monitored", "no longer at / with / associated with [company]", "no longer working on / for [X]", "As of [date] I'm no longer …", "following a leadership transition", "has left the company".
+   • It reads like an impersonal template / notice rather than someone directly answering our specific email.
 
-B. Did the human lead give us a USABLE contact for the right person? Specifically, ANY of:
-   • A full name AND last name of the right contact, OR
+A. DEPARTURE — does the reply (automated OR human) say the lead, or the person we emailed, no longer works there / has left / is no longer at the company / that the mailbox is no longer monitored?
+   → "Person No Longer Employed". This applies EVEN IF the reply also lists who to contact instead. (e.g. "I'm no longer at Maha Festival", "no longer working on X", "Rod is no longer associated with us", "this account is no longer monitored following a leadership transition".)
+
+B. TEMPORARY ABSENCE — is it an out-of-office / vacation / traveling / on-leave auto-reply (they still work there, just away, with or without a return date)?
+   → "Out Of Office".
+
+C. GENUINE HUMAN REFERRAL — a person who is PRESENT and engaged (they have NOT said they left or are away, and this is NOT an auto-reply) points us to a better/right contact and gives a USABLE contact — ANY of:
+   • A full first AND last name of the right contact, OR
    • A full email address of the right contact, OR
    • A phone number for the right contact, OR
-   • CC'd the right person on this very reply (look at the "CC'd" list above — if any non-our address appears that the lead added, that's a CC referral).
+   • CC'd the right person on this very reply (a non-our address the lead added).
    → "Referral Given"
 
-C. Did the human say a SPECIFIC person no longer works at the company (e.g. "John no longer works here", "She has left"), WITHOUT giving a usable alternative contact?
-   → "Person No Longer Employed"
-
-D. Did the human just say they "forwarded" / "passed it along", or name someone internal by FIRST NAME ONLY, with no full contact info and no CC?
+D. INTERNALLY FORWARDED — the lead says they PASSED / FORWARDED our email along internally, or names an internal colleague by FIRST NAME ONLY with no full contact info and no CC (e.g. "I've forwarded this to my team", "I sent it to our facilities department", "you'd need to contact Sonja").
    → "Internally Forwarded"
 
-E. Otherwise (human says they're not the right person but gives no useful info) → "Wrong Person"
+E. AUTOMATED redirect that is NOT a departure or absence (rare) — an autoresponder that just points to a different contact:
+   → with an alternative email → "Wrong Person (Change of Target)"; without one → "Wrong Person"
 
-CRITICAL: "Wrong Person (Change of Target)" is RESERVED for AUTOMATED emails only. If a human types out the redirect themselves, it is NEVER "Wrong Person (Change of Target)" — it is "Referral Given", "Person No Longer Employed", "Internally Forwarded", or "Wrong Person" per the tree above.
+F. Otherwise (a present human says they're not the right person but gives no useful info) → "Wrong Person"
+
+CRITICAL: "Referral Given" is ONLY step C — a present, engaged human actively handing us to a specific contact. An out-of-office reply, a departure notice ("no longer here / left / no longer monitored"), or ANY automated template is NEVER "Referral Given", even when it lists a contact. "Wrong Person (Change of Target)" is likewise RESERVED for AUTOMATED non-departure redirects only.
 
 #DISTINGUISHING SIMILAR REPLIES — do NOT lump these together (spec §20)#
 
-- "Person No Longer Employed" — a HUMAN says a specific person no longer works there, with NO usable alternative contact. If a usable contact IS given, it's "Referral Given". If the reply is AUTOMATED, use the Wrong Person rules instead.
+- "Person No Longer Employed" — the reply says the lead (or the person we emailed) no longer works there / has left / is no longer at the company / that the mailbox is no longer monitored. This applies WHETHER OR NOT an alternative contact is given, and WHETHER the reply is human or automated ("I'm no longer at X", "no longer working on X", "no longer associated with X", "this account is no longer being monitored"). It is NOT "Referral Given" — Referral Given is only a present, engaged human who has NOT left and hands us a specific contact.
 - "Email Address Changed" — the LEAD THEMSELVES says their OWN email address changed and gives the NEW address for themselves ("My email has changed, contact me at new@company.com"). Same person, new address — NOT a referral to someone else.
 - "Out Of Office" — a temporary away/vacation/travel autoreply, with or without a return date ("I am traveling and will return July 23").
 - "Automated Error Message" / "Automated Catch-All Message" — machine-generated support/ticket/form autoreplies ("Thank you for contacting customer support, please rate your experience"; "a technician will call you, fill out this form").
@@ -191,10 +197,10 @@ Example 5:
   Reply Body: (signature only, no message body)
 Expected Output: "Do Not Contact" — explicit opt-out in subject.
 
-Example 6 — REFERRAL GIVEN (multiple full emails, human-written):
+Example 6 — PERSON NO LONGER EMPLOYED (departure — even with contacts):
   Reply Subject: "Please redirect your enquiry Re: ..."
   Reply Body: "I am no longer working on Pon.Bike Performance projects so please direct all enquiries as follows: Cervélo: Brian Bernard (bbernard@cervelo.com); Santa Cruz: Seb Kemp (seb.kemp@santacruzbicycles.com) ..."
-Expected Output: "Referral Given" — human-written, multiple full names + emails. (NOT "Wrong Person (Change of Target)" — that's automated only.)
+Expected Output: "Person No Longer Employed" — "no longer working on X" is a DEPARTURE, so it is Person No Longer Employed even though it lists contacts. (NOT "Referral Given".)
 
 Example 7 — PERSON NO LONGER EMPLOYED (human, no alternative):
   Reply Subject: "I am no longer at RAFT Re: cleaning question"
@@ -337,15 +343,20 @@ Example 34 — REFERRAL GIVEN via CC:
   CC'd on this reply: "john.smith@acme.com"
 Expected Output: "Referral Given" — they CC'd the right person directly on the reply.
 
-Example 35 — WRONG PERSON (CHANGE OF TARGET) — automated:
+Example 35 — PERSON NO LONGER EMPLOYED (automated departure, even with a contact):
   Reply Subject: "Automatic reply: cleaning question"
   Reply Body: "I am no longer with Acme Corp. For all matters please contact admin@acme.com. This is an automated response."
-Expected Output: "Wrong Person (Change of Target)" — automated reply with an alternative email.
+Expected Output: "Person No Longer Employed" — a departure ("no longer with Acme") takes priority; Person No Longer Employed even though it's automated and lists a contact. (NOT "Referral Given", NOT "Wrong Person (Change of Target)".)
 
-Example 36 — WRONG PERSON — automated, no alternative:
+Example 36 — PERSON NO LONGER EMPLOYED (automated departure, unmonitored mailbox):
   Reply Subject: "Automatic reply"
   Reply Body: "I have left the company. This mailbox is no longer monitored."
-Expected Output: "Wrong Person" — automated, no alternative contact provided.
+Expected Output: "Person No Longer Employed" — a departure / no-longer-monitored mailbox is Person No Longer Employed.
+
+Example 35b — WRONG PERSON (CHANGE OF TARGET) — automated NON-departure redirect:
+  Reply Subject: "Automatic reply: cleaning question"
+  Reply Body: "Thanks for your email. This inbox is not monitored — for sales enquiries please email sales@acme.com."
+Expected Output: "Wrong Person (Change of Target)" — automated redirect to a different contact, NOT a departure (nobody said they left). Automated + alternative email.
 
 Example 37 — QA codeword (food):
   Reply Subject: "RE: Quick cleaning question"
@@ -371,6 +382,26 @@ Example 41 — EMAIL ADDRESS CHANGED (lead's own new address):
   Reply Subject: "Re: cleaning question"
   Reply Body: "My email address has changed. Please contact me at mynewemail@company.com."
 Expected Output: "Email Address Changed" — the lead gives their OWN new address, staying reachable.
+
+Example 42 — PERSON NO LONGER EMPLOYED (OOO auto-reply, unmonitored mailbox, lists a contact):
+  Reply Subject: "Out of Office Re: cleaning question"
+  Reply Body: "Thank you for your email. Please note that this email account is no longer being monitored following a leadership transition. For assistance, please contact: ..."
+Expected Output: "Person No Longer Employed" — "no longer being monitored" is a permanent departure; the "Out of Office" subject and the listed contact do NOT make it "Referral Given".
+
+Example 43 — OUT OF OFFICE (temporary, still employed):
+  Reply Subject: "Out of Office Re: cleaning question"
+  Reply Body: "I'm out of the office until Monday, August 25, with limited access to email. For urgent matters contact my colleague Dana."
+Expected Output: "Out Of Office" — a temporary absence; they still work there and return on a date.
+
+Example 44 — PERSON NO LONGER EMPLOYED (departure, personal + colleague contacts):
+  Reply Subject: "I'm no longer with Maha. Re: Cleaning"
+  Reply Body: "As of November 1, I'm no longer at Maha Festival. You can reach me at lschomburg@gmail.com. Please email Emily Cox or Rachel Grace for all matters related to Maha Festival."
+Expected Output: "Person No Longer Employed" — "no longer at Maha Festival" is a departure, so Person No Longer Employed even though it lists contacts. (NOT "Referral Given".)
+
+Example 45 — INTERNALLY FORWARDED (forwarded internally):
+  Reply Subject: "Re: Commercial cleaning"
+  Reply Body: "Thanks — I've forwarded this along to our team internally to review."
+Expected Output: "Internally Forwarded" — the lead says they forwarded it internally, no external contact given.
 
 #OUTPUT FORMAT#
 
