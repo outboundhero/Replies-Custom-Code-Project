@@ -375,6 +375,67 @@ interface SendPrevState {
   confirm: boolean;                 // second-step confirm before the send fires
 }
 
+type Recipient = { name: string; email: string };
+
+// Recipient (CC/BCC name + email) editor. Defined at MODULE scope — NOT inside
+// InboxPage — so it keeps a STABLE component identity across the parent's
+// re-renders. Previously it was declared inside InboxPage, making it a brand-new
+// function every render; React then remounted its <Input>s on each keystroke and
+// the field lost focus after every letter typed.
+function RecipientList({
+  label, value, onChange, max, addLabel,
+}: {
+  label: string; value: Recipient[]; onChange: (next: Recipient[]) => void;
+  max: number; addLabel: string;
+}) {
+  function update(idx: number, field: "name" | "email", v: string) {
+    const next = value.slice();
+    next[idx] = { ...next[idx], [field]: v };
+    onChange(next);
+  }
+  function remove(idx: number) {
+    onChange(value.filter((_, i) => i !== idx));
+  }
+  function add() {
+    if (value.length >= max) return;
+    onChange([...value, { name: "", email: "" }]);
+  }
+  return (
+    <div className="space-y-1">
+      <Label className="text-[10px] text-muted-foreground">{label}</Label>
+      {value.map((r, idx) => (
+        <div key={idx} className="flex gap-1.5">
+          <Input
+            value={r.name}
+            onChange={(e) => update(idx, "name", e.target.value)}
+            placeholder="Name"
+            className="text-[11px] h-7 flex-1"
+          />
+          <Input
+            value={r.email}
+            onChange={(e) => update(idx, "email", e.target.value)}
+            placeholder="email@example.com"
+            className="text-[11px] h-7 flex-[1.5]"
+          />
+          <button
+            type="button"
+            onClick={() => remove(idx)}
+            className="h-7 w-7 shrink-0 rounded border border-border text-xs text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
+            title="Remove"
+          >×</button>
+        </div>
+      ))}
+      {value.length < max && (
+        <button
+          type="button"
+          onClick={add}
+          className="text-[11px] text-primary hover:underline"
+        >+ {addLabel}</button>
+      )}
+    </div>
+  );
+}
+
 export default function InboxPage() {
   // Per-user scope comes from the server session (context) — no /api/auth fetch.
   const session = useSession();
@@ -467,8 +528,7 @@ export default function InboxPage() {
   const detailCache = useRef<Map<number, ReplyDetail>>(new Map());
   const detailInflight = useRef<Set<number>>(new Set());
 
-  // Reply form
-  type Recipient = { name: string; email: string };
+  // Reply form (Recipient type is defined at module scope)
   const [replyMsg, setReplyMsg] = useState("");
   const [replyCc, setReplyCc] = useState<Recipient[]>([]);
   const [replyBcc, setReplyBcc] = useState<Recipient[]>([]);
@@ -858,60 +918,6 @@ export default function InboxPage() {
     return recipients
       .filter((r) => r.email.trim())
       .map((r) => ({ name: r.name.trim(), email_address: r.email.trim() }));
-  }
-
-  function RecipientList({
-    label, value, onChange, max, addLabel,
-  }: {
-    label: string; value: Recipient[]; onChange: (next: Recipient[]) => void;
-    max: number; addLabel: string;
-  }) {
-    function update(idx: number, field: "name" | "email", v: string) {
-      const next = value.slice();
-      next[idx] = { ...next[idx], [field]: v };
-      onChange(next);
-    }
-    function remove(idx: number) {
-      onChange(value.filter((_, i) => i !== idx));
-    }
-    function add() {
-      if (value.length >= max) return;
-      onChange([...value, { name: "", email: "" }]);
-    }
-    return (
-      <div className="space-y-1">
-        <Label className="text-[10px] text-muted-foreground">{label}</Label>
-        {value.map((r, idx) => (
-          <div key={idx} className="flex gap-1.5">
-            <Input
-              value={r.name}
-              onChange={(e) => update(idx, "name", e.target.value)}
-              placeholder="Name"
-              className="text-[11px] h-7 flex-1"
-            />
-            <Input
-              value={r.email}
-              onChange={(e) => update(idx, "email", e.target.value)}
-              placeholder="email@example.com"
-              className="text-[11px] h-7 flex-[1.5]"
-            />
-            <button
-              type="button"
-              onClick={() => remove(idx)}
-              className="h-7 w-7 shrink-0 rounded border border-border text-xs text-muted-foreground hover:bg-muted hover:text-destructive transition-colors"
-              title="Remove"
-            >×</button>
-          </div>
-        ))}
-        {value.length < max && (
-          <button
-            type="button"
-            onClick={add}
-            className="text-[11px] text-primary hover:underline"
-          >+ {addLabel}</button>
-        )}
-      </div>
-    );
   }
 
   async function updateCategory(
