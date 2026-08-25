@@ -232,7 +232,38 @@ export async function expandCampaignsForClient(
     row.clones = clones;
     result.instances.push(row);
     if (clones.length) {
-      await logActivity("nurture-expand", "expanded", { client_tag: TAG, details: { instance, combinedLeads: row.combinedLeads, clones } });
+      // Full diagnostic snapshot of WHAT triggered this expansion — the exact
+      // campaigns evaluated with their live total/contacted, plus the computed
+      // gate. If a batch ever expands without genuinely being full (≥8k contacted
+      // & ≥80%), this log catches it red-handed with the real numbers.
+      const evaluated = details.map((d) => ({
+        esp: d.esp,
+        campaignId: d.entry.campaign_id,
+        campaignName: d.name,
+        batch: d.batch,
+        total: d.total,
+        contacted: Math.round((d.completion / 100) * d.total),
+        pct: Math.round(d.completion),
+      }));
+      const misfire =
+        gate.combinedContacted < CONTACTED_LEADS_MIN || gate.pct < CONTACTED_MIN_PCT;
+      await logActivity("nurture-expand", misfire ? "expanded-MISFIRE" : "expanded", {
+        client_tag: TAG,
+        details: {
+          instance,
+          combinedTotal: gate.combinedTotal,
+          combinedContacted: gate.combinedContacted,
+          pct: Math.round(gate.pct),
+          threshold: { minContacted: CONTACTED_LEADS_MIN, minPct: CONTACTED_MIN_PCT },
+          evaluated,
+          clones,
+        },
+      });
+      if (misfire) {
+        await logError("nurture-expand", `MISFIRE:${TAG}/${instance}`,
+          `Expanded below threshold — ${gate.combinedContacted} contacted / ${gate.pct.toFixed(0)}% (need ≥${CONTACTED_LEADS_MIN} & ≥${CONTACTED_MIN_PCT}%)`,
+          { evaluated });
+      }
     }
   }
 
