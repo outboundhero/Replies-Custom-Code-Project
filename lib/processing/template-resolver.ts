@@ -322,23 +322,33 @@ export async function resolveTemplate(template: string, vars: TemplateVars): Pro
     //               but not sure if it's direct to Ryan's phone yet."
     // Reuse the phone(s) the single extraction call already pulled from the
     // reply (no duplicate AI call); the resolver only reaches for the website /
-    // custom-var fallbacks when the reply had none.
-    const replyPhones = extracted?.phone
-      ? extracted.phone.split(/\s+or\s+|,\s*/i).map((s) => s.trim()).filter(Boolean)
-      : [];
+    // custom-var fallbacks when the reply had none. Pass the raw extracted string
+    // as a single candidate — resolveLeadPhones tokenizes/cleans it (handles
+    // multi-number blobs, newlines, ZIPs) and caps it at ≤2 numbers.
+    const replyPhones = extracted?.phone ? [extracted.phone] : [];
     const { phones, source } = await resolveLeadPhones({
       replyPhones,
       leadEmail: vars.leadEmail,
       customVarPhone: vars.phoneNumber,
     });
-    const phone = phonesForTemplate(phones); // "A, B or C"
+    const phone = phonesForTemplate(phones); // "A" or "A or B"
     const firstName = (vars.firstName || "").trim();
-    // Only the company-switchboard fallback gets the "not sure if direct"
-    // disclaimer — a number the LEAD gave (reply) or their site is spoken plainly.
-    const replacement =
-      source === "custom" && phone && firstName
-        ? `${phone}, but not sure if it's direct to ${firstName}'s phone yet`
-        : phone;
+    // Three cases for the {PHONE} slot:
+    //  • reply / website number → speak it plainly (it's the lead's own line).
+    //  • company-switchboard fallback (custom var) → append a "not sure if direct"
+    //    disclaimer so we don't overpromise a generic line.
+    //  • no number anywhere → say we don't have their direct line yet, rather
+    //    than leaving the sentence dangling ("...good number to call is .").
+    let replacement: string;
+    if (!phone) {
+      replacement = firstName
+        ? `not sure what the direct phone number is for ${firstName} as yet`
+        : `not sure what the direct phone number is as yet`;
+    } else if (source === "custom" && firstName) {
+      replacement = `${phone}, but not sure if it's direct to ${firstName}'s phone yet`;
+    } else {
+      replacement = phone;
+    }
     resolved = resolved.replaceAll("{PHONE}", replacement);
   }
 

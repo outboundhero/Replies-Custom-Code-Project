@@ -19,27 +19,58 @@ import { extractDomain, isPersonalDomain } from "@/lib/processing/personal-domai
 const PHONE_RE = /\+?\d[\d().\-\s]{7,}\d(?:\s*(?:x|ext\.?)\s*\d+)?/gi;
 const digitsOf = (s: string) => (s.match(/\d/g) || []).join("");
 
+// Never render more than this many numbers — a reply/sheet cell only ever needs
+// the lead's direct + mobile line. Prevents a signature dump or an AI blob from
+// spraying 4-5 numbers (or a ZIP misread as a phone) into the reply.
+const MAX_PHONES = 2;
+
 export type PhoneSource = "reply" | "website" | "custom" | "none";
 
-/** Format to "(xxx) xxx-xxxx" (+ " ext. N") for US 10-digit numbers; otherwise
- *  return the trimmed original (keeps international/odd formats intact). */
-function formatUsPhone(raw: string): string {
+/** Normalize ONE token to "(xxx) xxx-xxxx" (+ " ext. N"); return null unless it
+ *  is a valid US 10-digit number (11 with a leading country "1"). Returning null
+ *  for everything else is what drops ZIP codes, years, prices, and multi-number
+ *  blobs that would otherwise leak through verbatim. */
+function normalizeUsPhone(raw: string): string | null {
   const ext = raw.match(/(?:x|ext\.?)\s*(\d+)/i)?.[1] || "";
   let d = digitsOf(raw.replace(/(?:x|ext\.?)\s*\d+/i, ""));
   if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
-  const base = d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : raw.trim();
+  if (d.length !== 10) return null;
+  const base = `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
   return ext ? `${base} ext. ${ext}` : base;
 }
 
-/** Dedupe by digit-string, preserving order; drop anything with < 7 digits. */
-function dedupePhones(list: string[]): string[] {
+/** Pull individual phone tokens out of an arbitrary string that may hold several
+ *  numbers, newlines, or junk (e.g. a single AI field that crammed in a whole
+ *  signature). Newlines and list separators are broken up FIRST so the phone
+ *  regex can't glue two adjacent numbers into one unusable blob. */
+function phoneTokens(raw: string): string[] {
+  const pieces = (raw || "")
+    .replace(/[\n\r]+/g, ",")
+    .split(/\s+or\s+|[,;|/]/i);
+  const toks: string[] = [];
+  for (const p of pieces) {
+    for (const m of p.match(PHONE_RE) || []) toks.push(m.trim());
+  }
+  return toks;
+}
+
+/** Turn arbitrary raw candidate strings into a clean, deduped, capped list of
+ *  properly-formatted US phone numbers. This is the single choke point that
+ *  guarantees the reply/sheet never shows a malformed number, a non-phone, or
+ *  more than {@link MAX_PHONES}. */
+function cleanPhones(candidates: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const p of list) {
-    const key = digitsOf(p);
-    if (key.length < 7 || seen.has(key)) continue;
-    seen.add(key);
-    out.push(p);
+  for (const c of candidates) {
+    for (const tok of phoneTokens(c)) {
+      const norm = normalizeUsPhone(tok);
+      if (!norm) continue;
+      const key = digitsOf(norm);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(norm);
+      if (out.length >= MAX_PHONES) return out;
+    }
   }
   return out;
 }
@@ -76,7 +107,7 @@ export async function extractReplyPhones(replyBody: string, replySubject = ""): 
     if (!raw) return [];
     const parsed = JSON.parse(raw) as { phones?: unknown };
     const phones = Array.isArray(parsed.phones) ? parsed.phones.map((p) => String(p)) : [];
-    return dedupePhones(phones.map(formatUsPhone));
+    return cleanPhones(phones);
   } catch {
     return [];
   }
@@ -112,7 +143,7 @@ export async function fetchWebsitePhones(domain: string): Promise<string[]> {
     }
     if (found.length) break; // homepage had numbers → don't also hit /contact
   }
-  return dedupePhones(found.map(formatUsPhone)).slice(0, 3);
+  return cleanPhones(found);
 }
 
 /** Waterfall resolver — reply → website → custom var. Pass `replyPhones` when the
@@ -125,7 +156,7 @@ export async function resolveLeadPhones(input: {
   customVarPhone?: string;
 }): Promise<{ phones: string[]; source: PhoneSource }> {
   // 1. Reply content + signature (always first preference).
-  let replyPhones = input.replyPhones?.length ? dedupePhones(input.replyPhones.map(formatUsPhone)) : [];
+  let replyPhones = input.replyPhones?.length ? cleanPhones(input.replyPhones) : [];
   if (!replyPhones.length && input.replyBody) {
     replyPhones = await extractReplyPhones(input.replyBody, input.replySubject || "");
   }
@@ -139,7 +170,7 @@ export async function resolveLeadPhones(input: {
   }
 
   // 3. Bison "Company Phone" custom variable (last resort).
-  const custom = dedupePhones([input.customVarPhone || ""].filter(Boolean).map(formatUsPhone));
+  const custom = cleanPhones([input.customVarPhone || ""].filter(Boolean));
   if (custom.length) return { phones: custom, source: "custom" };
 
   return { phones: [], source: "none" };
