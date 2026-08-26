@@ -1,0 +1,610 @@
+failed_at,day,scheduled_email_id,status,sent_at,scheduled_for,lead_id,lead_email,lead_name,company,subject,body_html,body_plain,sender_email,sender_name,sender_status,sender_type,sender_daily_limit,sender_sent,campaign_id,campaign,step_order,raw_message_id
+2026-07-27T16:28:58.000000Z,2026-07-27,9561207,queued_for_sending,,2026-07-27T13:26:00.000000Z,1611745,tthompson@realhrhero.com,Tonyel T,Real HR Hero,"Re: Commercial cleaning question, Tonyel","In the future, if your Los Angeles location needs new cleaners, who should I reach out to?<br><br>Katie<br>Los Angeles County Commercial Cleaning<br>3580 Wilshire Boulevard, STE 760 Los Angeles, California 90010","In the future, if your Los Angeles location needs new cleaners, who should I reach out to?
+
+Katie
+Los Angeles County Commercial Cleaning
+3580 Wilshire Boulevard, STE 760 Los Angeles, California 90010",katie.edwards.a@buildingcleansolutions.com,Katie Edwards,connected,microsoft_oauth,5,63,191,JPLA: Outlook (Cleaning Client),3,<a25aef94-3b74-4a69-a836-57d0150d5ee6@buildingcleansolutions.com>
+2026-07-27T18:32:17.000000Z,2026-07-27,9645228,queued_for_sending,,2026-07-27T18:31:00.000000Z,417622,monica@metamorphosistexas.com,Monica Gutierrez,Metamorphosis Therapy,Re: Commercial cleaning around Winter Garden,"If your Winter Garden location ever requires new cleaners, who handles the hiring process?<br><br>Kelli<br>Local Building Cleaning in Orlando, Florida<br>Orlando, FL<br><br>","If your Winter Garden location ever requires new cleaners, who handles the hiring process?
+
+Kelli
+Local Building Cleaning in Orlando, Florida
+Orlando, FL",kellibyrd.e@polishedpremises.co,Kelli Byrd,connected,microsoft_oauth,3,89,169,GSC: Google + Custom (Cleaning Client),3,<a25b18db-a56b-465a-bf79-ab7d84a3bb01@polishedpremises.co>
+2026-07-27T22:26:37.000000Z,2026-07-27,9833985,sent,2026-07-27T22:26:33.000000Z,2026-07-27T21:19:00.000000Z,337394,mtaylor@logisticsfreightmanagement.com,Logistics Freight Management Team (General Email),Logistics Freight Management,Your cleaners,"<p>Hey Logistics Freight Management Team – how do you manage keeping your office and warehouse spaces clean while maintaining operational efficiency?</p><p><br></p><p>I'm emailing you because my company provides commercial cleaning services in the Mississauga area.</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning quote?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Isla</p>","Hey Logistics Freight Management Team – how do you manage keeping your office and warehouse spaces clean while maintaining operational efficiency?
+I'm emailing you because my company provides commercial cleaning services in the Mississauga area.
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning quote?Isla",islahawthorne.b@cleanfacilityservices.info,Isla Hawthorne,connected,microsoft_oauth,5,0,15,ICCCS: SEGs (Cleaning Client),1,<a25cad10-8f26-472b-a43a-e8ac72b47a37@cleanfacilityservices.info>
+2026-07-27T23:15:48.000000Z,2026-07-27,9896774,queued_for_sending,,2026-07-27T20:07:00.000000Z,358407,shawh@edmonds.wednet.edu,Edmonds School District 15 Team (General Email),Edmonds School District 15,Question about cleaning,Reaching out because we provide commercial cleaning and janitorial for businesses around Edmonds.<br><br>Let me know.<br><br>Barbara<br><br><br><br>Not the right fit for cleaning? Reply unsubscribe and I'll remove you from our outreach list.,"Reaching out because we provide commercial cleaning and janitorial for businesses around Edmonds.
+
+Let me know.
+
+Barbara
+
+
+
+Not the right fit for cleaning? Reply unsubscribe and I'll remove you from our outreach list.",barbarahart.j@localpropertymaintenance.info,Barbara Hart,connected,microsoft_oauth,5,0,100,SBSSE: Google + Custom [Nurture] (Cleaning Client),1,<a25cbfb4-61d0-4069-a44d-f0be37108c80@localpropertymaintenance.info>
+2026-07-27T23:49:48.000000Z,2026-07-27,9912129,queued_for_sending,,2026-07-27T20:40:00.000000Z,1385389,ben@simplesoda.com,Ben Bowman,Simple Soda,Cleaning Question,"My name is Charlotte, and I work with a commercial cleaning &amp; janitorial company that serves businesses around Tempe.<br><br>Let me know if you’re open to arranging a cleaning quote.<br><br>Warmly,<br><br>Charlotte<br><br>PS - would (480) 442-3494 be a good number to reach you?<br><br><br><br>Let me know if you'd like to be removed from future emails.","My name is Charlotte, and I work with a commercial cleaning & janitorial company that serves businesses around Tempe.
+
+Let me know if you’re open to arranging a cleaning quote.
+
+Warmly,
+
+Charlotte
+
+PS - would (480) 442-3494 be a good number to reach you?
+
+
+
+Let me know if you'd like to be removed from future emails.",charlotte.romero@commercialcleansphere.com,Charlotte Romero,connected,microsoft_oauth,5,2,40,SQFT: Google + Custom (Cleaning Client),1,<a25cc248-1065-4256-a1ad-0dd28b71df54@commercialcleansphere.com>
+2026-07-28T00:03:01.000000Z,2026-07-28,9741993,queued_for_sending,,2026-07-27T20:51:00.000000Z,617294,hi@commonrootsacupuncture.com,Common Roots Acupuncture Team (General Email),Common Roots Acupuncture,Your cleaning setup,"<p>Hi Common Roots Acupuncture Team - how often do you assess the cleanliness of your treatment rooms and patient areas for optimal care?</p><p><br></p><p>Let me know if your team would open to a complimentary cleaning quote for your space.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Oliver</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>--</p><p>Oliver Smith</p><p>Commercial Cleaning Provider in the Greater Orlando Area</p><p></p>","Hi Common Roots Acupuncture Team - how often do you assess the cleanliness of your treatment rooms and patient areas for optimal care?
+Let me know if your team would open to a complimentary cleaning quote for your space.Oliver--Oliver SmithCommercial Cleaning Provider in the Greater Orlando Area",oliversmith.c@propertybridgeclean.com,Oliver Smith,connected,microsoft_oauth,5,2,104,JPTUC: Outlook [Nurture] (Cleaning Client),1,<a25c953a-215f-4d96-b25f-57dd461e962d@propertybridgeclean.com>
+2026-07-28T00:20:45.000000Z,2026-07-28,9917845,queued_for_sending,,2026-07-27T21:08:00.000000Z,1399085,shermanscs@gmail.com,Steve Sherman Billiards Instruction Team (General Email),Steve Sherman Billiards Instruction,Thoughts,"Hi Steve Sherman Billiards Instruction Team, how do you ensure your training spaces and office remain inviting for your clients?<br><br>Sending you an email because we provide commercial cleaning &amp; janitorial services for facilities in the area.<br><br>Hoping you can let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Alicia<br><br>PS: Is (203) 400-1284 a good number to get ahold of you?<br><br>--<br>Alicia Mccormick<br>Area Development Manager<br>Local Commercial Cleaning Services based in Gilbert, Arizona<br><br><br>Let me know if you'd like to be removed from our contact list.","Hi Steve Sherman Billiards Instruction Team, how do you ensure your training spaces and office remain inviting for your clients?
+
+Sending you an email because we provide commercial cleaning & janitorial services for facilities in the area.
+
+Hoping you can let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Alicia
+
+PS: Is (203) 400-1284 a good number to get ahold of you?
+
+--
+Alicia Mccormick
+Area Development Manager
+Local Commercial Cleaning Services based in Gilbert, Arizona
+
+
+Let me know if you'd like to be removed from our contact list.",alicia.mccormick.l@commercialcleaningcrewco.com,Alicia Mccormick,connected,microsoft_oauth,5,3,40,SQFT: Google + Custom (Cleaning Client),1,<a25cc2fb-8458-4672-98c8-232285ea0175@commercialcleaningcrewco.com>
+2026-07-28T00:59:21.000000Z,2026-07-28,9915523,queued_for_sending,,2026-07-27T21:45:00.000000Z,1392494,dawson.schnautz@ffga.com,Dawson Schnautz,First Financial Group of America,Commercial cleaning services for your space,"<p>Hey Dawson – how do you keep your office spaces and meeting rooms clean without disrupting employee productivity?</p><p><br></p><p>Let me know if you'd open to a complimentary cleaning quote for your space.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Carol</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>P.S. Reply stop outreach and we'll be sure not to email you again.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p>","Hey Dawson – how do you keep your office spaces and meeting rooms clean without disrupting employee productivity?
+Let me know if you'd open to a complimentary cleaning quote for your space.CarolP.S. Reply stop outreach and we'll be sure not to email you again.",carol.woodard.k@cleanserveprosco.com,Carol Woodard,connected,microsoft_oauth,5,4,40,SQFT: Google + Custom (Cleaning Client),1,<a25cc2af-f8f8-4a35-9ac2-d85038025faf@cleanserveprosco.com>
+2026-07-28T13:40:14.000000Z,2026-07-28,10314738,queued_for_sending,,2026-07-28T12:38:00.000000Z,1340028,tim@salvageheaven.com,Tim Hansen,Salvage Heaven,Cleaning Question,"My name is Tracy, and I work with a commercial cleaning and janitorial company that serves businesses around Greendale.<br><br>Let me know if you’re open to arranging a complimentary cleaning quote.<br><br>Best,<br><br>Tracy<br><br><br><br>Am I barking up the wrong tree? Reply ""End Emails"" and you're off our outreach list.","My name is Tracy, and I work with a commercial cleaning and janitorial company that serves businesses around Greendale.
+
+Let me know if you’re open to arranging a complimentary cleaning quote.
+
+Best,
+
+Tracy
+
+
+
+Am I barking up the wrong tree? Reply ""End Emails"" and you're off our outreach list.",tracy.b@nearbyofficegroundskeeping.info,Tracy Bishop,connected,microsoft_oauth,5,0,118,LC: Google + Custom [Nurture] (Cleaning Client),1,<a25d4490-2ef0-473e-909f-46a777af23de@nearbyofficegroundskeeping.info>
+2026-07-28T13:52:16.000000Z,2026-07-28,10282291,queued_for_sending,,2026-07-28T13:51:00.000000Z,1050800,jeena@zsltax.com,Jeena Panjsheeri,ZSL Tax and Financial Services,Re: cleaning,"At any point, if your Manassas location is looking for new cleaners, who should I reach out to?<br><br>Natasha<br>Commercial Cleaning Provider -  Manassas, VA<br>Manassas, VA 20111","At any point, if your Manassas location is looking for new cleaners, who should I reach out to?
+
+Natasha
+Commercial Cleaning Provider -  Manassas, VA
+Manassas, VA 20111",natashagarrett.l@freshdeskjanitorial.co,Natasha Garrett,connected,microsoft_oauth,5,85,62,PPS: Outlook (Cleaning Client),3,<a25d39ee-0296-4df5-9bf7-501f194f7819@freshdeskjanitorial.co>
+2026-07-28T14:00:52.000000Z,2026-07-28,10143427,queued_for_sending,,2026-07-28T13:00:00.000000Z,1808772,RaisingTexasTeachers@CharlesButtFdn.org,Charles Butt Foundation Team (General Email),Charles Butt Foundation,Re: Cleaning,"Charles Butt Foundation Team,<br><br>Do you want a complimentary janitorial and cleaning quote to know your options?<br><br>Emily<br><br><br>Emily Hodges<br>Area Development Manager<br>Commercial Cleaning Provider in the Greater Austin Area, Texas<br>Greater Northwest Austin, Texas<br><br>Not interested in our cleaning services? Reply NO MORE and you're off the list.","Charles Butt Foundation Team,
+
+Do you want a complimentary janitorial and cleaning quote to know your options?
+
+Emily
+
+
+Emily Hodges
+Area Development Manager
+Commercial Cleaning Provider in the Greater Austin Area, Texas
+Greater Northwest Austin, Texas
+
+Not interested in our cleaning services? Reply NO MORE and you're off the list.",emily.hodges.as@commercialcleaningdeskteam.com,Emily Hodges,connected,microsoft_oauth,3,12,209,CCGNWA: Outlook (Cleaning Client),2,<a25d0db3-0cc9-4479-8818-524abe8e5816@commercialcleaningdeskteam.com>
+2026-07-28T14:11:45.000000Z,2026-07-28,10116266,queued_for_sending,,2026-07-28T13:11:00.000000Z,740565,dfeeley@t-mobilecenter.com,David Feeley,T-Mobile Center,Cleaning in the Kansas City area,"Hey David - how do you manage the cleanliness of high-traffic areas while ensuring a safe experience during events?<br><br>My name is Delilah, and I work with a commercial cleaning company that serves businesses in Kansas City.<br><br>Let me know if you’re open to arranging a cleaning quote.<br><br>Respectfully,<br><br>Delilah<br><br>P.S. Would (816) 949-7100 be an okay number to reach you at?<br><br>--<br>Delilah Wright<br> Manager<br>Commercial Cleaning - Kansas City and Wichita, KS area<br><br><br>Don't need a cleaning vendor? Reply STOP and I'll remove you from our outreach list.","Hey David - how do you manage the cleanliness of high-traffic areas while ensuring a safe experience during events?
+
+My name is Delilah, and I work with a commercial cleaning company that serves businesses in Kansas City.
+
+Let me know if you’re open to arranging a cleaning quote.
+
+Respectfully,
+
+Delilah
+
+P.S. Would (816) 949-7100 be an okay number to reach you at?
+
+--
+Delilah Wright
+ Manager
+Commercial Cleaning - Kansas City and Wichita, KS area
+
+
+Don't need a cleaning vendor? Reply STOP and I'll remove you from our outreach list.",delilahwright.e@advancedbuildingcleaning.com,Delilah Wright,connected,microsoft_oauth,5,10,95,CCGW: Outlook [Nurture] (Cleaning Client),1,<a25d009e-42db-4d57-b0b7-75facf840681@advancedbuildingcleaning.com>
+2026-07-28T14:39:48.000000Z,2026-07-28,10004219,queued_for_sending,,2026-07-28T14:38:00.000000Z,1919077,rodney@esteppenergy.com,Rodney (General Email),Estepp Energy,Thoughts,Sending you an email because we provide commercial cleaning for businesses in the area.<br><br>Hoping you can let me know.<br><br>Veronica<br><br><br><br>Let me know if you'd like to be removed from our contact list.,"Sending you an email because we provide commercial cleaning for businesses in the area.
+
+Hoping you can let me know.
+
+Veronica
+
+
+
+Let me know if you'd like to be removed from our contact list.",veronica.waters.ap@commercialservicecleaningnow.com,Veronica Waters,connected,microsoft_oauth,3,13,221,CVJLEX: Outlook (Cleaning Client),1,<a25cdd53-b012-4eb9-a37d-ec1404e6428e@commercialservicecleaningnow.com>
+2026-07-28T14:46:36.000000Z,2026-07-28,10343973,queued_for_sending,,2026-07-28T13:44:00.000000Z,373,dsanchez@hntlgh.com,Dyann A Sanchez,"Huntleigh Securities Corporation, Research Division",cleaning,"Hi, how often do you assess the cleanliness of your meeting rooms and common areas for client impressions?<br><br>We provide cleaning for businesses similar to yours in the area.<br><br>Would you be open to a complimentary quote?<br><br>Anna<br><br>--<br>Anna Carter<br>Commercial Cleaning Provider in the St Louis, Missouri<br><br><br>Let me know if you'd like to be removed from future outreach.<br><br>","Hi, how often do you assess the cleanliness of your meeting rooms and common areas for client impressions?
+
+We provide cleaning for businesses similar to yours in the area.
+
+Would you be open to a complimentary quote?
+
+Anna
+
+--
+Anna Carter
+Commercial Cleaning Provider in the St Louis, Missouri
+
+
+Let me know if you'd like to be removed from future outreach.",a.carter@precisionfacilityclean.com,Anna Carter,connected,microsoft_oauth,5,7,83,CCGSTL: Outlook [Nurture] (Cleaning Client),1,<a25d4c84-e32d-4821-a7f1-ede730e7f358@precisionfacilityclean.com>
+2026-07-28T14:56:38.000000Z,2026-07-28,10363832,queued_for_sending,,2026-07-28T13:54:00.000000Z,700572,2801manager@totalwine.com,Total Wine & More Team (General Email),Total Wine & More,Cleaning service for businesses in the Wichita area,"My name is Mila, and I work with a commercial cleaning company that serves facilities in Wichita.<br><br>I was hoping you can let me know.<br><br>Best regards,<br><br>Mila<br><br>PS: would (316) 448-0600 be a good number to get ahold of you?<br><br><br>Mila Gonzalez<br>Strategic Business Development Manager<br>Wichita \&amp; Kansas City Commercial Cleaners<br><br><br>Let me know if you'd like to be removed from our contact list.","My name is Mila, and I work with a commercial cleaning company that serves facilities in Wichita.
+
+I was hoping you can let me know.
+
+Best regards,
+
+Mila
+
+PS: would (316) 448-0600 be a good number to get ahold of you?
+
+
+Mila Gonzalez
+Strategic Business Development Manager
+Wichita \& Kansas City Commercial Cleaners
+
+
+Let me know if you'd like to be removed from our contact list.",milagonzalez.d@primejanitorialgroup.co,Mila Gonzalez,connected,microsoft_oauth,5,7,10,CCGW: Google + Custom (Cleaning Client),1,<a25d53e7-e8c2-4bf9-83cf-84f8c79243b8@primejanitorialgroup.co>
+2026-07-28T15:17:07.000000Z,2026-07-28,10020999,queued_for_sending,,2026-07-28T15:13:00.000000Z,874923,chris@ihrpt.com,Chris Antonacci,"Ralph A. Antonacci Jr, MSPT",Question about your cleaning setup,"My name is Jasmine, and I work with a commercial cleaning company that serves businesses in Norwalk.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Respectfully,<br><br>Jasmine<br><br>--<br>Jasmine Chapman<br>Area Development Manager<br>Local Commercial Cleaning Provider based in Connecticut, Connecticut<br><br><br>Rather I move on for good? You can reply REMOVE ME and I'll take you off our outreach list.","My name is Jasmine, and I work with a commercial cleaning company that serves businesses in Norwalk.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Respectfully,
+
+Jasmine
+
+--
+Jasmine Chapman
+Area Development Manager
+Local Commercial Cleaning Provider based in Connecticut, Connecticut
+
+
+Rather I move on for good? You can reply REMOVE ME and I'll take you off our outreach list.",chapmanjasmine@getofficegroundskeeping.info,Jasmine Chapman,connected,microsoft_oauth,5,1,128,CCGCT: Outlook [Nurture] (Cleaning Client),1,<a25ce181-2646-44c0-ba22-af90f2b29f15@getofficegroundskeeping.info>
+2026-07-28T15:25:49.000000Z,2026-07-28,10258057,queued_for_sending,,2026-07-28T14:22:00.000000Z,1986164,Timothy.Smith@yulista.com,Timothy (General Email),Yulista Aviation,Re: cleaning,"Hi Timothy,<br><br>Are you open to exploring a new janitorial provider? You can totally say no and I won't follow up.<br><br>Kathleen<br><br><br>Kathleen Spence<br>Area Development Manager<br>Commercial Cleaning - Huntsville, Alabama<br>Huntsville, Alabama<br><br><br><br>Let me know if you'd like to be removed from future outreach.<br><br>","Hi Timothy,
+
+Are you open to exploring a new janitorial provider? You can totally say no and I won't follow up.
+
+Kathleen
+
+
+Kathleen Spence
+Area Development Manager
+Commercial Cleaning - Huntsville, Alabama
+Huntsville, Alabama
+
+
+
+Let me know if you'd like to be removed from future outreach.",kathleen.spence.ai@commercialcleaningunit.com,Kathleen Spence,connected,microsoft_oauth,3,13,250,CCGHAL: Google + Custom (Cleaning Client),2,<a25d331d-07cd-417e-90c4-f194d15b6048@commercialcleaningunit.com>
+2026-07-28T15:43:48.000000Z,2026-07-28,10020350,queued_for_sending,,2026-07-28T15:38:00.000000Z,860407,ymcneill@ehmchm.org,Yamilette McNeill,Parish Court,Current cleaners,"<p>Hi Yamilette, how do you keep common areas and resident facilities spotless while meeting the needs of seniors?</p><p><br></p><p>Let me know if your team would interested in a complimentary cleaning quote.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Jocelyn</p>","Hi Yamilette, how do you keep common areas and resident facilities spotless while meeting the needs of seniors?
+Let me know if your team would interested in a complimentary cleaning quote.Jocelyn",jocelyn.mayer@servicerootfacility.com,Jocelyn Mayer,connected,microsoft_oauth,5,3,128,CCGCT: Outlook [Nurture] (Cleaning Client),1,<a25ce168-fd5a-40bc-adba-9bc04cf6390e@servicerootfacility.com>
+2026-07-28T15:52:53.000000Z,2026-07-28,9955586,queued_for_sending,,2026-07-28T14:48:00.000000Z,648510,dabrahamson@zionmortgage.com,David Abrahamson,Zion Mortgage,Current cleaning company,"<p>Hi David – how do you ensure your client-facing areas remain spotless and welcoming for potential homeowners?</p><p><br></p><p>I wanted to send you an email because my company provides commercial cleaning services for several facilities in Orlando.</p><p><br></p><p>Would your office be interested in a complimentary cleaning quote for your space?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Andrea</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p>Andrea Phillips</p><p>Local Building Cleaning –  Orlando, FL</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>PS: Reply take my email off for no more emails.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p>","Hi David – how do you ensure your client-facing areas remain spotless and welcoming for potential homeowners?
+I wanted to send you an email because my company provides commercial cleaning services for several facilities in Orlando.
+Would your office be interested in a complimentary cleaning quote for your space?AndreaAndrea PhillipsLocal Building Cleaning –  Orlando, FLPS: Reply take my email off for no more emails.",andrea.phillips@facilitylinecleaning.com,Andrea Phillips,connected,microsoft_oauth,5,5,57,FCS: SEGs (Cleaning Client),1,<a25ccbde-eec3-4f18-8ae2-86c3106604ac@facilitylinecleaning.com>
+2026-07-28T15:55:44.000000Z,2026-07-28,10312561,queued_for_sending,,2026-07-28T12:50:00.000000Z,784552,jfoley@bgcsc.org,Mukilteo Boys & Girls Club Team (General Email),Mukilteo Boys & Girls Club,Cleaning Question,"Hey Mukilteo Boys &amp; Girls Club Team, how do you manage cleanliness in your club's high-traffic areas while ensuring a safe environment for kids?<br><br>Sending you an email because we provide commercial cleaning &amp; janitorial services for businesses around the area.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a quote.<br><br>Warmly,<br><br>Belinda<br><br>--<br>Belinda Flores<br> Manager<br>Commercial Cleaning in Bellevue, Washington<br><br><br>If our cleaning services aren't a fit, reply Not For Me and I'll take you off our contact list.","Hey Mukilteo Boys & Girls Club Team, how do you manage cleanliness in your club's high-traffic areas while ensuring a safe environment for kids?
+
+Sending you an email because we provide commercial cleaning & janitorial services for businesses around the area.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a quote.
+
+Warmly,
+
+Belinda
+
+--
+Belinda Flores
+ Manager
+Commercial Cleaning in Bellevue, Washington
+
+
+If our cleaning services aren't a fit, reply Not For Me and I'll take you off our contact list.",belindaflores.d@requestofficeupkeep.info,Belinda Flores,connected,microsoft_oauth,5,5,100,SBSSE: Google + Custom [Nurture] (Cleaning Client),1,<a25d43b6-ada1-46e6-a102-07ec2e055737@requestofficeupkeep.info>
+2026-07-28T16:28:10.000000Z,2026-07-28,9965219,queued_for_sending,,2026-07-28T15:19:00.000000Z,797710,admin@labortribune.com,Labor Tribune Publishing Team (General Email),Labor Tribune Publishing,Commercial Cleaning Intro,"Hey Labor Tribune Publishing Team, how do you ensure your publishing office and production areas maintain a professional image for your readers?<br><br>My name is Alyssa, and I work with a commercial cleaning company that serves facilities in Saint louis.<br><br>I was hoping you can let me know if you’re open to arranging a complimentary cleaning quote.<br><br>Alyssa<br><br><br><br>Rather I move on for good? You can reply NO MORE and I'll take you off our outreach list.","Hey Labor Tribune Publishing Team, how do you ensure your publishing office and production areas maintain a professional image for your readers?
+
+My name is Alyssa, and I work with a commercial cleaning company that serves facilities in Saint louis.
+
+I was hoping you can let me know if you’re open to arranging a complimentary cleaning quote.
+
+Alyssa
+
+
+
+Rather I move on for good? You can reply NO MORE and I'll take you off our outreach list.",wise.b@superiorfacilitycare.com,Alyssa Wise,connected,microsoft_oauth,5,5,82,CCGSTL: Google + Custom [Nurture] (Cleaning Client),1,<a25ccdc6-287c-4c79-baea-b8baa5369466@superiorfacilitycare.com>
+2026-07-28T16:28:13.000000Z,2026-07-28,10235805,queued_for_sending,,2026-07-28T16:19:00.000000Z,2009740,mbrewer@fischerhomes.com,Matt Brewer,,Commercial Cleaning Introduction,"My name is Valerie, and I work with a commercial cleaning company that serves facilities in Louisville Metropolitan Area.<br><br>I was hoping you can let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Valerie<br><br>--<br>Valerie Lam<br><br>Commercial Cleaning Services in the Louisville, KY area<br><br><br>Note: Reply Not For Me and you will not hear from me again.","My name is Valerie, and I work with a commercial cleaning company that serves facilities in Louisville Metropolitan Area.
+
+I was hoping you can let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Valerie
+
+--
+Valerie Lam
+
+Commercial Cleaning Services in the Louisville, KY area
+
+
+Note: Reply Not For Me and you will not hear from me again.",valerie.lam.at@commercialcleaninggroupteam.com,Valerie Lam,connected,microsoft_oauth,3,13,226,CVJLOU: Google + Custom (Cleaning Client),1,<a25d2f7b-8b1b-492f-8a68-a856a25acc3e@commercialcleaninggroupteam.com>
+2026-07-28T16:32:40.000000Z,2026-07-28,10183228,queued_for_sending,,2026-07-28T16:23:00.000000Z,602038,grant@revivalcity.com,Grant Farrell,Revival City Church,Commercial cleaning services for your space,"<p>Hey Grant – how do you ensure your church's high-traffic areas stay clean and welcoming for services?</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would you be open to a complimentary cleaning quote?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Camila</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p>Camila Hayes</p><p>Local Building Cleaning –  Orlando, FL</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>PS: You can reply take my email off for no more emails.</p>","Hey Grant – how do you ensure your church's high-traffic areas stay clean and welcoming for services?
+Not sure if this is something you’re reviewing right now, but would you be open to a complimentary cleaning quote?CamilaCamila HayesLocal Building Cleaning –  Orlando, FLPS: You can reply take my email off for no more emails.",camilahayes@hirejanitorialservice.com,Camila Hayes,connected,microsoft_oauth,5,4,55,FCS: Google + Custom (Cleaning Client),1,<a25d204e-d835-478a-a0cf-401388fff671@hirejanitorialservice.com>
+2026-07-28T16:32:40.000000Z,2026-07-28,10318772,queued_for_sending,,2026-07-28T16:23:00.000000Z,147489,admin@ablawoffices.com,Andrew Bisulca Law Office Team (General Email),Andrew Bisulca Law Office,Cleaning,"Hey Andrew Bisulca Law Office Team,<br><br>Do you know if your office is in the market for a new cleaning vendor?<br><br>We provide cleaning for businesses similar to yours in the area.<br><br>Hoping you can let me know if you’re open to arranging a cleaning quote.<br><br>Hope to hear from you,<br>Alexandra<br><br>P.S. would (703) 763-3951 be an okay number to get ahold of you?<br><br><br><br>P.S. Reply unsubscribe and I'll be sure not to reach out to you again.<br><br>","Hey Andrew Bisulca Law Office Team,
+
+Do you know if your office is in the market for a new cleaning vendor?
+
+We provide cleaning for businesses similar to yours in the area.
+
+Hoping you can let me know if you’re open to arranging a cleaning quote.
+
+Hope to hear from you,
+Alexandra
+
+P.S. would (703) 763-3951 be an okay number to get ahold of you?
+
+
+
+P.S. Reply unsubscribe and I'll be sure not to reach out to you again.",alexandra.watkins@facilitycoremaintenance.com,Alexandra Watkins,connected,microsoft_oauth,5,186,61,PPS: Google + Custom (Cleaning Client),4,<a25d4571-6d0b-4f20-a22d-a902f274b51e@facilitycoremaintenance.com>
+2026-07-28T17:04:28.000000Z,2026-07-28,10297917,queued_for_sending,,2026-07-28T13:53:00.000000Z,109854,dmarshall@swan2b.com,Dave M,Albany Power Sports,Local cleaning question,"<p>Hey Dave, how do you maintain cleanliness in your service areas and showroom to impress customers?</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Let me know,</p><p><br></p><p>Daisy</p><p><br></p><p>Disclaimer note: You can respond end outreach and this'll be our final message.</p>","Hey Dave, how do you maintain cleanliness in your service areas and showroom to impress customers?
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?Let me know,
+Daisy
+Disclaimer note: You can respond end outreach and this'll be our final message.",daisyoliver.a@brighteracleaning.com,Daisy Oliver,connected,microsoft_oauth,5,41,89,BCSOR: Outlook [Nurture] (Cleaning Client),1,<a25d40a3-5460-4345-8658-e48a3e18cec3@brighteracleaning.com>
+2026-07-28T17:24:11.000000Z,2026-07-28,10298897,queued_for_sending,,2026-07-28T14:12:00.000000Z,102241,amcadams@trilliumfamily.org,Amy McAdams Gettings,Trillium Family Services,Question about cleaning,"Hey Amy - how do you ensure high-touch areas in your facility remain sanitized for both clients and staff?<br><br>Sending you an email because we provide commercial cleaning and janitorial services for facilities in the area.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Jordan<br><br>--<br>Jordan Cisneros<br><br>Business Development<br>Local Commercial Cleaning -  Springfield, OR<br><br><br>Don't need a cleaning vendor? Reply REMOVE ME and I'll remove you from our outreach list.","Hey Amy - how do you ensure high-touch areas in your facility remain sanitized for both clients and staff?
+
+Sending you an email because we provide commercial cleaning and janitorial services for facilities in the area.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Jordan
+
+--
+Jordan Cisneros
+
+Business Development
+Local Commercial Cleaning -  Springfield, OR
+
+
+Don't need a cleaning vendor? Reply REMOVE ME and I'll remove you from our outreach list.",jordancisneros.c@shinebridgefacility.co,Jordan Cisneros,connected,microsoft_oauth,5,44,89,BCSOR: Outlook [Nurture] (Cleaning Client),1,<a25d40bc-8feb-4689-82b3-1cca3ab4c00c@shinebridgefacility.co>
+2026-07-28T17:25:42.000000Z,2026-07-28,10271576,queued_for_sending,,2026-07-28T14:14:00.000000Z,1295097,Gunnar.Israel@oiaglobal.com,Gunnar (General Email),Oia Global Logistics,Complimentary cleaning quote,"Hi Gunnar - how do you handle keeping your logistics facilities clean and welcoming for clients while managing daily operations?<br><br>I'm reaching out because we provide commercial cleaning for facilities around Carson.<br><br>I was hoping you can let me know if you’re open to arranging a complimentary cleaning quote.<br><br>Warm regards,<br><br>Meghan<br><br>--<br>Meghan Cantu<br><br>Business Development Manager<br>Commercial Cleaning Service in the Los Angeles County<br><br><br>If our cleaning services aren't a fit, reply No More and I'll take you off the list.","Hi Gunnar - how do you handle keeping your logistics facilities clean and welcoming for clients while managing daily operations?
+
+I'm reaching out because we provide commercial cleaning for facilities around Carson.
+
+I was hoping you can let me know if you’re open to arranging a complimentary cleaning quote.
+
+Warm regards,
+
+Meghan
+
+--
+Meghan Cantu
+
+Business Development Manager
+Commercial Cleaning Service in the Los Angeles County
+
+
+If our cleaning services aren't a fit, reply No More and I'll take you off the list.",meghan.cantu.a@proactivecleaningcompany.com,Meghan Cantu,connected,microsoft_oauth,5,63,191,JPLA: Outlook (Cleaning Client),1,<a25d376d-26f2-4235-9164-833d6235cd86@proactivecleaningcompany.com>
+2026-07-28T17:46:11.000000Z,2026-07-28,10464271,queued_for_sending,,2026-07-28T17:33:00.000000Z,2033876,ad@mishkantefila.org,Andrew Davis,Congregation Mishkan Tefila,Commercial cleaning introduction,"Hi Andrew - how do you keep your sanctuary and event spaces clean while supporting a vibrant community?<br><br>My name is Carrie, and I work with a commercial cleaning company that serves facilities around Brookline.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Carrie<br><br>PS - Would (617) 332-7770 be a good number to get ahold of you?<br><br><br>Carrie Bolton<br>Area Development Manager<br>Commercial Cleaning Provider in the Nashua, New Hampshire<br><br><br>If we're never going to be a fit, reply STOP and I'll take you off our contact list.","Hi Andrew - how do you keep your sanctuary and event spaces clean while supporting a vibrant community?
+
+My name is Carrie, and I work with a commercial cleaning company that serves facilities around Brookline.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Carrie
+
+PS - Would (617) 332-7770 be a good number to get ahold of you?
+
+
+Carrie Bolton
+Area Development Manager
+Commercial Cleaning Provider in the Nashua, New Hampshire
+
+
+If we're never going to be a fit, reply STOP and I'll take you off our contact list.",carrie.bolton.f@primefacilitypoint.com,Carrie Bolton,connected,microsoft_oauth,3,47,197,CCGNH: Outlook (Cleaning Client),1,<a25d75a1-b77e-4503-afd1-5541f5531fc0@primefacilitypoint.com>
+2026-07-28T17:53:17.000000Z,2026-07-28,10197342,queued_for_sending,,2026-07-28T14:39:00.000000Z,674678,jamie.patterson@bofa.com,Jamie Patterson,Bank of America,Cleaning check,"<p>Hi Jamie – how do you ensure your branches and offices remain spotless and compliant while serving customers?</p><p><br></p><p>Would your office be open to a complimentary cleaning quote for your space?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Coraline</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>You can reply quit and we'll include you on our contact blacklist</p>","Hi Jamie – how do you ensure your branches and offices remain spotless and compliant while serving customers?
+Would your office be open to a complimentary cleaning quote for your space?CoralineYou can reply quit and we'll include you on our contact blacklist",coralinenielsen.j@probridgemaintenanceco.com,Coraline Nielsen,connected,microsoft_oauth,2,3,102,SBSSE: SEGs [Nurture] (Cleaning Client),1,<a25d2670-a67d-4655-8abb-d0bcb6aca7c2@probridgemaintenanceco.com>
+2026-07-28T17:53:35.000000Z,2026-07-28,10197566,queued_for_sending,,2026-07-28T14:40:00.000000Z,1479762,info@maxemwealth.com,Maxem Wealth Advisors Team (General Email),Maxem Wealth Advisors,Question for you,"Hey Maxem Wealth Advisors Team, how do you ensure your office consistently reflects the professionalism your clients expect in financial services?<br><br>My name is Alexander, and I work with a commercial cleaning and janitorial company that serves companies in Vancouver.<br><br>Let me know.<br><br>Let me know,<br><br>Alexander<br><br><br><br>Want off our list permanently? Reply STOP and I'll remove you.","Hey Maxem Wealth Advisors Team, how do you ensure your office consistently reflects the professionalism your clients expect in financial services?
+
+My name is Alexander, and I work with a commercial cleaning and janitorial company that serves companies in Vancouver.
+
+Let me know.
+
+Let me know,
+
+Alexander
+
+
+
+Want off our list permanently? Reply STOP and I'll remove you.",alexanderwalker.b@maintainbridgeprosco.com,Alexander Walker,connected,microsoft_oauth,5,7,102,SBSSE: SEGs [Nurture] (Cleaning Client),1,<a25d2679-29e3-48d7-8179-41ead38147f8@maintainbridgeprosco.com>
+2026-07-28T18:01:59.000000Z,2026-07-28,10092536,queued_for_sending,,2026-07-28T14:48:00.000000Z,1292119,mflosi@oesd114.org,Mari Flosi SPHR,Olympic Educational Service District #114,Current cleaning company,"<p>Mari - how do you ensure classrooms and restrooms meet health compliance while remaining welcoming for students and staff?</p><p><br></p><p>We provide cleaning services for multiple buildings in the Bremerton area.</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Kevin</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>PS: Simply respond quit for no emails.</p>","Mari - how do you ensure classrooms and restrooms meet health compliance while remaining welcoming for students and staff?
+We provide cleaning services for multiple buildings in the Bremerton area.
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?KevinPS: Simply respond quit for no emails.",kevinharris.e@buildingsupportworksco.com,Kevin Harris,connected,microsoft_oauth,5,6,17,SBSSE: Outlook (Cleaning Client),1,<a25cf34e-a93a-4773-850a-2c2f741bd555@buildingsupportworksco.com>
+2026-07-28T18:05:56.000000Z,2026-07-28,10306710,queued_for_sending,,2026-07-28T16:51:00.000000Z,1189599,devontray.davenport@westcare.com,Devontray (General Email),WestCare Wisconsin,Question about your interior cleaning setup,"<p>Devontray - how often do you guys review the cleanliness of your community centers and clinical spaces?</p><p><br></p><p>Would you be open to a complimentary cleaning quote for your space?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Leslie</p>","Devontray - how often do you guys review the cleanliness of your community centers and clinical spaces?
+Would you be open to a complimentary cleaning quote for your space?Leslie",leslielutz@getfacilitygroundskeeping.info,Leslie Lutz,connected,microsoft_oauth,5,2,35,LC: Outlook (Cleaning Client),1,<a25d41da-e73b-4eda-beaa-3466169d47fe@getfacilitygroundskeeping.info>
+2026-07-28T18:05:59.000000Z,2026-07-28,10191591,queued_for_sending,,2026-07-28T17:51:00.000000Z,208259,kurtpatel@royalpowder.com,Kurt Patel,Royal Powder,Cleaning,"Hello Kurt,<br><br>Any interest in a complimentary quote?<br><br>I'm reaching out because we do cleaning services for businesses similar to yours in Cleveland.<br><br>Let me know.<br><br>Have a great week,<br>Nina<br><br>P.S. Would there be an okay number to reach you?<br><br><br>--<br>Nina Terry<br><br><br>Business Development Manager<br>Cleveland, Akron &amp; Toledo Commercial Cleaners<br><br><br>P.S. Simply reply NO MORE and I'll make sure not to email you again.","Hello Kurt,
+
+Any interest in a complimentary quote?
+
+I'm reaching out because we do cleaning services for businesses similar to yours in Cleveland.
+
+Let me know.
+
+Have a great week,
+Nina
+
+P.S. Would there be an okay number to reach you?
+
+
+--
+Nina Terry
+
+
+Business Development Manager
+Cleveland, Akron & Toledo Commercial Cleaners
+
+
+P.S. Simply reply NO MORE and I'll make sure not to email you again.",ninaterry.p@servicefacilitycare.com,Nina Terry,connected,microsoft_oauth,5,114,76,JPCL: Google + Custom (Cleaning Client),4,<a25d24f6-a73e-4ec2-b7b1-3bed04ae6e46@servicefacilitycare.com>
+2026-07-28T18:21:12.000000Z,2026-07-28,10020110,queued_for_sending,,2026-07-28T18:06:00.000000Z,861416,fw@atlasship.com,Frederik Wendelboe,Atlas Shipping,Thoughts,Sending you an email because we provide commercial cleaning for companies around the area.<br><br>Hoping you'd let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Amanda<br><br>P.S. Is there a good number to get ahold of you at?<br><br>--<br>Amanda Booker<br>Strategic Business Development<br>Connecticut Commercial Cleaners<br><br><br>Let me know if you'd like to be removed from future emails.,"Sending you an email because we provide commercial cleaning for companies around the area.
+
+Hoping you'd let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Amanda
+
+P.S. Is there a good number to get ahold of you at?
+
+--
+Amanda Booker
+Strategic Business Development
+Connecticut Commercial Cleaners
+
+
+Let me know if you'd like to be removed from future emails.",amanda@selectcommercialcleaningservice.com,Amanda Booker,connected,microsoft_oauth,5,3,128,CCGCT: Outlook [Nurture] (Cleaning Client),1,<a25ce160-c864-42cf-9857-81e142fddf3f@selectcommercialcleaningservice.com>
+2026-07-28T18:33:03.000000Z,2026-07-28,10211174,queued_for_sending,,2026-07-28T18:16:00.000000Z,612306,karen@allegrahalton.com,Karen Grassick,Allegra Halton,Cleaning for your building,"<p>Hi Karen, how do you maintain a professional appearance in your production and office spaces without disrupting workflow?</p><p><br></p><p>Let me know if you would interested in a complimentary cleaning quote for your space.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Rowan</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p>Rowan Montgomery</p><p>Orlando Area Commercial Cleaning</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Let me know if you'd like to be removed from future outreach from our company.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p>","Hi Karen, how do you maintain a professional appearance in your production and office spaces without disrupting workflow?
+Let me know if you would interested in a complimentary cleaning quote for your space.RowanRowan MontgomeryOrlando Area Commercial CleaningLet me know if you'd like to be removed from future outreach from our company.",rowanmontgomery.f@cleanfacilitypro.info,Rowan Montgomery,connected,microsoft_oauth,5,3,98,ICCCS: Outlook [Nurture] (Cleaning Client),1,<a25d298a-758a-4b58-a7a7-83b223383e9e@cleanfacilitypro.info>
+2026-07-28T18:43:09.000000Z,2026-07-28,10331076,queued_for_sending,,2026-07-28T15:26:00.000000Z,1432371,cameron.done@macerich.com,Cameron (General Email),Macerich,Question about your cleaning setup,"Hey Cameron, how do you manage the cleanliness of your retail centers while ensuring compliance in high-traffic areas?<br><br>My name is Carla, and I work with a commercial cleaning company that serves businesses around Phoenix.<br><br>Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.<br><br>Best regards,<br><br>Carla<br><br>PS - Is (602) 953-6200 a good number to reach you?<br><br><br><br>Quick disclaimer: Simply reply unsubscribe and I'll be sure not to reach out to you again.","Hey Cameron, how do you manage the cleanliness of your retail centers while ensuring compliance in high-traffic areas?
+
+My name is Carla, and I work with a commercial cleaning company that serves businesses around Phoenix.
+
+Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.
+
+Best regards,
+
+Carla
+
+PS - Is (602) 953-6200 a good number to reach you?
+
+
+
+Quick disclaimer: Simply reply unsubscribe and I'll be sure not to reach out to you again.",carla.morgan.h@legacybuildingcare.com,Carla Morgan,connected,microsoft_oauth,5,5,40,SQFT: Google + Custom (Cleaning Client),1,<a25d4725-ab9b-4690-beb8-a3bb414b7f9a@legacybuildingcare.com>
+2026-07-28T18:49:24.000000Z,2026-07-28,10234299,queued_for_sending,,2026-07-28T18:32:00.000000Z,2007322,siva.sai@ctrlspacetech.com,Siva Sai Srivatsav Villuri,,Cleaning service for businesses in the Louisville area,"My name is Cynthia, and I work with a commercial cleaning &amp; janitorial company that serves businesses around Louisville.<br><br>Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.<br><br>Cynthia<br><br>--<br>Cynthia Clay<br>Strategic Business Development Manager<br>Building Cleaning based in Louisville, KY<br><br><br>Note: You can respond Not For Me and you will not hear from me again.","My name is Cynthia, and I work with a commercial cleaning & janitorial company that serves businesses around Louisville.
+
+Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.
+
+Cynthia
+
+--
+Cynthia Clay
+Strategic Business Development Manager
+Building Cleaning based in Louisville, KY
+
+
+Note: You can respond Not For Me and you will not hear from me again.",cynthia.clay.af@commercialcleaningnowteam.com,Cynthia Clay,connected,microsoft_oauth,3,12,226,CVJLOU: Google + Custom (Cleaning Client),1,<a25d2f50-39d3-46a1-9199-6b64c61a1a40@commercialcleaningnowteam.com>
+2026-07-28T18:55:46.000000Z,2026-07-28,9986132,queued_for_sending,,2026-07-28T18:38:00.000000Z,884130,katherine.lorenzana@klinehill.com,Katherine Lorenzana,Kline Hill Partners,cleaning,"Hey Katherine - how do you ensure your office and meeting spaces reflect professionalism while keeping compliance in mind?<br><br>Sending you an email because we provide commercial cleaning &amp; janitorial services for businesses in the area.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a quote.<br><br>Thanks for your time,<br><br>Alexandra<br><br>PS - would there be a good number to get ahold of you?<br><br><br><br>P.S. Reply Not For Me and you will not hear from me again.","Hey Katherine - how do you ensure your office and meeting spaces reflect professionalism while keeping compliance in mind?
+
+Sending you an email because we provide commercial cleaning & janitorial services for businesses in the area.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a quote.
+
+Thanks for your time,
+
+Alexandra
+
+PS - would there be a good number to get ahold of you?
+
+
+
+P.S. Reply Not For Me and you will not hear from me again.",alexandram@routinecleaningservice.com,Alexandra Martinez,connected,microsoft_oauth,5,2,127,CCGCT: Google + Custom [Nurture] (Cleaning Client),1,<a25cd370-242b-4621-ad03-42dece164d4e@routinecleaningservice.com>
+2026-07-28T19:00:49.000000Z,2026-07-28,10364981,queued_for_sending,,2026-07-28T17:43:00.000000Z,702110,haylee@mgroupkc.com,Haylee (General Email),"M Group Real Estate, Real Broker",Question about your cleaning setup,"<p>Haylee - how often do you guys deep clean your office spaces to impress clients and maintain professionalism?</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Rebecca</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p>Rebecca Evans</p><p>Local Building Cleaning based in Orlando, Florida</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>You can reply with take me off and I'll include you on my company's prospect blacklist</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p>","Haylee - how often do you guys deep clean your office spaces to impress clients and maintain professionalism?
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?RebeccaRebecca EvansLocal Building Cleaning based in Orlando, FloridaYou can reply with take me off and I'll include you on my company's prospect blacklist",rebeccaevans.a@primejanitorialgroup.co,Rebecca Evans,connected,microsoft_oauth,5,9,10,CCGW: Google + Custom (Cleaning Client),1,<a25d540e-faf7-419c-8e42-3d85b778592b@primejanitorialgroup.co>
+2026-07-28T19:02:55.000000Z,2026-07-28,10185842,queued_for_sending,,2026-07-28T18:44:00.000000Z,621998,coreyl@allstarfireinc.com,Corey Lindsey,All Star Fire,Cleaning quote question,"<p>Hey Corey – how do you ensure your service areas and offices maintain a spotless, compliant environment for clients?</p><p><br></p><p>Let me know if you'd interested in a complimentary cleaning quote.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Isabella</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p>Isabella Bennett</p><p>Orlando Area Commercial Cleaners</p><p></p>","Hey Corey – how do you ensure your service areas and offices maintain a spotless, compliant environment for clients?
+Let me know if you'd interested in a complimentary cleaning quote.IsabellaIsabella BennettOrlando Area Commercial Cleaners",bennetti@scheduleofficecleaning.com,Isabella Bennett,connected,microsoft_oauth,5,5,55,FCS: Google + Custom (Cleaning Client),1,<a25d20b8-3298-49b6-bdce-41282066427a@scheduleofficecleaning.com>
+2026-07-28T19:04:00.000000Z,2026-07-28,9856231,queued_for_sending,,2026-07-28T18:46:00.000000Z,1302520,mdarden@mtvernoncsd.org,Lincoln Elementary School Team (General Email),Lincoln Elementary School,Office cleaning - Mt Vernon,"<p>Hey Lincoln Elementary School Team - how do you guys manage cleaning your classrooms and common areas while keeping students focused on learning?</p><p><br></p><p>Would you be interested in a complimentary cleaning quote?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Hayden</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>--</p><p>Hayden Marshall</p><p>Orlando Commercial Cleaning</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>You can reply take me off and we'll add you to our no-email list.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p>","Hey Lincoln Elementary School Team - how do you guys manage cleaning your classrooms and common areas while keeping students focused on learning?
+Would you be interested in a complimentary cleaning quote?Hayden--Hayden MarshallOrlando Commercial CleaningYou can reply take me off and we'll add you to our no-email list.",marshallh@localcommercialjanitorial.com,Hayden Marshall,connected,microsoft_oauth,5,6,52,SINY: Google + Custom (Cleaning Client),1,<a25cb2de-92cf-4950-a26c-8928d9e32d26@localcommercialjanitorial.com>
+2026-07-28T19:07:52.000000Z,2026-07-28,10213905,queued_for_sending,,2026-07-28T18:49:00.000000Z,2032506,todd@united-drywall.com,Todd Boone,United Drywall,Commercial cleaning introduction,"My name is Anne, and I work with a commercial cleaning company that serves facilities around Orlando.<br><br>Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.<br><br>Warmly,<br><br>Anne<br><br>--<br>Anne Pierce<br> Manager<br>Orlando Commercial Cleaners<br><br><br>Let me know if you'd like to be removed from our contact list.","My name is Anne, and I work with a commercial cleaning company that serves facilities around Orlando.
+
+Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.
+
+Warmly,
+
+Anne
+
+--
+Anne Pierce
+ Manager
+Orlando Commercial Cleaners
+
+
+Let me know if you'd like to be removed from our contact list.",annepierce.n@shineviewcleaning.co,Anne Pierce,connected,microsoft_oauth,3,88,170,GSC: Outlook (Cleaning Client),1,<a25d2a07-2e82-4b10-b8f9-ad6a1ace93db@shineviewcleaning.co>
+2026-07-28T19:09:52.000000Z,2026-07-28,9885779,queued_for_sending,,2026-07-28T18:50:00.000000Z,62576,sidney.peters@e-arc.com,sidney Peters,ARC Document Solutions,Janitorial solution for ARC Document Solutions,"<p>Hey sidney, how often do you review the cleanliness of your meeting rooms and production areas to ensure a welcoming environment?</p><p><br></p><p>Would you be interested in a complimentary cleaning quote?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Diamond</p><p><br></p><p>Not for you and not going to be? Reply POTATO and I'll remove you from our list to hear from.</p>","Hey sidney, how often do you review the cleanliness of your meeting rooms and production areas to ensure a welcoming environment?
+Would you be interested in a complimentary cleaning quote?Diamond
+Not for you and not going to be? Reply POTATO and I'll remove you from our list to hear from.",diamond.cooley@buildingpeakfacility.com,Diamond Cooley,connected,microsoft_oauth,5,184,146,PPS: Outlook [Nurture] (Cleaning Client),1,<a25cbda4-2643-4c43-a818-7e1c92c0356f@buildingpeakfacility.com>
+2026-07-28T19:10:21.000000Z,2026-07-28,10024571,queued_for_sending,,2026-07-28T17:51:00.000000Z,803754,kcl@tmbcc.org,Tibetan Mongolian Buddhist Cultural Center Team (General Email),Tibetan Mongolian Buddhist Cultural Center,Question about your cleaning solution,"<p>Hi Tibetan Mongolian Buddhist Cultural Center Team, how do you manage cleanliness across your diverse spaces while ensuring a welcoming environment for visitors?</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning quote?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Marcia</p>","Hi Tibetan Mongolian Buddhist Cultural Center Team, how do you manage cleanliness across your diverse spaces while ensuring a welcoming environment for visitors?
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning quote?Marcia",marcia.collier@buildingharborjanitorial.com,Marcia Collier,connected,microsoft_oauth,5,5,46,CCGSWI: Google + Custom (Cleaning Client),1,<a25ce222-e7bd-4d5e-b46c-26fdd4832700@buildingharborjanitorial.com>
+2026-07-28T19:11:30.000000Z,2026-07-28,9983208,queued_for_sending,,2026-07-28T18:52:00.000000Z,929700,roesch@missionquickbooks.com,Bernard Roesch,MISSION Accounting,Janitorial quote for MISSION Accounting,"<p>Hi Bernard, how do you maintain a professional appearance in your office to impress clients and support staff productivity?</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning quote?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Diamond</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p></p><p>Diamond Wood</p><p>Commercial Cleaning in the Greater Orlando Area</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p> PS: You're able to respond no more emails and I'll add you to the contact blacklist right away.</p>","Hi Bernard, how do you maintain a professional appearance in your office to impress clients and support staff productivity?
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning quote?DiamondDiamond WoodCommercial Cleaning in the Greater Orlando Area PS: You're able to respond no more emails and I'll add you to the contact blacklist right away.",diamond.wood@cleanstonebuilding.com,Diamond Wood,connected,microsoft_oauth,5,2,127,CCGCT: Google + Custom [Nurture] (Cleaning Client),1,<a25cd303-b504-4226-989b-0d24f1b676bd@cleanstonebuilding.com>
+2026-07-28T19:14:34.000000Z,2026-07-28,10453846,queued_for_sending,,2026-07-28T17:55:00.000000Z,407451,lizzie@imagestudios360.com,Lizzie Webb,Simply You,Re: cleaning,"If you start looking for new cleaners for your Lexington location, who would be the best person to email?<br><br>Emma<br>Commercial Cleaning in the Nashville, TN area<br>Nashville Area and south down towards Alabama","If you start looking for new cleaners for your Lexington location, who would be the best person to email?
+
+Emma
+Commercial Cleaning in the Nashville, TN area
+Nashville Area and south down towards Alabama",emmawalton.e@cleanandgreencommercial.com,Emma Walton,connected,microsoft_oauth,5,108,163,JPNA: Google + Custom (Cleaning Client),3,<a25d738f-93a4-44d2-8d76-759284c252ae@cleanandgreencommercial.com>
+2026-07-28T19:22:09.000000Z,2026-07-28,10434670,queued_for_sending,,2026-07-28T18:02:00.000000Z,524820,jeff@trailerdepot.net,Jeff (General Email),The Trailer Depot,Cleaning Question,"Hey Jeff, how often does your team focus on keeping your showroom and service areas clean and inviting for customers?<br><br>My name is Sydney, and I work with a commercial cleaning and janitorial company that serves companies in Lebanon.<br><br>Let me know.<br><br>Looking forward to your reply,<br><br>Sydney<br><br>PS: Is (800) 253-1871 a good number to reach you?<br><br><br>Sydney Rasmussen<br> Manager<br>Building Cleaning Provider in Nashville, TN<br><br><br>Not interested in our cleaning services? Reply STOP and you're off the list.","Hey Jeff, how often does your team focus on keeping your showroom and service areas clean and inviting for customers?
+
+My name is Sydney, and I work with a commercial cleaning and janitorial company that serves companies in Lebanon.
+
+Let me know.
+
+Looking forward to your reply,
+
+Sydney
+
+PS: Is (800) 253-1871 a good number to reach you?
+
+
+Sydney Rasmussen
+ Manager
+Building Cleaning Provider in Nashville, TN
+
+
+Not interested in our cleaning services? Reply STOP and you're off the list.",sydney.rasmussen@buildingservicemaintenance.com,Sydney Rasmussen,connected,microsoft_oauth,5,109,164,JPNA: Outlook (Cleaning Client),1,<a25d6e4f-8361-4697-8d9f-87e80aadaa88@buildingservicemaintenance.com>
+2026-07-28T19:25:41.000000Z,2026-07-28,10177230,queued_for_sending,,2026-07-28T19:05:00.000000Z,1981570,bshell@scsosheriff.org,Bobby Shell,Bethel Baptist Church,Question about your cleaning setup,"Sending you an email because we provide commercial cleaning for facilities in Berea.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Thanks,<br><br>Jillian<br><br><br>Jillian Crane<br>Area Development Manager<br>Lexington, KY Commercial Cleaners<br><br><br>Note: Reply Remove Me and you will not hear from me again.","Sending you an email because we provide commercial cleaning for facilities in Berea.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Thanks,
+
+Jillian
+
+
+Jillian Crane
+Area Development Manager
+Lexington, KY Commercial Cleaners
+
+
+Note: Reply Remove Me and you will not hear from me again.",jillian.crane.am@commercialservicecleaningleague.com,Jillian Crane,connected,microsoft_oauth,3,11,220,CVJLEX: Google + Custom (Cleaning Client),1,<a25d1dd5-cf74-4b81-954d-990022b2baf3@commercialservicecleaningleague.com>
+2026-07-28T19:27:29.000000Z,2026-07-28,10137260,queued_for_sending,,2026-07-28T18:07:00.000000Z,287425,kim.sullivan@expresspros.com,Kim Sullivan,Express Employment Professionals,Thoughts,"My name is Julia, and I work with a commercial cleaning &amp; janitorial company that serves businesses in Bloomington.<br><br>I'm hoping you can let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Julia<br><br>P.S. Would (812) 333-6210 be a good number to get ahold of you?<br><br><br><br>Rather not be contacted about cleaning? Reply REMOVE ME and I'll remove you from my list of potential customers.","My name is Julia, and I work with a commercial cleaning & janitorial company that serves businesses in Bloomington.
+
+I'm hoping you can let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Julia
+
+P.S. Would (812) 333-6210 be a good number to get ahold of you?
+
+
+
+Rather not be contacted about cleaning? Reply REMOVE ME and I'll remove you from my list of potential customers.",julia.pearson.aq@commercialcleaningdeskteam.com,Julia Pearson,connected,microsoft_oauth,3,11,209,CCGNWA: Outlook (Cleaning Client),1,<a25d0bd5-bfd7-43d8-9ec6-a383ecb9dbfc@commercialcleaningdeskteam.com>
+2026-07-28T19:34:38.000000Z,2026-07-28,9854170,queued_for_sending,,2026-07-28T19:13:00.000000Z,1295069,paul@smiledoctordentistry.com,Paul Giotopoulos,"Dr. Jacqueline I. Nussbaum, DDS",Commercial cleaning,"Hi Paul, how do you ensure your dental practice meets infection control standards while maintaining a welcoming environment?<br><br>Reaching out because we provide commercial cleaning and janitorial for companies in the area.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Hayden<br><br><br>Hayden Marshall<br><br>Business Development Manager<br>Briar Cliff Manor Commercial Cleaners<br><br><br>Note: Reply Not For Me and I'll be sure not to reach out to you again.","Hi Paul, how do you ensure your dental practice meets infection control standards while maintaining a welcoming environment?
+
+Reaching out because we provide commercial cleaning and janitorial for companies in the area.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Hayden
+
+
+Hayden Marshall
+
+Business Development Manager
+Briar Cliff Manor Commercial Cleaners
+
+
+Note: Reply Not For Me and I'll be sure not to reach out to you again.",hayden@localcommercialjanitorial.com,Hayden Marshall,connected,microsoft_oauth,5,5,52,SINY: Google + Custom (Cleaning Client),1,<a25cb283-019f-41c7-b605-8617a282f2d5@localcommercialjanitorial.com>
+2026-07-28T19:44:33.000000Z,2026-07-28,10400013,queued_for_sending,,2026-07-28T19:24:00.000000Z,310706,info@praroof.com,PRA Roof Contractors Team (General Email),PRA Roof Contractors,Cleaning,"Hi PRA Roof Contractors Team,<br><br>Any interest in a complimentary cleaning quote?<br><br>We provide cleaning for commercial buildings in the area.<br><br>Let me know.<br><br>Lauren<br><br>P.S. Is (770) 869-2436 a good number to get ahold of you?<br><br><br><br>Let me know if you'd like to be removed from our contact list.","Hi PRA Roof Contractors Team,
+
+Any interest in a complimentary cleaning quote?
+
+We provide cleaning for commercial buildings in the area.
+
+Let me know.
+
+Lauren
+
+P.S. Is (770) 869-2436 a good number to get ahold of you?
+
+
+
+Let me know if you'd like to be removed from our contact list.",lauren@cleancorpservices.co,Lauren Davis,connected,microsoft_oauth,7,176,73,JPC&A: Google + Custom (Cleaning Client),4,<a25d60c3-d4d9-4974-a50f-cc6170d30c76@cleancorpservices.co>
+2026-07-28T19:51:23.000000Z,2026-07-28,9853032,queued_for_sending,,2026-07-28T19:30:00.000000Z,1288762,deborah.becker@hudsonfg.com,Deborah Becker,Marc Mirabella- Hudson Financial,Office cleaning thought,"<p>Hi Deborah – how do you maintain a pristine office environment to impress clients and keep your team focused?</p><p><br></p><p>Let me know if you would open to a complimentary cleaning quote.</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Jennifer</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>--</p><p>Jennifer Freeman</p><p>Orlando Area Commercial Cleaners</p><p></p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Let me know if you'd like to be removed from our contact list.</p>","Hi Deborah – how do you maintain a pristine office environment to impress clients and keep your team focused?
+Let me know if you would open to a complimentary cleaning quote.Jennifer--Jennifer FreemanOrlando Area Commercial CleanersLet me know if you'd like to be removed from our contact list.",jfreeman@routinecleaningcompany.com,Jennifer Freeman,connected,microsoft_oauth,5,5,52,SINY: Google + Custom (Cleaning Client),1,<a25cb250-95ea-431d-9afa-b3dc8ddfa7f7@routinecleaningcompany.com>
+2026-07-28T19:52:55.000000Z,2026-07-28,10109977,queued_for_sending,,2026-07-28T18:31:00.000000Z,1746687,don.coram@csn.org,Don Coram,Child Safety Network The,cleaning,"Hi Don, how do you ensure your training and office spaces are consistently clean and welcoming for your community outreach efforts?<br><br>My name is Carly, and I work with a commercial cleaning company that serves companies in Dallas.<br><br>Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.<br><br>Thanks for your time,<br><br>Carly<br><br>PS - Is there an okay number to get ahold of you at?<br><br><br><br>Not for you and not going to be? Reply REMOVE ME and I'll remove you from the list.","Hi Don, how do you ensure your training and office spaces are consistently clean and welcoming for your community outreach efforts?
+
+My name is Carly, and I work with a commercial cleaning company that serves companies in Dallas.
+
+Let me know if you’d be interested in a conversation about your cleaning needs and getting a complimentary quote.
+
+Thanks for your time,
+
+Carly
+
+PS - Is there an okay number to get ahold of you at?
+
+
+
+Not for you and not going to be? Reply REMOVE ME and I'll remove you from the list.",carly.burke.j@careservebuildingco.com,Carly Burke,connected,microsoft_oauth,3,13,239,GJS: Outlook (Cleaning Client),1,<a25cfd51-b0c4-4c72-bfdc-b4f0ea9c4734@careservebuildingco.com>
+2026-07-28T19:54:51.000000Z,2026-07-28,10178540,queued_for_sending,,2026-07-28T19:34:00.000000Z,1910406,jaime@americanrealestate.com,Jaime Hensley,American Real Estate Cons,Re: Cleaning,"Jaime,<br><br>You can say no, but my team was wanting to see if your team might be open to a complimentary quote for cleaning services.<br><br>Sydney<br><br><br>Sydney Huff<br> Manager<br>Local Commercial Cleaning Provider -  Lexington, KY<br>1795 Alysheba Way, Suite 1004 Lexington, Kentucky 40509 <br><br>Rather not hear from me about cleaning? Reply REMOVE ME and I'll take you off the list.<br><br>","Jaime,
+
+You can say no, but my team was wanting to see if your team might be open to a complimentary quote for cleaning services.
+
+Sydney
+
+
+Sydney Huff
+ Manager
+Local Commercial Cleaning Provider -  Lexington, KY
+1795 Alysheba Way, Suite 1004 Lexington, Kentucky 40509 
+
+Rather not hear from me about cleaning? Reply REMOVE ME and I'll take you off the list.",sydney.huff.an@thecommercialservicecleaning.com,Sydney Huff,connected,microsoft_oauth,3,14,220,CVJLEX: Google + Custom (Cleaning Client),2,<a25d1e4f-32e8-44e3-a841-c35d43f9bf8e@thecommercialservicecleaning.com>
+2026-07-28T19:56:25.000000Z,2026-07-28,10193511,queued_for_sending,,2026-07-28T19:35:00.000000Z,375386,acampbell@roversk12.org,Rootstown Local Schools Board of Education Team (General Email),Rootstown Local Schools Board of Education,cleaning,"Hey Rootstown Local Schools Board of Education Team,<br><br>Would your office be interested in a complimentary quote sometime soon?<br><br>We do cleaning services for businesses in the area.<br><br>Let me know.<br><br>Best Regards,<br>Nina<br><br>P.S. Is (330) 325-9911 a good number to reach you?<br><br><br><br>Let me know if you'd like to be removed from future outreach from our company.<br><br>","Hey Rootstown Local Schools Board of Education Team,
+
+Would your office be interested in a complimentary quote sometime soon?
+
+We do cleaning services for businesses in the area.
+
+Let me know.
+
+Best Regards,
+Nina
+
+P.S. Is (330) 325-9911 a good number to reach you?
+
+
+
+Let me know if you'd like to be removed from future outreach from our company.",ninaterry.f@servicefacilitycare.com,Nina Terry,connected,microsoft_oauth,5,123,76,JPCL: Google + Custom (Cleaning Client),4,<a25d2564-2cb3-4dc7-847d-46f349f2069c@servicefacilitycare.com>
+2026-07-28T20:00:17.000000Z,2026-07-28,10466901,queued_for_sending,,2026-07-28T19:38:00.000000Z,683048,michael.nelson@amway.com,Michael Nelson,Anton Health Solutions,Re: Cleaning,"If your Dallas location ever requires new cleaners, who handles the hiring process?<br><br>Heather<br>Commercial Cleaning Provider - Nashua, New Hampshire area<br>Nashua, New Hampshire 03060","If your Dallas location ever requires new cleaners, who handles the hiring process?
+
+Heather
+Commercial Cleaning Provider - Nashua, New Hampshire area
+Nashua, New Hampshire 03060",heather.rosales.e@cleanmaintenancepartners.com,Heather Rosales,connected,microsoft_oauth,3,44,197,CCGNH: Outlook (Cleaning Client),3,<a25d7606-4915-4b49-a9ff-ac9319f12cdb@cleanmaintenancepartners.com>
+2026-07-28T20:02:26.000000Z,2026-07-28,10354893,queued_for_sending,,2026-07-28T18:40:00.000000Z,734951,sasadi@ironexcalibursecurity.com,Shervin Asadi,Excalibur Home Security,Commercial Cleaning Intro,"I'm reaching out because we provide commercial cleaning for facilities in San antonio.<br><br>Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.<br><br>Cheers,<br><br>Isabella<br><br><br><br>Let me know if you'd like to be removed from future emails from our company.","I'm reaching out because we provide commercial cleaning for facilities in San antonio.
+
+Let me know if you’re interested in knowing more about what we can help with for commercial cleaning.
+
+Cheers,
+
+Isabella
+
+
+
+Let me know if you'd like to be removed from future emails from our company.",isabella.brennan.g@commercialfacilityservicesco.com,Isabella Brennan,connected,microsoft_oauth,5,52,85,JPSAN: Google + Custom [Nurture] (Cleaning Client),1,<a25d516d-d1c8-4ed1-884f-bff87b8e22f8@commercialfacilityservicesco.com>
+2026-07-28T20:02:54.000000Z,2026-07-28,10145893,queued_for_sending,,2026-07-28T19:41:00.000000Z,64601,jlee@psiint.com,Jeffrey Lee,Psi International,Cleaning service for businesses in the Fairfax area,"My name is Caroline, and I work with a commercial cleaning &amp; janitorial company that serves companies around Fairfax.<br><br>I was hoping you'd let me know.<br><br>Caroline<br><br><br>Caroline Golden<br><br>Business Development<br>Montgomery &amp; Fairfax Counties Commercial Cleaning<br><br><br>Want off our outreach list for good? Reply REMOVE ME and you're off.","My name is Caroline, and I work with a commercial cleaning & janitorial company that serves companies around Fairfax.
+
+I was hoping you'd let me know.
+
+Caroline
+
+
+Caroline Golden
+
+Business Development
+Montgomery & Fairfax Counties Commercial Cleaning
+
+
+Want off our outreach list for good? Reply REMOVE ME and you're off.",caroline.golden.ac@commercialservicecleaningforceteam.com,Caroline Golden,connected,microsoft_oauth,3,13,245,PC: Outlook (Cleaning Client),1,<a25d0e76-4b2a-4e1b-a710-5d23171df2a6@commercialservicecleaningforceteam.com>
+2026-07-28T20:04:29.000000Z,2026-07-28,10441689,queued_for_sending,,2026-07-28T18:42:00.000000Z,325268,info@icee.com,The ICEE Team (General Email),The ICEE,Re: cleaning,Would you be able to share the email of the person responsible for hiring a cleaning company for your La Vergne location if you ever require them?<br><br>Erika<br>Commercial Cleaning Provider in the Nashville Area<br>Nashville Area and south down towards Alabama,"Would you be able to share the email of the person responsible for hiring a cleaning company for your La Vergne location if you ever require them?
+
+Erika
+Commercial Cleaning Provider in the Nashville Area
+Nashville Area and south down towards Alabama",erika.edwards@commercialmaintenancegrouppro.com,Erika Edwards,connected,microsoft_oauth,5,113,164,JPNA: Outlook (Cleaning Client),3,<a25d6f77-db33-452b-a14b-737cfb44274d@commercialmaintenancegrouppro.com>
+2026-07-28T20:04:32.000000Z,2026-07-28,10419087,queued_for_sending,,2026-07-28T16:42:00.000000Z,324796,abench@wrightrunstad.com,Andy Bench,Wright Runstad &,Re: cleaning,"At any point, if your Seattle location is looking for new cleaners, may I have the hiring person’s email?<br><br>Terry<br>Commercial Cleaning Service in the Seattle, Washington area<br>Greater Seattle Area","At any point, if your Seattle location is looking for new cleaners, may I have the hiring person’s email?
+
+Terry
+Commercial Cleaning Service in the Seattle, Washington area
+Greater Seattle Area",terrykelley.m@primeedgejanitorial.com,Terry Kelley,connected,microsoft_oauth,5,117,79,JPPS: Outlook (Cleaning Client),3,<a25d6795-54b9-465a-b7b9-de977c059a95@primeedgejanitorial.com>
+2026-07-28T20:05:26.000000Z,2026-07-28,10306860,queued_for_sending,,2026-07-28T18:43:00.000000Z,256923,johaver@onebn.com,Office H2O Team (General Email),Office H2O,Looking for cleaning services?,"<p>Hi Office H2O Team - how do you ensure your facilities maintain a pristine environment for clients while providing water solutions?</p><p><br></p><p>I'm emailing you because my company provides commercial cleaning services for multiple buildings in the Columbus area.</p><p><br></p><p>Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>Kathryn</p><p><br style=""border:0px solid;margin:0px;padding:0px;""></p><p>PS: You can reply remove my email for no emails.</p>","Hi Office H2O Team - how do you ensure your facilities maintain a pristine environment for clients while providing water solutions?
+I'm emailing you because my company provides commercial cleaning services for multiple buildings in the Columbus area.
+Not sure if this is something you’re reviewing right now, but would your team be open to a complimentary cleaning estimate?KathrynPS: You can reply remove my email for no emails.",kathryn.spencer@janitorialcaresystems.com,Kathryn Spencer,connected,microsoft_oauth,5,3,35,LC: Outlook (Cleaning Client),1,<a25d41e1-476c-4165-802f-d8becb72b082@janitorialcaresystems.com>
+2026-07-28T20:06:18.000000Z,2026-07-28,10472763,queued_for_sending,,2026-07-28T17:44:00.000000Z,487069,ryan@csesco.com,Ryan Brinkerhoff,Csesco,Re: Janitorial question,"Hi Ryan,<br><br>You can say no, but I was wanting to see if your team might be open to a complimentary quote for cleaning services.<br><br>Jillian<br><br>--<br>Jillian Mayo<br>Area Development<br>Commercial Cleaning Provider in the Salt Lake City &amp; Surrounding Areas<br>7090 South Union Park Center, STE 350 Midvale, UT<br><br><br><br>Rather not hear from me about cleaning? Reply NO MORE and I'll take you off the list.<br><br>","Hi Ryan,
+
+You can say no, but I was wanting to see if your team might be open to a complimentary quote for cleaning services.
+
+Jillian
+
+--
+Jillian Mayo
+Area Development
+Commercial Cleaning Provider in the Salt Lake City & Surrounding Areas
+7090 South Union Park Center, STE 350 Midvale, UT
+
+
+
+Rather not hear from me about cleaning? Reply NO MORE and I'll take you off the list.",jillian.mayo.d@cleanmaintenancealliance.com,Jillian Mayo,connected,microsoft_oauth,5,103,172,CWSLC: Google + Custom (Cleaning Client),2,<a25d78d4-ca93-40b0-b52d-3cc7462c6342@cleanmaintenancealliance.com>

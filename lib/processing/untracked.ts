@@ -10,6 +10,7 @@ import { searchRecords, createRecord, updateRecord, AIRTABLE_WRITES_ENABLED } fr
 import { sanitizeForAirtableLongText } from "./sanitize-airtable";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendDm4pmWebhooks, dm4pmShouldPush } from "@/lib/dm4pm-webhook";
+import { sendOhWebhook, ohShouldPush } from "@/lib/oh-webhook";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { isSubsequenceTag } from "@/lib/subsequence/config";
@@ -432,6 +433,23 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
       });
     } catch (error) {
       await logError("untracked", "dm4pm-webhook", (error as Error).message, {
+        company_code: companyCode,
+        lead_email: reply.from_email_address,
+      });
+    }
+  }
+
+  // OH: Clay only (new reply only, actionable AI category). Retired Close.com —
+  // now flows to the SAME Clay table as DM4PM, tagged sub-client "OH".
+  if (companyCode === "OH" && ohShouldPush(aiCategory)) {
+    try {
+      await sendOhWebhook({
+        email: reply.from_email_address,
+        leadName: reply.from_name || reply.from_email_address,
+        leadResponse: cleanedReply,
+      });
+    } catch (error) {
+      await logError("untracked", "oh-webhook", (error as Error).message, {
         company_code: companyCode,
         lead_email: reply.from_email_address,
       });

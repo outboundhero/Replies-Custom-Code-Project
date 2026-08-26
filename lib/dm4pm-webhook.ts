@@ -9,7 +9,8 @@
  */
 import { sendToClayWebhook } from "@/lib/clay";
 
-const DM4PM_CLAY_WEBHOOK =
+// Exported so OH can push to the SAME Clay table (distinguished by sub-client).
+export const DM4PM_CLAY_WEBHOOK =
   "https://api.clay.com/v3/sources/webhook/pull-in-data-from-a-webhook-041ec6d2-a3d1-43b2-859d-b9c04672185d";
 // Google Apps Script that posts the lead to DM4PM's Slack.
 const DM4PM_SLACK_WEBHOOK =

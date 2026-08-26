@@ -12,6 +12,7 @@ import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { sendToClayWebhook } from "@/lib/clay";
 import { sendEsjWebhook, ESJ_CLIENT_TAGS } from "@/lib/esj-webhook";
 import { sendDm4pmWebhooks, dm4pmShouldPush } from "@/lib/dm4pm-webhook";
+import { sendOhWebhook, ohShouldPush } from "@/lib/oh-webhook";
 import { shouldBlacklistDomain, blacklistDomain, blacklistEmail } from "./domain-blacklist";
 import { isSubsequenceTag } from "@/lib/subsequence/config";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
@@ -618,6 +619,26 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
       });
     } catch (error) {
       await logError("tracked", "dm4pm-webhook", (error as Error).message, {
+        client_tag: campaignTag,
+        lead_email: reply.from_email_address,
+      });
+    }
+  }
+
+  // 6b-3. OH: Clay only (new reply only, actionable AI category). OH used to go
+  // to Close.com CRM — retired; it now flows to the SAME Clay table as DM4PM,
+  // tagged sub-client "OH".
+  if (campaignTag === "OH" && ohShouldPush(aiCategory)) {
+    try {
+      await sendOhWebhook({
+        email: reply.from_email_address,
+        leadName: `${lead.first_name || ""} ${lead.last_name || ""}`.trim() || reply.from_name || reply.from_email_address,
+        company: lead.company,
+        linkedin: customVars.linkedin,
+        leadResponse: cleanedReply,
+      });
+    } catch (error) {
+      await logError("tracked", "oh-webhook", (error as Error).message, {
         client_tag: campaignTag,
         lead_email: reply.from_email_address,
       });
