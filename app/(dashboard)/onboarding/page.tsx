@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
+import { ClipboardList, ArrowRight } from "lucide-react";
 import { useSession } from "@/components/session-provider";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -67,12 +68,21 @@ function RolePill({ role }: { role: OnboardingRole }) {
 }
 function Progress({ done, total, className }: { done: number; total: number; className?: string }) {
   const pct = total ? Math.round((done / total) * 100) : 0;
+  const complete = total > 0 && done === total;
   return (
     <div className={cn("flex items-center gap-2", className)}>
       <div className="h-1.5 flex-1 rounded-full bg-muted overflow-hidden">
-        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+        <div className={cn("h-full rounded-full transition-all", complete ? "bg-green-500" : "bg-primary")} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-xs text-muted-foreground tabular-nums w-14 text-right">{done}/{total}</span>
+    </div>
+  );
+}
+function Stat({ label, value, accent }: { label: string; value: string | number; accent?: string }) {
+  return (
+    <div className="rounded-xl border bg-card px-4 py-3">
+      <div className={cn("text-2xl font-semibold tracking-tight tabular-nums", accent)}>{value}</div>
+      <div className="text-xs text-muted-foreground mt-0.5">{label}</div>
     </div>
   );
 }
@@ -112,12 +122,21 @@ export default function OnboardingPage() {
 
   const userEmails = useMemo(() => users.map((u) => u.email), [users]);
 
+  const stats = useMemo(() => {
+    const total = clients.length;
+    const completed = clients.filter((c) => c.status === "completed").length;
+    const active = total - completed;
+    const pcts = clients.map((c) => (c.tasks_total ? c.tasks_done / c.tasks_total : 0));
+    const avg = pcts.length ? Math.round((pcts.reduce((a, b) => a + b, 0) / pcts.length) * 100) : 0;
+    return { total, active, completed, avg };
+  }, [clients]);
+
   return (
-    <div className="space-y-6 max-w-6xl">
-      <div className="flex items-start justify-between gap-4">
+    <div className="space-y-6 max-w-7xl mx-auto w-full">
+      <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Onboarding</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground mt-1">
             Add a client to auto-generate its onboarding timeline — tasks, due dates, and owners.
           </p>
         </div>
@@ -128,6 +147,15 @@ export default function OnboardingPage() {
 
       {err && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">{err}</div>}
 
+      {clients.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Stat label="Clients" value={stats.total} />
+          <Stat label="Active" value={stats.active} accent="text-blue-600 dark:text-blue-400" />
+          <Stat label="Completed" value={stats.completed} accent="text-green-600 dark:text-green-400" />
+          <Stat label="Avg progress" value={`${stats.avg}%`} />
+        </div>
+      )}
+
       <Tabs defaultValue="clients">
         <TabsList>
           <TabsTrigger value="clients">All Clients</TabsTrigger>
@@ -137,7 +165,8 @@ export default function OnboardingPage() {
         </TabsList>
 
         <TabsContent value="clients" className="mt-4">
-          <AllClients clients={clients} loading={loading} />
+          <AllClients clients={clients} loading={loading} isAdmin={isAdmin}
+            userEmails={userEmails} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
         </TabsContent>
         <TabsContent value="board" className="mt-4">
           <Board tasks={tasks} clients={clients} userEmails={userEmails} myEmail={session?.email ?? null} onChange={load} />
@@ -156,66 +185,79 @@ export default function OnboardingPage() {
 }
 
 // ─────────────────────────── All Clients ───────────────────────────
-function AllClients({ clients, loading }: { clients: OnbClient[]; loading: boolean }) {
-  if (loading) return <div className="text-sm text-muted-foreground py-12 text-center">Loading…</div>;
+function StatusChip({ status }: { status: string }) {
+  const done = status === "completed";
+  return (
+    <span className={cn("text-[11px] font-medium rounded-full border px-2 py-0.5 shrink-0",
+      done
+        ? "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/40 dark:text-green-300 dark:border-green-900/60"
+        : "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-900/60")}>
+      {done ? "Completed" : "Active"}
+    </span>
+  );
+}
+
+function AllClients({ clients, loading, isAdmin, userEmails, existingTags, onAdded }: {
+  clients: OnbClient[]; loading: boolean; isAdmin: boolean;
+  userEmails: string[]; existingTags: string[]; onAdded: () => void;
+}) {
+  if (loading) {
+    return (
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {[0, 1, 2].map((i) => <div key={i} className="h-40 rounded-xl border bg-muted/30 animate-pulse" />)}
+      </div>
+    );
+  }
   if (!clients.length) {
     return (
       <Card>
-        <CardContent className="py-12 text-center text-sm text-muted-foreground">
-          No clients in onboarding yet — add your first with <span className="font-medium text-foreground">Add to Onboarding</span>.
+        <CardContent className="py-20 flex flex-col items-center text-center gap-3">
+          <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center">
+            <ClipboardList className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1 max-w-sm">
+            <h3 className="text-base font-semibold">No clients in onboarding yet</h3>
+            <p className="text-sm text-muted-foreground">Add your first client and the system will auto-generate its onboarding timeline — tasks, due dates, and owners.</p>
+          </div>
+          {isAdmin && <div className="pt-1"><AddClientDialog userEmails={userEmails} existingTags={existingTags} onAdded={onAdded} /></div>}
         </CardContent>
       </Card>
     );
   }
   return (
-    <Card className="overflow-hidden">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Client</TableHead>
-            <TableHead>Start</TableHead>
-            <TableHead>Owners</TableHead>
-            <TableHead className="w-48">Progress</TableHead>
-            <TableHead>Status</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {clients.map((c) => (
-            <TableRow key={c.client_tag} className="cursor-pointer">
-              <TableCell>
-                <Link href={`/onboarding/${encodeURIComponent(c.client_tag)}`} className="flex items-center gap-2 hover:underline">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {clients.map((c) => (
+        <Link key={c.client_tag} href={`/onboarding/${encodeURIComponent(c.client_tag)}`} className="group block">
+          <Card className="p-4 h-full space-y-3 hover:border-primary/40 hover:shadow-sm transition-all">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
                   <TagPill tag={c.client_tag} />
-                  {c.client_name && <span className="text-sm">{c.client_name}</span>}
                   {c.plan_type && <span className="text-[10px] font-medium rounded-full border border-border bg-muted px-1.5 py-0.5 text-muted-foreground">{c.plan_type}</span>}
-                </Link>
-              </TableCell>
-              <TableCell className="text-sm text-muted-foreground whitespace-nowrap">{fmtDate(c.start_date)}</TableCell>
-              <TableCell>
-                <div className="flex flex-wrap gap-1">
-                  {(["domains", "inbox", "ops"] as OnboardingRole[]).map((r) => {
-                    const email = r === "domains" ? c.domains_owner_email : r === "inbox" ? c.inbox_owner_email : c.ops_owner_email;
-                    return (
-                      <span key={r} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                        <RolePill role={r} /><span>{shortEmail(email) || "—"}</span>
-                      </span>
-                    );
-                  })}
                 </div>
-              </TableCell>
-              <TableCell><Progress done={c.tasks_done} total={c.tasks_total} /></TableCell>
-              <TableCell>
-                <span className={cn("text-xs font-medium rounded-full border px-2 py-0.5",
-                  c.status === "completed"
-                    ? "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/40 dark:text-green-300 dark:border-green-900/60"
-                    : "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-900/60")}>
-                  {c.status === "completed" ? "Completed" : "Active"}
-                </span>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </Card>
+                {c.client_name && <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">{c.client_name}</div>}
+              </div>
+              <StatusChip status={c.status} />
+            </div>
+            <Progress done={c.tasks_done} total={c.tasks_total} />
+            <div className="flex flex-wrap gap-x-3 gap-y-1 pt-0.5">
+              {(["domains", "inbox", "ops"] as OnboardingRole[]).map((r) => {
+                const email = r === "domains" ? c.domains_owner_email : r === "inbox" ? c.inbox_owner_email : c.ops_owner_email;
+                return (
+                  <span key={r} className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                    <RolePill role={r} /><span className="truncate max-w-[90px]">{shortEmail(email) || "—"}</span>
+                  </span>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-between border-t pt-2 text-[11px] text-muted-foreground">
+              <span>Started {fmtDate(c.start_date)}</span>
+              <span className="inline-flex items-center gap-0.5 text-primary opacity-0 group-hover:opacity-100 transition-opacity">Open <ArrowRight className="h-3 w-3" /></span>
+            </div>
+          </Card>
+        </Link>
+      ))}
+    </div>
   );
 }
 

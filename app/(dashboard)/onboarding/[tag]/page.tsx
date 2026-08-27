@@ -112,7 +112,7 @@ export default function ClientDetailPage() {
   if (loading) return <div className="text-sm text-muted-foreground py-12 text-center">Loading…</div>;
   if (notFound || !client) {
     return (
-      <div className="space-y-4 max-w-2xl">
+      <div className="space-y-4 max-w-2xl mx-auto w-full">
         <Link href="/onboarding" className="text-sm text-muted-foreground hover:underline">← Onboarding</Link>
         <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">
           <span className="font-mono font-bold">{tag}</span> isn&apos;t in onboarding.
@@ -122,7 +122,7 @@ export default function ClientDetailPage() {
   }
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-5xl mx-auto w-full">
       <Link href="/onboarding" className="text-sm text-muted-foreground hover:underline">← Onboarding</Link>
 
       {/* Header */}
