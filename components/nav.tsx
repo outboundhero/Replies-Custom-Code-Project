@@ -41,7 +41,14 @@ const WARM_ENDPOINT: Record<string, string> = {
 
 const items: NavItem[] = [
   { href: "/", label: "Dashboard", adminOnly: true },
-  { href: "/clients", label: "Clients" },
+  {
+    label: "Clients",
+    defaultOpen: true,
+    children: [
+      { href: "/clients", label: "All Clients" },
+      { href: "/onboarding", label: "Onboarding" },
+    ],
+  },
   { href: "/sections", label: "Sections & Tags", adminOnly: true },
   { href: "/untracked", label: "Untracked Config", adminOnly: true },
   {
@@ -53,7 +60,6 @@ const items: NavItem[] = [
       { href: "/archive", label: "Archive", adminOnly: true },
     ],
   },
-  { href: "/onboarding", label: "Onboarding" },
   { href: "/nurture", label: "Nurture", adminOnly: true },
   { href: "/migrate", label: "Move Leads", adminOnly: true },
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
