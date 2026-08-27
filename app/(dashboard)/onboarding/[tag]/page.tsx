@@ -47,7 +47,6 @@ function RolePill({ role }: { role: OnboardingRole }) {
 
 export default function ClientDetailPage() {
   const params = useParams();
-  const router = useRouter();
   const session = useSession();
   const isAdmin = session?.role === "admin";
   const tag = decodeURIComponent(String(params.tag || "")).toUpperCase();
@@ -234,10 +233,9 @@ export default function ClientDetailPage() {
             onClick={() => refresh({ action: "regenerate", client_tag: client.client_tag }, "Regenerated missing tasks")}>
             Regenerate missing tasks
           </Button>
-          <Button variant="ghost" size="sm" className="text-destructive"
-            onClick={() => { if (confirm(`Remove ${client.client_tag} from onboarding? This deletes its tasks.`)) postMutate({ action: "delete-client", client_tag: client.client_tag }).then((r) => { if (r.ok) { toast.success("Removed"); router.push("/onboarding"); } else toast.error(r.error || "Failed"); }); }}>
-            Remove from onboarding
-          </Button>
+          <div className="ml-auto">
+            <DeleteClientDialog client={client} taskCount={tasks.length} />
+          </div>
         </div>
       )}
     </div>
@@ -294,6 +292,41 @@ function TaskRow({ task, users, today, isAdmin, selected, onToggle, onChange }: 
           onClick={() => mut({ action: "delete-task", id: task.id }, "Deleted")}>✕</Button>
       )}
     </div>
+  );
+}
+
+function DeleteClientDialog({ client, taskCount }: { client: OnbClient; taskCount: number }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  async function del() {
+    setBusy(true);
+    const r = await postMutate({ action: "delete-client", client_tag: client.client_tag });
+    setBusy(false);
+    if (r.ok) { toast.success(`${client.client_name || client.client_tag} deleted`); router.push("/onboarding"); }
+    else { toast.error(r.error || "Failed to delete"); setOpen(false); }
+  }
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive">
+          Delete client
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Delete {client.client_name || client.client_tag}?</DialogTitle>
+          <DialogDescription>
+            This removes <span className="font-mono font-semibold">{client.client_tag}</span> from onboarding and permanently
+            deletes {taskCount === 0 ? "it" : `all ${taskCount} of its task${taskCount === 1 ? "" : "s"}`}. This can&apos;t be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
+          <Button variant="destructive" onClick={del} disabled={busy}>{busy ? "Deleting…" : "Delete client"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
