@@ -33,6 +33,7 @@ const WARM_ENDPOINT: Record<string, string> = {
   "/nurture": "/api/config/clients",
   "/migrate": "/api/config/clients",
   "/users": "/api/users",
+  "/onboarding": "/api/onboarding",
   "/sheet-pushes": "/api/sheet-pushes",
   // /data-view is special-cased in warmHref → prefetchDataView (fills the
   // buffer the page hydrates from, so the click paints instantly).
@@ -52,6 +53,7 @@ const items: NavItem[] = [
       { href: "/archive", label: "Archive", adminOnly: true },
     ],
   },
+  { href: "/onboarding", label: "Onboarding" },
   { href: "/nurture", label: "Nurture", adminOnly: true },
   { href: "/migrate", label: "Move Leads", adminOnly: true },
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
