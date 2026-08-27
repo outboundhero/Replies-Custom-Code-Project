@@ -22,6 +22,7 @@ import { extractReplyLocation } from "./extract-reply-location";
 import { stripQuotedHistory } from "./strip-quoted";
 import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
 import { getChurnedTags } from "@/lib/churn";
+import { reportMissingQualificationIfNeeded } from "@/lib/qualification/missing-qual-alert";
 import { geminiJSON } from "@/lib/gemini";
 
 interface QualifyLeadParams {
@@ -227,6 +228,20 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
         if (error) console.error("[qualification] Supabase update failed:", error.message);
       });
   }
+
+  // 7b-2. Missing-qualification-data alert. When this client has NO rules at all
+  // (no exclusion industries AND no service area / office anchor), the audit
+  // passed trivially — the lead isn't really being vetted. Flag it to the inbox-
+  // management Slack channel (deduped per lead, only when the live sheet is ALSO
+  // empty). Fire-and-forget — never blocks or breaks qualification.
+  void reportMissingQualificationIfNeeded({
+    replyRowId,
+    clientTag: campaignTag,
+    leadEmail,
+    companyName,
+    hasExclusion: !!exclusionIndustries.trim(),
+    hasLocation: !!(inclusionLocations.trim() || hqAnchor.trim()),
+  });
 
   // 7c. CW ZIP auto-router. For City Wide tags (CWSJ/CWSV/…), check whether
   // the lead's resolved ZIP belongs to a DIFFERENT CW client and, if so,

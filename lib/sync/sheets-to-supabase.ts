@@ -23,7 +23,7 @@ interface SyncResult {
  * stay intact. (The old /[&\/,]+/ split "K&LCS" into "K"+"LCS", so its rules were
  * stored under the wrong tags and the audit found none.)
  */
-function splitAbbreviations(raw: string): string[] {
+export function splitAbbreviations(raw: string): string[] {
   return raw
     .split(/\s*\/\s*|\s+&\s+|\s+and\s+|\s*,\s*/i)
     .map((s) => s.trim())

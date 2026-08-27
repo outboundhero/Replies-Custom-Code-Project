@@ -35,6 +35,19 @@ export async function postToChannel(channel: string, text: string): Promise<{ ok
   return r.ok ? { ok: true } : { ok: false, error: String(r.error || "unknown") };
 }
 
+/** Post a Block Kit message to a channel. `fallbackText` is the notification/
+ *  accessibility text shown where blocks can't render. */
+export async function postBlocks(
+  channel: string,
+  blocks: unknown[],
+  fallbackText: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const r = await slackCall("chat.postMessage", {
+    channel, text: fallbackText, blocks, unfurl_links: false, unfurl_media: false,
+  });
+  return r.ok ? { ok: true } : { ok: false, error: String(r.error || "unknown") };
+}
+
 /** DM the same message to each person, resolved by their Slack account email. */
 export async function dmByEmails(emails: string[], text: string): Promise<{ ok: boolean; sent: string[]; failed: { email: string; error: string }[] }> {
   const sent: string[] = [];
