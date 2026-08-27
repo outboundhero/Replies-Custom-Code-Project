@@ -41,6 +41,9 @@ type TemplateTask = {
 type UserRow = { email: string; role: string };
 
 const UNASSIGNED = "—";
+// Plan / package options (from the client tracker). Kept as a simple list so it's
+// easy to edit if the tiers change.
+const PLAN_OPTIONS = ["Tier 0.5 (Trial)", "Tier 1 (Base)", "Tier 2 (Scale)", "PPQM", "PPQL"];
 
 async function postMutate(body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string; [k: string]: unknown }> {
   const res = await fetch("/api/onboarding/mutate", {
@@ -330,7 +333,13 @@ function AddClientDialog({ userEmails, existingTags, onAdded }: {
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">Plan / Package <span className="opacity-60">(optional)</span></label>
-              <Input value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="e.g. Growth, Starter" />
+              <Select value={plan || UNASSIGNED} onValueChange={(v) => setPlan(v === UNASSIGNED ? "" : v)}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Select a plan" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={UNASSIGNED}>— None —</SelectItem>
+                  {PLAN_OPTIONS.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="grid grid-cols-1 gap-3">
