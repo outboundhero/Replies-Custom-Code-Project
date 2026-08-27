@@ -163,7 +163,6 @@ export default function OnboardingPage() {
         <TabsList>
           <TabsTrigger value="clients">All Clients</TabsTrigger>
           <TabsTrigger value="board">Board</TabsTrigger>
-          <TabsTrigger value="mine">My Tasks</TabsTrigger>
           {isAdmin && <TabsTrigger value="template">Template</TabsTrigger>}
         </TabsList>
 
@@ -173,9 +172,6 @@ export default function OnboardingPage() {
         </TabsContent>
         <TabsContent value="board" className="mt-4">
           <Board tasks={tasks} clients={clients} userEmails={userEmails} myEmail={session?.email ?? null} onChange={load} />
-        </TabsContent>
-        <TabsContent value="mine" className="mt-4">
-          <MyTasks tasks={tasks} myEmail={session?.email ?? null} onChange={load} />
         </TabsContent>
         {isAdmin && (
           <TabsContent value="template" className="mt-4">
@@ -434,66 +430,6 @@ function Board({ tasks, clients, myEmail, onChange }: {
           );
         })}
       </div>
-    </div>
-  );
-}
-
-// ─────────────────────────── My Tasks ───────────────────────────
-function MyTasks({ tasks, myEmail, onChange }: { tasks: OnbTask[]; myEmail: string | null; onChange: () => void }) {
-  const today = todayStr();
-  const mine = useMemo(() =>
-    tasks.filter((t) => t.assignee_email && t.assignee_email === myEmail && t.status !== "completed")
-         .sort((a, b) => (a.due_date || "").localeCompare(b.due_date || "")),
-    [tasks, myEmail, today]);
-
-  const groups = useMemo(() => {
-    const overdue: OnbTask[] = [], todayT: OnbTask[] = [], upcoming: OnbTask[] = [];
-    for (const t of mine) {
-      if (!t.due_date) { upcoming.push(t); continue; }
-      if (t.due_date < today) overdue.push(t);
-      else if (t.due_date === today) todayT.push(t);
-      else upcoming.push(t);
-    }
-    return { overdue, todayT, upcoming };
-  }, [mine, today]);
-
-  async function setStatus(id: string, status: TaskStatus) {
-    const r = await postMutate({ action: "update-task-status", id, status });
-    if (r.ok) { toast.success("Updated"); onChange(); } else toast.error(r.error || "Failed");
-  }
-
-  if (!myEmail) return <div className="text-sm text-muted-foreground py-12 text-center">No session.</div>;
-  if (!mine.length) {
-    return <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">You're all caught up — no open tasks assigned to you. 🎉</CardContent></Card>;
-  }
-
-  const Section = ({ label, items, tint }: { label: string; items: OnbTask[]; tint: string }) => items.length ? (
-    <div className="space-y-2">
-      <h3 className={cn("text-xs font-semibold uppercase tracking-wide", tint)}>{label} · {items.length}</h3>
-      <Card className="overflow-hidden"><div className="divide-y">
-        {items.map((t) => (
-          <div key={t.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-            <div className="min-w-0">
-              <div className="text-sm font-medium truncate">{t.title}</div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
-                <TagPill tag={t.client_tag} /><RolePill role={t.role} /><span className="tabular-nums">{fmtDate(t.due_date)}</span>
-              </div>
-            </div>
-            <Select value={t.status} onValueChange={(v) => setStatus(t.id, v as TaskStatus)}>
-              <SelectTrigger className="h-8 w-36 text-xs shrink-0"><SelectValue /></SelectTrigger>
-              <SelectContent>{TASK_STATUS_ORDER.map((s) => <SelectItem key={s} value={s}>{STATUS_META[s].label}</SelectItem>)}</SelectContent>
-            </Select>
-          </div>
-        ))}
-      </div></Card>
-    </div>
-  ) : null;
-
-  return (
-    <div className="space-y-5">
-      <Section label="Overdue" items={groups.overdue} tint="text-destructive" />
-      <Section label="Today" items={groups.todayT} tint="text-blue-600 dark:text-blue-400" />
-      <Section label="Upcoming" items={groups.upcoming} tint="text-muted-foreground" />
     </div>
   );
 }
