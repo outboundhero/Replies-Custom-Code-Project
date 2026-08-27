@@ -90,38 +90,39 @@ function Stat({ label, value, accent }: { label: string; value: string | number;
   );
 }
 
+// Stale-while-revalidate cache: keep the last board payload in module scope so
+// navigating back to Onboarding paints instantly (no skeleton) while a fresh copy
+// loads in the background. Lives for the browser session.
+type BoardData = { clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[] };
+let boardCache: BoardData | null = null;
+
 // ─────────────────────────── page ───────────────────────────
 export default function OnboardingPage() {
   const session = useSession();
   const isAdmin = session?.role === "admin";
 
-  const [clients, setClients] = useState<OnbClient[]>([]);
-  const [tasks, setTasks] = useState<OnbTask[]>([]);
-  const [template, setTemplate] = useState<TemplateTask[]>([]);
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [clients, setClients] = useState<OnbClient[]>(boardCache?.clients ?? []);
+  const [tasks, setTasks] = useState<OnbTask[]>(boardCache?.tasks ?? []);
+  const [users, setUsers] = useState<UserRow[]>(boardCache?.users ?? []);
+  const [loading, setLoading] = useState(!boardCache); // instant paint if cached
   const [err, setErr] = useState<string | null>(null);
 
+  // One request for everything the page needs (clients + tasks + users).
   const load = useCallback(async () => {
     try {
-      const [b, u] = await Promise.all([fetch("/api/onboarding"), fetch("/api/onboarding/users")]);
-      if (b.status === 401 || u.status === 401) { window.location.href = "/login"; return; }
+      const b = await fetch("/api/onboarding");
+      if (b.status === 401) { window.location.href = "/login"; return; }
       if (!b.ok) { setErr(`Failed to load (${b.status})`); return; }
       const data = await b.json();
-      setClients(data.clients ?? []);
-      setTasks(data.tasks ?? []);
-      if (u.ok) setUsers(await u.json());
+      const next: BoardData = { clients: data.clients ?? [], tasks: data.tasks ?? [], users: data.users ?? [] };
+      boardCache = next;
+      setClients(next.clients); setTasks(next.tasks); setUsers(next.users);
       setErr(null);
     } catch (e) { setErr((e as Error).message); }
     finally { setLoading(false); }
   }, []);
 
-  const loadTemplate = useCallback(async () => {
-    const r = await fetch("/api/onboarding/template");
-    if (r.ok) setTemplate(await r.json());
-  }, []);
-
-  useEffect(() => { load(); loadTemplate(); }, [load, loadTemplate]);
+  useEffect(() => { load(); }, [load]);
 
   const userEmails = useMemo(() => users.map((u) => u.email), [users]);
 
@@ -175,7 +176,7 @@ export default function OnboardingPage() {
         </TabsContent>
         {isAdmin && (
           <TabsContent value="template" className="mt-4">
-            <TemplateEditor template={template} onChange={loadTemplate} />
+            <TemplateEditor />
           </TabsContent>
         )}
       </Tabs>
@@ -459,14 +460,24 @@ function Board({ tasks, clients, myEmail, onChange }: {
 }
 
 // ─────────────────────────── Template editor ───────────────────────────
-function TemplateEditor({ template, onChange }: { template: TemplateTask[]; onChange: () => void }) {
+// Self-fetching: only mounts (and hits the API) when the Template tab is opened —
+// keeps it off the page's initial load. Cached in module scope for instant re-open.
+let templateCache: TemplateTask[] | null = null;
+function TemplateEditor() {
+  const [template, setTemplate] = useState<TemplateTask[]>(templateCache ?? []);
   const [busy, setBusy] = useState(false);
+
+  const loadTemplate = useCallback(async () => {
+    const r = await fetch("/api/onboarding/template");
+    if (r.ok) { const t = await r.json(); templateCache = t; setTemplate(t); }
+  }, []);
+  useEffect(() => { loadTemplate(); }, [loadTemplate]);
 
   async function save(body: Record<string, unknown>) {
     setBusy(true);
     const r = await postMutate(body);
     setBusy(false);
-    if (r.ok) { onChange(); } else toast.error(r.error || "Failed");
+    if (r.ok) { loadTemplate(); } else toast.error(r.error || "Failed");
   }
 
   return (

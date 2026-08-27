@@ -58,13 +58,13 @@ export default function ClientDetailPage() {
 
   const load = useCallback(async () => {
     try {
-      const [b, u] = await Promise.all([fetch("/api/onboarding"), fetch("/api/onboarding/users")]);
+      const b = await fetch("/api/onboarding"); // one request — includes users
       if (b.status === 401) { window.location.href = "/login"; return; }
       const data = await b.json();
       const c = (data.clients as OnbClient[]).find((x) => x.client_tag.toUpperCase() === tag) || null;
       setClient(c); setNotFound(!c);
       setTasks((data.tasks as OnbTask[]).filter((t) => t.client_tag.toUpperCase() === tag));
-      if (u.ok) setUsers((await u.json() as { email: string }[]).map((x) => x.email));
+      setUsers(((data.users as { email: string }[]) ?? []).map((x) => x.email));
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }, [tag]);

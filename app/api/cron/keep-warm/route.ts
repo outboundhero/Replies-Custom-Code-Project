@@ -23,6 +23,7 @@ const ROUTES = [
   "/api/config/qualification",
   "/api/config/untracked",
   "/api/users",
+  "/api/onboarding",
   "/api/inbox?mode=bootstrap&view=base-clients-cherry",
   "/api/data-view?sort=created_at.desc&limit=50&offset=0",
   "/api/sheet-pushes",
