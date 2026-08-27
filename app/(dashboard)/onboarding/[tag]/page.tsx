@@ -17,7 +17,7 @@ import { STATUS_META, TASK_STATUS_ORDER, ROLE_META, shortEmail, fmtDate, todaySt
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
 type OnbClient = {
-  client_tag: string; client_name: string | null; start_date: string;
+  client_tag: string; client_name: string | null; plan_type: string | null; start_date: string;
   domains_owner_email: string | null; inbox_owner_email: string | null; ops_owner_email: string | null;
   status: string; tasks_total: number; tasks_done: number;
 };
@@ -132,7 +132,10 @@ export default function ClientDetailPage() {
             <div className="flex items-center gap-3">
               <TagPill tag={client.client_tag} />
               <div>
-                <h2 className="text-xl font-semibold tracking-tight leading-none">{client.client_name || client.client_tag}</h2>
+                <h2 className="text-xl font-semibold tracking-tight leading-none flex items-center gap-2">
+                  {client.client_name || client.client_tag}
+                  {client.plan_type && <span className="text-[10px] font-medium rounded-full border border-border bg-muted px-1.5 py-0.5 text-muted-foreground">{client.plan_type}</span>}
+                </h2>
                 <p className="text-xs text-muted-foreground mt-1">Started {fmtDate(client.start_date)}</p>
               </div>
             </div>

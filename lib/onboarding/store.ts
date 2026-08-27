@@ -44,6 +44,7 @@ async function ensureTables(): Promise<void> {
   await db.execute(`CREATE TABLE IF NOT EXISTS onboarding_client (
     client_tag TEXT PRIMARY KEY,
     client_name TEXT,
+    plan_type TEXT,
     start_date TEXT NOT NULL,
     domains_owner_email TEXT,
     inbox_owner_email TEXT,
@@ -71,6 +72,9 @@ async function ensureTables(): Promise<void> {
   )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_tag ON onboarding_task(client_tag, status)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_assignee ON onboarding_task(assignee_email)`);
+  // Added after first release — safe to run repeatedly (prod already has the
+  // table without plan_type).
+  try { await db.execute("ALTER TABLE onboarding_client ADD COLUMN plan_type TEXT"); } catch { /* already exists */ }
   ready = true;
 }
 
@@ -83,6 +87,7 @@ export interface TemplateTaskRow extends TemplateTask {
 export interface OnboardingClientRow {
   client_tag: string;
   client_name: string | null;
+  plan_type: string | null;
   start_date: string;
   domains_owner_email: string | null;
   inbox_owner_email: string | null;
@@ -266,6 +271,7 @@ async function insertGeneratedTasks(tasks: GeneratedTask[]): Promise<void> {
 export interface AddClientInput {
   client_tag: string;
   client_name?: string | null;
+  plan_type?: string | null;
   start_date: string;
   domains_owner_email?: string | null;
   inbox_owner_email?: string | null;
@@ -287,17 +293,18 @@ export async function addOnboardingClient(input: AddClientInput): Promise<{ clie
   const now = nowIso();
   await db.execute({
     sql: `INSERT INTO onboarding_client
-            (client_tag, client_name, start_date, domains_owner_email, inbox_owner_email,
+            (client_tag, client_name, plan_type, start_date, domains_owner_email, inbox_owner_email,
              ops_owner_email, status, created_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
           ON CONFLICT(client_tag) DO UPDATE SET
             client_name = excluded.client_name,
+            plan_type = excluded.plan_type,
             start_date = excluded.start_date,
             domains_owner_email = excluded.domains_owner_email,
             inbox_owner_email = excluded.inbox_owner_email,
             ops_owner_email = excluded.ops_owner_email,
             updated_at = excluded.updated_at`,
-    args: [tag, input.client_name?.trim() || null, input.start_date,
+    args: [tag, input.client_name?.trim() || null, input.plan_type?.trim() || null, input.start_date,
            input.domains_owner_email?.trim() || null, input.inbox_owner_email?.trim() || null,
            input.ops_owner_email?.trim() || null, input.created_by || null, now, now],
   });
@@ -378,6 +385,7 @@ export async function listClients(): Promise<OnboardingClientRow[]> {
   return r.rows.map((row) => ({
     client_tag: String(row.client_tag),
     client_name: row.client_name ? String(row.client_name) : null,
+    plan_type: row.plan_type ? String(row.plan_type) : null,
     start_date: String(row.start_date),
     domains_owner_email: row.domains_owner_email ? String(row.domains_owner_email) : null,
     inbox_owner_email: row.inbox_owner_email ? String(row.inbox_owner_email) : null,
@@ -402,6 +410,7 @@ export async function getClient(tag: string): Promise<OnboardingClientRow | null
   return {
     client_tag: String(row.client_tag),
     client_name: row.client_name ? String(row.client_name) : null,
+    plan_type: row.plan_type ? String(row.plan_type) : null,
     start_date: String(row.start_date),
     domains_owner_email: row.domains_owner_email ? String(row.domains_owner_email) : null,
     inbox_owner_email: row.inbox_owner_email ? String(row.inbox_owner_email) : null,

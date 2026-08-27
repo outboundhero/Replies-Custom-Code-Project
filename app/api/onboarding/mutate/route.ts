@@ -39,6 +39,7 @@ export async function POST(req: NextRequest) {
         const res = await addOnboardingClient({
           client_tag: String(body.client_tag || ""),
           client_name: body.client_name ?? null,
+          plan_type: body.plan_type ?? null,
           start_date: String(body.start_date || ""),
           domains_owner_email: body.domains_owner_email ?? null,
           inbox_owner_email: body.inbox_owner_email ?? null,

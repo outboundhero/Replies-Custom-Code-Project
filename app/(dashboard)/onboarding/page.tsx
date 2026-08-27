@@ -25,7 +25,7 @@ import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
 // ─────────────────────────── types ───────────────────────────
 type OnbClient = {
-  client_tag: string; client_name: string | null; start_date: string;
+  client_tag: string; client_name: string | null; plan_type: string | null; start_date: string;
   domains_owner_email: string | null; inbox_owner_email: string | null; ops_owner_email: string | null;
   status: string; tasks_total: number; tasks_done: number;
 };
@@ -186,6 +186,7 @@ function AllClients({ clients, loading }: { clients: OnbClient[]; loading: boole
                 <Link href={`/onboarding/${encodeURIComponent(c.client_tag)}`} className="flex items-center gap-2 hover:underline">
                   <TagPill tag={c.client_tag} />
                   {c.client_name && <span className="text-sm">{c.client_name}</span>}
+                  {c.plan_type && <span className="text-[10px] font-medium rounded-full border border-border bg-muted px-1.5 py-0.5 text-muted-foreground">{c.plan_type}</span>}
                 </Link>
               </TableCell>
               <TableCell className="text-sm text-muted-foreground whitespace-nowrap">{fmtDate(c.start_date)}</TableCell>
@@ -226,12 +227,13 @@ function AddClientDialog({ userEmails, existingTags, onAdded }: {
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
   const [tag, setTag] = useState("");
+  const [plan, setPlan] = useState("");
   const [start, setStart] = useState(todayStr());
   const [domains, setDomains] = useState("");
   const [inbox, setInbox] = useState("");
   const [ops, setOps] = useState("");
 
-  function reset() { setName(""); setTag(""); setStart(todayStr()); setDomains(""); setInbox(""); setOps(""); }
+  function reset() { setName(""); setTag(""); setPlan(""); setStart(todayStr()); setDomains(""); setInbox(""); setOps(""); }
 
   async function submit() {
     const t = tag.trim().toUpperCase();
@@ -239,7 +241,7 @@ function AddClientDialog({ userEmails, existingTags, onAdded }: {
     if (existingTags.includes(t)) { toast.error(`${t} is already in onboarding`); return; }
     setBusy(true);
     const r = await postMutate({
-      action: "add-client", client_tag: t, client_name: name, start_date: start,
+      action: "add-client", client_tag: t, client_name: name, plan_type: plan || null, start_date: start,
       domains_owner_email: domains || null, inbox_owner_email: inbox || null, ops_owner_email: ops || null,
     });
     setBusy(false);
@@ -279,9 +281,15 @@ function AddClientDialog({ userEmails, existingTags, onAdded }: {
               <Input value={tag} onChange={(e) => setTag(e.target.value.toUpperCase())} placeholder="ACME" className="font-mono" />
             </div>
           </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">Start Date</label>
-            <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Start Date</label>
+              <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Plan / Package <span className="opacity-60">(optional)</span></label>
+              <Input value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="e.g. Growth, Starter" />
+            </div>
           </div>
           <div className="grid grid-cols-1 gap-3">
             <OwnerSelect role="domains" value={domains} set={setDomains} />
@@ -304,13 +312,19 @@ function Board({ tasks, clients, myEmail, onChange }: {
 }) {
   const [clientFilter, setClientFilter] = useState<string>("all");
   const [mineOnly, setMineOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<"due" | "day">("due");
   const activeTags = useMemo(() => new Set(clients.filter((c) => c.status !== "completed").map((c) => c.client_tag)), [clients]);
 
-  const filtered = useMemo(() => tasks.filter((t) => {
-    if (clientFilter === "all" ? !activeTags.has(t.client_tag) : t.client_tag !== clientFilter) return false;
-    if (mineOnly && t.assignee_email !== myEmail) return false;
-    return true;
-  }), [tasks, clientFilter, mineOnly, activeTags, myEmail]);
+  const filtered = useMemo(() => {
+    const rows = tasks.filter((t) => {
+      if (clientFilter === "all" ? !activeTags.has(t.client_tag) : t.client_tag !== clientFilter) return false;
+      if (mineOnly && t.assignee_email !== myEmail) return false;
+      return true;
+    });
+    return rows.sort((a, b) => sortBy === "day"
+      ? a.day_offset - b.day_offset || a.order_index - b.order_index
+      : (a.due_date || "").localeCompare(b.due_date || "") || a.order_index - b.order_index);
+  }, [tasks, clientFilter, mineOnly, activeTags, myEmail, sortBy]);
 
   async function setStatus(id: string, status: TaskStatus) {
     const r = await postMutate({ action: "update-task-status", id, status });
@@ -328,6 +342,11 @@ function Board({ tasks, clients, myEmail, onChange }: {
           </SelectContent>
         </Select>
         <Button variant={mineOnly ? "default" : "outline"} size="sm" onClick={() => setMineOnly((v) => !v)}>My tasks only</Button>
+        <div className="ml-auto flex items-center gap-1 text-xs">
+          <span className="text-muted-foreground">Sort:</span>
+          <Button variant={sortBy === "due" ? "default" : "outline"} size="sm" className="h-7 text-xs" onClick={() => setSortBy("due")}>Due date</Button>
+          <Button variant={sortBy === "day" ? "default" : "outline"} size="sm" className="h-7 text-xs" onClick={() => setSortBy("day")}>Day offset</Button>
+        </div>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {TASK_STATUS_ORDER.map((status) => {
@@ -349,7 +368,7 @@ function Board({ tasks, clients, myEmail, onChange }: {
                     </div>
                     <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                       <span className="flex items-center gap-1.5"><RolePill role={t.role} />{shortEmail(t.assignee_email) || "unassigned"}</span>
-                      <span className="tabular-nums">{fmtDate(t.due_date)}</span>
+                      <span className="tabular-nums">{fmtDate(t.due_date)}{t.template_task_id ? ` · D${t.day_offset}` : ""}</span>
                     </div>
                     <Select value={t.status} onValueChange={(v) => setStatus(t.id, v as TaskStatus)}>
                       <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
