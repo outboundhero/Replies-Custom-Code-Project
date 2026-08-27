@@ -569,6 +569,9 @@ export default function InboxPage() {
   const [tsSaving, setTsSaving] = useState(false);
   // §29: inline sends require an explicit second click before firing.
   const [confirmInline, setConfirmInline] = useState<"reply" | "fwd" | "oo" | null>(null);
+  // Bumped after a send failure is dismissed → forces the top "needs manual
+  // resend" strip to reload so the matching lead chip drops immediately.
+  const [bannerReload, setBannerReload] = useState(0);
   // Client qualification rules drawer (search audits/locations from the inbox).
   const [showQual, setShowQual] = useState(false);
 
@@ -1087,6 +1090,22 @@ export default function InboxPage() {
     }
   }
 
+  // Dismiss a persistent send failure the operator has handled: clears the red
+  // "last send failed" box on this lead AND drops its chip from the top strip
+  // (both read the same send_error). The draft is kept — if they try again and it
+  // fails, a fresh error + retry cycle starts and can be dismissed again.
+  async function handleDismissSendError() {
+    if (!detail) return;
+    const detailId = detail.id;
+    // Clearing send_error hides the red box (it's the gate) and, server-side,
+    // drops this lead from the top strip.
+    setDetail((prev) => (prev && prev.id === detailId ? { ...prev, send_error: null, send_error_at: null } : prev));
+    setBannerReload((n) => n + 1); // refresh the top strip so the chip drops
+    const d = await mutate({ action: "dismiss-send-error", id: detailId });
+    if (d.ok) toast.success("Dismissed");
+    else { toast.error(d.error || "Failed to dismiss"); setBannerReload((n) => n + 1); }
+  }
+
   async function handleFwd() {
     if (!detail || !fwdTo) return;
     if (confirmInline !== "fwd") { setConfirmInline("fwd"); return; } // §29 confirm
@@ -1254,7 +1273,7 @@ export default function InboxPage() {
   return (
     <div className="flex flex-col h-[calc(100vh-3rem)]">
       {/* Top strip: reply/handoff sends that failed to auto-recover (manual resend). */}
-      <NeedsAttentionBanner onOpen={(rid) => loadDetail(rid)} />
+      <NeedsAttentionBanner onOpen={(rid) => loadDetail(rid)} reloadSignal={bannerReload} />
       <div className="flex flex-1 min-h-0">
       {/* ── LEFT PANEL ── */}
       <div className="w-72 border-r flex flex-col bg-white shrink-0">
@@ -1820,7 +1839,17 @@ export default function InboxPage() {
               {/* Persistent send status: failure stays until the next success. */}
               {detail.send_error && (
                 <div className="rounded border border-rose-300 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-800 space-y-1">
-                  <div><span className="font-semibold">⚠ Last send failed:</span> {detail.send_error}. Your draft is kept — fix and retry.</div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div><span className="font-semibold">⚠ Last send failed:</span> {detail.send_error}. Your draft is kept — fix and retry.</div>
+                    <button
+                      type="button"
+                      onClick={handleDismissSendError}
+                      title="Dismiss this error — also clears it from the top strip. Sending again and failing will show a fresh error."
+                      className="shrink-0 rounded border border-rose-300 bg-white px-1.5 py-0.5 text-[10px] font-medium text-rose-700 hover:bg-rose-100 transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
                   {detail.send_retry?.status === "exhausted" ? (
                     <div className="text-[10px] font-medium text-rose-700">
                       ✗ Auto-resend failed after reconnect attempts — the sending inbox likely needs manual reconnection (e.g. the domain was removed at the inbox vendor). Resend manually once it&apos;s fixed. This is recorded in Error Logs.

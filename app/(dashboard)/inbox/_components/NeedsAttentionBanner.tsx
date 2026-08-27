@@ -17,8 +17,18 @@ interface Item {
  * needs a human. Renders nothing when there's nothing to act on, so it never adds
  * visual weight in the normal case. Each lead is a clickable chip that opens it.
  */
-export function NeedsAttentionBanner({ onOpen }: { onOpen: (replyId: number) => void }) {
+export function NeedsAttentionBanner({
+  onOpen,
+  reloadSignal = 0,
+}: {
+  onOpen: (replyId: number) => void;
+  /** Bump this (from the parent) to force an immediate reload — e.g. right after
+   *  a send failure is dismissed from the lead's detail pane, so the matching
+   *  chip disappears without waiting for the 60s poll. */
+  reloadSignal?: number;
+}) {
   const [items, setItems] = useState<Item[]>([]);
+  const [dismissing, setDismissing] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -33,6 +43,25 @@ export function NeedsAttentionBanner({ onOpen }: { onOpen: (replyId: number) => 
     load();
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
+  }, [load]);
+
+  // Force a refresh when the parent signals (e.g. a dismiss from the detail pane).
+  useEffect(() => { if (reloadSignal) load(); }, [reloadSignal, load]);
+
+  // Dismiss a single lead's failure straight from its chip. Optimistically drop
+  // it, then clear the persistent send_error server-side (same action the detail
+  // pane's Dismiss uses), and re-sync.
+  const dismiss = useCallback(async (replyId: number) => {
+    setDismissing(replyId);
+    setItems((prev) => prev.filter((it) => it.replyId !== replyId));
+    try {
+      await fetch("/api/inbox/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "dismiss-send-error", id: replyId }),
+      });
+    } catch { /* already dropped locally; the poll will reconcile */ }
+    finally { setDismissing(null); load(); }
   }, [load]);
 
   if (!items.length) return null;
@@ -53,19 +82,33 @@ export function NeedsAttentionBanner({ onOpen }: { onOpen: (replyId: number) => 
         </span>
         <div className="flex flex-wrap items-center gap-1.5">
           {shown.map((it) => (
-            <button
+            <span
               key={it.replyId}
-              type="button"
-              onClick={() => onOpen(it.replyId)}
-              title={[
-                it.clientTag ? `Client ${it.clientTag}` : null,
-                it.senderEmail ? `inbox ${it.senderEmail}` : null,
-                it.lastError || null,
-              ].filter(Boolean).join(" · ")}
-              className="max-w-[220px] truncate rounded-full border border-amber-300 bg-white px-2.5 py-0.5 text-[11px] text-amber-800 transition-colors hover:bg-amber-100"
+              className="inline-flex items-center rounded-full border border-amber-300 bg-white text-[11px] text-amber-800 transition-colors hover:bg-amber-100"
             >
-              {it.leadEmail || `Reply #${it.replyId}`}
-            </button>
+              <button
+                type="button"
+                onClick={() => onOpen(it.replyId)}
+                title={[
+                  it.clientTag ? `Client ${it.clientTag}` : null,
+                  it.senderEmail ? `inbox ${it.senderEmail}` : null,
+                  it.lastError || null,
+                ].filter(Boolean).join(" · ")}
+                className="max-w-[220px] truncate rounded-full pl-2.5 pr-1.5 py-0.5"
+              >
+                {it.leadEmail || `Reply #${it.replyId}`}
+              </button>
+              <button
+                type="button"
+                onClick={() => dismiss(it.replyId)}
+                disabled={dismissing === it.replyId}
+                title="Dismiss — clear this send failure"
+                aria-label="Dismiss send failure"
+                className="mr-0.5 rounded-full px-1 leading-none text-amber-500 hover:text-amber-900 hover:bg-amber-200/60 disabled:opacity-50"
+              >
+                ×
+              </button>
+            </span>
           ))}
           {extra > 0 && <span className="text-[11px] font-medium text-amber-700">+{extra} more</span>}
         </div>

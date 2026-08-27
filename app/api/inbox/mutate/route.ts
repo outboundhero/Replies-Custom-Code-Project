@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import db from "@/lib/db";
 import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail, findSenderEmailByAddress } from "@/lib/outboundhero-api";
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
@@ -113,6 +114,31 @@ export async function POST(req: NextRequest) {
         const result = await handleDm4pmSubsequenceAction(action, id, body, { clientTag: rowClientTag });
         if (result.error) return NextResponse.json({ error: result.error }, { status: result.status || 400 });
         return NextResponse.json(result.data);
+      }
+
+      // Dismiss a persistent send failure the operator has handled elsewhere
+      // (e.g. resent from the vendor, or the lead no longer matters). Clears the
+      // reply's send_error so BOTH the red "last send failed" box on the lead AND
+      // the top "needs manual resend" strip drop this lead — the strip requires an
+      // exhausted retry whose reply still has send_error, so clearing it is enough;
+      // we also mark the retry row 'dismissed' so it can never resurface. The draft
+      // (sent_reply) is left untouched.
+      case "dismiss-send-error": {
+        const nowIso = new Date().toISOString();
+        try {
+          await supabase.from("replies")
+            .update({ send_error: null, send_error_at: null, updated_at: nowIso })
+            .eq("id", id);
+        } catch { /* columns may not exist pre-migration */ }
+        try {
+          await db.execute({
+            sql: "UPDATE send_reply_retries SET status = 'dismissed', updated_at = ? WHERE reply_row_id = ? AND status = 'exhausted'",
+            args: [nowIso, id],
+          });
+        } catch { /* table may not exist / no retry row — clearing send_error already suffices */ }
+        await logActivity("inbox", "send-error-dismissed", { client_tag: rowClientTag ?? undefined, details: { row_id: id } });
+        bumpCacheVersion();
+        return NextResponse.json({ ok: true });
       }
 
       // Change the AI-classified category (ai_categorized_lead_category). Views key
