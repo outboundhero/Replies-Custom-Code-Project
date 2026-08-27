@@ -11,8 +11,10 @@ import { requireAuth, requireAdmin, getSession } from "@/lib/auth";
 import {
   addOnboardingClient, updateClientStartDate, setClientStatus, deleteOnboardingClient, regenerateTasks,
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
+  bulkUpdateTaskStatus, listTasks, getTask,
   upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate,
 } from "@/lib/onboarding/store";
+import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
 const ADMIN_ACTIONS = new Set([
@@ -43,6 +45,11 @@ export async function POST(req: NextRequest) {
           ops_owner_email: body.ops_owner_email ?? null,
           created_by: session?.email ?? null,
         });
+        // DM each owner a summary of their new tasks (fire-and-forget).
+        if (res.tasks > 0) {
+          const tasks = await listTasks({ tag: res.client_tag });
+          void notifyOwnersOnAdd(res.client_tag, body.client_name ?? null, tasks);
+        }
         return NextResponse.json({ ok: true, ...res });
       }
       case "update-start-date":
@@ -63,9 +70,21 @@ export async function POST(req: NextRequest) {
       case "update-task-status":
         await updateTaskStatus(String(body.id || ""), body.status as TaskStatus);
         return NextResponse.json({ ok: true });
-      case "update-task-assignee":
-        await updateTaskAssignee(String(body.id || ""), body.assignee_email ?? null);
+      case "update-task-assignee": {
+        const email = body.assignee_email ?? null;
+        await updateTaskAssignee(String(body.id || ""), email);
+        // Ping the new assignee about this task (fire-and-forget).
+        if (email) {
+          const t = await getTask(String(body.id || ""));
+          if (t) void notifyAssignee(email, t.client_tag, t.title, t.due_date);
+        }
         return NextResponse.json({ ok: true });
+      }
+      case "bulk-task-status": {
+        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        const n = await bulkUpdateTaskStatus(ids, body.status as TaskStatus);
+        return NextResponse.json({ ok: true, updated: n });
+      }
       case "update-task-due-date":
         await updateTaskDueDate(String(body.id || ""), String(body.due_date || ""));
         return NextResponse.json({ ok: true });

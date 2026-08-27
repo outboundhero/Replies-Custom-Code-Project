@@ -78,6 +78,32 @@ export default function ClientDetailPage() {
   const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
   const today = todayStr();
 
+  // Group tasks by due date so the list reads as a timeline with colored day
+  // headers (overdue / today / upcoming).
+  const groups = useMemo(() => {
+    const m = new Map<string, OnbTask[]>();
+    for (const t of sorted) {
+      const key = t.due_date || "no-date";
+      const arr = m.get(key);
+      if (arr) arr.push(t); else m.set(key, [t]);
+    }
+    return [...m.entries()];
+  }, [sorted]);
+
+  // Bulk selection + status.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const toggleSel = (id: string) => setSelected((prev) => {
+    const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n;
+  });
+  const clearSel = () => setSelected(new Set());
+  async function bulkStatus(status: TaskStatus) {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const r = await postMutate({ action: "bulk-task-status", ids, status });
+    if (r.ok) { toast.success(`${ids.length} task${ids.length === 1 ? "" : "s"} updated`); clearSel(); load(); }
+    else toast.error(r.error || "Failed");
+  }
+
   async function refresh(body: Record<string, unknown>, okMsg?: string) {
     const r = await postMutate(body);
     if (r.ok) { if (okMsg) toast.success(okMsg); load(); } else toast.error(r.error || "Failed");
@@ -153,12 +179,47 @@ export default function ClientDetailPage() {
           <h3 className="text-sm font-semibold">Tasks</h3>
           <AddTaskDialog tag={client.client_tag} users={users} onAdded={load} />
         </div>
-        <Card className="overflow-hidden"><div className="divide-y">
-          {sorted.length === 0 && <div className="py-10 text-center text-sm text-muted-foreground">No tasks.</div>}
-          {sorted.map((t) => (
-            <TaskRow key={t.id} task={t} users={users} today={today} isAdmin={isAdmin} onChange={load} />
-          ))}
-        </div></Card>
+
+        {/* Bulk action bar — appears when tasks are selected. */}
+        {selected.size > 0 && (
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+            <span className="font-medium">{selected.size} selected</span>
+            <span className="text-muted-foreground">· set status:</span>
+            {TASK_STATUS_ORDER.map((s) => (
+              <Button key={s} size="sm" variant="outline" className="h-7 text-xs" onClick={() => bulkStatus(s)}>
+                {STATUS_META[s].label}
+              </Button>
+            ))}
+            <button onClick={clearSel} className="ml-auto text-xs text-muted-foreground hover:text-foreground">Clear</button>
+          </div>
+        )}
+
+        {sorted.length === 0 && (
+          <Card><div className="py-10 text-center text-sm text-muted-foreground">No tasks.</div></Card>
+        )}
+        {groups.map(([key, ts]) => {
+          const due = key === "no-date" ? null : key;
+          const overdue = due && due < today;
+          const isToday = due === today;
+          const tint = !due ? "text-muted-foreground" : overdue ? "text-destructive" : isToday ? "text-blue-600 dark:text-blue-400" : "text-muted-foreground";
+          const dot = !due ? "bg-muted-foreground/40" : overdue ? "bg-destructive" : isToday ? "bg-blue-500" : "bg-muted-foreground/40";
+          const label = !due ? "No due date" : overdue ? `Overdue · ${fmtDate(due)}` : isToday ? `Today · ${fmtDate(due)}` : fmtDate(due);
+          return (
+            <div key={key} className="space-y-1.5">
+              <div className="flex items-center gap-2 px-1">
+                <span className={cn("h-1.5 w-1.5 rounded-full", dot)} />
+                <span className={cn("text-xs font-semibold", tint)}>{label}</span>
+                <span className="text-[11px] text-muted-foreground">· {ts.length}</span>
+              </div>
+              <Card className="overflow-hidden"><div className="divide-y">
+                {ts.map((t) => (
+                  <TaskRow key={t.id} task={t} users={users} today={today} isAdmin={isAdmin}
+                    selected={selected.has(t.id)} onToggle={() => toggleSel(t.id)} onChange={load} />
+                ))}
+              </div></Card>
+            </div>
+          );
+        })}
       </div>
 
       {isAdmin && (
@@ -177,8 +238,9 @@ export default function ClientDetailPage() {
   );
 }
 
-function TaskRow({ task, users, today, isAdmin, onChange }: {
-  task: OnbTask; users: string[]; today: string; isAdmin: boolean; onChange: () => void;
+function TaskRow({ task, users, today, isAdmin, selected, onToggle, onChange }: {
+  task: OnbTask; users: string[]; today: string; isAdmin: boolean;
+  selected: boolean; onToggle: () => void; onChange: () => void;
 }) {
   const overdue = task.status !== "completed" && task.due_date && task.due_date < today;
   const isToday = task.status !== "completed" && task.due_date === today;
@@ -190,7 +252,9 @@ function TaskRow({ task, users, today, isAdmin, onChange }: {
   }
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5">
+    <div className={cn("flex items-center gap-3 px-4 py-2.5 transition-colors", selected && "bg-primary/5")}>
+      <input type="checkbox" checked={selected} onChange={onToggle}
+        className="h-3.5 w-3.5 shrink-0 rounded border-muted-foreground/40 accent-primary cursor-pointer" />
       <div className={cn("h-2 w-2 rounded-full shrink-0", STATUS_META[task.status].dot)} />
       <div className="min-w-0 flex-1">
         <div className={cn("text-sm font-medium truncate", task.status === "completed" && "line-through text-muted-foreground")}>{task.title}</div>

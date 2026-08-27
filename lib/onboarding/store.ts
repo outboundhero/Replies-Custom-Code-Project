@@ -474,6 +474,12 @@ export async function listTasks(filter?: { tag?: string; assignee?: string }): P
   return r.rows.map(asTask);
 }
 
+export async function getTask(id: string): Promise<OnboardingTaskRow | null> {
+  await ensureTables();
+  const r = await db.execute({ sql: "SELECT * FROM onboarding_task WHERE id=?", args: [id] });
+  return r.rows[0] ? asTask(r.rows[0]) : null;
+}
+
 export async function updateTaskStatus(id: string, status: TaskStatus): Promise<void> {
   await ensureTables();
   await db.execute({
@@ -539,4 +545,21 @@ export async function deleteTask(id: string): Promise<void> {
   await ensureTables();
   await db.execute({ sql: "DELETE FROM onboarding_task WHERE id=?", args: [id] });
   bumpVersion("onboarding");
+}
+
+/** Set the same status on many tasks at once (bulk action from the UI). */
+export async function bulkUpdateTaskStatus(ids: string[], status: TaskStatus): Promise<number> {
+  await ensureTables();
+  const clean = ids.filter(Boolean);
+  if (!clean.length) return 0;
+  const now = nowIso();
+  await db.batch(
+    clean.map((id) => ({
+      sql: "UPDATE onboarding_task SET status=?, updated_at=? WHERE id=?",
+      args: [status, now, id],
+    })),
+    "write",
+  );
+  bumpVersion("onboarding");
+  return clean.length;
 }

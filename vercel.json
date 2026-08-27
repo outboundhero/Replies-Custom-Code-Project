@@ -74,6 +74,10 @@
       "schedule": "0 0,1 * * *"
     },
     {
+      "path": "/api/cron/onboarding-digest",
+      "schedule": "0 16 * * *"
+    },
+    {
       "path": "/api/cron/retry-sheet-pushes",
       "schedule": "*/15 * * * *"
     },
