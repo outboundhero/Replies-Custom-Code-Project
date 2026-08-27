@@ -22,7 +22,7 @@ import { splitAbbreviations } from "@/lib/sync/sheets-to-supabase";
 import { isChurned } from "@/lib/churn";
 import { logActivity, logError } from "@/lib/errors";
 
-const CHANNEL = process.env.SLACK_INBOX_MGMT_CHANNEL || "C0BKP83NP9Q";
+const CHANNEL = process.env.SLACK_INBOX_MGMT_CHANNEL || "C0B84LMSVMH";
 
 let ready = false;
 async function ensureTable(): Promise<void> {
