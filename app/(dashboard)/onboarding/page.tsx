@@ -373,9 +373,25 @@ function Board({ tasks, clients, myEmail, onChange }: {
       : (a.due_date || "").localeCompare(b.due_date || "") || a.order_index - b.order_index);
   }, [tasks, clientFilter, mineOnly, activeTags, myEmail, sortBy]);
 
+  // Optimistic status: reflect a move instantly, cleared when fresh data lands.
+  const [localStatus, setLocalStatus] = useState<Record<string, TaskStatus>>({});
+  useEffect(() => { setLocalStatus({}); }, [tasks]);
+  const effStatus = (t: OnbTask): TaskStatus => localStatus[t.id] ?? t.status;
+
+  // Native HTML5 drag-and-drop between columns.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overStatus, setOverStatus] = useState<TaskStatus | null>(null);
+
   async function setStatus(id: string, status: TaskStatus) {
+    setLocalStatus((prev) => ({ ...prev, [id]: status })); // optimistic
     const r = await postMutate({ action: "update-task-status", id, status });
-    if (r.ok) { toast.success("Updated"); onChange(); } else toast.error(r.error || "Failed");
+    if (r.ok) { onChange(); }
+    else { toast.error(r.error || "Failed"); setLocalStatus((prev) => { const n = { ...prev }; delete n[id]; return n; }); }
+  }
+  function dropOnStatus(status: TaskStatus) {
+    const id = dragId;
+    setOverStatus(null); setDragId(null);
+    if (id) { const t = tasks.find((x) => x.id === id); if (t && effStatus(t) !== status) setStatus(id, status); }
   }
 
   return (
@@ -395,20 +411,28 @@ function Board({ tasks, clients, myEmail, onChange }: {
           <Button variant={sortBy === "day" ? "default" : "outline"} size="sm" className="h-7 text-xs" onClick={() => setSortBy("day")}>Day offset</Button>
         </div>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 h-[calc(100vh-16rem)] min-h-[340px]">
         {TASK_STATUS_ORDER.map((status) => {
-          const col = filtered.filter((t) => t.status === status);
+          const col = filtered.filter((t) => effStatus(t) === status);
           const m = STATUS_META[status];
+          const isOver = overStatus === status;
           return (
-            <div key={status} className={cn("rounded-xl border bg-muted/20", m.col)}>
-              <div className="flex items-center justify-between px-3 py-2.5 border-b">
+            <div key={status}
+              onDragOver={(e) => { e.preventDefault(); if (overStatus !== status) setOverStatus(status); }}
+              onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverStatus((s) => (s === status ? null : s)); }}
+              onDrop={(e) => { e.preventDefault(); dropOnStatus(status); }}
+              className={cn("flex flex-col rounded-xl border bg-muted/20 overflow-hidden transition-colors", m.col, isOver && "ring-2 ring-primary/50 bg-primary/5")}>
+              <div className="flex items-center justify-between px-3 py-2.5 border-b shrink-0">
                 <span className="flex items-center gap-2 text-sm font-medium"><span className={cn("h-2 w-2 rounded-full", m.dot)} />{m.label}</span>
                 <span className="text-xs text-muted-foreground tabular-nums rounded-full bg-muted px-2 py-0.5">{col.length}</span>
               </div>
-              <div className="p-2 space-y-2 min-h-[80px]">
-                {col.length === 0 && <div className="text-xs text-muted-foreground/60 text-center py-6">Nothing here</div>}
+              <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                {col.length === 0 && <div className="text-xs text-muted-foreground/60 text-center py-10">{isOver ? "Drop here" : "Nothing here"}</div>}
                 {col.map((t) => (
-                  <div key={t.id} className="rounded-lg border bg-card p-3 space-y-2 hover:shadow-sm transition-shadow">
+                  <div key={t.id} draggable
+                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t.id); setDragId(t.id); }}
+                    onDragEnd={() => { setDragId(null); setOverStatus(null); }}
+                    className={cn("rounded-lg border bg-card p-3 space-y-2 cursor-grab active:cursor-grabbing hover:shadow-sm transition-all", dragId === t.id && "opacity-40")}>
                     <div className="flex items-start justify-between gap-2">
                       <span className="text-sm font-medium leading-snug">{t.title}</span>
                       <TagPill tag={t.client_tag} />
@@ -417,7 +441,7 @@ function Board({ tasks, clients, myEmail, onChange }: {
                       <span className="flex items-center gap-1.5"><RolePill role={t.role} />{shortEmail(t.assignee_email) || "unassigned"}</span>
                       <span className="tabular-nums">{fmtDate(t.due_date)}{t.template_task_id ? ` · D${t.day_offset}` : ""}</span>
                     </div>
-                    <Select value={t.status} onValueChange={(v) => setStatus(t.id, v as TaskStatus)}>
+                    <Select value={effStatus(t)} onValueChange={(v) => setStatus(t.id, v as TaskStatus)}>
                       <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                       <SelectContent>
                         {TASK_STATUS_ORDER.map((s) => <SelectItem key={s} value={s}>{STATUS_META[s].label}</SelectItem>)}
