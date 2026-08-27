@@ -7,26 +7,18 @@
  */
 import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
-import supabase from "@/lib/supabase";
 import { withCache, nsVersion } from "@/lib/server-cache";
-import { listClients, listTasks } from "@/lib/onboarding/store";
+import { listClients, listTasks, listOnboardingUsers } from "@/lib/onboarding/store";
 
 export async function GET() {
   const denied = await requireAuth();
   if (denied) return denied;
   try {
-    const [board, users] = await Promise.all([
-      withCache(`onboarding:board:v${nsVersion("onboarding")}`, 15_000, async () => {
-        const [clients, tasks] = await Promise.all([listClients(), listTasks()]);
-        return { clients, tasks };
-      }),
-      withCache(`onboarding:users:v${nsVersion("users")}`, 60_000, async () => {
-        const { data, error } = await supabase.from("app_users").select("email, role").order("email", { ascending: true });
-        if (error) throw new Error(error.message);
-        return data ?? [];
-      }),
-    ]);
-    return NextResponse.json({ ...board, users });
+    const data = await withCache(`onboarding:board:v${nsVersion("onboarding")}`, 15_000, async () => {
+      const [clients, tasks, users] = await Promise.all([listClients(), listTasks(), listOnboardingUsers()]);
+      return { clients, tasks, users };
+    });
+    return NextResponse.json(data);
   } catch (error) {
     console.error("[api/onboarding] GET failed:", error);
     return NextResponse.json({ error: "Failed to load onboarding" }, { status: 500 });

@@ -7,12 +7,14 @@
  *              bumpVersion handled inside the store helpers).
  */
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { requireAuth, requireAdmin, getSession } from "@/lib/auth";
 import {
   addOnboardingClient, updateClientStartDate, setClientStatus, deleteOnboardingClient, regenerateTasks,
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
   bulkUpdateTaskStatus, listTasks, getTask,
   upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate,
+  upsertOnboardingUser, deleteOnboardingUser,
 } from "@/lib/onboarding/store";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
@@ -20,6 +22,7 @@ import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 const ADMIN_ACTIONS = new Set([
   "add-client", "delete-client",
   "template-upsert", "template-delete", "template-reorder", "template-seed",
+  "user-upsert", "user-delete",
 ]);
 
 export async function POST(req: NextRequest) {
@@ -46,10 +49,13 @@ export async function POST(req: NextRequest) {
           ops_owner_email: body.ops_owner_email ?? null,
           created_by: session?.email ?? null,
         });
-        // DM each owner a summary of their new tasks (fire-and-forget).
+        // DM each owner a summary of their new tasks. after() keeps the function
+        // alive past the response so the Slack calls actually complete on serverless.
         if (res.tasks > 0) {
-          const tasks = await listTasks({ tag: res.client_tag });
-          void notifyOwnersOnAdd(res.client_tag, body.client_name ?? null, tasks);
+          after(async () => {
+            const tasks = await listTasks({ tag: res.client_tag });
+            await notifyOwnersOnAdd(res.client_tag, body.client_name ?? null, tasks);
+          });
         }
         return NextResponse.json({ ok: true, ...res });
       }
@@ -74,10 +80,12 @@ export async function POST(req: NextRequest) {
       case "update-task-assignee": {
         const email = body.assignee_email ?? null;
         await updateTaskAssignee(String(body.id || ""), email);
-        // Ping the new assignee about this task (fire-and-forget).
+        // Ping the new assignee about this task; after() so the DM completes.
         if (email) {
-          const t = await getTask(String(body.id || ""));
-          if (t) void notifyAssignee(email, t.client_tag, t.title, t.due_date);
+          after(async () => {
+            const t = await getTask(String(body.id || ""));
+            if (t) await notifyAssignee(email, t.client_tag, t.title, t.due_date);
+          });
         }
         return NextResponse.json({ ok: true });
       }
@@ -126,6 +134,19 @@ export async function POST(req: NextRequest) {
         const n = await seedDefaultTemplate();
         return NextResponse.json({ ok: true, seeded: n });
       }
+
+      // ── onboarding users (Slack member IDs) ──────────────────
+      case "user-upsert": {
+        const id = await upsertOnboardingUser({
+          id: body.id ?? null,
+          name: String(body.name || ""),
+          slack_member_id: body.slack_member_id ?? null,
+        });
+        return NextResponse.json({ ok: true, id });
+      }
+      case "user-delete":
+        await deleteOnboardingUser(String(body.id || ""));
+        return NextResponse.json({ ok: true });
 
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });

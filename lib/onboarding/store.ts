@@ -70,6 +70,17 @@ async function ensureTables(): Promise<void> {
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`);
+  // Onboarding-specific team members (NOT the Reply Router app_users). Each has a
+  // Slack member ID so notifications DM them directly (no email lookup). The
+  // owner/assignee columns above store this user's `id` (the *_email column names
+  // are legacy; the value is an onboarding_user id).
+  await db.execute(`CREATE TABLE IF NOT EXISTS onboarding_user (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slack_member_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_tag ON onboarding_task(client_tag, status)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_assignee ON onboarding_task(assignee_email)`);
   // Added after first release — safe to run repeatedly (prod already has the
@@ -229,6 +240,59 @@ export async function reorderTemplate(orderedIds: string[]): Promise<void> {
     })),
     "write",
   );
+  bumpVersion("onboarding");
+}
+
+// ─────────────────────────── Onboarding users ───────────────────────────
+
+export interface OnboardingUserRow {
+  id: string;
+  name: string;
+  slack_member_id: string | null;
+}
+
+export async function listOnboardingUsers(): Promise<OnboardingUserRow[]> {
+  await ensureTables();
+  const r = await db.execute("SELECT id, name, slack_member_id FROM onboarding_user ORDER BY name COLLATE NOCASE ASC");
+  return r.rows.map((row) => ({
+    id: String(row.id),
+    name: String(row.name),
+    slack_member_id: row.slack_member_id ? String(row.slack_member_id) : null,
+  }));
+}
+
+/** Map onboarding_user id → { name, slackId } for display + notifications. */
+export async function onboardingUserMap(): Promise<Map<string, { name: string; slackId: string | null }>> {
+  const users = await listOnboardingUsers();
+  return new Map(users.map((u) => [u.id, { name: u.name, slackId: u.slack_member_id }]));
+}
+
+export async function upsertOnboardingUser(input: { id?: string | null; name: string; slack_member_id?: string | null }): Promise<string> {
+  await ensureTables();
+  const name = input.name.trim();
+  if (!name) throw new Error("name required");
+  const slack = input.slack_member_id?.trim() || null;
+  const now = nowIso();
+  if (input.id) {
+    await db.execute({
+      sql: "UPDATE onboarding_user SET name=?, slack_member_id=?, updated_at=? WHERE id=?",
+      args: [name, slack, now, input.id],
+    });
+    bumpVersion("onboarding");
+    return input.id;
+  }
+  const id = randomUUID();
+  await db.execute({
+    sql: "INSERT INTO onboarding_user (id, name, slack_member_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    args: [id, name, slack, now, now],
+  });
+  bumpVersion("onboarding");
+  return id;
+}
+
+export async function deleteOnboardingUser(id: string): Promise<void> {
+  await ensureTables();
+  await db.execute({ sql: "DELETE FROM onboarding_user WHERE id=?", args: [id] });
   bumpVersion("onboarding");
 }
 

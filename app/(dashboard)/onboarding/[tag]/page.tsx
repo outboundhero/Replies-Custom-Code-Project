@@ -13,7 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger, DialogDescription,
 } from "@/components/ui/dialog";
-import { STATUS_META, TASK_STATUS_ORDER, ROLE_META, shortEmail, fmtDate, todayStr } from "@/lib/onboarding/ui";
+import { STATUS_META, TASK_STATUS_ORDER, ROLE_META, fmtDate, todayStr } from "@/lib/onboarding/ui";
+
+type UserRow = { id: string; name: string; slack_member_id: string | null };
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
 type OnbClient = {
@@ -52,7 +54,7 @@ export default function ClientDetailPage() {
 
   const [client, setClient] = useState<OnbClient | null>(null);
   const [tasks, setTasks] = useState<OnbTask[]>([]);
-  const [users, setUsers] = useState<string[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
@@ -64,7 +66,7 @@ export default function ClientDetailPage() {
       const c = (data.clients as OnbClient[]).find((x) => x.client_tag.toUpperCase() === tag) || null;
       setClient(c); setNotFound(!c);
       setTasks((data.tasks as OnbTask[]).filter((t) => t.client_tag.toUpperCase() === tag));
-      setUsers(((data.users as { email: string }[]) ?? []).map((x) => x.email));
+      setUsers((data.users as UserRow[]) ?? []);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }, [tag]);
@@ -77,6 +79,7 @@ export default function ClientDetailPage() {
   const done = tasks.filter((t) => t.status === "completed").length;
   const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
   const today = todayStr();
+  const usersById = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
 
   // Group tasks by due date so the list reads as a timeline with colored day
   // headers (overdue / today / upcoming).
@@ -165,10 +168,10 @@ export default function ClientDetailPage() {
           {/* Owners */}
           <div className="flex flex-wrap gap-4 pt-1">
             {(["domains", "inbox", "ops"] as OnboardingRole[]).map((r) => {
-              const email = r === "domains" ? client.domains_owner_email : r === "inbox" ? client.inbox_owner_email : client.ops_owner_email;
+              const oid = r === "domains" ? client.domains_owner_email : r === "inbox" ? client.inbox_owner_email : client.ops_owner_email;
               return (
                 <div key={r} className="flex items-center gap-1.5 text-sm">
-                  <RolePill role={r} /><span className="text-muted-foreground">{email || "unassigned"}</span>
+                  <RolePill role={r} /><span className="text-muted-foreground">{(oid && usersById.get(oid)) || "unassigned"}</span>
                 </div>
               );
             })}
@@ -242,7 +245,7 @@ export default function ClientDetailPage() {
 }
 
 function TaskRow({ task, users, today, isAdmin, selected, onToggle, onChange }: {
-  task: OnbTask; users: string[]; today: string; isAdmin: boolean;
+  task: OnbTask; users: UserRow[]; today: string; isAdmin: boolean;
   selected: boolean; onToggle: () => void; onChange: () => void;
 }) {
   const overdue = task.status !== "completed" && task.due_date && task.due_date < today;
@@ -273,7 +276,7 @@ function TaskRow({ task, users, today, isAdmin, selected, onToggle, onChange }: 
         <SelectTrigger className="h-8 w-40 text-xs shrink-0"><SelectValue placeholder="Unassigned" /></SelectTrigger>
         <SelectContent>
           <SelectItem value={UNASSIGNED}>— Unassigned —</SelectItem>
-          {users.map((u) => <SelectItem key={u} value={u}>{shortEmail(u)}</SelectItem>)}
+          {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
         </SelectContent>
       </Select>
       {/* Due date edit (admin) */}
@@ -322,7 +325,7 @@ function StartDateDialog({ tag, current, onSaved }: { tag: string; current: stri
   );
 }
 
-function AddTaskDialog({ tag, users, onAdded }: { tag: string; users: string[]; onAdded: () => void }) {
+function AddTaskDialog({ tag, users, onAdded }: { tag: string; users: UserRow[]; onAdded: () => void }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState("");
@@ -356,7 +359,7 @@ function AddTaskDialog({ tag, users, onAdded }: { tag: string; users: string[]; 
               <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={UNASSIGNED}>— Unassigned —</SelectItem>
-                {users.map((u) => <SelectItem key={u} value={u}>{shortEmail(u)}</SelectItem>)}
+                {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>

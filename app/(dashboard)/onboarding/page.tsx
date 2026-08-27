@@ -20,7 +20,7 @@ import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from "@/components/ui/table";
 import {
-  STATUS_META, TASK_STATUS_ORDER, ROLE_META, shortEmail, fmtDate, todayStr,
+  STATUS_META, TASK_STATUS_ORDER, ROLE_META, fmtDate, todayStr,
 } from "@/lib/onboarding/ui";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
@@ -38,7 +38,7 @@ type OnbTask = {
 type TemplateTask = {
   id: string; title: string; role: OnboardingRole; day_offset: number; order_index: number; task_group: string | null;
 };
-type UserRow = { email: string; role: string };
+type UserRow = { id: string; name: string; slack_member_id: string | null };
 
 const UNASSIGNED = "—";
 // Plan / package options (from the client tracker). Kept as a simple list so it's
@@ -124,7 +124,7 @@ export default function OnboardingPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const userEmails = useMemo(() => users.map((u) => u.email), [users]);
+  const usersById = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
 
   const stats = useMemo(() => {
     const total = clients.length;
@@ -145,7 +145,7 @@ export default function OnboardingPage() {
           </p>
         </div>
         {isAdmin && (
-          <AddClientDialog userEmails={userEmails} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
+          <AddClientDialog users={users} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
         )}
       </div>
 
@@ -165,18 +165,24 @@ export default function OnboardingPage() {
           <TabsTrigger value="clients">All Clients</TabsTrigger>
           <TabsTrigger value="board">Board</TabsTrigger>
           {isAdmin && <TabsTrigger value="template">Template</TabsTrigger>}
+          {isAdmin && <TabsTrigger value="users">Users</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="clients" className="mt-4">
-          <AllClients clients={clients} loading={loading} isAdmin={isAdmin}
-            userEmails={userEmails} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
+          <AllClients clients={clients} loading={loading} isAdmin={isAdmin} usersById={usersById}
+            users={users} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
         </TabsContent>
         <TabsContent value="board" className="mt-4">
-          <Board tasks={tasks} clients={clients} userEmails={userEmails} myEmail={session?.email ?? null} onChange={load} />
+          <Board tasks={tasks} clients={clients} users={users} usersById={usersById} onChange={load} />
         </TabsContent>
         {isAdmin && (
           <TabsContent value="template" className="mt-4">
             <TemplateEditor />
+          </TabsContent>
+        )}
+        {isAdmin && (
+          <TabsContent value="users" className="mt-4">
+            <UsersManager users={users} onChange={load} />
           </TabsContent>
         )}
       </Tabs>
@@ -197,9 +203,9 @@ function StatusChip({ status }: { status: string }) {
   );
 }
 
-function AllClients({ clients, loading, isAdmin, userEmails, existingTags, onAdded }: {
+function AllClients({ clients, loading, isAdmin, users, usersById, existingTags, onAdded }: {
   clients: OnbClient[]; loading: boolean; isAdmin: boolean;
-  userEmails: string[]; existingTags: string[]; onAdded: () => void;
+  users: UserRow[]; usersById: Map<string, string>; existingTags: string[]; onAdded: () => void;
 }) {
   if (loading) {
     return (
@@ -219,7 +225,7 @@ function AllClients({ clients, loading, isAdmin, userEmails, existingTags, onAdd
             <h3 className="text-base font-semibold">No clients in onboarding yet</h3>
             <p className="text-sm text-muted-foreground">Add your first client and the system will auto-generate its onboarding timeline — tasks, due dates, and owners.</p>
           </div>
-          {isAdmin && <div className="pt-1"><AddClientDialog userEmails={userEmails} existingTags={existingTags} onAdded={onAdded} /></div>}
+          {isAdmin && <div className="pt-1"><AddClientDialog users={users} existingTags={existingTags} onAdded={onAdded} /></div>}
         </CardContent>
       </Card>
     );
@@ -242,10 +248,10 @@ function AllClients({ clients, loading, isAdmin, userEmails, existingTags, onAdd
             <Progress done={c.tasks_done} total={c.tasks_total} />
             <div className="flex flex-wrap gap-x-3 gap-y-1 pt-0.5">
               {(["domains", "inbox", "ops"] as OnboardingRole[]).map((r) => {
-                const email = r === "domains" ? c.domains_owner_email : r === "inbox" ? c.inbox_owner_email : c.ops_owner_email;
+                const oid = r === "domains" ? c.domains_owner_email : r === "inbox" ? c.inbox_owner_email : c.ops_owner_email;
                 return (
                   <span key={r} className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                    <RolePill role={r} /><span className="truncate max-w-[90px]">{shortEmail(email) || "—"}</span>
+                    <RolePill role={r} /><span className="truncate max-w-[90px]">{(oid && usersById.get(oid)) || "—"}</span>
                   </span>
                 );
               })}
@@ -262,8 +268,8 @@ function AllClients({ clients, loading, isAdmin, userEmails, existingTags, onAdd
 }
 
 // ─────────────────────────── Add dialog ───────────────────────────
-function AddClientDialog({ userEmails, existingTags, onAdded }: {
-  userEmails: string[]; existingTags: string[]; onAdded: () => void;
+function AddClientDialog({ users, existingTags, onAdded }: {
+  users: UserRow[]; existingTags: string[]; onAdded: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -291,14 +297,14 @@ function AddClientDialog({ userEmails, existingTags, onAdded }: {
     else toast.error(r.error || "Failed to add client");
   }
 
-  const ownerOptions = [UNASSIGNED, ...userEmails];
   const OwnerSelect = ({ role, value, set }: { role: OnboardingRole; value: string; set: (v: string) => void }) => (
     <div className="space-y-1.5">
       <label className="text-xs font-medium text-muted-foreground">{ROLE_META[role].label}</label>
       <Select value={value || UNASSIGNED} onValueChange={(v) => set(v === UNASSIGNED ? "" : v)}>
         <SelectTrigger className="w-full"><SelectValue placeholder="Unassigned" /></SelectTrigger>
         <SelectContent>
-          {ownerOptions.map((o) => <SelectItem key={o} value={o}>{o === UNASSIGNED ? "— Unassigned —" : o}</SelectItem>)}
+          <SelectItem value={UNASSIGNED}>— Unassigned —</SelectItem>
+          {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
         </SelectContent>
       </Select>
     </div>
@@ -355,24 +361,24 @@ function AddClientDialog({ userEmails, existingTags, onAdded }: {
 }
 
 // ─────────────────────────── Board ───────────────────────────
-function Board({ tasks, clients, myEmail, onChange }: {
-  tasks: OnbTask[]; clients: OnbClient[]; userEmails: string[]; myEmail: string | null; onChange: () => void;
+function Board({ tasks, clients, users, usersById, onChange }: {
+  tasks: OnbTask[]; clients: OnbClient[]; users: UserRow[]; usersById: Map<string, string>; onChange: () => void;
 }) {
   const [clientFilter, setClientFilter] = useState<string>("all");
-  const [mineOnly, setMineOnly] = useState(false);
+  const [ownerFilter, setOwnerFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<"due" | "day">("due");
   const activeTags = useMemo(() => new Set(clients.filter((c) => c.status !== "completed").map((c) => c.client_tag)), [clients]);
 
   const filtered = useMemo(() => {
     const rows = tasks.filter((t) => {
       if (clientFilter === "all" ? !activeTags.has(t.client_tag) : t.client_tag !== clientFilter) return false;
-      if (mineOnly && t.assignee_email !== myEmail) return false;
+      if (ownerFilter !== "all" && t.assignee_email !== ownerFilter) return false;
       return true;
     });
     return rows.sort((a, b) => sortBy === "day"
       ? a.day_offset - b.day_offset || a.order_index - b.order_index
       : (a.due_date || "").localeCompare(b.due_date || "") || a.order_index - b.order_index);
-  }, [tasks, clientFilter, mineOnly, activeTags, myEmail, sortBy]);
+  }, [tasks, clientFilter, ownerFilter, activeTags, sortBy]);
 
   // Optimistic status: reflect a move instantly, cleared when fresh data lands.
   const [localStatus, setLocalStatus] = useState<Record<string, TaskStatus>>({});
@@ -405,7 +411,13 @@ function Board({ tasks, clients, myEmail, onChange }: {
             {clients.map((c) => <SelectItem key={c.client_tag} value={c.client_tag}>{c.client_tag}{c.client_name ? ` · ${c.client_name}` : ""}</SelectItem>)}
           </SelectContent>
         </Select>
-        <Button variant={mineOnly ? "default" : "outline"} size="sm" onClick={() => setMineOnly((v) => !v)}>My tasks only</Button>
+        <Select value={ownerFilter} onValueChange={setOwnerFilter}>
+          <SelectTrigger className="w-44"><SelectValue placeholder="All owners" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All owners</SelectItem>
+            {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
         <div className="ml-auto flex items-center gap-1 text-xs">
           <span className="text-muted-foreground">Sort:</span>
           <Button variant={sortBy === "due" ? "default" : "outline"} size="sm" className="h-7 text-xs" onClick={() => setSortBy("due")}>Due date</Button>
@@ -439,7 +451,7 @@ function Board({ tasks, clients, myEmail, onChange }: {
                       <TagPill tag={t.client_tag} />
                     </div>
                     <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1.5"><RolePill role={t.role} />{shortEmail(t.assignee_email) || "unassigned"}</span>
+                      <span className="flex items-center gap-1.5"><RolePill role={t.role} />{(t.assignee_email && usersById.get(t.assignee_email)) || "unassigned"}</span>
                       <span className="tabular-nums">{fmtDate(t.due_date)}{t.template_task_id ? ` · D${t.day_offset}` : ""}</span>
                     </div>
                     <Select value={effStatus(t)} onValueChange={(v) => setStatus(t.id, v as TaskStatus)}>
@@ -549,6 +561,78 @@ function TemplateRow({ task, index, onSave, busy }: {
           <div className="flex items-center gap-1 justify-end">
             {dirty && <Button size="sm" variant="ghost" onClick={commit} disabled={busy}>Save</Button>}
             <Button size="sm" variant="ghost" className="text-destructive" onClick={() => onSave({ action: "template-delete", id: task!.id }).then(() => toast.success("Deleted"))} disabled={busy}>✕</Button>
+          </div>
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+// ─────────────────────────── Users manager ───────────────────────────
+function UsersManager({ users, onChange }: { users: UserRow[]; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  async function save(body: Record<string, unknown>) {
+    setBusy(true);
+    const r = await postMutate(body);
+    setBusy(false);
+    if (r.ok) { onChange(); } else toast.error(r.error || "Failed");
+  }
+  return (
+    <div className="space-y-4 max-w-3xl">
+      <p className="text-sm text-muted-foreground">
+        Onboarding team members. Each person&apos;s <span className="font-medium text-foreground">Slack member ID</span> receives their task-assignment DMs and the daily digest.
+        Find an ID in Slack → click a profile → <span className="italic">More</span> → <span className="italic">Copy member ID</span> (looks like <span className="font-mono">U0123ABCD</span>).
+      </p>
+      <Card className="overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead className="w-56">Slack member ID</TableHead>
+              <TableHead className="w-10" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {users.map((u) => <UserEditRow key={u.id} user={u} onSave={save} busy={busy} />)}
+            <UserEditRow key="new" user={null} onSave={save} busy={busy} />
+          </TableBody>
+        </Table>
+      </Card>
+      {!users.length && <p className="text-xs text-muted-foreground">Add your team here first, then assign them as Domains / Inbox / Ops owners when onboarding a client.</p>}
+    </div>
+  );
+}
+
+function UserEditRow({ user, onSave, busy }: {
+  user: UserRow | null; onSave: (b: Record<string, unknown>) => Promise<void>; busy: boolean;
+}) {
+  const [name, setName] = useState(user?.name ?? "");
+  const [slack, setSlack] = useState(user?.slack_member_id ?? "");
+  const isNew = !user;
+  const dirty = !isNew && (name !== user!.name || (slack || "") !== (user!.slack_member_id || ""));
+
+  async function commit() {
+    if (!name.trim()) { if (isNew) return; toast.error("Name required"); return; }
+    await onSave({ action: "user-upsert", id: user?.id ?? null, name, slack_member_id: slack.trim() || null });
+    if (isNew) { setName(""); setSlack(""); toast.success("User added"); }
+    else toast.success("Saved");
+  }
+
+  return (
+    <TableRow className={cn(isNew && "bg-muted/20")}>
+      <TableCell>
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={isNew ? "Add a team member…" : ""} className="h-8" />
+      </TableCell>
+      <TableCell>
+        <Input value={slack} onChange={(e) => setSlack(e.target.value)} placeholder="U0123ABCD" className="h-8 font-mono text-xs" />
+      </TableCell>
+      <TableCell className="text-right">
+        {isNew ? (
+          <Button size="sm" variant="ghost" onClick={commit} disabled={busy || !name.trim()}>Add</Button>
+        ) : (
+          <div className="flex items-center gap-1 justify-end">
+            {dirty && <Button size="sm" variant="ghost" onClick={commit} disabled={busy}>Save</Button>}
+            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => onSave({ action: "user-delete", id: user!.id }).then(() => toast.success("Deleted"))} disabled={busy}>✕</Button>
           </div>
         )}
       </TableCell>

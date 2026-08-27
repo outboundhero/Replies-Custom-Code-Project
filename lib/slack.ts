@@ -48,6 +48,28 @@ export async function postBlocks(
   return r.ok ? { ok: true } : { ok: false, error: String(r.error || "unknown") };
 }
 
+/** DM the same message to each Slack member ID directly (no email lookup needed).
+ *  Opens the DM channel for each id, then posts. Returns per-id failures. */
+export async function dmBySlackIds(memberIds: string[], text: string): Promise<{ ok: boolean; sent: string[]; failed: { id: string; error: string }[] }> {
+  const sent: string[] = [];
+  const failed: { id: string; error: string }[] = [];
+  for (const id of memberIds) {
+    const clean = (id || "").trim();
+    if (!clean) continue;
+    try {
+      const open = await slackCall("conversations.open", { users: clean });
+      const channelId = (open.channel as { id?: string } | undefined)?.id;
+      if (!open.ok || !channelId) { failed.push({ id: clean, error: String(open.error || "could not open DM") }); continue; }
+      const post = await slackCall("chat.postMessage", { channel: channelId, text, unfurl_links: false });
+      if (post.ok) sent.push(clean);
+      else failed.push({ id: clean, error: String(post.error || "post failed") });
+    } catch (e) {
+      failed.push({ id: clean, error: (e as Error).message });
+    }
+  }
+  return { ok: failed.length === 0, sent, failed };
+}
+
 /** DM the same message to each person, resolved by their Slack account email. */
 export async function dmByEmails(emails: string[], text: string): Promise<{ ok: boolean; sent: string[]; failed: { email: string; error: string }[] }> {
   const sent: string[] = [];
