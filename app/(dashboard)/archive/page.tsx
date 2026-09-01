@@ -138,7 +138,7 @@ export default function ArchivePage() {
             <h1 className="text-sm font-semibold tracking-tight">Archived Database</h1>
             <p className="text-[11px] text-muted-foreground">Search every archived reply — restore any to Open Response.</p>
           </div>
-          <Input placeholder="Search name, email, company, or reply content…" value={search} onChange={(e) => setSearch(e.target.value)} className="h-8 text-xs" />
+          <Input placeholder="Search by email, name, or company…" value={search} onChange={(e) => setSearch(e.target.value)} className="h-8 text-xs" />
           <div className="grid grid-cols-2 gap-1.5">
             <Select value={clientTag || "all"} onValueChange={(v) => setClientTag(v === "all" ? "" : v)}>
               <SelectTrigger className="h-7 text-[11px]"><SelectValue placeholder="All Clients" /></SelectTrigger>

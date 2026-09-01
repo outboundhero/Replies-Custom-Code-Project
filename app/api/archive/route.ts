@@ -58,10 +58,14 @@ export async function GET(req: NextRequest) {
     if (from) q = q.gte("created_at", `${from}T00:00:00Z`);
     if (to) q = q.lte("created_at", `${to}T23:59:59Z`);
     if (search) {
-      const s = search.replace(/[%,]/g, " ");
-      q = q.or(
-        `lead_email.ilike.%${s}%,company_name.ilike.%${s}%,lead_name.ilike.%${s}%,reply_we_got.ilike.%${s}%`
-      );
+      const s = search.replace(/[%,]/g, " ").trim();
+      // Search the identity columns only. `reply_we_got` (the full reply body) is
+      // deliberately EXCLUDED: an `ILIKE %term%` over that large text column across
+      // the ~300k+ archived rows is a full sequential scan that blows the Postgres
+      // statement timeout (observed ~8s+ → "canceling statement due to statement
+      // timeout"). Email/name/company search over the short columns returns in ~1.4s.
+      // (Full-body content search would need a pg_trgm GIN / tsvector index to be viable.)
+      q = q.or(`lead_email.ilike.%${s}%,company_name.ilike.%${s}%,lead_name.ilike.%${s}%`);
     }
     const { data: rows, error } = await q;
     if (error) throw new Error(error.message);
