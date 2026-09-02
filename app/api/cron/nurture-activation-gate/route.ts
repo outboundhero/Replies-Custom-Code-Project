@@ -1,11 +1,11 @@
 /**
  * GET /api/cron/nurture-activation-gate?secret=X
  *
- * The nurture 80% activation gate (fire-once). For each active, non-churned
- * client tag (oldest-checked-first rotation, soft time budget):
+ * The nurture activation gate (fire-once) — now runs nurture IN PARALLEL with the
+ * main sequence (the 80% threshold was removed, 2026-09). For each active,
+ * non-churned client tag (oldest-checked-first rotation, soft time budget):
  *   - already fired            → skip forever
- *   - main completion >= 80%   → FIRE: record + activate ready nurture
- *   - main completion <  80%   → pause any currently-sending nurture campaign
+ *   - otherwise (threshold 0)  → FIRE: record + activate ready nurture (always)
  *
  * Scheduled every 2h in vercel.json, offset from nurture-auto-push. Also
  * callable manually (used for the one-time rollout). See

@@ -1,21 +1,23 @@
 /**
- * Nurture 80% activation gate (fire-once).
+ * Nurture activation gate (fire-once) — RUNS NURTURE IN PARALLEL.
  *
- * Problem: nurture campaigns share sender inboxes with the client's MAIN cold
- * campaigns, so nurture eats ~half the daily send capacity and mains crawl.
- * Fix: keep nurture OFF until 80% of the client's main-campaign leads are
- * contacted, then flip it ON once — and never re-evaluate that % again (so
- * topping up leads can't drop it back under 80% and shut nurture off).
+ * History: this used to hold nurture OFF until 80% of the client's main-campaign
+ * leads were contacted (nurture shares sender inboxes with the MAIN cold
+ * campaigns, so it eats ~half the daily capacity and slows the mains). Per an
+ * explicit product decision (2026-09), that gate is REMOVED: nurture should run
+ * in parallel with the main sequence for every eligible client, from the start.
  *
- * "Fired" = the client tag is present in Turso `nurture_activation`. Once fired,
- * the gate skips it forever. Every other nurture activation path consults
- * `isFired()` so nothing turns a client's nurture on before it's fired
- * (lib/nurture/enable-sending.ts, lib/nurture/campaign-expansion.ts).
+ * Implementation: `ACTIVATION_THRESHOLD = 0`, so every eligible (active,
+ * non-churned) client's main completion (always ≥ 0) clears the bar → it FIRES
+ * immediately and its ready nurture is activated. The "under-threshold → pause"
+ * branch is therefore dead (nothing is ever paused for being early). The
+ * fire-once bookkeeping (`nurture_activation`) is kept so activation is recorded
+ * and idempotent; `autoActivateReadyCampaigns` still only launches campaigns
+ * that have a connected inbox + leads.
  *
  * Per run (see the nurture-activation-gate cron), for each active non-churned tag:
  *   - already fired            → skip
- *   - main completion >= 80%   → FIRE: record + activate ready nurture
- *   - main completion <  80%   → pause any currently-sending nurture campaign
+ *   - main completion >= 0     → FIRE: record + activate ready nurture (always)
  */
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedTags } from "@/lib/churn";
@@ -31,7 +33,9 @@ import {
 } from "@/lib/nurture/activation-state";
 import { logActivity, logError } from "@/lib/errors";
 
-export const ACTIVATION_THRESHOLD = 0.8;
+// 0 = gate removed: every eligible (active / not-churned-past-date) client fires
+// immediately, so nurture runs in parallel with the main sequence. (Was 0.8.)
+export const ACTIVATION_THRESHOLD = 0;
 export { isFired };
 
 export type GateAction =
