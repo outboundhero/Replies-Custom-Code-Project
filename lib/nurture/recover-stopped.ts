@@ -23,6 +23,7 @@
  * pools (campaigns archived by the nurture merge) are swept once.
  */
 import db from "@/lib/db";
+import supabase from "@/lib/supabase";
 import { listCampaigns, sweepCampaignLeadsCursor, type OutboundLead } from "@/lib/outboundhero-api";
 import { getChurnedTags } from "@/lib/churn";
 import { getAllClientInstances, getClientInstances } from "@/lib/nurture/group-routing";
@@ -92,6 +93,52 @@ async function stampRecovered(
               nurture_campaign_id = excluded.nurture_campaign_id`,
       args,
     });
+  }
+  // Mirror into the Supabase nurture_sequence_finished table AS ALREADY-ADDED, so
+  // the Nurture dashboard shows these leads under "Added" and the finished Auto
+  // Route's dedup (ob_lead_id + bison_instance + added_at) never re-routes them.
+  await mirrorRecoveredToFinished(tag, campaignId, rows, stamp);
+}
+
+/**
+ * Upsert recovered leads into Supabase nurture_sequence_finished with added_at
+ * set (so they read as already-routed). Unique key is
+ * (ob_lead_id, ob_campaign_id, bison_instance); we use the target nurture
+ * campaign id as ob_campaign_id and a "(stopped-recovery)" source name. Exported
+ * so a reconciliation pass can mirror leads recovered before this was wired in.
+ */
+export async function mirrorRecoveredToFinished(
+  tag: string,
+  campaignId: number,
+  rows: Array<{ email: string; obLeadId: number | null; sourceInstance: string | null; esp: string }>,
+  stamp: string,
+): Promise<void> {
+  const supRows = rows
+    .filter((r) => typeof r.obLeadId === "number" && r.sourceInstance)
+    .map((r) => ({
+      ob_lead_id: r.obLeadId,
+      ob_campaign_id: campaignId,
+      campaign_name: "(stopped-recovery)",
+      client_tag: tag,
+      email: r.email,
+      esp: r.esp,
+      sequence_finished_at: stamp,
+      synced_at: stamp,
+      bison_instance: r.sourceInstance,
+      added_at: stamp,
+      nurture_campaign_id: campaignId,
+    }));
+  if (supRows.length === 0) return;
+  // Dedupe within the batch on the conflict key (Postgres rejects dup keys).
+  const byKey = new Map<string, (typeof supRows)[number]>();
+  for (const r of supRows) byKey.set(`${r.ob_lead_id}:${r.ob_campaign_id}:${r.bison_instance}`, r);
+  const deduped = [...byKey.values()];
+  for (let i = 0; i < deduped.length; i += 500) {
+    const chunk = deduped.slice(i, i + 500);
+    const { error } = await supabase
+      .from("nurture_sequence_finished")
+      .upsert(chunk, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
+    if (error) await logError("nurture-recover-stopped", `${tag}/mirror`, error.message);
   }
 }
 
