@@ -167,10 +167,14 @@ export async function recoverStoppedForClient(
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { res.error = "no campaigns mapped"; res.noMap = true; return res; }
 
-  // Source campaigns: the client's own ESP-named, non-nurture campaigns with leads.
-  const instanceKeys = Array.from(new Set([instances.b2b, instances.b2c]));
+  // Source campaigns: the client's own ESP-named, non-nurture campaigns with
+  // leads. Scan ALL instances (not just the current group's two) so that after a
+  // GROUP MOVE (G1↔G2) we still find the client's OLD-group campaigns by tag —
+  // their stopped leads route cross-instance into the CURRENT group's nurture map
+  // (target instance = instances[lane] below). Mirrors the finished-lead cron,
+  // which sweeps every instance per-instance for the same reason.
   const sources: Array<{ inst: string; id: number; esp: "google" | "outlook" | "segs" }> = [];
-  for (const inst of instanceKeys) {
+  for (const inst of ALL_INSTANCES) {
     let list;
     try { list = await listCampaigns(inst, { statuses, search: TAG }); }
     catch (e) { await logError("nurture-recover-stopped", `${TAG}/${inst}/list`, (e as Error).message); continue; }
