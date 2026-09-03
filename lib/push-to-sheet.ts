@@ -179,41 +179,71 @@ export async function pushToSheet(
   const row = headers.map((h) => valueByHeader[H(h)] ?? "");
   const lastCol = colLetter(Math.max(headers.length, 1));
 
+  // Resolve the tab's numeric id once — appendCells needs it. If metadata can't
+  // be read we fall back to values.append below.
+  let sheetGid: number | undefined;
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: sheet.sheet_id, fields: "sheets.properties(sheetId,title)" });
+    sheetGid = (meta.data.sheets || []).find((s) => s.properties?.title === sheet!.sheet_name)?.properties?.sheetId ?? undefined;
+  } catch { /* fall back to append */ }
+
   // Retry transient Google API failures (rate limit / 5xx / network) a few
   // times before giving up, so a blip never drops a lead. Permanent errors
   // (bad range, permission) fail fast.
   let lastErr = "";
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const resp = await sheets.spreadsheets.values.append({
-        spreadsheetId: sheet.sheet_id,
-        range: `'${sheet.sheet_name}'!A:${lastCol}`,
-        valueInputOption: "USER_ENTERED",
-        // INSERT_ROWS (not the default OVERWRITE): always INSERT a fresh row for
-        // the lead. The default overwrote the last row when the sheet's grid had
-        // no spare rows — so multiple leads all landed on the same row number,
-        // each silently clobbering the previous, while Google still reported
-        // "success". This was the root cause of "pushed to sheet" but missing.
-        insertDataOption: "INSERT_ROWS",
-        requestBody: { values: [row] },
-      });
-      // Google returns the range it wrote, e.g. 'Sheet1'!A45:W45 → row 45. We
-      // capture it so the send-reply flow can update THIS exact row later.
-      const updatedRange = resp.data.updates?.updatedRange || "";
-      const rowNum = updatedRange.match(/![A-Z]+(\d+)/i)?.[1];
+      if (sheetGid !== undefined) {
+        // appendCells ALWAYS starts a fresh row at column A. We switched off
+        // values.append because its "table detection" can anchor the new row in
+        // the WRONG columns when a sheet has drifted/extra data — observed on
+        // JPPS, where rows landed in columns P–AM and the column-A verify then
+        // failed forever, spawning thousands of duplicate rows. appendCells is
+        // also concurrency-safe (each call inserts one new row after the last
+        // data row). Values are written as text — we never need Sheets to
+        // re-parse emails/timestamps.
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: sheet.sheet_id,
+          requestBody: {
+            requests: [{
+              appendCells: {
+                sheetId: sheetGid,
+                rows: [{ values: row.map((v) => ({ userEnteredValue: { stringValue: String(v ?? "") } })) }],
+                fields: "userEnteredValue",
+              },
+            }],
+          },
+        });
+      } else {
+        // Fallback (only if we couldn't resolve the numeric sheet id).
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: sheet.sheet_id,
+          range: `'${sheet.sheet_name}'!A:${lastCol}`,
+          valueInputOption: "USER_ENTERED",
+          insertDataOption: "INSERT_ROWS",
+          requestBody: { values: [row] },
+        });
+      }
 
-      // VERIFY the write actually persisted. append can silently no-op / overwrite
-      // on some grid layouts and still return a range — so confirm the lead email
-      // is really present now. If not, fail LOUD (recorded + retryable) instead of
-      // reporting a false success. A verify-read error doesn't block (trust append).
+      // VERIFY the write persisted in column A, and derive the row number from it
+      // (so the send-reply flow can update THIS exact row later). Fail LOUD +
+      // retryable if the email isn't there, instead of a false success.
+      let rowNum: number | undefined;
       if (email) {
-        let present: boolean | null = null;
-        try { present = (await readEmailsColA()).has(email); } catch { present = null; }
-        if (present === false) {
-          return { ok: false, error: `Sheet write did not persist — append reported "${updatedRange || "ok"}" but ${email} is not in '${sheet.sheet_name}' afterward (client ${clientTag}).` };
+        let colA: string[][] | null = null;
+        try {
+          const res = await sheets.spreadsheets.values.get({ spreadsheetId: sheet.sheet_id, range: `'${sheet.sheet_name}'!A:A` });
+          colA = (res.data.values as string[][]) || [];
+        } catch { colA = null; }
+        if (colA) {
+          const idx = colA.findIndex((r) => String(r[0] || "").trim().toLowerCase() === email);
+          if (idx < 0) {
+            return { ok: false, error: `Sheet write did not persist — ${email} is not in '${sheet.sheet_name}' column A afterward (client ${clientTag}).` };
+          }
+          rowNum = idx + 1;
         }
       }
-      return { ok: true, row: rowNum ? Number(rowNum) : undefined, sheetId: sheet.sheet_id };
+      return { ok: true, row: rowNum, sheetId: sheet.sheet_id };
     } catch (error) {
       lastErr = (error as Error).message || "unknown error";
       const status = (error as { code?: number; response?: { status?: number } })?.code
