@@ -23,7 +23,6 @@
  * pools (campaigns archived by the nurture merge) are swept once.
  */
 import db from "@/lib/db";
-import { getInstanceConfig } from "@/lib/bison-instances";
 import { listCampaigns, sweepCampaignLeadsCursor, type OutboundLead } from "@/lib/outboundhero-api";
 import { getChurnedTags } from "@/lib/churn";
 import { getAllClientInstances, getClientInstances } from "@/lib/nurture/group-routing";
@@ -96,31 +95,13 @@ async function stampRecovered(
   }
 }
 
-// ── blacklist cache (per instance) ───────────────────────────────────────────
-const blCache = new Map<string, { ts: number; set: Set<string> }>();
-const BL_TTL = 10 * 60_000;
-async function blacklistSet(inst: string): Promise<Set<string>> {
-  const hit = blCache.get(inst);
-  if (hit && Date.now() - hit.ts < BL_TTL) return hit.set;
-  const { baseUrl, token } = getInstanceConfig(inst);
-  const set = new Set<string>();
-  for (let page = 1; page < 3000; page++) {
-    try {
-      const res = await fetch(`${baseUrl}/api/blacklisted-emails?per_page=200&page=${page}`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      });
-      if (!res.ok) break;
-      const d = await res.json().catch(() => null);
-      const rows = (d?.data ?? []) as Array<{ email?: string }>;
-      if (!rows.length) break;
-      for (const r of rows) if (r.email) set.add(r.email.toLowerCase().trim());
-      const last = Number(d?.meta?.last_page) || 0;
-      if (last && page >= last) break;
-    } catch { break; }
-  }
-  blCache.set(inst, { ts: Date.now(), set });
-  return set;
-}
+// NOTE on blacklisted leads: we deliberately do NOT fetch/exclude the blacklist.
+// Bison's blacklist endpoint serves ~15 rows/page and the lists run to hundreds
+// of thousands of emails (outboundhero alone ~338k = 22k+ pages), so fetching it
+// is infeasible. It's also unnecessary: a blacklisted address attached to a
+// campaign is SUPPRESSED at send time by Bison — it never receives an email. So
+// re-adding one is harmless; Bison enforces the block. (Matches MikeBison's
+// "de-blacklist before re-adding" — without de-blacklisting, they just don't send.)
 
 function isBounced(l: OutboundLead): boolean {
   if (String(l.status || "").toLowerCase().includes("bounce")) return true;
@@ -130,20 +111,6 @@ function isBounced(l: OutboundLead): boolean {
 }
 function repliedCount(l: OutboundLead): number {
   return Number(l.overall_stats?.replies ?? 0) || 0;
-}
-
-async function drainStopped(inst: string, cid: number): Promise<OutboundLead[]> {
-  const all: OutboundLead[] = [];
-  let cursor: string | null = null;
-  for (let guard = 0; guard < 20000; guard++) {
-    const r = await sweepCampaignLeadsCursor(inst, cid, cursor, {
-      leadCampaignStatus: "sequence_stopped", maxLeads: 100000, maxMs: 120_000,
-    });
-    all.push(...r.leads);
-    if (r.done || !r.nextCursor) break;
-    cursor = r.nextCursor;
-  }
-  return all;
 }
 
 // ── result shape ─────────────────────────────────────────────────────────────
@@ -164,6 +131,7 @@ export interface RecoverResult {
   eligible: number;                  // net that would be routed (dry) / attempted (live)
   attached: number;                  // live: actually attached to a nurture campaign
   unmapped: number;                  // eligible but no mapped campaign for their bucket
+  budgetHit?: boolean;               // stopped early on cap/time budget (more remain)
 }
 
 function emptyResult(tag: string, dry: boolean): RecoverResult {
@@ -181,7 +149,7 @@ function emptyResult(tag: string, dry: boolean): RecoverResult {
  */
 export async function recoverStoppedForClient(
   tag: string,
-  opts: { dry?: boolean; statuses?: string[]; cap?: number } = {},
+  opts: { dry?: boolean; statuses?: string[]; cap?: number; maxMs?: number; onFlush?: (r: RecoverResult) => void } = {},
 ): Promise<RecoverResult> {
   const TAG = tag.toUpperCase();
   const dry = !!opts.dry;
@@ -220,92 +188,89 @@ export async function recoverStoppedForClient(
   if (sources.length === 0) { res.ok = true; return res; }
 
   const recovered = await loadRecovered(TAG);
-  const bl: Record<string, Set<string>> = {};
-  for (const inst of instanceKeys) bl[inst] = await blacklistSet(inst);
 
-  // Sweep each source campaign's stopped leads → dedupe by email into candidates.
-  const byEmail = new Map<string, Candidate>();
-  let pool = 0;
-  const CONC = 3;
-  let si = 0;
-  await Promise.all(Array.from({ length: Math.min(CONC, sources.length) }, async () => {
-    while (si < sources.length) {
-      const s = sources[si++];
-      let leads: OutboundLead[];
-      try { leads = await drainStopped(s.inst, s.id); }
-      catch (e) { await logError("nurture-recover-stopped", `${TAG}/${s.inst}/${s.id}/drain`, (e as Error).message); continue; }
-      for (const l of leads) {
-        res.grossStopped++;
-        const email = String(l.email || "").toLowerCase().trim();
-        if (!email) continue;
-        if (byEmail.has(email)) continue;         // dedupe across campaigns (count once)
-        if (isBounced(l)) { res.excludedBounced++; continue; }
-        if (repliedCount(l) > 0) { res.excludedReplied++; continue; }
-        if (bl[s.inst]?.has(email)) { res.excludedBlacklisted++; continue; }
-        if (recovered.has(email)) { res.excludedAlreadyRecovered++; continue; }
-        const lane: "b2b" | "b2c" = isPersonalDomain(email) ? "b2c" : "b2b";
-        byEmail.set(email, {
-          source: "campaign",
-          rowId: l.id,
-          email,
-          esp: s.esp,
-          first_name: l.first_name ?? null,
-          last_name: l.last_name ?? null,
-          company: l.company ?? null,
-          obLeadId: l.id,
-          sourceInstance: s.inst,
-          custom_variables: Array.isArray(l.custom_variables)
-            ? l.custom_variables.filter((v) => v && v.name && v.value != null)
-            : [],
-          lane,
-          instance: instances[lane],
-        });
-      }
-    }
-  }));
-  res.uniqueStopped = res.grossStopped
-    ? res.excludedBounced + res.excludedReplied + res.excludedBlacklisted + res.excludedAlreadyRecovered + byEmail.size
-    : 0;
-
-  let candidates = [...byEmail.values()];
-
-  // Sheet-authoritative Meeting-Ready gate — never re-nurture a delivered lead.
-  // Fail CLOSED: if the sheet is unreadable, skip this client this run.
+  // Sheet-authoritative Meeting-Ready gate emails (once; fail CLOSED if the sheet
+  // is registered but unreadable — never risk re-nurturing a delivered lead).
   const smr = await getSheetMeetingReadyEmails(TAG);
   if (!smr.ok) { res.error = "lead-tracking sheet unreadable — skipped (fail-closed)"; return res; }
-  if (smr.emails.size) {
-    const before = candidates.length;
-    candidates = candidates.filter((c) => !smr.emails.has((c.email || "").trim().toLowerCase()));
-    res.excludedSheetMeetingReady = before - candidates.length;
+
+  // STREAM: page each source campaign in windows → route + stamp every FLUSH
+  // leads. The ledger fills incrementally, so progress persists and a crash/stop
+  // never loses more than the last window (resumable via the ledger). `cap` and
+  // `maxMs` bound one call; whatever's left is picked up on the next run.
+  const started = Date.now();
+  const maxMs = opts.maxMs ?? Infinity;
+  const FLUSH = 500;
+  const seen = new Set<string>();           // distinct stopped emails handled this run
+  let buffer: Candidate[] = [];
+
+  const flush = async (): Promise<void> => {
+    if (buffer.length === 0) return;
+    const batch = buffer; buffer = [];
+    res.eligible += batch.length;
+    if (dry) return;                          // dry: count only, no Bison/ledger writes
+    const routed = await routeCandidates(TAG, batch, map, {
+      onAttached: async (campaignId, resolvedList) => {
+        await stampRecovered(
+          TAG, campaignId,
+          resolvedList.map((c) => ({ email: c.email, obLeadId: c.obLeadId, sourceInstance: c.sourceInstance, esp: c.esp })),
+        );
+      },
+    });
+    res.attached += routed.totalAttached;
+    res.unmapped += routed.perBucket.filter((b) => b.error?.includes("no campaign mapped")).reduce((n, b) => n + b.requested, 0);
+    opts.onFlush?.({ ...res });
+  };
+
+  outer:
+  for (const s of sources) {
+    let cursor: string | null = null;
+    for (;;) {
+      if (Date.now() - started > maxMs || res.eligible + buffer.length >= cap) { res.budgetHit = true; break outer; }
+      let win: { leads: OutboundLead[]; nextCursor: string | null; done: boolean };
+      try {
+        win = await sweepCampaignLeadsCursor(s.inst, s.id, cursor, {
+          leadCampaignStatus: "sequence_stopped", maxLeads: FLUSH, maxMs: 60_000,
+        });
+      } catch (e) {
+        await logError("nurture-recover-stopped", `${TAG}/${s.inst}/${s.id}/sweep`, (e as Error).message);
+        break;
+      }
+      for (const l of win.leads) {
+        res.grossStopped++;
+        const email = String(l.email || "").toLowerCase().trim();
+        if (!email || seen.has(email)) continue;   // dedupe across campaigns
+        seen.add(email);
+        if (isBounced(l)) { res.excludedBounced++; continue; }
+        if (repliedCount(l) > 0) { res.excludedReplied++; continue; }
+        if (recovered.has(email)) { res.excludedAlreadyRecovered++; continue; }
+        if (smr.emails.size && smr.emails.has(email)) { res.excludedSheetMeetingReady++; continue; }
+        const lane: "b2b" | "b2c" = isPersonalDomain(email) ? "b2c" : "b2b";
+        buffer.push({
+          source: "campaign", rowId: l.id, email, esp: s.esp,
+          first_name: l.first_name ?? null, last_name: l.last_name ?? null, company: l.company ?? null,
+          obLeadId: l.id, sourceInstance: s.inst,
+          custom_variables: Array.isArray(l.custom_variables)
+            ? l.custom_variables.filter((v) => v && v.name && v.value != null) : [],
+          lane, instance: instances[lane],
+        });
+        if (buffer.length >= FLUSH) await flush();
+      }
+      if (win.done || !win.nextCursor) break;
+      cursor = win.nextCursor;
+    }
   }
-
-  // Per-run cap (cron budget). Backfill passes a large cap.
-  if (candidates.length > cap) candidates = candidates.slice(0, cap);
-  res.eligible = candidates.length;
-
-  if (dry) { res.ok = true; return res; }
-  if (candidates.length === 0) { res.ok = true; return res; }
-
-  // Route via the shared engine; stamp the ledger only for what actually attached.
-  const routed = await routeCandidates(TAG, candidates, map, {
-    onAttached: async (campaignId, resolvedList) => {
-      await stampRecovered(
-        TAG, campaignId,
-        resolvedList.map((c) => ({ email: c.email, obLeadId: c.obLeadId, sourceInstance: c.sourceInstance, esp: c.esp })),
-      );
-    },
-  });
-  res.attached = routed.totalAttached;
-  res.unmapped = routed.perBucket.filter((b) => b.error?.includes("no campaign mapped")).reduce((n, b) => n + b.requested, 0);
+  await flush();
+  res.uniqueStopped = seen.size;
   res.ok = true;
 
   await logActivity("nurture-recover-stopped", res.attached > 0 ? "recovered" : "no-op", {
     client_tag: TAG,
     details: {
       campaigns: res.campaignsScanned, unique_stopped: res.uniqueStopped, eligible: res.eligible,
-      attached: res.attached, blacklisted: res.excludedBlacklisted, bounced: res.excludedBounced,
+      attached: res.attached, bounced: res.excludedBounced, replied: res.excludedReplied,
       already_recovered: res.excludedAlreadyRecovered, sheet_meeting_ready: res.excludedSheetMeetingReady,
-      per_bucket: routed.perBucket.map((b) => ({ esp: b.esp, instance: b.instance, attached: b.attached, error: b.error })),
+      budget_hit: res.budgetHit ?? false,
     },
   });
   return res;

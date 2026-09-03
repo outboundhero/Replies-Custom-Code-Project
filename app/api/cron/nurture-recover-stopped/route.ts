@@ -56,9 +56,9 @@ export async function GET(req: NextRequest) {
       totals,
       results: res.results.map((r) => ({
         tag: r.clientTag, eligible: r.eligible, attached: r.attached,
-        uniqueStopped: r.uniqueStopped, blacklisted: r.excludedBlacklisted,
-        bounced: r.excludedBounced, alreadyRecovered: r.excludedAlreadyRecovered,
-        sheetMeetingReady: r.excludedSheetMeetingReady, noMap: r.noMap ?? false, error: r.error,
+        uniqueStopped: r.uniqueStopped, bounced: r.excludedBounced, replied: r.excludedReplied,
+        alreadyRecovered: r.excludedAlreadyRecovered, sheetMeetingReady: r.excludedSheetMeetingReady,
+        budgetHit: r.budgetHit ?? false, noMap: r.noMap ?? false, error: r.error,
       })),
     });
   } catch (e) {
