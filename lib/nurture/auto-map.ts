@@ -167,7 +167,9 @@ export function clearAutoMapCache(): void {
 
 function isLiveStatus(s: string): boolean {
   const x = (s || "").toLowerCase();
-  return x === "active" || x === "live" || x === "running" || x === "sending";
+  // "queued" = launching/about-to-send — a valid, current campaign (and a far
+  // better map target than an archived clone), so it counts as live here.
+  return x === "active" || x === "live" || x === "running" || x === "sending" || x === "queued";
 }
 
 // ── Per-client auto-map ──────────────────────────────────────────────────────
