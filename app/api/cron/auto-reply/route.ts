@@ -31,6 +31,7 @@ import { NextRequest, NextResponse } from "next/server";
 import supabase from "@/lib/supabase";
 import { sendReply, getFirstSentEmail } from "@/lib/outboundhero-api";
 import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
+import { htmlToText } from "@/lib/html-text";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance } from "@/lib/bison-instances";
 
@@ -113,9 +114,13 @@ function isPermanentSendError(error: string | undefined): boolean {
 async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok: true; build: BuildResult } | { ok: false; reason: string }> {
   const kind = row.auto_reply_kind || "not_interested";
 
+  // NOTE: sendReply() runs `message` through plainTextToEmailHtml() (escapes
+  // <>&, linkifies, newlines→<br>) and sends content_type:"html". So `message`
+  // MUST be PLAIN TEXT — passing HTML here double-escapes it and the recipient
+  // sees literal <p>/<br> tags. (This was the OOO/not-interested tag bug.)
   if (kind === "not_interested") {
     const plain = buildNotInterestedReply(row.lead_name, row.sender_name);
-    return { ok: true, build: { message: plain.replace(/\n/g, "<br>"), plainSummary: plain } };
+    return { ok: true, build: { message: plain, plainSummary: plain } };
   }
 
   if (kind === "out_of_office") {
@@ -125,9 +130,12 @@ async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok:
     const firstEmail = await getFirstSentEmail(instanceKey, row.lead_id, row.campaign_id);
     if (!firstEmail) return { ok: false, reason: `no sent emails for lead ${row.lead_id} in campaign ${row.campaign_id}` };
 
-    const intro = `<p>Looks like you are back, so I am sending the initial email again.</p><br>`;
-    const message = intro + (firstEmail.email_body || "");
-    const plainSummary = `Looks like you are back, so I am sending the initial email again.\n\n${firstEmail.email_subject || "(original cold email)"}`;
+    // The original cold email body is HTML — convert to plain text so sendReply's
+    // HTML conversion renders it correctly (instead of escaping its tags).
+    const introPlain = "Looks like you are back, so I am sending the initial email again.";
+    const bodyPlain = htmlToText(firstEmail.email_body || "");
+    const message = `${introPlain}\n\n${bodyPlain}`;
+    const plainSummary = `${introPlain}\n\n${firstEmail.email_subject || "(original cold email)"}`;
     return { ok: true, build: { message, plainSummary } };
   }
 
