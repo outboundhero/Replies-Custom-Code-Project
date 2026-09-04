@@ -1521,6 +1521,32 @@ export default function InboxPage() {
               </div>
             </div>
 
+            {/* Client-email flag: the reply BODY contains a client's configured
+                CC/BCC contact email → strong signal of which client this reply is
+                really for (esp. when the same lead sits under multiple clients).
+                Flag only — never auto-reassigns. Green = matches the current tag;
+                amber = a DIFFERENT client's email is present. */}
+            {Array.isArray(detail.client_email_flags) && detail.client_email_flags.length > 0 && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900 space-y-1">
+                <div className="flex items-center gap-1.5 font-semibold"><span>🏷️</span> Client contact email found in this reply</div>
+                {detail.client_email_flags.map((f: { email: string; clientTags: string[] }) => (
+                  <div key={f.email} className="pl-5 flex flex-wrap items-center gap-1">
+                    <span className="font-mono break-all">{f.email}</span>
+                    <span>→ belongs to</span>
+                    {f.clientTags.map((t: string) => {
+                      const isCurrent = String(detail.client_tag || "").toUpperCase() === t;
+                      return (
+                        <span key={t} className={`font-mono font-bold px-1.5 py-0.5 rounded ${isCurrent ? "bg-emerald-100 text-emerald-800" : "bg-amber-200 text-amber-900"}`}>{t}</span>
+                      );
+                    })}
+                    {f.clientTags.every((t: string) => String(detail.client_tag || "").toUpperCase() !== t) && (
+                      <span className="text-amber-700">— differs from current tag ({detail.client_tag || "N/A"})</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Out-of-office re-send schedule (§21): when the original cold email
                 is (or was) queued to re-send on the lead's stated return date. */}
             {detail.lead_category === "Out Of Office" && detail.auto_reply_kind === "out_of_office" && detail.auto_reply_due_at && (

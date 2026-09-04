@@ -77,6 +77,59 @@ export async function loadClientContactEmails(clientTag: string | null | undefin
   return set;
 }
 
+// email → client tags that have it configured as a CC/BCC contact. Cached 5 min.
+let _emailMap: { map: Map<string, string[]>; ts: number } | null = null;
+export async function loadClientContactEmailMap(): Promise<Map<string, string[]>> {
+  const now = Date.now();
+  if (_emailMap && now - _emailMap.ts < ALL_TTL_MS) return _emailMap.map;
+  const map = new Map<string, string[]>();
+  try {
+    const r = await db.execute(`SELECT client_tag, ${CONTACT_KEYS.join(", ")} FROM client_config`);
+    for (const row of r.rows) {
+      const tag = String((row as Record<string, unknown>).client_tag ?? "").trim().toUpperCase();
+      if (!tag) continue;
+      for (const e of collectConfigEmails(row as Record<string, unknown>)) {
+        const arr = map.get(e) ?? [];
+        if (!arr.includes(tag)) arr.push(tag);
+        map.set(e, arr);
+      }
+    }
+  } catch { /* table missing / error → empty map */ }
+  _emailMap = { map, ts: now };
+  return map;
+}
+
+const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+
+export interface ClientEmailFlag {
+  email: string;
+  clientTags: string[];
+}
+
+/**
+ * Scan free text (e.g. a reply body, including quoted content) for any email
+ * that a client has configured as a CC/BCC contact. Returns each matched email
+ * with the client tag(s) it belongs to — used to FLAG (not reassign) which
+ * client a reply is really for. Emails are extracted (not substring-matched) to
+ * avoid partial hits.
+ */
+export function findClientEmailsInText(
+  text: string | null | undefined,
+  map: Map<string, string[]>,
+): ClientEmailFlag[] {
+  if (!text || map.size === 0) return [];
+  const out: ClientEmailFlag[] = [];
+  const seen = new Set<string>();
+  for (const m of String(text).matchAll(EMAIL_RE)) {
+    const e = m[0].toLowerCase();
+    if (seen.has(e)) continue;
+    seen.add(e);
+    const tags = map.get(e);
+    if (tags && tags.length) out.push({ email: e, clientTags: tags });
+  }
+  return out;
+}
+
 interface ReplyLike {
   from_email_address?: string | null;
   to?: Array<{ name?: string; address?: string }> | null;

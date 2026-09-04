@@ -108,6 +108,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         : null;
     } catch { /* retry table missing → no recovery banner */ }
 
+    // Flag (do NOT reassign) when the reply BODY contains a client's configured
+    // CC/BCC contact email — a strong signal of which client this reply is really
+    // for, especially when the same lead email exists under multiple clients. We
+    // scan the body text (incl. quoted thread) and surface every match + its
+    // client tag(s) so the inbox can show a banner. Best-effort.
+    try {
+      const { loadClientContactEmailMap, findClientEmailsInText } = await import("@/lib/processing/cc-bcc-match");
+      const map = await loadClientContactEmailMap();
+      const body = [data.reply_we_got, data.email_subject]
+        .filter(Boolean).map(String).join("\n");
+      (data as Record<string, unknown>).client_email_flags = findClientEmailsInText(body, map);
+    } catch { (data as Record<string, unknown>).client_email_flags = []; }
+
     return NextResponse.json(data);
   } catch (error) {
     console.error("[api/inbox/[id]] GET failed:", error);
