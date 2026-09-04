@@ -172,6 +172,14 @@ function isLiveStatus(s: string): boolean {
   return x === "active" || x === "live" || x === "running" || x === "sending" || x === "queued";
 }
 
+// A campaign that is retired/removed — the ONLY case the re-onboarding refresh
+// will re-point a confirmed map off of. Paused/draft are deliberately NOT dead:
+// they can be transient or a deliberate operator choice, so they're left alone.
+function isDeadStatus(s: string): boolean {
+  const x = (s || "").toLowerCase();
+  return x === "archived" || x === "completed" || x === "stopped" || x === "deleted" || x === "failed";
+}
+
 // ── Per-client auto-map ──────────────────────────────────────────────────────
 
 /**
@@ -311,8 +319,12 @@ export async function refreshMapForClient(
         a.id - b.id,
     )[0];
     const mapped = list.find((c) => c.id === cell.campaign_id) ?? null;
-    const mappedIsLive = mapped ? isLiveStatus(mapped.status) : false;
-    if (!mappedIsLive && isLiveStatus(best.status) && best.id !== cell.campaign_id) {
+    // Refresh ONLY when the mapped campaign is retired/removed: either dead
+    // (archived/completed/stopped) or gone from the client's canonical set (e.g. a
+    // now-archived [Nurture 2] clone). A mapped campaign that is live/paused/draft
+    // is a valid current or deliberate choice → never touched.
+    const mappedIsDeadOrGone = mapped ? isDeadStatus(mapped.status) : true;
+    if (mappedIsDeadOrGone && isLiveStatus(best.status) && best.id !== cell.campaign_id) {
       report.remapped.push({
         instance: cell.bison_instance, esp: cell.esp,
         from: { id: cell.campaign_id, name: cell.campaign_name || "" },
