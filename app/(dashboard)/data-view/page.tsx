@@ -1323,8 +1323,10 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, on
 
       <div className="px-4 py-3 space-y-3">
         <div>
-          <button onClick={() => onPatch(i, { expanded: !c.expanded })} className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground">Original reply {c.expanded ? "▾" : "▸"}</button>
-          <p className={`mt-1 text-xs text-foreground/80 whitespace-pre-wrap ${c.expanded ? "" : "line-clamp-2"}`}>{c.row.reply_we_got || "No content"}</p>
+          <button onClick={() => onPatch(i, { expanded: !c.expanded })} className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground">Original reply {c.expanded ? "▾" : "▸ (hover to preview)"}</button>
+          {c.expanded
+            ? <p className="mt-1 text-xs text-foreground/80 whitespace-pre-wrap">{c.row.reply_we_got || "No content"}</p>
+            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} /></div>}
         </div>
 
         {c.loading ? (
