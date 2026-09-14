@@ -257,6 +257,11 @@ export default function DataViewPage() {
   // ── Bulk review queue ──
   const [queue, setQueue] = useState<ReviewCard[] | null>(null);
   const [running, setRunning] = useState(false);
+  // Batch progress panel shown at the top of the grid while a Run-batch runs
+  // (the review modal closes immediately so the operator isn't stuck in it).
+  const [batchProgress, setBatchProgress] = useState<
+    { total: number; done: number; ok: number; fail: number; label: string; running: boolean } | null
+  >(null);
 
   // When grouping, sort server-side by the group column so groups arrive
   // contiguous and complete (not fragmented across pages).
@@ -531,17 +536,23 @@ export default function DataViewPage() {
 
   async function runBatch() {
     if (!queue || !allReviewed) return;
+    // Snapshot the cards, then close the review modal immediately so the operator
+    // isn't held in it — progress is shown in the top panel over the grid.
+    const cards = queue;
+    const actionLabel = cardTypeFor(cards[0]?.category || "") === "category" ? "Applying categories" : "Running batch";
     setRunning(true);
-    let ok = 0, fail = 0;
-    for (const c of queue) {
+    setQueue(null);
+    setSelected(new Set());
+    setBatchProgress({ total: cards.length, done: 0, ok: 0, fail: 0, label: actionLabel, running: true });
+
+    let ok = 0, fail = 0, done = 0;
+    for (const c of cards) {
       try {
         if (c.status === "declined") {
           const target = c.type === "change-of-target" ? "Open Response" : nonSendCategoryFor(c.category);
           await mutate({ action: "update-category", id: c.row.id, category: target });
           ok++;
-          continue;
-        }
-        if (c.type === "category") {
+        } else if (c.type === "category") {
           const d = await mutate({ action: "update-category", id: c.row.id, category: c.category });
           d.ok ? ok++ : fail++;
         } else if (c.type === "send-reply") {
@@ -563,10 +574,11 @@ export default function DataViewPage() {
           d.ok ? ok++ : fail++;
         }
       } catch { fail++; }
+      done++;
+      setBatchProgress({ total: cards.length, done, ok, fail, label: actionLabel, running: true });
     }
     setRunning(false);
-    setQueue(null);
-    setSelected(new Set());
+    setBatchProgress({ total: cards.length, done, ok, fail, label: actionLabel, running: false });
     toast[fail ? "warning" : "success"](`Batch done — ${ok} applied${fail ? `, ${fail} failed` : ""}`);
     load(true);
   }
@@ -795,6 +807,39 @@ export default function DataViewPage() {
             <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="h-9 w-[135px] text-xs" title="To date" />
           </div>
         </div>
+
+        {/* ── Batch progress panel (Run batch runs here after the modal closes) ── */}
+        {batchProgress && (
+          <div className="border-b bg-white px-6 py-3">
+            <div className="flex items-center gap-3">
+              {batchProgress.running ? (
+                <svg className="h-4 w-4 shrink-0 animate-spin text-primary" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" /></svg>
+              ) : (
+                <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full text-white ${batchProgress.fail ? "bg-amber-500" : "bg-green-600"}`}><svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><path d="M20 6 9 17l-5-5" /></svg></span>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium">
+                    {batchProgress.running ? batchProgress.label : "Batch complete"}
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      {batchProgress.done} / {batchProgress.total}
+                      {batchProgress.fail > 0 && <span className="text-amber-600"> · {batchProgress.fail} failed</span>}
+                    </span>
+                  </p>
+                  {!batchProgress.running && (
+                    <button onClick={() => setBatchProgress(null)} className="text-xs font-medium text-muted-foreground hover:text-foreground">Dismiss</button>
+                  )}
+                </div>
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${batchProgress.running ? "bg-primary" : batchProgress.fail ? "bg-amber-500" : "bg-green-600"}`}
+                    style={{ width: `${batchProgress.total ? (batchProgress.done / batchProgress.total) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Grid ── */}
         <div className="flex-1 overflow-auto bg-[#fafafa]">
