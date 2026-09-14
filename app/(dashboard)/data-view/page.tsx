@@ -13,6 +13,7 @@
  * pages auto-load via an IntersectionObserver sentinel.
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -430,6 +431,41 @@ export default function DataViewPage() {
     }
   }
 
+  // Update the AI-suggested category (ai_categorized_lead_category). Unlike a
+  // lead-category change this triggers no send, so it applies directly (no review
+  // queue). Optimistic + revert on failure. Also updates view eligibility.
+  async function inlineSetAi(r: Row, cat: string) {
+    if (cat === (r.ai_categorized_lead_category || "")) return;
+    const old = r.ai_categorized_lead_category;
+    setRows((prev) => prev.map((x) => x.id === r.id ? { ...x, ai_categorized_lead_category: cat } : x));
+    setPanelDetail((prev) => (prev && prev.id === r.id ? { ...prev, ai_categorized_lead_category: cat } : prev));
+    const d = await mutate({ action: "set-ai-category", id: r.id, aiCategory: cat });
+    if (d.ok) toast.success(`AI category: ${cat}`);
+    else {
+      toast.error(d.error || "Update failed");
+      setRows((prev) => prev.map((x) => x.id === r.id ? { ...x, ai_categorized_lead_category: old } : x));
+    }
+  }
+
+  // Bulk-set the AI category on every selected row (direct field update, no
+  // review queue needed since nothing is sent). Limited concurrency.
+  async function bulkSetAi(cat: string) {
+    const ids = rows.filter((r) => selected.has(r.id)).map((r) => r.id as number);
+    if (!ids.length) return;
+    setRows((prev) => prev.map((x) => selected.has(x.id) ? { ...x, ai_categorized_lead_category: cat } : x));
+    let ok = 0, fail = 0, i = 0;
+    await Promise.all(Array.from({ length: Math.min(6, ids.length) }, async () => {
+      while (i < ids.length) {
+        const id = ids[i++];
+        const d = await mutate({ action: "set-ai-category", id, aiCategory: cat });
+        d.ok ? ok++ : fail++;
+      }
+    }));
+    setSelected(new Set());
+    if (fail) toast.warning(`AI category set on ${ok}/${ids.length} (${fail} failed)`);
+    else toast.success(`AI category set on ${ok} lead${ok === 1 ? "" : "s"}`);
+  }
+
   // ── Review queue ──
   function openQueue(chosenCategory: string) {
     openQueueFor(rows.filter((r) => selected.has(r.id)), chosenCategory);
@@ -579,7 +615,7 @@ export default function DataViewPage() {
         );
       }
       case "reply":
-        return <p className="text-xs text-foreground/80 line-clamp-2 whitespace-pre-wrap">{r.reply_we_got || <span className="text-muted-foreground/50">No content</span>}</p>;
+        return <ReplyHoverCell body={r.reply_we_got} />;
       case "category":
         return editingCell === r.id ? (
           <div onClick={(e) => e.stopPropagation()}>
@@ -850,6 +886,14 @@ export default function DataViewPage() {
               ))}</SelectContent>
             </Select>
             <div className="h-5 w-px bg-border" />
+            <span className="text-xs text-muted-foreground whitespace-nowrap">Set AI category →</span>
+            <Select value="" onValueChange={(v) => v && bulkSetAi(v)}>
+              <SelectTrigger className="h-9 w-[190px] text-xs"><SelectValue placeholder="AI category…" /></SelectTrigger>
+              <SelectContent side="top">{AI_CATEGORIES.map((c) => (
+                <SelectItem key={c} value={c}>{c}</SelectItem>
+              ))}</SelectContent>
+            </Select>
+            <div className="h-5 w-px bg-border" />
             <button onClick={() => setSelected(new Set())} className="text-xs text-muted-foreground hover:text-foreground whitespace-nowrap">Clear</button>
           </div>
         )}
@@ -862,6 +906,7 @@ export default function DataViewPage() {
           detail={panelDetail}
           onClose={() => { setPanelRow(null); setPanelDetail(null); }}
           onSetCategory={(cat) => inlineSetCategory(panelRow, cat)}
+          onSetAiCategory={(cat) => inlineSetAi(panelRow, cat)}
           onFieldsSaved={(patch) => {
             // Reflect edits in the grid + panel immediately (same row the inbox reads).
             setRows((prev) => prev.map((x) => x.id === panelRow.id ? { ...x, ...patch } : x));
@@ -888,9 +933,48 @@ export default function DataViewPage() {
   );
 }
 
+// ── Reply cell with a hover popover showing the FULL reply ─────────────────
+// The grid cells are overflow-hidden, so the full-reply box is rendered in a
+// portal at a fixed position (never clipped). A short close delay lets the mouse
+// travel from the cell into the box so its contents can be scrolled.
+function ReplyHoverCell({ body }: { body: string | null | undefined }) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const ref = useRef<HTMLParagraphElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setPos(null), 140); };
+  useEffect(() => cancelClose, []);
+  if (!body) return <span className="text-muted-foreground/50 text-xs">No content</span>;
+  const open = () => {
+    cancelClose();
+    const r = ref.current?.getBoundingClientRect();
+    if (r) setPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 440)), top: r.bottom + 4 });
+  };
+  return (
+    <>
+      <p
+        ref={ref}
+        onMouseEnter={open}
+        onMouseLeave={scheduleClose}
+        className="text-xs text-foreground/80 line-clamp-2 whitespace-pre-wrap"
+      >{body}</p>
+      {pos && createPortal(
+        <div
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+          style={{ position: "fixed", left: pos.left, top: pos.top }}
+          className="z-[100] w-[420px] max-h-72 overflow-y-auto rounded-lg border bg-white p-3 text-xs leading-relaxed text-foreground whitespace-pre-wrap shadow-xl"
+        >{body}</div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 // ── Right-side record panel — editable fields + send-reply composer ────────
-function RecordPanel({ row, detail, onClose, onSetCategory, onFieldsSaved }: {
+function RecordPanel({ row, detail, onClose, onSetCategory, onSetAiCategory, onFieldsSaved }: {
   row: Row; detail: Row | null; onClose: () => void; onSetCategory: (cat: string) => void;
+  onSetAiCategory: (cat: string) => void;
   onFieldsSaved: (patch: Record<string, string>) => void;
 }) {
   const d = detail || row;
@@ -979,9 +1063,20 @@ function RecordPanel({ row, detail, onClose, onSetCategory, onFieldsSaved }: {
           <span className="text-[10px] text-muted-foreground ml-auto">{fmtDate(d.created_at)}</span>
         </div>
 
-        {/* Category (inline editable) */}
+        {/* AI Lead Category (editable) */}
         <div className="space-y-1">
-          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Category</label>
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">AI Lead Category</label>
+          <Select value={d.ai_categorized_lead_category || ""} onValueChange={onSetAiCategory}>
+            <SelectTrigger className="h-9 text-xs"><SelectValue placeholder="—" /></SelectTrigger>
+            <SelectContent>{AI_CATEGORIES.map((cat) => (
+              <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+            ))}</SelectContent>
+          </Select>
+        </div>
+
+        {/* Lead Category (inline editable) */}
+        <div className="space-y-1">
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Lead Category</label>
           <Select value={d.lead_category || "Open Response"} onValueChange={onSetCategory}>
             <SelectTrigger className="h-9 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>{LEAD_CATEGORIES.map((cat) => (
@@ -990,7 +1085,6 @@ function RecordPanel({ row, detail, onClose, onSetCategory, onFieldsSaved }: {
               </SelectItem>
             ))}</SelectContent>
           </Select>
-          {d.ai_categorized_lead_category && <p className="text-[11px] text-muted-foreground">AI suggested: {d.ai_categorized_lead_category}</p>}
         </div>
 
         {/* Participants */}
