@@ -78,7 +78,8 @@ export const INBOX_VIEWS: InboxView[] = [
   {
     id: "all",
     label: "Master Inbox",
-    description: "All leads in the inbox",
+    description: "All leads in the inbox (ICCCS hidden — worked elsewhere)",
+    excludeClientTags: ["ICCCS"],
   },
   {
     id: "base-clients-cherry",
@@ -95,7 +96,7 @@ export const INBOX_VIEWS: InboxView[] = [
     // them out of the regular team's base view so work doesn't overlap. CWSJ /
     // CWSJ-OS are worked by the regular inbox team now, so they stay INCLUDED
     // here (they still also have their own CWSJ (Cherry) view).
-    excludeClientTags: ["OH", "DM4PM", "SBSPO"],
+    excludeClientTags: ["OH", "DM4PM", "SBSPO", "ICCCS"],
   },
   {
     id: "outboundhero-cherry",
