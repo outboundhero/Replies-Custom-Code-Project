@@ -475,8 +475,13 @@ export default function DataViewPage() {
     const type = cardTypeFor(chosenCategory);
     const cards: ReviewCard[] = chosen.map((row) => {
       const { to: t, cc, bcc } = computeReplyRecipients(row, chosenCategory);
+      // Auto-approve when there's no doubt: a plain category change the AI already
+      // agrees with (ai_categorized_lead_category === the chosen category). Cards
+      // where the AI disagrees — or that SEND an email (send-reply / change-of-
+      // target) — stay pending so a human reviews only the doubtful ones.
+      const aiAgrees = type === "category" && String(row.ai_categorized_lead_category || "").trim() === chosenCategory;
       return {
-        row, type, category: chosenCategory, status: "pending",
+        row, type, category: chosenCategory, status: aiAgrees ? "approved" : "pending",
         loading: type !== "category", expanded: false,
         fromEmail: String(row.sender_email || ""),
         senderEmailId: (row.sender_id as number | null) ?? null,
@@ -507,6 +512,11 @@ export default function DataViewPage() {
   }
   function patchCard(i: number, patch: Partial<ReviewCard>) {
     setQueue((prev) => prev ? prev.map((c, j) => (j === i ? { ...c, ...patch } : c)) : prev);
+  }
+  // Apply a patch to many cards at once (bulk approve / skip in the review queue).
+  function patchCards(indices: number[], patch: Partial<ReviewCard>) {
+    const set = new Set(indices);
+    setQueue((prev) => prev ? prev.map((c, j) => (set.has(j) ? { ...c, ...patch } : c)) : prev);
   }
   async function regenerateCard(i: number) {
     const c = queue?.[i]; if (!c) return;
@@ -925,6 +935,7 @@ export default function DataViewPage() {
           running={running}
           onClose={() => !running && setQueue(null)}
           onPatch={patchCard}
+          onPatchMany={patchCards}
           onRegenerate={regenerateCard}
           onRun={runBatch}
         />
@@ -1187,21 +1198,46 @@ function RecRow({ label, name, email }: { label: string; name?: string | null; e
 
 // ── Bulk Review Queue overlay ──────────────────────────────────────────────
 function ReviewQueue({
-  cards, reviewed, approved, allReviewed, running, onClose, onPatch, onRegenerate, onRun,
+  cards, reviewed, approved, allReviewed, running, onClose, onPatch, onPatchMany, onRegenerate, onRun,
 }: {
   cards: ReviewCard[]; reviewed: number; approved: number; allReviewed: boolean; running: boolean;
   onClose: () => void; onPatch: (i: number, p: Partial<ReviewCard>) => void;
+  onPatchMany: (indices: number[], p: Partial<ReviewCard>) => void;
   onRegenerate: (i: number) => void; onRun: () => void;
 }) {
   const action = cardTypeFor(cards[0]?.category || "");
   const actionLabel = action === "change-of-target" ? "Change of Target" : action === "send-reply" ? "Send Reply" : "Set Category";
+
+  // Multi-select + drag-select across cards, so the flagged (doubtful) ones can be
+  // approved / skipped in bulk instead of one at a time.
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  const dragging = useRef(false);
+  const dragAdd = useRef(true);
+  useEffect(() => {
+    const up = () => { dragging.current = false; };
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
+  const startDrag = (i: number) => {
+    dragging.current = true; dragAdd.current = !sel.has(i);
+    setSel((p) => { const n = new Set(p); dragAdd.current ? n.add(i) : n.delete(i); return n; });
+  };
+  const dragEnter = (i: number) => {
+    if (!dragging.current) return;
+    setSel((p) => { const n = new Set(p); dragAdd.current ? n.add(i) : n.delete(i); return n; });
+  };
+  const canApprove = (c: ReviewCard) => !c.loading && !c.error && (c.type === "category" || (!!c.message.trim() && !!c.toEmail));
+  const pendingIdx = cards.map((c, i) => ({ c, i })).filter(({ c }) => c.status === "pending").map(({ i }) => i);
+  const approveSelected = () => { onPatchMany([...sel].filter((i) => canApprove(cards[i])), { status: "approved" }); setSel(new Set()); };
+  const skipSelected = () => { onPatchMany([...sel], { status: "declined" }); setSel(new Set()); };
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/40">
       <div className="flex-1 overflow-hidden flex flex-col bg-[#fafafa] mt-8 rounded-t-2xl shadow-2xl">
         <div className="flex items-center justify-between gap-4 border-b bg-white px-6 py-4">
           <div>
             <h2 className="text-base font-semibold">Review Queue — Bulk {actionLabel}</h2>
-            <p className="text-xs text-muted-foreground">{cards[0]?.category} · every reply must be reviewed before the batch runs</p>
+            <p className="text-xs text-muted-foreground">{cards[0]?.category} · confident matches are auto-approved — you only review the flagged ones</p>
           </div>
           <div className="flex items-center gap-4">
             <div className="text-right">
@@ -1214,8 +1250,28 @@ function ReviewQueue({
           </div>
         </div>
 
+        {/* Bulk-select toolbar: select many (or drag) → Approve / Skip together. */}
+        <div className="flex items-center gap-3 border-b bg-white/70 px-6 py-2 text-xs">
+          <button onClick={() => setSel(new Set(pendingIdx))} className="rounded border px-2 py-1 font-medium hover:bg-muted disabled:opacity-40" disabled={!pendingIdx.length}>Select all to review ({pendingIdx.length})</button>
+          <button onClick={() => setSel(new Set(cards.map((_, i) => i)))} className="rounded border px-2 py-1 font-medium hover:bg-muted">Select all</button>
+          {sel.size > 0 && (
+            <>
+              <span className="text-muted-foreground">· {sel.size} selected</span>
+              <Button size="sm" className="h-7 text-xs" onClick={approveSelected}>Approve selected</Button>
+              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={skipSelected}>Skip selected</Button>
+              <button onClick={() => setSel(new Set())} className="text-muted-foreground hover:text-foreground">Clear</button>
+            </>
+          )}
+          <span className="ml-auto text-muted-foreground/70">Tip: check a card and drag to select a range</span>
+        </div>
+
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
-          {cards.map((c, i) => <ReviewCardView key={c.row.id} card={c} index={i} onPatch={onPatch} onRegenerate={onRegenerate} />)}
+          {cards.map((c, i) => (
+            <ReviewCardView
+              key={c.row.id} card={c} index={i} onPatch={onPatch} onRegenerate={onRegenerate}
+              selected={sel.has(i)} onDragSelectStart={() => startDrag(i)} onDragSelectEnter={() => dragEnter(i)}
+            />
+          ))}
         </div>
 
         <div className="border-t bg-white px-6 py-3 flex items-center justify-between">
@@ -1235,14 +1291,23 @@ function ReviewQueue({
   );
 }
 
-function ReviewCardView({ card: c, index: i, onPatch, onRegenerate }: {
+function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, onDragSelectStart, onDragSelectEnter }: {
   card: ReviewCard; index: number; onPatch: (i: number, p: Partial<ReviewCard>) => void; onRegenerate: (i: number) => void;
+  selected?: boolean; onDragSelectStart?: () => void; onDragSelectEnter?: () => void;
 }) {
-  const ring = c.status === "approved" ? "border-green-300 bg-green-50/40" : c.status === "declined" ? "border-gray-300 bg-gray-50/60 opacity-70" : "border-border bg-white";
+  const ring = selected ? "border-indigo-400 bg-indigo-50/50 ring-1 ring-indigo-300"
+    : c.status === "approved" ? "border-green-300 bg-green-50/40" : c.status === "declined" ? "border-gray-300 bg-gray-50/60 opacity-70" : "border-border bg-white";
   return (
-    <div className={`rounded-xl border ${ring} transition-colors`}>
+    <div className={`rounded-xl border ${ring} transition-colors`} onMouseEnter={onDragSelectEnter}>
       <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-border/50">
         <div className="flex items-center gap-2.5 min-w-0">
+          {/* Selection checkbox — click, or mousedown-drag across cards, to multi-select. */}
+          <input
+            type="checkbox" checked={!!selected} readOnly
+            onMouseDown={(e) => { e.stopPropagation(); onDragSelectStart?.(); }}
+            className="h-4 w-4 shrink-0 cursor-pointer accent-indigo-600"
+            aria-label="Select card"
+          />
           <div className="h-7 w-7 shrink-0 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-white flex items-center justify-center text-[10px] font-semibold">{initials(c.row.from_name || c.row.lead_name, c.row.lead_email)}</div>
           <div className="min-w-0">
             <div className="text-sm font-medium truncate">{c.row.from_name || c.row.lead_name || c.row.lead_email}</div>
