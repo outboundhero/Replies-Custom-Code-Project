@@ -310,6 +310,14 @@ export async function refreshMapForClient(
 
   for (const cell of existing) {
     report.checked++;
+    // Expansion ([Nurture N] batch clones) is managed by the campaign-expansion
+    // cron, which deliberately points the map at the newest batch clone. Auto-map's
+    // canonical list EXCLUDES batch-2+ clones (isBatchTwoPlus), so without this
+    // guard a cell pointing at "[Nurture 13]" reads as "gone" and gets snapped
+    // back to the batch-1 "[Nurture]" original — which re-arms expansion and spawns
+    // a fresh orphan batch every run (the BCSOR runaway: 13 batches, ~36 orphan
+    // draft campaigns). Never touch an expansion-managed cell here.
+    if (isBatchTwoPlus(cell.campaign_name || "")) continue;
     const list = (byInstance.get(cell.bison_instance) || []).filter((c) => c.tag === TAG && c.esp === cell.esp);
     if (list.length === 0) continue; // no canonical candidates → leave as-is
     const best = [...list].sort(
