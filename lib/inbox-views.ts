@@ -42,6 +42,11 @@ export interface InboxView {
   /** Only rows currently in a DM4PM subsequence (dm4pm_subseq_status set). The
    *  server forces the slow-path counts for this so the sidebar stays accurate. */
   subsequenceOnly?: boolean;
+  /** For a scoped user whose allowed tags are ALL covered by this view's tag set,
+   *  this view REPLACES the generic Master Inbox: "all" is hidden for them and
+   *  this becomes their default view. Use for a dedicated team that should only
+   *  ever see their own curated view (e.g. LRL → UJ), never the generic inbox. */
+  isScopedDefault?: boolean;
 }
 
 // Shared "Cherry" filter config, reused by Base Clients (Cherry) and any
@@ -81,17 +86,23 @@ export const INBOX_VIEWS: InboxView[] = [
     description: "All leads in the inbox (ICCCS hidden — worked elsewhere)",
     excludeClientTags: ["ICCCS"],
   },
-  // "LRL - OH Clients" — a Master-Inbox-style view (EVERY reply, all buckets, no
-  // cherry filter — confirmed by Harrison) scoped to the tags the LRL team manages.
-  // The Industry Exclusion / Location Inclusion rule cards render in the detail
-  // panel for any lead here. Tag list confirmed by Spencer: UJ (Uptown Janitorial).
-  // ⚠️ Add more tags here as the LRL team takes on more OH clients — never leave
-  // includeClientTags empty (that falls through to ALL clients).
+  // "LRL - OH Clients" — a Cherry-style view (positive + unrecognizable only,
+  // noise + negative buckets hidden — same filters as Base Clients (Cherry))
+  // scoped to the tags the LRL team manages. The Industry Exclusion / Location
+  // Inclusion rule cards render in the detail panel for any lead here. Tag list
+  // confirmed by Spencer: UJ (Uptown Janitorial). isScopedDefault = for a user
+  // scoped to only these tags, this REPLACES the generic Master Inbox (hidden +
+  // becomes their default view). ⚠️ Add more tags here as the LRL team takes on
+  // more OH clients — never leave includeClientTags empty (falls through to ALL).
   {
     id: "lrl-oh-clients",
     label: "LRL - OH Clients",
-    description: "Every reply for the OH clients the LRL team manages (all buckets).",
+    description: "Positive + unrecognizable leads for the OH clients the LRL team manages; noise and negative buckets hidden.",
+    excludeNoise: true,
+    aiCategoryAllowlist: CHERRY_AI_ALLOWLIST,
+    hiddenLeadCategories: CHERRY_HIDDEN,
     includeClientTags: ["UJ"],
+    isScopedDefault: true,
   },
   {
     id: "base-clients-cherry",
@@ -192,6 +203,23 @@ export function dedicatedMasterViewId(allowedClientTags?: string[] | null): stri
 /** True when {@link dedicatedMasterViewId} exists for this scope. */
 export function hasDedicatedMasterView(allowedClientTags?: string[] | null): boolean {
   return dedicatedMasterViewId(allowedClientTags) !== null;
+}
+
+/**
+ * The id of an `isScopedDefault` view whose tag set fully covers this user's
+ * scope, or null. Such a view REPLACES the generic Master Inbox for that user:
+ * "all" is hidden and this becomes their default (e.g. a UJ-only login gets the
+ * "LRL - OH Clients" view and never the generic inbox). Unlike
+ * {@link dedicatedMasterViewId} this matches curated/cherry views too.
+ */
+export function scopedDefaultViewId(allowedClientTags?: string[] | null): string | null {
+  if (!allowedClientTags || !allowedClientTags.length) return null;
+  const v = INBOX_VIEWS.find((vv) => {
+    if (!vv.isScopedDefault) return false;
+    const tags = vv.clientTag ? [vv.clientTag] : vv.includeClientTags ?? [];
+    return tags.length > 0 && allowedClientTags.every((t) => tags.includes(t));
+  });
+  return v?.id ?? null;
 }
 
 /**
