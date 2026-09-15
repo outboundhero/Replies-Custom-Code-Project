@@ -1396,6 +1396,17 @@ export async function updateCampaign(
   return res.ok;
 }
 
+/** Permanently delete a campaign (DELETE /api/campaigns/{id}). Returns
+ *  { ok, status } so callers can distinguish "gone" from a refusal. */
+export async function deleteCampaign(instanceKey: string, campaignId: number): Promise<{ ok: boolean; status: number }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}`, {
+    method: "DELETE", headers: buildHeaders(token), timeoutMs: 30_000,
+  });
+  // 404 = already gone → treat as success (idempotent).
+  return { ok: res.ok || res.status === 404, status: res.status };
+}
+
 // ── Verification / fallback helpers (read what duplicate carried) ───────────
 
 export async function getCampaignSchedule(instanceKey: string, campaignId: number): Promise<Record<string, unknown> | null> {
