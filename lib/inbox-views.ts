@@ -83,16 +83,16 @@ export const INBOX_VIEWS: InboxView[] = [
   },
   // "LRL - OH Clients" — a Master-Inbox-style view (EVERY reply, all buckets, no
   // cherry filter — confirmed by Harrison) scoped to the tags the LRL team manages.
-  // The Industry Exclusion / Location Inclusion rule cards already render in the
-  // detail panel for any lead. ⚠️ INACTIVE until Spencer confirms the exact tag
-  // list: an empty includeClientTags falls through to ALL clients, so keep this
-  // commented until the tags are filled in, then uncomment to activate.
-  // {
-  //   id: "lrl-oh-clients",
-  //   label: "LRL - OH Clients",
-  //   description: "Every reply for the OH clients the LRL team manages (all buckets).",
-  //   includeClientTags: [/* TODO: Spencer's tag list, e.g. "XXX", "YYY" */],
-  // },
+  // The Industry Exclusion / Location Inclusion rule cards render in the detail
+  // panel for any lead here. Tag list confirmed by Spencer: UJ (Uptown Janitorial).
+  // ⚠️ Add more tags here as the LRL team takes on more OH clients — never leave
+  // includeClientTags empty (that falls through to ALL clients).
+  {
+    id: "lrl-oh-clients",
+    label: "LRL - OH Clients",
+    description: "Every reply for the OH clients the LRL team manages (all buckets).",
+    includeClientTags: ["UJ"],
+  },
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
