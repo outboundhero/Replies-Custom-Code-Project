@@ -1728,6 +1728,32 @@ export default function InboxPage() {
               );
             })()}
 
+            {/* Industry Exclusion (col N) + Location Inclusion (col P) — the tagged
+                client's qualification rules, shown read-only directly under the
+                audit for the LRL - OH Clients view. Display only: no pass/fail. */}
+            {(() => {
+              const rules = detail.qualification_rules as { exclusion_industries?: string; inclusion_locations?: string } | null;
+              const excl = String(rules?.exclusion_industries || "").trim();
+              const incl = String(rules?.inclusion_locations || "").trim();
+              if (!rules || (!excl && !incl)) return null;
+              return (
+                <div className="rounded border bg-white px-4 py-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Client Qualification Rules</span>
+                    {detail.client_tag && <span className="text-[10px] font-mono font-semibold text-muted-foreground">{detail.client_tag}</span>}
+                  </div>
+                  <div className="space-y-1">
+                    <span className="inline-block rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">Industry Exclusion</span>
+                    <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/80">{excl || <span className="italic text-muted-foreground">None on file</span>}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">Location Inclusion</span>
+                    <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/80">{incl || <span className="italic text-muted-foreground">None on file</span>}</p>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Find Best Fit Client — embedded below the audit; auto-populates
                 location (reply-first, from the audit) + industry, shows the
                 recommended tag, and prefills reallocation on click. */}

@@ -121,6 +121,26 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       (data as Record<string, unknown>).client_email_flags = findClientEmailsInText(body, map);
     } catch { (data as Record<string, unknown>).client_email_flags = []; }
 
+    // The tagged client's qualification rules — Industry Exclusion (col N) and
+    // Location Inclusion (col P) — surfaced read-only in the detail panel for the
+    // LRL - OH Clients view. Display only: NO pass/fail audit is run against them.
+    try {
+      const tag = String(data.client_tag || "");
+      if (tag && tag !== "N/A") {
+        const { data: qual } = await supabase
+          .from("client_qualifications")
+          .select("exclusion_industries, inclusion_locations")
+          .eq("client_abbreviation", tag)
+          .maybeSingle();
+        (data as Record<string, unknown>).qualification_rules = qual
+          ? {
+              exclusion_industries: (qual.exclusion_industries as string | null) || "",
+              inclusion_locations: (qual.inclusion_locations as string | null) || "",
+            }
+          : null;
+      }
+    } catch { /* rules lookup failed → cards just won't render */ }
+
     return NextResponse.json(data);
   } catch (error) {
     console.error("[api/inbox/[id]] GET failed:", error);

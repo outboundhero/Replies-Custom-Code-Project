@@ -81,6 +81,18 @@ export const INBOX_VIEWS: InboxView[] = [
     description: "All leads in the inbox (ICCCS hidden — worked elsewhere)",
     excludeClientTags: ["ICCCS"],
   },
+  // "LRL - OH Clients" — a Master-Inbox-style view (EVERY reply, all buckets, no
+  // cherry filter — confirmed by Harrison) scoped to the tags the LRL team manages.
+  // The Industry Exclusion / Location Inclusion rule cards already render in the
+  // detail panel for any lead. ⚠️ INACTIVE until Spencer confirms the exact tag
+  // list: an empty includeClientTags falls through to ALL clients, so keep this
+  // commented until the tags are filled in, then uncomment to activate.
+  // {
+  //   id: "lrl-oh-clients",
+  //   label: "LRL - OH Clients",
+  //   description: "Every reply for the OH clients the LRL team manages (all buckets).",
+  //   includeClientTags: [/* TODO: Spencer's tag list, e.g. "XXX", "YYY" */],
+  // },
   {
     id: "base-clients-cherry",
     label: "Base Clients (Cherry)",
