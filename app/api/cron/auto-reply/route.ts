@@ -60,18 +60,6 @@ interface DueRow {
   bcc_name_2: string | null; bcc_email_2: string | null;
 }
 
-function collectRecipients(row: DueRow, prefix: "cc" | "bcc"): { name: string; email_address: string }[] {
-  const max = prefix === "cc" ? 6 : 2;
-  const out: { name: string; email_address: string }[] = [];
-  for (let i = 1; i <= max; i++) {
-    const email = (row[`${prefix}_email_${i}` as keyof DueRow] as string | null)?.trim();
-    if (!email) continue;
-    const name = (row[`${prefix}_name_${i}` as keyof DueRow] as string | null)?.trim() || "";
-    out.push({ name, email_address: email });
-  }
-  return out;
-}
-
 /** Decide whether a row is still safe to auto-reply on. */
 function categoryStillMatchesKind(row: DueRow): boolean {
   const cat = row.lead_category;
@@ -227,8 +215,16 @@ export async function GET(req: NextRequest) {
       continue;
     }
 
-    const ccEmails = collectRecipients(row, "cc");
-    const bccEmails = collectRecipients(row, "bcc");
+    // Do NOT loop in the client's CC/BCC on these automated sends. Both kinds go
+    // to the LEAD, not the client: out_of_office re-sends the original cold email
+    // (outbound prospecting), and not_interested is a polite rejection ack. The
+    // client's CC/BCC gets stamped onto the row at ingest for CC/BCC-eligible AI
+    // categories (incl. "Unrecognizable by AI", which OOO replies often land in),
+    // so reusing it here would CC the client on our own prospecting — which is
+    // exactly the bug clients reported (e.g. being CC'd on an OOO "welcome back"
+    // re-send). CC/BCC is only for genuine positive-engagement replies.
+    const ccEmails: { name: string; email_address: string }[] = [];
+    const bccEmails: { name: string; email_address: string }[] = [];
 
     const result = await sendReply(instanceKey, {
       replyId: row.reply_id,
