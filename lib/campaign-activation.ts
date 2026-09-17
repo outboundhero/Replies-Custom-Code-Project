@@ -15,6 +15,7 @@ import { listCampaigns, resumeCampaign } from "@/lib/outboundhero-api";
 import { getInstanceConfig } from "@/lib/bison-instances";
 import { getAllClientInstances, type ClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedTags } from "@/lib/churn";
+import { fetchNotYetLiveTags } from "@/lib/google-sheets";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import db from "@/lib/db";
 import { logActivity, logError } from "@/lib/errors";
@@ -92,6 +93,31 @@ function ensureCursor(): Promise<void> {
   return cursorReady;
 }
 
+// ── activation HOLD list ──────────────────────────────────────────────────────
+// Clients that must NEVER be auto-activated by the sweep — e.g. a new client
+// still being set up whose campaigns are loaded with leads + connected inboxes
+// but is NOT yet meant to go live. Without this, the sweep force-resumes their
+// campaigns (they meet the leads+inbox test), sending cold email before launch.
+// An operator pauses the campaigns AND holds the client; the hold is lifted at
+// go-live. This is a deliberate override of the "no skip intentionally-paused"
+// rule, scoped to explicitly-held clients only.
+let holdReady: Promise<void> | null = null;
+function ensureHold(): Promise<void> {
+  if (!holdReady) {
+    holdReady = db.execute(
+      "CREATE TABLE IF NOT EXISTS campaign_activation_hold (client_tag TEXT PRIMARY KEY, reason TEXT, created_at TEXT DEFAULT (datetime('now')))",
+    ).then(() => undefined).catch((e) => { holdReady = null; throw e; });
+  }
+  return holdReady;
+}
+
+/** Upper-cased set of client tags currently on activation hold. */
+export async function getActivationHolds(): Promise<Set<string>> {
+  await ensureHold();
+  const r = await db.execute("SELECT client_tag FROM campaign_activation_hold");
+  return new Set((r.rows as unknown as Array<{ client_tag: string }>).map((x) => String(x.client_tag).toUpperCase()));
+}
+
 export interface ActivationSweepResult {
   checked: number;
   budgetHit: boolean;
@@ -116,7 +142,22 @@ export async function runActivationSweep(opts: {
 
   const all = await getAllClientInstances();
   const churned = await getChurnedTags();
-  let tags = [...all.keys()].map((t) => t.toUpperCase()).filter((t) => !churned.has(t));
+  // NOT-yet-live clients (Go Live Date in the future, per the Client Tracker) and
+  // manually-held clients are NEVER auto-activated — this is what stops a new
+  // client's loaded campaigns from being force-resumed before launch. FAIL SAFE:
+  // if the go-live sheet read fails we skip the ENTIRE sweep this tick rather than
+  // risk activating a pre-launch client with the gate missing (it retries next
+  // tick — activation is not time-critical).
+  let notLive: Set<string>;
+  try { notLive = await fetchNotYetLiveTags(); }
+  catch (e) {
+    await logError("campaign-activation", "golive-fetch", `skipping sweep — could not read go-live dates: ${(e as Error).message}`);
+    return { checked: 0, budgetHit: false, totalActivated: 0, results: [] };
+  }
+  const holds = await getActivationHolds();
+  let tags = [...all.keys()]
+    .map((t) => t.toUpperCase())
+    .filter((t) => !churned.has(t) && !notLive.has(t) && !holds.has(t));
 
   const cur = await db.execute("SELECT client_tag, last_run_at FROM campaign_activation_cursor");
   const last = new Map<string, string>();

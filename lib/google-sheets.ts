@@ -76,6 +76,61 @@ export async function fetchClientTracker(): Promise<ClientTrackerRow[]> {
 }
 
 /**
+ * Map of client TAG (upper) → "Go Live Date" cell (raw string, e.g. "9/23/2026"),
+ * from the Client Tracker. Used to keep a NOT-yet-launched client's campaigns
+ * from being force-activated: a client whose go-live date is in the future is not
+ * live yet. Bundled abbreviations ("JPDFW & JPK") map each tag to the same date.
+ * Cached briefly so the activation sweep doesn't re-pull the sheet every tick.
+ */
+let _goLiveCache: { map: Map<string, string>; ts: number } | null = null;
+export async function fetchGoLiveDates(): Promise<Map<string, string>> {
+  if (_goLiveCache && Date.now() - _goLiveCache.ts < 5 * 60_000) return _goLiveCache.map;
+  const sheets = google.sheets({ version: "v4", auth: getAuth() });
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "'Client Tracker'" });
+  const rows = res.data.values || [];
+  const out = new Map<string, string>();
+  if (rows.length >= 2) {
+    const headers = rows[0].map((h: string) => h?.toString() || "");
+    const abbrIdx = findColumnIndex(headers, "Client Abbreviation", "Client Abbrevation");
+    const goLiveIdx = findColumnIndex(headers, "Go Live Date");
+    if (abbrIdx !== -1 && goLiveIdx !== -1) {
+      for (let i = 1; i < rows.length; i++) {
+        const rawAbbr = rows[i][abbrIdx]?.toString()?.trim();
+        const goLive = rows[i][goLiveIdx]?.toString()?.trim() || "";
+        if (!rawAbbr) continue;
+        // Split bundled tags the same way churn parsing does.
+        for (const tag of rawAbbr.split(/\s+&\s+|\s+and\s+|\s*\/\s*/i).map((t: string) => t.trim()).filter(Boolean)) {
+          out.set(tag.toUpperCase(), goLive);
+        }
+      }
+    }
+  }
+  _goLiveCache = { map: out, ts: Date.now() };
+  return out;
+}
+
+/**
+ * Client tags NOT yet live — their "Go Live Date" is in the FUTURE (strictly
+ * after today). A blank/unparseable date is treated as live (never blocks an
+ * established client). Used to exclude pre-launch clients from auto-activation.
+ */
+export async function fetchNotYetLiveTags(): Promise<Set<string>> {
+  const dates = await fetchGoLiveDates();
+  const today = new Date();
+  const todayNum = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
+  const out = new Set<string>();
+  for (const [tag, raw] of dates) {
+    const m = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/); // M/D/YYYY or M-D-YY
+    if (!m) continue; // blank / unrecognized → treat as live
+    let [, mm, dd, yy] = m;
+    let y = Number(yy); if (y < 100) y += 2000;
+    const dateNum = y * 10000 + Number(mm) * 100 + Number(dd);
+    if (dateNum > todayNum) out.add(tag); // go-live is in the future → not live yet
+  }
+  return out;
+}
+
+/**
  * The set of client TAGS that are CHURNED — defined as Status containing
  * "Churned" AND a non-empty Churn Date. A "Churned" status with no date is a
  * waitlisted/returning client and is treated as active.
