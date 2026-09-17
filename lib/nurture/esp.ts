@@ -119,24 +119,25 @@ export const ESP_LABEL: Record<Esp, string> = {
  *   "JPNNJ: Outlook [Nurture] (Cleaning Client)"
  *   "JPNNJ: SEGs [Nurture] (Cleaning Client)"
  *
- * The trailing marker is "(Cleaning Client)", "(Non-Cleaning Client)", or
- * "(Internal)" depending on the client type — all three are canonical.
+ * The trailing marker is a client-type parenthetical — "(Cleaning Client)",
+ * "(Non-Cleaning Client)", "(OS Client)", any future "(… Client)" variant, or
+ * "(Internal)" — all canonical.
  *
  * Legacy variants (e.g. "JPNNJ: Outlook (Nurture) (2)") still exist in
  * Bison but auto-route must ignore them — the markers are the literal
- * "[Nurture]" + "(… Cleaning Client)" suffixes. Operators can still pick a
+ * "[Nurture]" + "(… Client)" suffixes. Operators can still pick a
  * legacy campaign via the manual dropdown if they need to.
  */
 export function isCanonicalNurtureCampaign(name: string): boolean {
-  // Must be BOTH a [Nurture] campaign AND carry one of the type markers:
-  // "(Cleaning Client)", "(Non-Cleaning Client)", or "(Internal)". Requiring
-  // only the parenthetical was too loose — it also matched SOURCE campaigns
-  // (e.g. "SBCC: Outlook (Cleaning Client)") and legacy "(Nurture)" variants,
-  // so the "[Nurture]" requirement is what disambiguates. Canonical names look
-  // like "JPNNJ: Outlook [Nurture] (Cleaning Client)" / "… (Non-Cleaning
-  // Client)" / "… (Internal)". Batch clones carry a number in the marker —
+  // Must be BOTH a [Nurture] campaign AND carry a client-type parenthetical:
+  // any "(… Client)" (Cleaning / Non-Cleaning / OS / future types) or
+  // "(Internal)". We accept ANY "(… Client)" rather than an enumerated list so a
+  // new client type (e.g. UBM-OS's "(OS Client)") doesn't silently drop out of
+  // the nurture map. Requiring the "[Nurture]" marker is what keeps this from
+  // matching SOURCE / main campaigns (e.g. "SBCC: Outlook (Cleaning Client)")
+  // and legacy "(Nurture)" variants. Batch clones carry a number in the marker —
   // "[Nurture 2]", "[Nurture 3]" — and are still canonical.
-  return /\[nurture(?:\s*\d+)?\]/i.test(name) && /\((?:(?:non-)?cleaning client|internal)\)/i.test(name);
+  return /\[nurture(?:\s*\d+)?\]/i.test(name) && /\([^)]*\bclient\)|\(internal\)/i.test(name);
 }
 
 /**
