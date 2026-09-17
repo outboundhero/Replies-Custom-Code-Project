@@ -623,6 +623,18 @@ async function processLeadWindow(
     }
 }
 
+/**
+ * True for the sync's EXPECTED, non-error checkpoint notes — the incremental
+ * sweep ran out of its per-tick time budget and will resume next cron tick.
+ * These are progress markers, NOT failures, and must NOT be written to the
+ * error log (they were flooding it — one or more every 20-min tick per
+ * instance). Genuine failures (listCampaigns failed, a real Bison timeout, a
+ * client sync error) don't match and are still logged.
+ */
+export function isBenignSyncNote(msg: string): boolean {
+  return /soft budget hit|timed out after .*partial progress shown/i.test(String(msg || ""));
+}
+
 // Per-instance hard cap. Vercel kills the whole route at 5 min
 // (maxDuration). With 477 worth-syncing campaigns on outboundhero at
 // ~1 s each across 20 workers, the inner loop needs ~25 s ideal /

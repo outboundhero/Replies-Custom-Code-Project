@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { syncSequenceFinished } from "@/lib/nurture/sync-sequence-finished";
+import { syncSequenceFinished, isBenignSyncNote } from "@/lib/nurture/sync-sequence-finished";
 import { logActivity, logError } from "@/lib/errors";
 
 export const maxDuration = 300;
@@ -46,9 +46,11 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    // Persist each error individually so they're queryable from the
-    // error log UI alongside other Bison failures.
-    for (const e of result.errors.slice(0, 50)) {
+    // Persist each GENUINE error individually so they're queryable from the
+    // error log UI. Benign budget/timeout checkpoints (expected — resume next
+    // tick) are filtered out so they don't flood the error log.
+    const realErrors = result.errors.filter((e) => !isBenignSyncNote(e));
+    for (const e of realErrors.slice(0, 50)) {
       await logError("nurture-sync-sequence", "instance-error", e);
     }
 

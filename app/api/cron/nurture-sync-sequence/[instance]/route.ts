@@ -13,7 +13,7 @@
  * Auth: same CRON_SECRET pattern as the combined route.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { syncOneInstanceExported } from "@/lib/nurture/sync-sequence-finished";
+import { syncOneInstanceExported, isBenignSyncNote } from "@/lib/nurture/sync-sequence-finished";
 import { isValidInstance } from "@/lib/bison-instances";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -40,17 +40,24 @@ export async function GET(
   try {
     const result = await syncOneInstanceExported(instance);
 
+    // Separate benign budget/timeout checkpoints (expected — resumes next tick)
+    // from genuine failures. Only real failures go to the error log; checkpoints
+    // are recorded on the activity summary for visibility, not as red errors.
+    const realErrors = result.errors.filter((e) => !isBenignSyncNote(e));
+    const checkpoints = result.errors.length - realErrors.length;
+
     await logActivity("nurture-sync-sequence", "completed-per-instance", {
       details: {
         instance,
         upserted: result.upserted,
         campaigns_scanned: result.campaignsScanned,
         candidates_found: result.candidatesFound,
-        error_count: result.errors.length,
+        error_count: realErrors.length,
+        budget_checkpoints: checkpoints,
       },
     });
 
-    for (const e of result.errors.slice(0, 50)) {
+    for (const e of realErrors.slice(0, 50)) {
       await logError("nurture-sync-sequence", `instance-error:${instance}`, e);
     }
 
