@@ -405,6 +405,8 @@ export interface OutboundCampaign {
   emails_sent?: number;
   replied?: number;
   bounced?: number;
+  /** ISO timestamp of when the campaign was created (Bison `created_at`). */
+  created_at?: string | null;
 }
 
 export interface OutboundLead {
@@ -536,6 +538,7 @@ async function listCampaignsForStatus(
       emails_sent: row.emails_sent as number | undefined,
       replied: row.replied as number | undefined,
       bounced: row.bounced as number | undefined,
+      created_at: (row.created_at as string | null) ?? null,
     }));
     return { rows, lastPage };
   }

@@ -18,7 +18,15 @@ type Esp = "google" | "outlook" | "segs";
 type Lane = "b2b" | "b2c";
 type ClientStatus = "active" | "returning" | "all";
 interface ClientRow { tag: string; churned: boolean; churnDate: string | null; group: number | null; b2b: string | null; b2c: string | null }
-interface PlanCampaign { id: number; name: string; status: string; esp: Esp; total_leads: number; isNurture: boolean; instance: string; lane: Lane }
+interface PlanCampaign { id: number; name: string; status: string; esp: Esp; total_leads: number; isNurture: boolean; instance: string; lane: Lane; created_at?: string | null }
+
+/** Compact campaign-created date, e.g. "Sep 16, 2026". Blank when unknown. */
+function fmtCreated(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
 interface Job { campaignId: number; name: string; esp: Esp; sourceInstance: string; sourceSlot: string; totalLeads: number }
 
 const ESP_LABEL: Record<Esp, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
@@ -252,6 +260,7 @@ export default function SameInstanceTab({ onEnqueued }: { onEnqueued?: () => voi
                               {c.isNurture && <span className="text-[9px] rounded bg-violet-100 text-violet-700 px-1 py-0.5 shrink-0">nurture</span>}
                               <span className={`text-[10px] shrink-0 ${c.status === "active" ? "text-emerald-600" : "text-muted-foreground"}`}>{c.status}</span>
                               <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">{c.total_leads.toLocaleString()} leads</span>
+                              {fmtCreated(c.created_at) && <span className="text-[10px] text-muted-foreground/70 shrink-0" title={`Created ${fmtCreated(c.created_at)}`}>· created {fmtCreated(c.created_at)}</span>}
                             </div>
                             <label className="w-12 flex justify-center"><input type="checkbox" checked={sources.has(c.id)} disabled={destinations.has(c.id)} onChange={() => toggleSource(c.id)} className="size-3.5 rounded border-muted-foreground/40" /></label>
                             <label className="w-12 flex justify-center"><input type="checkbox" checked={destinations.has(c.id)} disabled={sources.has(c.id)} onChange={() => toggleDest(c.id)} className="size-3.5 rounded border-muted-foreground/40" /></label>

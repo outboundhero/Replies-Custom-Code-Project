@@ -57,6 +57,7 @@ export async function POST(req: Request) {
         .map((c) => ({
           id: c.id, name: c.name, status: c.status, esp: detectCampaignEsp(c.name)!,
           total_leads: c.total_leads ?? 0, isNurture: isNurtureName(c.name), instance, lane,
+          created_at: c.created_at ?? null,
         }));
     }));
     const campaigns = perLane.flat().sort((a, b) => b.total_leads - a.total_leads);
