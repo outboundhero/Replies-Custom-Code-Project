@@ -176,7 +176,17 @@ export async function pushToSheet(
     // No recognizable layout — refuse rather than write a misaligned/blank row.
     return { ok: false, error: `Sheet for ${clientTag} has no "Lead Email" header (found: ${headers.slice(0, 8).map((h) => `"${h}"`).join(", ")}) — refusing to write a misaligned row.` };
   }
-  const row = headers.map((h) => valueByHeader[H(h)] ?? "");
+  // Build the row in the sheet's own column order, matching BY HEADER NAME.
+  // Columns whose header we DON'T recognize (Duplicate Check, # Of Attempts,
+  // Quality Lead Criteria, Status/Notes (Required), and any other client-owned or
+  // formula column) are left as `null` → written as a TRULY EMPTY cell, never an
+  // empty string. Writing "" would OCCUPY the cell and break a client's column
+  // ARRAYFORMULA with #REF! ("array result would overwrite data"). Only the
+  // columns we actually own are ever touched.
+  const row: (string | null)[] = headers.map((h) => {
+    const key = H(h);
+    return Object.prototype.hasOwnProperty.call(valueByHeader, key) ? (valueByHeader[key] ?? "") : null;
+  });
   const lastCol = colLetter(Math.max(headers.length, 1));
 
   // Resolve the tab's numeric id once — appendCells needs it. If metadata can't
@@ -208,7 +218,9 @@ export async function pushToSheet(
             requests: [{
               appendCells: {
                 sheetId: sheetGid,
-                rows: [{ values: row.map((v) => ({ userEnteredValue: { stringValue: String(v ?? "") } })) }],
+                // null → empty CellData ({}) so the cell is left truly untouched
+                // (a client formula column can then fill it); mapped columns → the value.
+                rows: [{ values: row.map((v) => (v === null ? {} : { userEnteredValue: { stringValue: String(v) } })) }],
                 fields: "userEnteredValue",
               },
             }],
