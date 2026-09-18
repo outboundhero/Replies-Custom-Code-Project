@@ -128,6 +128,33 @@ export async function POST(req: NextRequest) {
       if (added.size) await recordRouted([...added]);
     }
 
+    // 2b.5. 45-DAY COOLDOWN GATE. Only nurture a sequence-finished lead once it
+    //   has aged 45 days past finishing — the SAME cutoff auto-push enforces
+    //   (`sequence_finished_at <= now-45d`). This path used to route EVERY
+    //   finished lead immediately, which nurtured brand-new clients' leads on
+    //   go-live day (e.g. CCOC: 138 leads finished + routed the same day). We
+    //   cross-reference the synced finish date and drop leads still in cooldown —
+    //   OR not yet synced (no finish date on file → not eligible yet; the sync
+    //   plus a later run will pick them up once they age).
+    let cooldownExcluded = 0;
+    if (fresh.length > 0) {
+      const NURTURE_DAYS = 45;
+      const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+      const ids = fresh.map((c) => c.obLeadId).filter((x): x is number => typeof x === "number");
+      const eligible = new Set<number>();
+      for (let i = 0; i < ids.length; i += 300) {
+        const { data } = await supabase.from("nurture_sequence_finished")
+          .select("ob_lead_id")
+          .eq("client_tag", clientTag).eq("bison_instance", sourceInstance)
+          .lte("sequence_finished_at", cutoffIso)
+          .in("ob_lead_id", ids.slice(i, i + 300));
+        for (const r of data || []) eligible.add(Number((r as { ob_lead_id: number }).ob_lead_id));
+      }
+      const before = fresh.length;
+      fresh = fresh.filter((c) => typeof c.obLeadId === "number" && eligible.has(c.obLeadId));
+      cooldownExcluded = before - fresh.length;
+    }
+
     // 2c. Sheet-authoritative Meeting-Ready gate: never route a lead the client's
     //     lead-tracking sheet marks "Meeting-Ready Lead" (delivered as a hot
     //     lead). Fail CLOSED if the sheet can't be read — retry shortly.
@@ -170,8 +197,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       fetched: leads.length,        // sequence-finished leads pulled this batch
       eligible: candidates.length,  // after dropping replied/bounced
-      fresh: fresh.length,          // not already routed
+      fresh: fresh.length,          // not already routed, past 45-day cooldown
       alreadyRouted,                // skipped — already added in a prior run
+      cooldownExcluded,             // skipped — finished < 45 days ago (still cooling down)
       sheetMeetingReadyExcluded,    // skipped — marked Meeting-Ready in lead sheet
       skipped,
       added: routed.totalAttached,
