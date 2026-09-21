@@ -18,6 +18,7 @@ import { getCampaignLeadsPage } from "@/lib/outboundhero-api";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedTags } from "@/lib/churn";
+import { fetchNotYetLiveTags, NURTURE_GOLIVE_LAG_DAYS } from "@/lib/google-sheets";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
@@ -50,6 +51,15 @@ export async function POST(req: NextRequest) {
   // Gates.
   if (!(await getMapConfirmedAt(clientTag))) return NextResponse.json({ error: "target-campaign map not confirmed" }, { status: 400 });
   if ((await getChurnedTags()).has(clientTag)) return NextResponse.json({ error: "client is churned" }, { status: 400 });
+  // NURTURE GO-LIVE GATE: don't route nurture for a client before it has launched
+  // (+ the agreed lag). Fail closed on a sheet-read error.
+  try {
+    if ((await fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS)).has(clientTag.toUpperCase())) {
+      return NextResponse.json({ error: "client is not live yet (before go-live + lag) — nurture is blocked until launch" }, { status: 400 });
+    }
+  } catch (e) {
+    return NextResponse.json({ error: `go-live check failed — routing blocked: ${(e as Error).message}` }, { status: 503 });
+  }
 
   const esp = detectCampaignEsp(sourceCampaignName);
   if (!esp) return NextResponse.json({ error: `no ESP detectable in source campaign name "${sourceCampaignName}"` }, { status: 400 });

@@ -110,11 +110,17 @@ export async function fetchGoLiveDates(): Promise<Map<string, string>> {
 }
 
 /**
- * Client tags NOT yet live — their "Go Live Date" is in the FUTURE (strictly
- * after today). A blank/unparseable date is treated as live (never blocks an
- * established client). Used to exclude pre-launch clients from auto-activation.
+ * Client tags NOT yet live — their "Go Live Date" (+ optional `lagDays`) is in
+ * the FUTURE (strictly after today). A blank/unparseable date is treated as live
+ * (never blocks an established client).
+ *
+ * `lagDays = 0` (default): the raw go-live gate — used to keep pre-launch clients
+ * out of campaign auto-activation.
+ * `lagDays > 0`: go-live + a lag — used so NURTURE doesn't start until the agreed
+ * lag past go-live (nurture must not run before the main campaigns have had time
+ * to work). Pass NURTURE_GOLIVE_LAG_DAYS for the nurture push/activation paths.
  */
-export async function fetchNotYetLiveTags(): Promise<Set<string>> {
+export async function fetchNotYetLiveTags(lagDays = 0): Promise<Set<string>> {
   const dates = await fetchGoLiveDates();
   const today = new Date();
   const todayNum = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
@@ -122,13 +128,23 @@ export async function fetchNotYetLiveTags(): Promise<Set<string>> {
   for (const [tag, raw] of dates) {
     const m = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/); // M/D/YYYY or M-D-YY
     if (!m) continue; // blank / unrecognized → treat as live
-    let [, mm, dd, yy] = m;
+    const [, mm, dd, yy] = m;
     let y = Number(yy); if (y < 100) y += 2000;
-    const dateNum = y * 10000 + Number(mm) * 100 + Number(dd);
-    if (dateNum > todayNum) out.add(tag); // go-live is in the future → not live yet
+    // Compare against (go-live + lagDays) so nurture waits the agreed lag.
+    const gate = new Date(Date.UTC(y, Number(mm) - 1, Number(dd) + lagDays));
+    const gateNum = gate.getUTCFullYear() * 10000 + (gate.getUTCMonth() + 1) * 100 + gate.getUTCDate();
+    if (gateNum > todayNum) out.add(tag); // go-live (+lag) still in the future → not yet eligible
   }
   return out;
 }
+
+/**
+ * Days AFTER a client's Go Live Date before its nurture may start. Nurture must
+ * never run before the main campaigns have had the agreed lag to work — and NEVER
+ * for a pre-launch client. Set to the value agreed with the team. 0 = nurture may
+ * start the moment the client goes live (still blocks all pre-launch nurture).
+ */
+export const NURTURE_GOLIVE_LAG_DAYS = 0;
 
 /**
  * The set of client TAGS that are CHURNED — defined as Status containing

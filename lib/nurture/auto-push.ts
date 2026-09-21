@@ -19,6 +19,7 @@ import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
+import { fetchNotYetLiveTags, NURTURE_GOLIVE_LAG_DAYS } from "@/lib/google-sheets";
 import { getClientInstances } from "@/lib/nurture/group-routing";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
@@ -83,6 +84,15 @@ export async function runAutoPushForClient(
   // GATE 2: the client must have a group mapping (→ which B2B/B2C instances).
   const instances = await getClientInstances(clientTag);
   if (!instances) { result.error = "no group mapping — sync the group sheet"; return result; }
+
+  // GATE 2b — NURTURE GO-LIVE GATE: never nurture a client before it has launched
+  // (+ the agreed lag). A pre-launch client (Go Live Date in the future) gets ZERO
+  // nurture activity. FAIL CLOSED on a sheet-read error (skip, don't risk it).
+  try {
+    if ((await fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS)).has(clientTag.toUpperCase())) {
+      result.error = "not yet live (before go-live + lag)"; return result;
+    }
+  } catch (e) { result.error = `go-live check failed — skipped: ${(e as Error).message}`; return result; }
 
   // The confirmed map: (instance, esp) → target campaign.
   const map = await getCampaignMap(clientTag);

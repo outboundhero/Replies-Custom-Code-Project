@@ -26,6 +26,7 @@ import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import { listCampaigns, sweepCampaignLeadsCursor, type OutboundLead } from "@/lib/outboundhero-api";
 import { getChurnedTags } from "@/lib/churn";
+import { fetchNotYetLiveTags, NURTURE_GOLIVE_LAG_DAYS } from "@/lib/google-sheets";
 import { getAllClientInstances, getClientInstances } from "@/lib/nurture/group-routing";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { detectCampaignEsp, isCanonicalNurtureCampaign } from "@/lib/nurture/esp";
@@ -209,6 +210,14 @@ export async function recoverStoppedForClient(
   // Gates — identical to the finished-lead flow.
   if (!(await getMapConfirmedAt(TAG))) { res.error = "map not confirmed"; res.noMap = true; return res; }
   if ((await getChurnedTags()).has(TAG)) { res.error = "churned"; return res; }
+  // NURTURE GO-LIVE GATE: never nurture a client until it has actually launched
+  // (+ the agreed lag). A pre-launch client (Go Live Date in the future) must get
+  // ZERO nurture activity — this is the path that pushed 49 stopped leads into
+  // JPDET's nurture before its 9/23 go-live. Best-effort: on a sheet-read failure
+  // we FAIL CLOSED (skip) rather than risk nurturing a pre-launch client.
+  try {
+    if ((await fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS)).has(TAG)) { res.error = "not yet live (before go-live + lag)"; return res; }
+  } catch (e) { res.error = `go-live check failed — skipped: ${(e as Error).message}`; return res; }
   const instances = await getClientInstances(TAG);
   if (!instances) { res.error = "no group mapping"; return res; }
   const map = await getCampaignMap(TAG);

@@ -21,6 +21,7 @@
  */
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { getChurnedTags } from "@/lib/churn";
+import { fetchNotYetLiveTags, NURTURE_GOLIVE_LAG_DAYS } from "@/lib/google-sheets";
 import { mainCompletion, listNurtureCampaigns, isOn } from "@/lib/nurture/campaign-inventory";
 import { pauseCampaign } from "@/lib/outboundhero-api";
 import { autoActivateReadyCampaigns } from "@/lib/nurture/enable-sending";
@@ -44,6 +45,7 @@ export type GateAction =
   | "fired-no-mains"       // no loaded main campaigns → treated as done, fired
   | "paused"               // under 80% → paused live nurture
   | "left-off"             // under 80% → nothing was live to pause
+  | "not-live"             // pre-launch (before go-live + lag) → did NOT fire
   | "error";
 
 export interface GateOutcome {
@@ -68,6 +70,18 @@ export async function evaluateTag(tag: string, opts?: { dryRun?: boolean }): Pro
   try {
     if (await isFired(TAG)) {
       out.action = "already-fired";
+      if (!dry) await recordCheck(TAG);
+      return out;
+    }
+
+    // NURTURE GO-LIVE GATE: a pre-launch client (Go Live Date in the future, + the
+    // agreed lag) must NOT fire and must NOT have its nurture campaigns activated.
+    // Fail closed on a sheet-read error (treat as not-live rather than risk it).
+    let notLive: boolean;
+    try { notLive = (await fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS)).has(TAG); }
+    catch { notLive = true; }
+    if (notLive) {
+      out.action = "not-live";
       if (!dry) await recordCheck(TAG);
       return out;
     }
