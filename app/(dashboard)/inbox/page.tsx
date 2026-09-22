@@ -479,6 +479,11 @@ export default function InboxPage() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
+  // Audit card is MINIMIZED by default (Spencer's request) — the pass/fail badges
+  // stay visible; reasons + suggested client expand on click. Reset to collapsed
+  // whenever a different lead opens so it's always minimized by default.
+  const [auditOpen, setAuditOpen] = useState(false);
+  useEffect(() => { setAuditOpen(false); }, [detail?.id]);
 
   // Real-time lead presence (Google-Docs-style): show who is currently viewing
   // each lead. Identity = the signed-in user; color from getPresenceProfile.
@@ -1676,58 +1681,66 @@ export default function InboxPage() {
               // CW leads use suggested_client for routing messages, shown below).
               const isCW = !!detail.client_tag?.toUpperCase().startsWith("CW");
               const suggested = !isCW && (industryBad || locationBad) ? String(detail.suggested_client || "").trim() : "";
+              const hasDetail = !!industryReason || !!locationReason || metaReasons.length > 0 || (!isCW && (industryBad || locationBad));
               return (
-                <div className="rounded border bg-white px-4 py-3 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Audit</span>
-                    <button onClick={() => handleRunAudit()} disabled={sending === "audit"} className="text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
-                  </div>
-                  {/* Industry */}
-                  {detail.industry_audit && (
-                    <div className="space-y-1">
-                      <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${detail.industry_audit === "Passed" ? "bg-green-50 text-green-700" : detail.industry_audit === "Residential" ? "bg-yellow-50 text-yellow-700" : "bg-red-50 text-red-700"}`}>Industry: {detail.industry_audit}</span>
-                      {industryReason && <p className="text-[11px] text-muted-foreground leading-relaxed">{industryReason.replace(/^industry audit:\s*/i, "")}</p>}
-                    </div>
-                  )}
-                  {/* Location */}
-                  {detail.location_audit && (
-                    <div className="space-y-1">
-                      <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${detail.location_audit === "Passed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>Location: {detail.location_audit}</span>
-                      {locationReason && <p className="text-[11px] text-muted-foreground leading-relaxed">{locationReason.replace(/^location audit:\s*/i, "")}</p>}
-                    </div>
-                  )}
-                  {/* Source / data notes */}
-                  {metaReasons.length > 0 && <p className="text-[10px] text-muted-foreground/70 leading-relaxed border-t pt-1.5">{metaReasons.join(" · ")}</p>}
-                  {/* Suggested client on a failed audit — concise clickable tag
-                      chips (click prefills the reallocation below). */}
-                  {(() => {
-                    const tags = suggested ? parseSuggestedTags(suggested, new Set(clientTags.map((t) => t.toUpperCase()))) : [];
-                    // Failed audit but nothing to suggest — tell the user it ran and found none.
-                    if (!tags.length) {
-                      if (!isCW && (industryBad || locationBad)) {
-                        return <p className="text-[11px] text-muted-foreground border-t pt-2">Suggested client: <span className="italic">no matching client found</span></p>;
-                      }
-                      return null;
-                    }
-                    return (
-                      <div className="flex items-center gap-1.5 flex-wrap border-t pt-2">
-                        <span className="text-[11px] text-muted-foreground">Suggested client:</span>
-                        {tags.map(({ tag, reason }) => (
-                          <span key={tag} className="relative group/sug inline-block">
-                            <button
-                              onClick={() => { setReallocTag(tag); toast.info(`Prefilled reallocation with ${tag}`); }}
-                              className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
-                            >{tag}</button>
-                            {reason && (
-                              <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-80 rounded-md bg-gray-900 px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg group-hover/sug:block whitespace-normal">
-                                {reason}
-                              </span>
-                            )}
-                          </span>
-                        ))}
+                <div className="rounded border bg-white px-4 py-3">
+                  {/* Collapsed header: label + pass/fail badges always visible; a
+                      chevron expands the reasons + suggested client below. */}
+                  <button
+                    type="button"
+                    onClick={() => setAuditOpen((o) => !o)}
+                    className="w-full flex items-center justify-between gap-2 text-left"
+                  >
+                    <span className="flex items-center gap-1.5 flex-wrap min-w-0">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Audit</span>
+                      {detail.industry_audit && (
+                        <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${detail.industry_audit === "Passed" ? "bg-green-50 text-green-700" : detail.industry_audit === "Residential" ? "bg-yellow-50 text-yellow-700" : "bg-red-50 text-red-700"}`}>Ind: {detail.industry_audit}</span>
+                      )}
+                      {detail.location_audit && (
+                        <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${detail.location_audit === "Passed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>Loc: {detail.location_audit}</span>
+                      )}
+                    </span>
+                    <svg className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${auditOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="m6 9 6 6 6-6" /></svg>
+                  </button>
+
+                  {auditOpen && (
+                    <div className="mt-3 space-y-2.5">
+                      <div className="flex justify-end -mt-1">
+                        <button onClick={() => handleRunAudit()} disabled={sending === "audit"} className="text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
                       </div>
-                    );
-                  })()}
+                      {industryReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Industry:</span> {industryReason.replace(/^industry audit:\s*/i, "")}</p>}
+                      {locationReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Location:</span> {locationReason.replace(/^location audit:\s*/i, "")}</p>}
+                      {metaReasons.length > 0 && <p className="text-[10px] text-muted-foreground/70 leading-relaxed border-t pt-1.5">{metaReasons.join(" · ")}</p>}
+                      {(() => {
+                        const tags = suggested ? parseSuggestedTags(suggested, new Set(clientTags.map((t) => t.toUpperCase()))) : [];
+                        if (!tags.length) {
+                          if (!isCW && (industryBad || locationBad)) {
+                            return <p className="text-[11px] text-muted-foreground border-t pt-2">Suggested client: <span className="italic">no matching client found</span></p>;
+                          }
+                          return null;
+                        }
+                        return (
+                          <div className="flex items-center gap-1.5 flex-wrap border-t pt-2">
+                            <span className="text-[11px] text-muted-foreground">Suggested client:</span>
+                            {tags.map(({ tag, reason }) => (
+                              <span key={tag} className="relative group/sug inline-block">
+                                <button
+                                  onClick={() => { setReallocTag(tag); toast.info(`Prefilled reallocation with ${tag}`); }}
+                                  className="text-[11px] font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded hover:bg-primary/20 transition-colors"
+                                >{tag}</button>
+                                {reason && (
+                                  <span className="pointer-events-none absolute left-0 top-full z-30 mt-1 hidden w-80 rounded-md bg-gray-900 px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg group-hover/sug:block whitespace-normal">
+                                    {reason}
+                                  </span>
+                                )}
+                              </span>
+                            ))}
+                          </div>
+                        );
+                      })()}
+                      {!hasDetail && <p className="text-[11px] text-muted-foreground italic">No additional audit detail.</p>}
+                    </div>
+                  )}
                 </div>
               );
             })()}
