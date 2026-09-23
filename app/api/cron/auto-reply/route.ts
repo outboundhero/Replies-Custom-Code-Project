@@ -99,6 +99,28 @@ function isPermanentSendError(error: string | undefined): boolean {
       || status === 404 || status === 410 || status === 422;
 }
 
+/**
+ * Expected, NON-ACTIONABLE outcomes of an AUTOMATED OOO / not-interested send.
+ * These are operational/data conditions, not code faults:
+ *   - build skip: the reply is untracked (no lead_id / campaign_id) or has no
+ *     prior sent email, so there's nothing to re-send.
+ *   - send fail: the sender mailbox was disconnected/removed on Bison since the
+ *     reply came in ("selected sender email id is invalid"), or the reply/lead/
+ *     campaign no longer exists (404/410).
+ * The row is drained either way; we record a quiet activity note instead of an
+ * Error Log entry so the log isn't flooded with routine mailbox-churn noise.
+ * Genuine problems (auth revoked, unknown kind, other 4xx) still log as errors.
+ */
+function isExpectedBuildSkip(reason: string): boolean {
+  return /missing lead_id|missing campaign_id|no sent emails/i.test(reason);
+}
+function isExpectedSendFailure(error: string | undefined): boolean {
+  if (!error) return false;
+  const status = parseInt(error.split(":")[0]?.trim() || "", 10);
+  if (status === 404 || status === 410) return true;            // reply/lead/campaign gone
+  return /selected sender email id is invalid|sender_email_id/i.test(error); // mailbox disconnected
+}
+
 async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok: true; build: BuildResult } | { ok: false; reason: string }> {
   const kind = row.auto_reply_kind || "not_interested";
 
@@ -205,7 +227,11 @@ export async function GET(req: NextRequest) {
 
     const built = await buildBodyForKind(row, instanceKey);
     if (!built.ok) {
-      await logError("inbox", `${kind}-auto-reply`, `build skipped: ${built.reason}`, { row_id: row.id, bison_instance: instanceKey });
+      if (isExpectedBuildSkip(built.reason)) {
+        await logActivity("inbox", `${kind}-auto-reply-skipped`, { lead_email: row.lead_email ?? undefined, details: { row_id: row.id, reason: built.reason, bison_instance: instanceKey } });
+      } else {
+        await logError("inbox", `${kind}-auto-reply`, `build skipped: ${built.reason}`, { row_id: row.id, bison_instance: instanceKey });
+      }
       // Mark sent so we don't loop on a permanently-broken row.
       await supabase
         .from("replies")
@@ -254,13 +280,19 @@ export async function GET(req: NextRequest) {
       sent++;
     } else {
       const permanent = isPermanentSendError(result.error);
-      await logError("inbox", `${kind}-auto-reply`, result.error || "sendReply !ok", {
-        row_id: row.id,
-        reply_id: row.reply_id,
-        lead_email: row.lead_email,
-        bison_instance: instanceKey,
-        permanent,
-      });
+      if (isExpectedSendFailure(result.error)) {
+        // Disconnected/removed sender mailbox (or deleted resource) — routine
+        // churn for an automated re-send, not an actionable error. Log quietly.
+        await logActivity("inbox", `${kind}-auto-reply-skipped`, { lead_email: row.lead_email ?? undefined, details: { row_id: row.id, reason: result.error, bison_instance: instanceKey } });
+      } else {
+        await logError("inbox", `${kind}-auto-reply`, result.error || "sendReply !ok", {
+          row_id: row.id,
+          reply_id: row.reply_id,
+          lead_email: row.lead_email,
+          bison_instance: instanceKey,
+          permanent,
+        });
+      }
       // Permanent failures (disconnected sender, deleted resource, revoked
       // token) never get better on retry — drain the row so the 2-min cron
       // doesn't re-log the same error forever.
