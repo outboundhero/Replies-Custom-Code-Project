@@ -17,6 +17,7 @@ import { getAllClientInstances, type ClientInstances } from "@/lib/nurture/group
 import { getChurnedTags } from "@/lib/churn";
 import { fetchNotYetLiveTags } from "@/lib/google-sheets";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
+import { isCanonicalNurtureCampaign } from "@/lib/nurture/esp";
 import db from "@/lib/db";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -42,6 +43,8 @@ export interface ActivateClientResult {
   blocked: number;
   failed: number;
   error?: string;
+  /** Set when the client was left alone because it isn't launched (no active main). */
+  skipped?: string;
 }
 
 /** Resume all sendable draft/paused Main+Nurture campaigns for one client. */
@@ -56,13 +59,33 @@ export async function activateSendableForClient(
   const re = new RegExp(`^${esc(TAG)}\\s*:`, "i");
   const instances = Array.from(new Set([ci.b2b, ci.b2c]));
 
+  // One pass per instance: figure out whether this client is ALREADY LIVE (has a
+  // main campaign currently Active) and collect its draft/paused sendables.
+  let hasActiveMain = false;
+  const perInstance: Array<{ inst: string; sendable: Awaited<ReturnType<typeof listCampaigns>> }> = [];
   for (const inst of instances) {
-    let cs;
-    try { cs = (await listCampaigns(inst, { statuses: ["draft", "paused"], search: TAG })).filter((c) => re.test(c.name || "")); }
-    catch (e) { await logError("campaign-activation", `${TAG}/${inst}/list`, (e as Error).message); continue; }
+    let all;
+    try {
+      all = (await listCampaigns(inst, { search: TAG }))
+        .filter((c) => re.test(c.name || "") && (extractTagFromCampaignName(c.name) || "").toUpperCase() === TAG);
+    } catch (e) { await logError("campaign-activation", `${TAG}/${inst}/list`, (e as Error).message); continue; }
+    for (const c of all) {
+      if (String(c.status).toLowerCase() === "active" && !isCanonicalNurtureCampaign(c.name || "")) hasActiveMain = true;
+    }
+    perInstance.push({ inst, sendable: all.filter((c) => ["draft", "paused"].includes(String(c.status).toLowerCase())) });
+  }
+
+  // LAUNCH GATE: only MAINTAIN clients that are already live (≥1 active main).
+  // The cron must NEVER perform a client's INITIAL launch — that is a human
+  // decision. A client whose main campaigns are ALL paused/draft is either not
+  // launched yet or deliberately held (e.g. a delayed go-live like CGCWP), so we
+  // leave everything exactly as the operator set it. This is what stops campaigns
+  // from going live on their own the moment a go-live date arrives.
+  if (!hasActiveMain) { out.skipped = "not launched — no active main campaign"; return out; }
+
+  for (const { inst, sendable } of perInstance) {
     let inboxOk: boolean | null = null;
-    for (const c of cs) {
-      if ((extractTagFromCampaignName(c.name) || "").toUpperCase() !== TAG) continue;
+    for (const c of sendable) {
       const leads = c.total_leads ?? 0;
       if (leads <= 0) { out.blocked++; continue; }
       if (inboxOk === null) { try { inboxOk = await hasConnectedInbox(inst, c.id); } catch { inboxOk = false; } }
