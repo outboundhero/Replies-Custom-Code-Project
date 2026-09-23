@@ -993,7 +993,10 @@ export default function DataViewPage() {
 // The grid cells are overflow-hidden, so the full-reply box is rendered in a
 // portal at a fixed position (never clipped). A short close delay lets the mouse
 // travel from the cell into the box so its contents can be scrolled.
-function ReplyHoverCell({ body }: { body: string | null | undefined }) {
+// Tailwind needs the full class names present so JIT keeps them.
+const CLAMP: Record<number, string> = { 2: "line-clamp-2", 3: "line-clamp-3", 4: "line-clamp-4", 5: "line-clamp-5", 6: "line-clamp-6" };
+
+function ReplyHoverCell({ body, clamp = 2, textClass = "text-xs" }: { body: string | null | undefined; clamp?: number; textClass?: string }) {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLParagraphElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1012,7 +1015,7 @@ function ReplyHoverCell({ body }: { body: string | null | undefined }) {
         ref={ref}
         onMouseEnter={open}
         onMouseLeave={scheduleClose}
-        className="text-xs text-foreground/80 line-clamp-2 whitespace-pre-wrap"
+        className={`${textClass} text-foreground/80 ${CLAMP[clamp] ?? "line-clamp-2"} whitespace-pre-wrap`}
       >{body}</p>
       {pos && createPortal(
         <div
@@ -1371,7 +1374,7 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, on
           <button onClick={() => onPatch(i, { expanded: !c.expanded })} className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground">Original reply {c.expanded ? "▾" : "▸ (hover to preview)"}</button>
           {c.expanded
             ? <p className="mt-1 text-xs text-foreground/80 whitespace-pre-wrap">{c.row.reply_we_got || "No content"}</p>
-            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} /></div>}
+            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} clamp={4} textClass="text-[11px] leading-snug" /></div>}
         </div>
 
         {c.loading ? (
