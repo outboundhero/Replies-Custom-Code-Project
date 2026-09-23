@@ -17,7 +17,6 @@ import { getAllClientInstances, type ClientInstances } from "@/lib/nurture/group
 import { getChurnedTags } from "@/lib/churn";
 import { fetchNotYetLiveTags } from "@/lib/google-sheets";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
-import { isCanonicalNurtureCampaign } from "@/lib/nurture/esp";
 import db from "@/lib/db";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -43,11 +42,17 @@ export interface ActivateClientResult {
   blocked: number;
   failed: number;
   error?: string;
-  /** Set when the client was left alone because it isn't launched (no active main). */
-  skipped?: string;
 }
 
-/** Resume all sendable draft/paused Main+Nurture campaigns for one client. */
+/**
+ * Resume all sendable draft/paused Main+Nurture campaigns for one client.
+ *
+ * Whether a client is eligible to be activated at all is decided upstream in
+ * runActivationSweep, and depends ONLY on the Client Tracker "Go Live Date":
+ * a client is auto-activated once its Go Live Date has arrived (today/past),
+ * and left untouched while it is in the future. To delay a launch, the
+ * operator pushes the Go Live Date forward — nothing else gates activation.
+ */
 export async function activateSendableForClient(
   tag: string,
   ci: ClientInstances,
@@ -59,31 +64,13 @@ export async function activateSendableForClient(
   const re = new RegExp(`^${esc(TAG)}\\s*:`, "i");
   const instances = Array.from(new Set([ci.b2b, ci.b2c]));
 
-  // One pass per instance: figure out whether this client is ALREADY LIVE (has a
-  // main campaign currently Active) and collect its draft/paused sendables.
-  let hasActiveMain = false;
-  const perInstance: Array<{ inst: string; sendable: Awaited<ReturnType<typeof listCampaigns>> }> = [];
   for (const inst of instances) {
     let all;
     try {
       all = (await listCampaigns(inst, { search: TAG }))
         .filter((c) => re.test(c.name || "") && (extractTagFromCampaignName(c.name) || "").toUpperCase() === TAG);
     } catch (e) { await logError("campaign-activation", `${TAG}/${inst}/list`, (e as Error).message); continue; }
-    for (const c of all) {
-      if (String(c.status).toLowerCase() === "active" && !isCanonicalNurtureCampaign(c.name || "")) hasActiveMain = true;
-    }
-    perInstance.push({ inst, sendable: all.filter((c) => ["draft", "paused"].includes(String(c.status).toLowerCase())) });
-  }
-
-  // LAUNCH GATE: only MAINTAIN clients that are already live (≥1 active main).
-  // The cron must NEVER perform a client's INITIAL launch — that is a human
-  // decision. A client whose main campaigns are ALL paused/draft is either not
-  // launched yet or deliberately held (e.g. a delayed go-live like CGCWP), so we
-  // leave everything exactly as the operator set it. This is what stops campaigns
-  // from going live on their own the moment a go-live date arrives.
-  if (!hasActiveMain) { out.skipped = "not launched — no active main campaign"; return out; }
-
-  for (const { inst, sendable } of perInstance) {
+    const sendable = all.filter((c) => ["draft", "paused"].includes(String(c.status).toLowerCase()));
     let inboxOk: boolean | null = null;
     for (const c of sendable) {
       const leads = c.total_leads ?? 0;
