@@ -15,6 +15,7 @@ import db from "@/lib/db";
 import { listCampaigns } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES } from "@/lib/bison-instances";
+import { reactivateCompletedNurture } from "@/lib/nurture/reactivate-completed";
 
 export const maxDuration = 300;
 
@@ -73,5 +74,26 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ ok: true, cached: rows.length, failures: failures.length ? failures : undefined });
+  // Revive any nurture campaigns that have gone "completed" (Bison stops them,
+  // silently killing nurture for the client). Reuse the lists we already paged
+  // above so this adds no extra Bison list calls. Never let it sink the refresh.
+  let revived: Awaited<ReturnType<typeof reactivateCompletedNurture>> | undefined;
+  try {
+    const campaignsByInstance: Record<string, typeof rows[number][]> = {};
+    settled.forEach((s, idx) => {
+      if (s.status === "fulfilled") {
+        campaignsByInstance[BISON_INSTANCES[idx].key] = s.value as unknown as typeof rows[number][];
+      }
+    });
+    revived = await reactivateCompletedNurture({ campaignsByInstance });
+  } catch (e) {
+    console.error("[cron/refresh-nurture-campaigns] revive-completed failed:", (e as Error).message);
+  }
+
+  return NextResponse.json({
+    ok: true,
+    cached: rows.length,
+    failures: failures.length ? failures : undefined,
+    revivedCompleted: revived ? { completed: revived.completed, revived: revived.revived, skipped: revived.skipped, failed: revived.failed } : undefined,
+  });
 }
