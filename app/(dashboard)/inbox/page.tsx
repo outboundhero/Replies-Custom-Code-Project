@@ -484,6 +484,10 @@ export default function InboxPage() {
   // whenever a different lead opens so it's always minimized by default.
   const [auditOpen, setAuditOpen] = useState(false);
   useEffect(() => { setAuditOpen(false); }, [detail?.id]);
+  // Client Qualification Rules card — same pattern: minimized by default,
+  // toggled open; reset to collapsed whenever a different lead opens.
+  const [qualOpen, setQualOpen] = useState(false);
+  useEffect(() => { setQualOpen(false); }, [detail?.id]);
 
   // Real-time lead presence (Google-Docs-style): show who is currently viewing
   // each lead. Identity = the signed-in user; color from getPresenceProfile.
@@ -1754,19 +1758,35 @@ export default function InboxPage() {
               const incl = String(rules?.inclusion_locations || "").trim();
               if (!rules || (!excl && !incl)) return null;
               return (
-                <div className="rounded border bg-white px-4 py-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Client Qualification Rules</span>
-                    {detail.client_tag && <span className="text-[10px] font-mono font-semibold text-muted-foreground">{detail.client_tag}</span>}
-                  </div>
-                  <div className="space-y-1">
-                    <span className="inline-block rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">Industry Exclusion</span>
-                    <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/80">{excl || <span className="italic text-muted-foreground">None on file</span>}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">Location Inclusion</span>
-                    <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/80">{incl || <span className="italic text-muted-foreground">None on file</span>}</p>
-                  </div>
+                <div className="rounded border bg-white px-4 py-3">
+                  <button
+                    type="button"
+                    onClick={() => setQualOpen((o) => !o)}
+                    className="w-full flex items-center justify-between gap-2 text-left"
+                  >
+                    <span className="flex items-center gap-1.5 flex-wrap min-w-0">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Client Qualification Rules</span>
+                      {excl && <span className="inline-block rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-700">Industry Exclusion</span>}
+                      {incl && <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700">Location Inclusion</span>}
+                    </span>
+                    <span className="flex items-center gap-2 shrink-0">
+                      {detail.client_tag && <span className="text-[10px] font-mono font-semibold text-muted-foreground">{detail.client_tag}</span>}
+                      <svg className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${qualOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="m6 9 6 6 6-6" /></svg>
+                    </span>
+                  </button>
+
+                  {qualOpen && (
+                    <div className="mt-3 space-y-3">
+                      <div className="space-y-1">
+                        <span className="inline-block rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">Industry Exclusion</span>
+                        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/80">{excl || <span className="italic text-muted-foreground">None on file</span>}</p>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="inline-block rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">Location Inclusion</span>
+                        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/80">{incl || <span className="italic text-muted-foreground">None on file</span>}</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })()}
