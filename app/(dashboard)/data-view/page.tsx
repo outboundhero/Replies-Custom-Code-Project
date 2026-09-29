@@ -37,6 +37,8 @@ const LEAD_CATEGORIES = [
   "Not Interested", "Not Interested (Send Reply)", "Out Of Office", "Person No Longer Employed",
   "Referral Given", "Request for Primary Point of Contact (Send Reply)", "Unqualified (Cleaning)", "Wrong Person",
 ];
+// Categories a Review Queue card can be switched to (Open Response = "no decision").
+const QUEUE_CATEGORIES = LEAD_CATEGORIES.filter((c) => c !== "Open Response");
 const AI_CATEGORIES = [
   "Interested", "Meeting Request", "Follow Up at a Later Date", "Not Interested", "Out Of Office",
   "Wrong Person", "Mailbox No Longer Active", "Automated Error Message", "Automated Catch-All Message",
@@ -364,7 +366,9 @@ export default function DataViewPage() {
   // Client tags for the filter combobox.
   useEffect(() => {
     fetch("/api/inbox?mode=client_tags").then((r) => r.ok ? r.json() : null).then((d) => {
-      if (d?.clientTags) setClientTags(d.clientTags);
+      // The endpoint returns { tags } (reading `clientTags` left this filter empty).
+      const tags = d?.tags ?? d?.clientTags;
+      if (Array.isArray(tags)) setClientTags(tags);
     }).catch(() => {});
   }, []);
 
@@ -1506,10 +1510,15 @@ function ReviewQueue({
               <span className="text-muted-foreground">· {sel.size} selected</span>
               <Button size="sm" className="h-7 text-xs" onClick={approveSelected}>Approve selected</Button>
               <Button variant="outline" size="sm" className="h-7 text-xs" onClick={skipSelected}>Skip selected</Button>
-              <Select value="" onValueChange={(cat) => { onRecategorize([...sel], cat); setSel(new Set()); }}>
-                <SelectTrigger className="h-7 w-[190px] text-xs"><SelectValue placeholder="Set category for selected…" /></SelectTrigger>
-                <SelectContent position="popper" className="max-h-[320px]">{LEAD_CATEGORIES.filter((cat) => cat !== "Open Response").map((cat) => <SelectItem key={cat} value={cat} className="text-xs">{cat}</SelectItem>)}</SelectContent>
-              </Select>
+              <SearchableCombobox
+                value=""
+                onValueChange={(cat) => { onRecategorize([...sel], cat); setSel(new Set()); }}
+                options={QUEUE_CATEGORIES}
+                placeholder="Set category for selected…"
+                searchPlaceholder="Search categories…"
+                triggerClassName="h-7 w-[210px] text-xs"
+                contentClassName="w-[260px]"
+              />
               <button onClick={() => setSel(new Set())} className="text-muted-foreground hover:text-foreground">Clear</button>
             </>
           )}
@@ -1602,15 +1611,19 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, onRecategori
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Select value={c.category} onValueChange={onRecategorize} disabled={c.applied}>
-            <SelectTrigger className="h-7 w-auto max-w-[260px] gap-1.5 text-[11px]" title="Category this lead will be set to when the batch runs">
-              <CatPill cat={c.category} />
-            </SelectTrigger>
-            {/* popper: the trigger holds a pill (not a SelectValue), which Radix's
-                default item-aligned mode needs to position — without it the list
-                opens off-screen. */}
-            <SelectContent position="popper" align="end" className="max-h-[320px]">{LEAD_CATEGORIES.filter((cat) => cat !== "Open Response").map((cat) => <SelectItem key={cat} value={cat} className="text-xs">{cat}</SelectItem>)}</SelectContent>
-          </Select>
+          <div title="Category this lead will be set to when the batch runs">
+            <SearchableCombobox
+              value={c.category}
+              onValueChange={onRecategorize}
+              options={QUEUE_CATEGORIES}
+              renderValue={(v) => <CatPill cat={v} />}
+              disabled={c.applied}
+              align="end"
+              searchPlaceholder="Search categories…"
+              triggerClassName="h-7 w-auto max-w-[280px] gap-1.5 px-2 text-[11px]"
+              contentClassName="w-[260px]"
+            />
+          </div>
           {c.status === "approved" && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">{c.applied ? "Done" : "Approved"}</span>}
           {c.status === "declined" && <span className="rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-600">Declined</span>}
         </div>

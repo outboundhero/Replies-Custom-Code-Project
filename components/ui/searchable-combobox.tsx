@@ -27,6 +27,8 @@ export function SearchableCombobox({
   triggerClassName,
   contentClassName,
   align = "start",
+  renderValue,
+  disabled,
 }: {
   value: string;
   onValueChange: (next: string) => void;
@@ -38,16 +40,23 @@ export function SearchableCombobox({
   triggerClassName?: string;
   contentClassName?: string;
   align?: "start" | "center" | "end";
+  /** Custom trigger content for the current value (e.g. a colored pill). */
+  renderValue?: (value: string) => React.ReactNode;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
+  // Keyboard-highlighted option (index into `filtered`); Enter picks it.
+  const [active, setActive] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const listRef = React.useRef<HTMLDivElement>(null);
 
   // Clear the search box every time the popover opens so the user
   // doesn't see stale text from a previous interaction.
   React.useEffect(() => {
     if (open) {
       setQuery("");
+      setActive(0);
       // Wait one tick so the input is mounted before focusing.
       setTimeout(() => inputRef.current?.focus(), 0);
     }
@@ -63,21 +72,42 @@ export function SearchableCombobox({
     onValueChange(next);
     setOpen(false);
   }
+  // New search text → highlight the top match again.
+  const [activeFor, setActiveFor] = React.useState(query);
+  if (activeFor !== query) { setActiveFor(query); setActive(0); }
+  function onSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!filtered.length) return;
+      const next = (active + (e.key === "ArrowDown" ? 1 : -1) + filtered.length) % filtered.length;
+      setActive(next);
+      listRef.current?.querySelectorAll<HTMLElement>("[data-option]")[next]?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const opt = filtered[Math.min(active, filtered.length - 1)];
+      if (opt !== undefined) pick(opt);
+    }
+  }
 
   return (
     <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
       <PopoverPrimitive.Trigger asChild>
         <button
           type="button"
+          disabled={disabled}
           className={cn(
-            "flex items-center justify-between gap-2 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
+            "flex items-center justify-between gap-2 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-60",
             triggerClassName,
             className,
           )}
         >
-          <span className={cn("truncate text-left", !value && "text-muted-foreground")}>
-            {value || placeholder}
-          </span>
+          {value && renderValue ? (
+            <span className="min-w-0 truncate text-left">{renderValue(value)}</span>
+          ) : (
+            <span className={cn("truncate text-left", !value && "text-muted-foreground")}>
+              {value || placeholder}
+            </span>
+          )}
           <ChevronDown className="size-4 opacity-50 shrink-0" />
         </button>
       </PopoverPrimitive.Trigger>
@@ -100,6 +130,7 @@ export function SearchableCombobox({
                 ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={onSearchKeyDown}
                 placeholder={searchPlaceholder}
                 className="h-7 text-xs pl-7"
               />
@@ -107,20 +138,23 @@ export function SearchableCombobox({
           </div>
 
           {/* Scrollable list */}
-          <div className="max-h-60 overflow-y-auto py-1">
+          <div ref={listRef} className="max-h-60 overflow-y-auto py-1">
             {filtered.length === 0 ? (
               <div className="px-3 py-2 text-xs text-muted-foreground">{emptyText}</div>
             ) : (
-              filtered.map((opt) => {
+              filtered.map((opt, idx) => {
                 const selected = opt === value;
                 return (
                   <button
                     key={opt}
                     type="button"
+                    data-option
                     onClick={() => pick(opt)}
+                    onMouseEnter={() => setActive(idx)}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 px-3 py-1.5 text-xs text-left hover:bg-accent hover:text-accent-foreground cursor-pointer",
                       selected && "bg-accent/40",
+                      idx === active && "bg-accent text-accent-foreground",
                     )}
                   >
                     <span className="truncate">{opt}</span>
