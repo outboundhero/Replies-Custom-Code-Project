@@ -188,6 +188,19 @@ export default function DataViewPage() {
 
   // ── Columns (resize + reorder, persisted) ──
   const [cols, setCols] = useState<ColDef[]>(DEFAULT_COLS);
+  // Visible width of the grid's scroll area — on screens wider than the columns
+  // add up to, the leftover goes to the Reply column (see displayCols) instead
+  // of leaving an empty band on the right.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [gridW, setGridW] = useState(0);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setGridW(el.clientWidth));
+    ro.observe(el);
+    setGridW(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
   useEffect(() => {
     try {
       type Saved = { id: string; width: number }[] | null;
@@ -671,7 +684,11 @@ export default function DataViewPage() {
   }
 
   const selectedCount = selected.size;
-  const totalWidth = 48 + cols.reduce((s, c) => s + c.width, 0);
+  const baseWidth = 48 + cols.reduce((s, c) => s + c.width, 0);
+  // Render-only stretch: saved widths are untouched; Reply absorbs any spare room.
+  const fillExtra = Math.max(0, gridW - baseWidth);
+  const displayCols = fillExtra ? cols.map((c) => (c.id === "reply" ? { ...c, width: c.width + fillExtra } : c)) : cols;
+  const totalWidth = baseWidth + fillExtra;
 
   // ── Cell renderer ──
   function renderCell(c: ColDef, r: Row) {
@@ -775,7 +792,7 @@ export default function DataViewPage() {
             <input type="checkbox" readOnly checked={isSel} className={`h-3.5 w-3.5 cursor-pointer accent-primary ${isSel ? "inline-block" : "hidden group-hover/row:inline-block"}`} />
           </div>
         </td>
-        {cols.map((c, ci) => (
+        {displayCols.map((c, ci) => (
           <td key={c.id} className={`${rowBg} ${ci === 0 ? "sticky left-12 z-10" : ""} overflow-hidden`} style={{ width: c.width, minWidth: c.width, maxWidth: c.width }}>
             {ci === 0 ? (
               <div className="flex items-center gap-1 min-w-0">
@@ -929,7 +946,7 @@ export default function DataViewPage() {
         )}
 
         {/* ── Grid ── */}
-        <div className="flex-1 overflow-auto bg-[#fafafa]">
+        <div ref={gridRef} className="flex-1 overflow-auto bg-[#fafafa]">
           {error && <div className="m-4 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
           {loading ? (
             <div className="p-6 space-y-2">{Array.from({ length: 9 }).map((_, i) => <div key={i} className="h-12 rounded-lg bg-muted/40 animate-pulse" />)}</div>
@@ -946,7 +963,7 @@ export default function DataViewPage() {
                     <th className="bg-[#f6f6f7] border-b border-r border-border/70 !px-0 text-center sticky left-0 z-30" style={{ width: 48, minWidth: 48 }}>
                       <input type="checkbox" checked={allLoadedSelected} onChange={toggleAll} className="h-3.5 w-3.5 cursor-pointer accent-primary align-middle" />
                     </th>
-                    {cols.map((c, ci) => {
+                    {displayCols.map((c, ci) => {
                       const isSorted = c.sortCol && sortCol === c.sortCol;
                       return (
                         <th
