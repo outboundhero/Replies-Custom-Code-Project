@@ -543,14 +543,16 @@ export default function DataViewPage() {
     });
     setQueueCategory(chosenCategory);
     setQueue(cards);
-    cards.forEach((card, i) => prepareCard(i, card));
+    cards.forEach((card) => prepareCard(card));
   }
   // Async prep for the card types that need server data before they can be
   // approved. A card whose category changed since the request started ignores
   // the stale response.
-  function prepareCard(i: number, card: ReviewCard) {
+  // Matched by lead (row id), not by position: a partial Run batch removes cards
+  // from the queue while these requests are in flight, which shifts positions.
+  function prepareCard(card: ReviewCard) {
     const stillFor = (patch: Partial<ReviewCard>) =>
-      setQueue((prev) => prev ? prev.map((c, j) => (j === i && c.category === card.category ? { ...c, ...patch } : c)) : prev);
+      setQueue((prev) => prev ? prev.map((c) => (c.row.id === card.row.id && c.category === card.category ? { ...c, ...patch } : c)) : prev);
     if (card.type === "change-of-target") {
       mutate({ action: "prepare-change-of-target", id: card.row.id }).then((d) => {
         stillFor(d.ok
@@ -581,7 +583,7 @@ export default function DataViewPage() {
     }
     if (!rebuilt.size) return;
     setQueue((prev) => prev ? prev.map((c, j) => (rebuilt.has(j) && !c.applied ? rebuilt.get(j)! : c)) : prev);
-    rebuilt.forEach((card, i) => prepareCard(i, card));
+    rebuilt.forEach((card) => prepareCard(card));
   }
   // Do not contact (personal mailbox) / Blacklist company (business domain),
   // applied immediately. Both also mark the lead "Do Not Contact" — the DNC
@@ -593,7 +595,7 @@ export default function DataViewPage() {
     const domain = extractDomain(email);
     if (!email || !domain) { toast.error("No email on this lead"); return; }
     const kind: "email" | "domain" = isPersonalDomain(domain) ? "email" : "domain";
-    patchCard(i, { blacklisting: true });
+    patchCardByRow(c.row.id, { blacklisting: true });
     try {
       if (kind === "domain") {
         const d = await mutate({ action: "blacklist-domain", id: c.row.id, email });
@@ -601,18 +603,22 @@ export default function DataViewPage() {
       }
       const d = await mutate({ action: "update-category", id: c.row.id, category: "Do Not Contact" });
       if (!d.ok) throw new Error(d.error || "Couldn't mark Do Not Contact");
-      patchCard(i, {
+      patchCardByRow(c.row.id, {
         ...buildCard(c.row, "Do Not Contact", "approved"),
         applied: true, blacklisted: kind, blacklisting: false,
       });
       toast.success(kind === "domain" ? `Blacklisted ${domain}` : `Blacklisted ${email}`);
     } catch (e) {
-      patchCard(i, { blacklisting: false });
+      patchCardByRow(c.row.id, { blacklisting: false });
       toast.error((e as Error).message);
     }
   }
   function patchCard(i: number, patch: Partial<ReviewCard>) {
     setQueue((prev) => prev ? prev.map((c, j) => (j === i ? { ...c, ...patch } : c)) : prev);
+  }
+  // For results that arrive after an await — the card may have moved position.
+  function patchCardByRow(rowId: unknown, patch: Partial<ReviewCard>) {
+    setQueue((prev) => prev ? prev.map((c) => (c.row.id === rowId ? { ...c, ...patch } : c)) : prev);
   }
   // Apply a patch to many cards at once (bulk approve / skip in the review queue).
   function patchCards(indices: number[], patch: Partial<ReviewCard>) {
@@ -621,9 +627,9 @@ export default function DataViewPage() {
   }
   async function regenerateCard(i: number) {
     const c = queue?.[i]; if (!c) return;
-    patchCard(i, { regenerating: true });
+    patchCardByRow(c.row.id, { regenerating: true });
     const d = await mutate({ action: "regenerate-reply", id: c.row.id, currentDraft: c.message, instructions: c.instructions, leadName: c.toName });
-    patchCard(i, d?.ok && d.message ? { message: d.message, instructions: "", regenerating: false } : { regenerating: false });
+    patchCardByRow(c.row.id, d?.ok && d.message ? { message: d.message, instructions: "", regenerating: false } : { regenerating: false });
     if (!d?.ok) toast.error(d?.error || "Couldn't regenerate");
   }
   const reviewedCount = queue ? queue.filter((c) => c.status !== "pending").length : 0;
@@ -631,14 +637,21 @@ export default function DataViewPage() {
   const allReviewed = !!queue && reviewedCount === queue.length;
 
   async function runBatch() {
-    if (!queue || !allReviewed) return;
-    // Snapshot the cards, then close the review modal immediately so the operator
-    // isn't held in it — progress is shown in the top panel over the grid.
-    const cards = queue;
+    if (!queue || running) return;
+    // Run whatever has been REVIEWED (approved or declined) — the operator can do
+    // this at any time. Cards still pending stay in the queue to review and run
+    // later; the modal only closes once nothing is left.
+    const cards = queue.filter((c) => c.status !== "pending");
+    if (!cards.length) return;
+    const remaining = queue.filter((c) => c.status === "pending");
     const actionLabel = cards.every((c) => c.type === "category") ? "Applying categories" : "Running batch";
     setRunning(true);
-    setQueue(null);
-    setSelected(new Set());
+    if (remaining.length) {
+      setQueue(remaining);
+    } else {
+      setQueue(null);
+      setSelected(new Set());
+    }
     setBatchProgress({ total: cards.length, done: 0, ok: 0, fail: 0, label: actionLabel, running: true });
 
     let ok = 0, fail = 0, done = 0;
@@ -1085,6 +1098,7 @@ export default function DataViewPage() {
           approved={approvedCount}
           allReviewed={allReviewed}
           running={running}
+          progress={batchProgress}
           onClose={() => !running && setQueue(null)}
           onPatch={patchCard}
           onPatchMany={patchCards}
@@ -1418,10 +1432,11 @@ function RecRow({ label, name, email }: { label: string; name?: string | null; e
 
 // ── Bulk Review Queue overlay ──────────────────────────────────────────────
 function ReviewQueue({
-  cards, baseCategory, reviewed, approved, allReviewed, running, onClose, onPatch, onPatchMany, onRegenerate, onRun,
+  cards, baseCategory, reviewed, approved, allReviewed, running, progress, onClose, onPatch, onPatchMany, onRegenerate, onRun,
   onRecategorize, onBlacklist,
 }: {
   cards: ReviewCard[]; baseCategory: string; reviewed: number; approved: number; allReviewed: boolean; running: boolean;
+  progress?: { total: number; done: number; ok: number; fail: number } | null;
   onClose: () => void; onPatch: (i: number, p: Partial<ReviewCard>) => void;
   onPatchMany: (indices: number[], p: Partial<ReviewCard>) => void;
   onRegenerate: (i: number) => void; onRun: () => void;
@@ -1434,6 +1449,15 @@ function ReviewQueue({
   // Multi-select + drag-select across cards, so the flagged (doubtful) ones can be
   // approved / skipped in bulk instead of one at a time.
   const [sel, setSel] = useState<Set<number>>(new Set());
+  // Selection is by position — reset it when a partial run removes cards
+  // (adjust-state-during-render, so no extra effect pass).
+  const [selForLen, setSelForLen] = useState(cards.length);
+  if (selForLen !== cards.length) { setSelForLen(cards.length); setSel(new Set()); }
+  // Closing discards the queue — don't silently lose reviewed-but-not-run cards.
+  const confirmClose = () => {
+    if (reviewed > 0 && !window.confirm(`Close without running? The ${reviewed} card${reviewed === 1 ? "" : "s"} you reviewed won't be applied.`)) return;
+    onClose();
+  };
   const dragging = useRef(false);
   const dragAdd = useRef(true);
   useEffect(() => {
@@ -1469,7 +1493,7 @@ function ReviewQueue({
                 <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${(reviewed / cards.length) * 100}%` }} />
               </div>
             </div>
-            <button onClick={onClose} disabled={running} className="text-2xl leading-none text-muted-foreground hover:text-foreground disabled:opacity-40">×</button>
+            <button onClick={confirmClose} disabled={running} className="text-2xl leading-none text-muted-foreground hover:text-foreground disabled:opacity-40">×</button>
           </div>
         </div>
 
@@ -1504,13 +1528,21 @@ function ReviewQueue({
 
         <div className="border-t bg-white px-6 py-3 flex items-center justify-between">
           <p className="text-xs text-muted-foreground">
-            {approved} approved · {cards.length - reviewed} awaiting review
-            {!allReviewed && <span className="text-amber-600"> — review every card to run the batch</span>}
+            {running && progress ? (
+              <span className="font-medium text-foreground">
+                Running {progress.done} / {progress.total}{progress.fail ? ` · ${progress.fail} failed` : ""} — you can keep reviewing the rest
+              </span>
+            ) : (
+              <>
+                {approved} approved{reviewed - approved > 0 ? ` · ${reviewed - approved} declined` : ""} · {cards.length - reviewed} still to review
+                {reviewed > 0 && !allReviewed && <span className="text-muted-foreground/80"> — Run batch sends the reviewed ones now; the rest stay here</span>}
+              </>
+            )}
           </p>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" className="h-9 text-xs" onClick={onClose} disabled={running}>Cancel</Button>
-            <Button size="sm" className="h-9 text-xs" onClick={onRun} disabled={!allReviewed || running}>
-              {running ? "Running…" : `Run batch (${approved} approved)`}
+            <Button variant="outline" size="sm" className="h-9 text-xs" disabled={running} onClick={confirmClose}>{allReviewed ? "Cancel" : "Close"}</Button>
+            <Button size="sm" className="h-9 text-xs" onClick={onRun} disabled={reviewed === 0 || running}>
+              {running ? "Running…" : `Run batch (${approved} approved${reviewed - approved > 0 ? `, ${reviewed - approved} declined` : ""})`}
             </Button>
           </div>
         </div>
