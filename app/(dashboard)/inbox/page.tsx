@@ -187,7 +187,7 @@ function sendReplyTemplateFor(category: string, d: ReplyDetail): string {
   if (category === PRIMARY_CONTACT_CATEGORY) return resolvePrimaryContactTemplate(d);
   if (category === "Not Interested (Send Reply)") {
     return buildNotInterestedReply(
-      String(d.lead_name || d.from_name || ""),
+      { leadName: d.lead_name, fromName: d.from_name, replyBody: d.reply_we_got, leadEmail: d.lead_email },
       String(d.sender_name || ""),
     );
   }

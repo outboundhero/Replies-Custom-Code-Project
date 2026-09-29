@@ -36,7 +36,10 @@ export function sendReplyTemplateFor(category: string, d: Row): string {
     return primaryContactFallback(leadFirstName(d), String(d.sender_name || "").trim().split(/\s+/)[0] || "");
   }
   if (category === "Not Interested (Send Reply)") {
-    return buildNotInterestedReply(String(d.lead_name || d.from_name || ""), String(d.sender_name || ""));
+    return buildNotInterestedReply(
+      { leadName: d.lead_name, fromName: d.from_name, replyBody: d.reply_we_got, leadEmail: d.lead_email },
+      String(d.sender_name || ""),
+    );
   }
   return String(d.our_reply || "");
 }

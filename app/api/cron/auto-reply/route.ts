@@ -45,6 +45,8 @@ interface DueRow {
   campaign_id: number | null;
   lead_email: string | null;
   lead_name: string | null;
+  from_name: string | null;
+  reply_we_got: string | null;
   sender_name: string | null;
   lead_category: string | null;
   auto_reply_kind: string | null;
@@ -134,7 +136,10 @@ async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok:
   // MUST be PLAIN TEXT — passing HTML here double-escapes it and the recipient
   // sees literal <p>/<br> tags. (This was the OOO/not-interested tag bug.)
   if (kind === "not_interested") {
-    const plain = buildNotInterestedReply(row.lead_name, row.sender_name);
+    const plain = buildNotInterestedReply(
+      { leadName: row.lead_name, fromName: row.from_name, replyBody: row.reply_we_got, leadEmail: row.lead_email },
+      row.sender_name,
+    );
     return { ok: true, build: { message: plain, plainSummary: plain } };
   }
 
@@ -171,7 +176,7 @@ export async function GET(req: NextRequest) {
   const { data: due, error } = await supabase
     .from("replies")
     .select(
-      "id, reply_id, sender_id, lead_id, campaign_id, lead_email, lead_name, sender_name, " +
+      "id, reply_id, sender_id, lead_id, campaign_id, lead_email, lead_name, from_name, reply_we_got, sender_name, " +
       "lead_category, auto_reply_kind, auto_reply_due_at, bison_instance, email_subject, " +
       "cc_name_1, cc_email_1, cc_name_2, cc_email_2, cc_name_3, cc_email_3, " +
       "cc_name_4, cc_email_4, cc_name_5, cc_email_5, cc_name_6, cc_email_6, " +
