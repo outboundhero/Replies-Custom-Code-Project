@@ -506,7 +506,17 @@ export async function POST(req: NextRequest) {
       }
 
       case "send-reply": {
-        const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply } = body;
+        const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply, notIfSentSince } = body;
+        // Retry guard (Data View "Retry failed"): if ANY reply reached this lead
+        // after the original attempt — the 5–10 min automatic reply, a queued
+        // server retry, or someone sending by hand — don't send a second one.
+        if (notIfSentSince) {
+          const { data: cur } = await supabase.from("replies").select("last_sent_at").eq("id", id).single();
+          if (cur?.last_sent_at && new Date(cur.last_sent_at).getTime() >= new Date(notIfSentSince).getTime()) {
+            if (clearAutoReply) await supabase.from("replies").update({ auto_reply_due_at: null }).eq("id", id);
+            return NextResponse.json({ ok: true, skipped: "already-sent", lastSentAt: cur.last_sent_at });
+          }
+        }
         let result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
         // "The selected sender email id is invalid": the stored inbox id is stale
         // (the inbox was removed or re-added under a NEW id). If the inbox is still

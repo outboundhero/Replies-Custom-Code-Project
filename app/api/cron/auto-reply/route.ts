@@ -280,6 +280,13 @@ export async function GET(req: NextRequest) {
         .update({
           auto_reply_sent_at: new Date().toISOString(),
           sent_reply: built.build.plainSummary,
+          // Same "a reply went out" stamp as a manual send — the batch Retry
+          // checks it so a retried send never doubles up on this one.
+          last_sent_at: new Date().toISOString(),
+          // Clearing send_error tells the send-retry queue a reply already went
+          // out, so a queued retry of an earlier failed manual send stands down.
+          send_error: null,
+          send_error_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq("id", row.id);

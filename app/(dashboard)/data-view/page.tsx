@@ -118,6 +118,28 @@ interface ReviewCard {
   applied?: boolean;
   blacklisted?: "email" | "domain";
   blacklisting?: boolean;
+  /** When this card was first run — a retry won't send if the lead got any reply after it. */
+  retrySince?: string;
+  /** Set on a retried card: the step it failed at, and the category it had then. */
+  retryFrom?: "category" | "send";
+  retryCategory?: string;
+}
+
+interface BatchFailure { card: ReviewCard; step: "category" | "send"; error: string }
+
+/** Bison errors arrive as `400: {"data":{"message":"…"}}` — show just the message. */
+function shortSendError(raw: string | null | undefined): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "Unknown error";
+  const m = s.match(/^\d{3}:\s*([\s\S]*)$/);
+  if (m) {
+    try {
+      const j = JSON.parse(m[1]);
+      const msg = j?.data?.message || j?.message || j?.error;
+      if (msg) return String(msg).slice(0, 200);
+    } catch { /* not JSON */ }
+  }
+  return s.slice(0, 200);
 }
 
 /** Build a review card for `row` targeting `category`. Only change-of-target and
@@ -317,8 +339,9 @@ export default function DataViewPage() {
   // Batch progress panel shown at the top of the grid while a Run-batch runs
   // (the review modal closes immediately so the operator isn't stuck in it).
   const [batchProgress, setBatchProgress] = useState<
-    { total: number; done: number; ok: number; fail: number; label: string; running: boolean } | null
+    { total: number; done: number; ok: number; fail: number; label: string; running: boolean; alreadySent?: number } | null
   >(null);
+  const [batchFailures, setBatchFailures] = useState<BatchFailure[]>([]);
 
   // When grouping, sort server-side by the group column so groups arrive
   // contiguous and complete (not fragmented across pages).
@@ -640,6 +663,71 @@ export default function DataViewPage() {
   const approvedCount = queue ? queue.filter((c) => c.status === "approved").length : 0;
   const allReviewed = !!queue && reviewedCount === queue.length;
 
+  // Run ONE card. A card retried after failing at the SEND step skips the
+  // category step: re-applying "Not Interested (Send Reply)" would re-arm the
+  // 5–10 min automatic reply, and the send is guarded server-side
+  // (notIfSentSince) so a lead who already got any reply isn't sent another.
+  async function runCard(c: ReviewCard): Promise<{ ok: true; skipped?: string } | { ok: false; step: "category" | "send"; error: string }> {
+    const fail = (step: "category" | "send", d: { error?: string } | null | undefined) =>
+      ({ ok: false as const, step, error: shortSendError(d?.error) });
+    const setCategory = async (category: string) => {
+      const d = await mutate({ action: "update-category", id: c.row.id, category });
+      return d?.ok ? null : fail("category", d);
+    };
+    const skipCategory = c.retryFrom === "send" && c.category === c.retryCategory;
+    if (c.applied) return { ok: true }; // done inside the queue (Do not contact / Blacklist company)
+    if (c.status === "declined" && c.type === "category") return { ok: true, skipped: "skipped" };
+    if (c.status === "declined") {
+      return (await setCategory(c.type === "change-of-target" ? "Open Response" : nonSendCategoryFor(c.category))) ?? { ok: true };
+    }
+    if (c.type === "category") return (await setCategory(c.category)) ?? { ok: true };
+    if (c.type === "send-reply") {
+      if (!skipCategory) { const f = await setCategory(c.category); if (f) return f; }
+      const d = await mutate({
+        action: "send-reply", id: c.row.id, replyId: c.row.reply_id, senderEmailId: c.senderEmailId,
+        message: c.message, toEmail: c.toEmail, toName: c.toName,
+        ccEmails: c.cc.filter((r) => r.email).map((r) => ({ name: r.name, email_address: r.email })),
+        bccEmails: c.bcc.filter((r) => r.email).map((r) => ({ name: r.name, email_address: r.email })),
+        clearAutoReply: true,
+        notIfSentSince: c.retrySince,
+      });
+      if (!d?.ok) return fail("send", d);
+      return d.skipped ? { ok: true, skipped: "already-sent" } : { ok: true };
+    }
+    if (!skipCategory) { const f = await setCategory("Change Of Target"); if (f) return f; }
+    const d = await mutate({
+      action: "send-change-of-target", id: c.row.id, senderEmailId: c.senderEmailId,
+      toEmail: c.toEmail, toName: c.toName, subject: c.subject, message: c.message,
+    });
+    return d?.ok ? { ok: true } : fail("send", d);
+  }
+
+  // Run a set of cards with the top progress panel; failures are kept (with the
+  // step + reason) so they can be retried or reopened for review.
+  async function processCards(cards: ReviewCard[], label: string) {
+    setRunning(true);
+    setBatchFailures([]);
+    setBatchProgress({ total: cards.length, done: 0, ok: 0, fail: 0, label, running: true });
+    let ok = 0, done = 0, alreadySent = 0;
+    const failures: BatchFailure[] = [];
+    for (const c of cards) {
+      let r: Awaited<ReturnType<typeof runCard>>;
+      try { r = await runCard(c); }
+      catch (e) { r = { ok: false, step: c.type === "category" ? "category" : "send", error: shortSendError(String((e as Error)?.message || e)) }; }
+      if (r.ok) { ok++; if (r.skipped === "already-sent") alreadySent++; }
+      else failures.push({ card: c, step: r.step, error: r.error });
+      done++;
+      setBatchProgress({ total: cards.length, done, ok, fail: failures.length, label, running: true, alreadySent });
+    }
+    setRunning(false);
+    setBatchFailures(failures);
+    setBatchProgress({ total: cards.length, done, ok, fail: failures.length, label, running: false, alreadySent });
+    toast[failures.length ? "warning" : "success"](
+      `${label.startsWith("Retry") ? "Retry" : "Batch"} done — ${ok} applied${alreadySent ? ` (${alreadySent} already had a reply, not re-sent)` : ""}${failures.length ? `, ${failures.length} failed` : ""}`,
+    );
+    load(true);
+  }
+
   async function runBatch() {
     if (!queue || running) return;
     // Run whatever has been REVIEWED (approved or declined) — the operator can do
@@ -648,56 +736,49 @@ export default function DataViewPage() {
     const cards = queue.filter((c) => c.status !== "pending");
     if (!cards.length) return;
     const remaining = queue.filter((c) => c.status === "pending");
-    const actionLabel = cards.every((c) => c.type === "category") ? "Applying categories" : "Running batch";
-    setRunning(true);
     if (remaining.length) {
       setQueue(remaining);
     } else {
       setQueue(null);
       setSelected(new Set());
     }
-    setBatchProgress({ total: cards.length, done: 0, ok: 0, fail: 0, label: actionLabel, running: true });
+    // Stamp each card with when it was first attempted, so a later retry can
+    // tell whether a reply already reached the lead since then.
+    const startedAt = new Date().toISOString();
+    const stamped = cards.map((c) => ({ ...c, retrySince: c.retrySince ?? startedAt }));
+    await processCards(stamped, cards.every((c) => c.type === "category") ? "Applying categories" : "Running batch");
+  }
 
-    let ok = 0, fail = 0, done = 0;
-    for (const c of cards) {
-      try {
-        if (c.applied) {
-          ok++; // already done from inside the queue (Do not contact / Blacklist company)
-        } else if (c.status === "declined" && c.type === "category") {
-          // Skipped plain category change → leave the lead exactly as it was.
-        } else if (c.status === "declined") {
-          const target = c.type === "change-of-target" ? "Open Response" : nonSendCategoryFor(c.category);
-          await mutate({ action: "update-category", id: c.row.id, category: target });
-          ok++;
-        } else if (c.type === "category") {
-          const d = await mutate({ action: "update-category", id: c.row.id, category: c.category });
-          d.ok ? ok++ : fail++;
-        } else if (c.type === "send-reply") {
-          await mutate({ action: "update-category", id: c.row.id, category: c.category });
-          const d = await mutate({
-            action: "send-reply", id: c.row.id, replyId: c.row.reply_id, senderEmailId: c.senderEmailId,
-            message: c.message, toEmail: c.toEmail, toName: c.toName,
-            ccEmails: c.cc.filter((r) => r.email).map((r) => ({ name: r.name, email_address: r.email })),
-            bccEmails: c.bcc.filter((r) => r.email).map((r) => ({ name: r.name, email_address: r.email })),
-            clearAutoReply: true,
-          });
-          d.ok ? ok++ : fail++;
-        } else {
-          await mutate({ action: "update-category", id: c.row.id, category: "Change Of Target" });
-          const d = await mutate({
-            action: "send-change-of-target", id: c.row.id, senderEmailId: c.senderEmailId,
-            toEmail: c.toEmail, toName: c.toName, subject: c.subject, message: c.message,
-          });
-          d.ok ? ok++ : fail++;
-        }
-      } catch { fail++; }
-      done++;
-      setBatchProgress({ total: cards.length, done, ok, fail, label: actionLabel, running: true });
+  /** Re-run only the failed cards, from the step each one failed at. */
+  async function retryFailed() {
+    if (running || !batchFailures.length) return;
+    const cards = batchFailures.map((f) => ({
+      ...f.card,
+      retryFrom: f.step, retryCategory: f.card.category,
+      retrySince: f.card.retrySince ?? new Date().toISOString(),
+    }));
+    await processCards(cards, `Retrying ${cards.length} failed`);
+  }
+
+  /** Reopen the failed cards in the Review Queue to fix them (e.g. a bad address) first. */
+  function reviewFailed() {
+    if (running || !batchFailures.length) return;
+    const cards = batchFailures.map((f) => ({
+      ...f.card, status: "pending" as const, error: undefined,
+      retryFrom: f.step, retryCategory: f.card.category,
+      retrySince: f.card.retrySince ?? new Date().toISOString(),
+    }));
+    // A partial run can leave the queue open — add the failed cards back to it
+    // rather than replacing the ones still waiting for review.
+    if (queue?.length) {
+      const have = new Set(queue.map((c) => c.row.id));
+      setQueue([...queue, ...cards.filter((c) => !have.has(c.row.id))]);
+    } else {
+      setQueueCategory(cards[0].category);
+      setQueue(cards);
     }
-    setRunning(false);
-    setBatchProgress({ total: cards.length, done, ok, fail, label: actionLabel, running: false });
-    toast[fail ? "warning" : "success"](`Batch done — ${ok} applied${fail ? `, ${fail} failed` : ""}`);
-    load(true);
+    setBatchFailures([]);
+    setBatchProgress(null);
   }
 
   const selectedCount = selected.size;
@@ -945,10 +1026,11 @@ export default function DataViewPage() {
                     <span className="ml-2 text-xs font-normal text-muted-foreground">
                       {batchProgress.done} / {batchProgress.total}
                       {batchProgress.fail > 0 && <span className="text-amber-600"> · {batchProgress.fail} failed</span>}
+                      {!!batchProgress.alreadySent && <span> · {batchProgress.alreadySent} already had a reply (not re-sent)</span>}
                     </span>
                   </p>
                   {!batchProgress.running && (
-                    <button onClick={() => setBatchProgress(null)} className="text-xs font-medium text-muted-foreground hover:text-foreground">Dismiss</button>
+                    <button onClick={() => { setBatchProgress(null); setBatchFailures([]); }} className="text-xs font-medium text-muted-foreground hover:text-foreground">Dismiss</button>
                   )}
                 </div>
                 <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
@@ -957,6 +1039,34 @@ export default function DataViewPage() {
                     style={{ width: `${batchProgress.total ? (batchProgress.done / batchProgress.total) * 100 : 0}%` }}
                   />
                 </div>
+                {/* Failures: why each one failed + Retry / fix-and-rerun. */}
+                {!batchProgress.running && batchFailures.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-amber-900">
+                        {batchFailures.length} {batchFailures.length === 1 ? "lead" : "leads"} didn&apos;t go through
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Button variant="outline" size="sm" className="h-7 bg-white text-xs" onClick={reviewFailed} title="Reopen these in the Review Queue to fix them (e.g. a bad address), then run again">Review in queue</Button>
+                        <Button size="sm" className="h-7 text-xs" onClick={retryFailed}>Retry failed ({batchFailures.length})</Button>
+                      </div>
+                    </div>
+                    <ul className="mt-2 space-y-1">
+                      {batchFailures.slice(0, 5).map((f) => (
+                        <li key={String(f.card.row.id)} className="text-[11px] leading-snug text-amber-900/90">
+                          <span className="font-medium">{f.card.row.from_name || f.card.row.lead_name || f.card.row.lead_email}</span>
+                          <span className="text-amber-900/60"> · {f.step === "send" ? "sending failed" : "couldn't set category"}:</span> {f.error}
+                        </li>
+                      ))}
+                      {batchFailures.length > 5 && <li className="text-[11px] text-amber-900/60">+{batchFailures.length - 5} more</li>}
+                    </ul>
+                    {batchFailures.some((f) => f.step === "send") && (
+                      <p className="mt-2 text-[11px] text-amber-900/70">
+                        Retry never double-sends: a lead who already got a reply since the batch (including the automatic Not Interested reply) is skipped.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1103,6 +1213,9 @@ export default function DataViewPage() {
           allReviewed={allReviewed}
           running={running}
           progress={batchProgress}
+          failures={batchFailures.length}
+          onRetryFailed={retryFailed}
+          onReviewFailed={reviewFailed}
           onClose={() => !running && setQueue(null)}
           onPatch={patchCard}
           onPatchMany={patchCards}
@@ -1436,11 +1549,12 @@ function RecRow({ label, name, email }: { label: string; name?: string | null; e
 
 // ── Bulk Review Queue overlay ──────────────────────────────────────────────
 function ReviewQueue({
-  cards, baseCategory, reviewed, approved, allReviewed, running, progress, onClose, onPatch, onPatchMany, onRegenerate, onRun,
+  cards, baseCategory, reviewed, approved, allReviewed, running, progress, failures = 0, onRetryFailed, onReviewFailed, onClose, onPatch, onPatchMany, onRegenerate, onRun,
   onRecategorize, onBlacklist,
 }: {
   cards: ReviewCard[]; baseCategory: string; reviewed: number; approved: number; allReviewed: boolean; running: boolean;
   progress?: { total: number; done: number; ok: number; fail: number } | null;
+  failures?: number; onRetryFailed?: () => void; onReviewFailed?: () => void;
   onClose: () => void; onPatch: (i: number, p: Partial<ReviewCard>) => void;
   onPatchMany: (indices: number[], p: Partial<ReviewCard>) => void;
   onRegenerate: (i: number) => void; onRun: () => void;
@@ -1549,6 +1663,14 @@ function ReviewQueue({
             )}
           </p>
           <div className="flex items-center gap-2">
+            {!running && failures > 0 && (
+              <span className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-900">
+                {failures} failed in the last run
+                <button onClick={onRetryFailed} className="font-medium underline-offset-2 hover:underline">Retry</button>
+                <span className="text-amber-900/40">·</span>
+                <button onClick={onReviewFailed} className="font-medium underline-offset-2 hover:underline" title="Add them back to this queue to fix, then run again">Add back to queue</button>
+              </span>
+            )}
             <Button variant="outline" size="sm" className="h-9 text-xs" disabled={running} onClick={confirmClose}>{allReviewed ? "Cancel" : "Close"}</Button>
             <Button size="sm" className="h-9 text-xs" onClick={onRun} disabled={reviewed === 0 || running}>
               {running ? "Running…" : `Run batch (${approved} approved${reviewed - approved > 0 ? `, ${reviewed - approved} declined` : ""})`}
