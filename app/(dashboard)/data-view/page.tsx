@@ -28,6 +28,7 @@ import {
   computeReplyRecipients, sendReplyTemplateFor, isSendReplyCategory,
   PRIMARY_CONTACT_CATEGORY, CAT_DOT, type Recipient,
 } from "@/lib/reply-compose";
+import { isPersonalDomain, extractDomain } from "@/lib/processing/personal-domains";
 
 const LEAD_CATEGORIES = [
   "Open Response", "Interested", "Meeting Request", "Meeting Set", "Automated Reply",
@@ -109,6 +110,29 @@ interface ReviewCard {
   candidates?: { email: string; name: string | null }[];
   instructions: string;
   regenerating: boolean;
+  /** Set once the card's action was already applied from inside the queue
+   *  (Do-not-contact / Blacklist-company buttons) — Run batch skips it. */
+  applied?: boolean;
+  blacklisted?: "email" | "domain";
+  blacklisting?: boolean;
+}
+
+/** Build a review card for `row` targeting `category`. Only change-of-target and
+ *  primary-contact replies need an async prep (see prepareCard); everything else
+ *  is ready immediately. */
+function buildCard(row: Row, category: string, status: ReviewCard["status"]): ReviewCard {
+  const type = cardTypeFor(category);
+  const { to: t, cc, bcc } = computeReplyRecipients(row, category);
+  return {
+    row, type, category, status,
+    loading: type === "change-of-target" || (type === "send-reply" && category === PRIMARY_CONTACT_CATEGORY),
+    expanded: false,
+    fromEmail: String(row.sender_email || ""),
+    senderEmailId: (row.sender_id as number | null) ?? null,
+    toEmail: t.email, toName: t.name, cc, bcc,
+    message: type === "send-reply" ? sendReplyTemplateFor(category, row) : "",
+    instructions: "", regenerating: false,
+  };
 }
 
 async function mutate(body: Record<string, unknown>) {
@@ -256,6 +280,9 @@ export default function DataViewPage() {
 
   // ── Bulk review queue ──
   const [queue, setQueue] = useState<ReviewCard[] | null>(null);
+  // The bulk action the queue was opened for (cards can be re-categorized
+  // individually, so this can't be read off cards[0]).
+  const [queueCategory, setQueueCategory] = useState("");
   const [running, setRunning] = useState(false);
   // Batch progress panel shown at the top of the grid while a Run-batch runs
   // (the review modal closes immediately so the operator isn't stuck in it).
@@ -479,41 +506,82 @@ export default function DataViewPage() {
     if (!chosen.length) return;
     const type = cardTypeFor(chosenCategory);
     const cards: ReviewCard[] = chosen.map((row) => {
-      const { to: t, cc, bcc } = computeReplyRecipients(row, chosenCategory);
       // Auto-approve when there's no doubt: a plain category change the AI already
       // agrees with (ai_categorized_lead_category === the chosen category). Cards
       // where the AI disagrees — or that SEND an email (send-reply / change-of-
       // target) — stay pending so a human reviews only the doubtful ones.
       const aiAgrees = type === "category" && String(row.ai_categorized_lead_category || "").trim() === chosenCategory;
-      return {
-        row, type, category: chosenCategory, status: aiAgrees ? "approved" : "pending",
-        loading: type !== "category", expanded: false,
-        fromEmail: String(row.sender_email || ""),
-        senderEmailId: (row.sender_id as number | null) ?? null,
-        toEmail: t.email, toName: t.name, cc, bcc,
-        message: type === "send-reply" ? sendReplyTemplateFor(chosenCategory, row) : "",
-        instructions: "", regenerating: false,
-      };
+      return buildCard(row, chosenCategory, aiAgrees ? "approved" : "pending");
     });
+    setQueueCategory(chosenCategory);
     setQueue(cards);
-    cards.forEach((card, i) => {
-      if (card.type === "change-of-target") {
-        mutate({ action: "prepare-change-of-target", id: card.row.id }).then((d) => {
-          patchCard(i, d.ok
-            ? {
-                loading: false, candidates: d.candidates || [],
-                toEmail: d.candidates?.[0]?.email || "", toName: d.candidates?.[0]?.name || "",
-                subject: d.subject || "", message: (d.messageTemplate || "").replaceAll("{FIRST_NAME}", (d.candidates?.[0]?.name || "there").split(/\s+/)[0]),
-                senderEmailId: d.senderEmailId ?? card.senderEmailId,
-              }
-            : { loading: false, error: d.reason || "Couldn't prepare Change of Target" });
-        }).catch((e) => patchCard(i, { loading: false, error: String(e) }));
-      } else if (card.type === "send-reply" && card.category === PRIMARY_CONTACT_CATEGORY) {
-        mutate({ action: "primary-contact-reply", id: card.row.id, firstName: (String(card.row.lead_name || card.row.from_name || "there")).split(/\s+/)[0] })
-          .then((d) => patchCard(i, { loading: false, message: d?.ok && d.message ? d.message : card.message }))
-          .catch(() => patchCard(i, { loading: false }));
+    cards.forEach((card, i) => prepareCard(i, card));
+  }
+  // Async prep for the card types that need server data before they can be
+  // approved. A card whose category changed since the request started ignores
+  // the stale response.
+  function prepareCard(i: number, card: ReviewCard) {
+    const stillFor = (patch: Partial<ReviewCard>) =>
+      setQueue((prev) => prev ? prev.map((c, j) => (j === i && c.category === card.category ? { ...c, ...patch } : c)) : prev);
+    if (card.type === "change-of-target") {
+      mutate({ action: "prepare-change-of-target", id: card.row.id }).then((d) => {
+        stillFor(d.ok
+          ? {
+              loading: false, candidates: d.candidates || [],
+              toEmail: d.candidates?.[0]?.email || "", toName: d.candidates?.[0]?.name || "",
+              subject: d.subject || "", message: (d.messageTemplate || "").replaceAll("{FIRST_NAME}", (d.candidates?.[0]?.name || "there").split(/\s+/)[0]),
+              senderEmailId: d.senderEmailId ?? card.senderEmailId,
+            }
+          : { loading: false, error: d.reason || "Couldn't prepare Change of Target" });
+      }).catch((e) => stillFor({ loading: false, error: String(e) }));
+    } else if (card.type === "send-reply" && card.category === PRIMARY_CONTACT_CATEGORY) {
+      mutate({ action: "primary-contact-reply", id: card.row.id, firstName: (String(card.row.lead_name || card.row.from_name || "there")).split(/\s+/)[0] })
+        .then((d) => stillFor({ loading: false, message: d?.ok && d.message ? d.message : card.message }))
+        .catch(() => stillFor({ loading: false }));
+    }
+  }
+  // Re-categorize one or more cards inside the queue. A plain category the
+  // operator picked explicitly counts as reviewed (approved); a send / change-of-
+  // target category needs its message reviewed, so it goes back to pending.
+  function recategorizeCards(indices: number[], category: string) {
+    if (!queue) return;
+    const rebuilt = new Map<number, ReviewCard>();
+    for (const i of indices) {
+      const old = queue[i];
+      if (!old || old.applied || old.category === category) continue;
+      rebuilt.set(i, buildCard(old.row, category, cardTypeFor(category) === "category" ? "approved" : "pending"));
+    }
+    if (!rebuilt.size) return;
+    setQueue((prev) => prev ? prev.map((c, j) => (rebuilt.has(j) && !c.applied ? rebuilt.get(j)! : c)) : prev);
+    rebuilt.forEach((card, i) => prepareCard(i, card));
+  }
+  // Do not contact (personal mailbox) / Blacklist company (business domain),
+  // applied immediately. Both also mark the lead "Do Not Contact" — the DNC
+  // category blacklists the email address server-side, and it guarantees the
+  // batch never sends a reply to a lead we just blacklisted.
+  async function blacklistCard(i: number) {
+    const c = queue?.[i]; if (!c || c.applied) return;
+    const email = String(c.row.lead_email || c.row.from_email || "").trim();
+    const domain = extractDomain(email);
+    if (!email || !domain) { toast.error("No email on this lead"); return; }
+    const kind: "email" | "domain" = isPersonalDomain(domain) ? "email" : "domain";
+    patchCard(i, { blacklisting: true });
+    try {
+      if (kind === "domain") {
+        const d = await mutate({ action: "blacklist-domain", id: c.row.id, email });
+        if (!d.ok) throw new Error(d.error || "Blacklist failed");
       }
-    });
+      const d = await mutate({ action: "update-category", id: c.row.id, category: "Do Not Contact" });
+      if (!d.ok) throw new Error(d.error || "Couldn't mark Do Not Contact");
+      patchCard(i, {
+        ...buildCard(c.row, "Do Not Contact", "approved"),
+        applied: true, blacklisted: kind, blacklisting: false,
+      });
+      toast.success(kind === "domain" ? `Blacklisted ${domain}` : `Blacklisted ${email}`);
+    } catch (e) {
+      patchCard(i, { blacklisting: false });
+      toast.error((e as Error).message);
+    }
   }
   function patchCard(i: number, patch: Partial<ReviewCard>) {
     setQueue((prev) => prev ? prev.map((c, j) => (j === i ? { ...c, ...patch } : c)) : prev);
@@ -539,7 +607,7 @@ export default function DataViewPage() {
     // Snapshot the cards, then close the review modal immediately so the operator
     // isn't held in it — progress is shown in the top panel over the grid.
     const cards = queue;
-    const actionLabel = cardTypeFor(cards[0]?.category || "") === "category" ? "Applying categories" : "Running batch";
+    const actionLabel = cards.every((c) => c.type === "category") ? "Applying categories" : "Running batch";
     setRunning(true);
     setQueue(null);
     setSelected(new Set());
@@ -548,7 +616,11 @@ export default function DataViewPage() {
     let ok = 0, fail = 0, done = 0;
     for (const c of cards) {
       try {
-        if (c.status === "declined") {
+        if (c.applied) {
+          ok++; // already done from inside the queue (Do not contact / Blacklist company)
+        } else if (c.status === "declined" && c.type === "category") {
+          // Skipped plain category change → leave the lead exactly as it was.
+        } else if (c.status === "declined") {
           const target = c.type === "change-of-target" ? "Open Response" : nonSendCategoryFor(c.category);
           await mutate({ action: "update-category", id: c.row.id, category: target });
           ok++;
@@ -637,7 +709,7 @@ export default function DataViewPage() {
         );
       }
       case "reply":
-        return <ReplyHoverCell body={r.reply_we_got} />;
+        return <ReplyHoverCell body={r.reply_we_got} fullId={r.id as number} />;
       case "category":
         return editingCell === r.id ? (
           <div onClick={(e) => e.stopPropagation()}>
@@ -974,6 +1046,9 @@ export default function DataViewPage() {
       {queue && (
         <ReviewQueue
           cards={queue}
+          baseCategory={queueCategory}
+          onRecategorize={recategorizeCards}
+          onBlacklist={blacklistCard}
           reviewed={reviewedCount}
           approved={approvedCount}
           allReviewed={allReviewed}
@@ -996,18 +1071,80 @@ export default function DataViewPage() {
 // Tailwind needs the full class names present so JIT keeps them.
 const CLAMP: Record<number, string> = { 2: "line-clamp-2", 3: "line-clamp-3", 4: "line-clamp-4", 5: "line-clamp-5", 6: "line-clamp-6" };
 
-function ReplyHoverCell({ body, clamp = 2, textClass = "text-xs" }: { body: string | null | undefined; clamp?: number; textClass?: string }) {
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+// /api/data-view trims reply bodies to 600 chars + "…" to keep the grid payload
+// small. Anything longer is fetched in full (the whole quoted thread) from the
+// record endpoint on demand and cached for the session.
+const fullReplyCache = new Map<number, string>();
+const fullReplyInflight = new Map<number, Promise<string | null>>();
+function isTrimmedReply(body: unknown): boolean {
+  return typeof body === "string" && body.length > 600 && body.endsWith("…");
+}
+function loadFullReply(id: number): Promise<string | null> {
+  const hit = fullReplyCache.get(id);
+  if (hit !== undefined) return Promise.resolve(hit);
+  let p = fullReplyInflight.get(id);
+  if (!p) {
+    p = fetch(`/api/inbox/${id}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((d) => {
+        const full = typeof d?.reply_we_got === "string" ? d.reply_we_got : null;
+        if (full !== null) fullReplyCache.set(id, full);
+        return full;
+      })
+      .catch(() => null)
+      .finally(() => fullReplyInflight.delete(id));
+    fullReplyInflight.set(id, p);
+  }
+  return p;
+}
+/** The full reply text for row `id` — the trimmed grid body until the full one
+ *  loads. Only fetches when `enabled` and the grid body was actually trimmed. */
+function useFullReply(id: number | undefined, enabled: boolean, gridBody: unknown): string {
+  const base = typeof gridBody === "string" ? gridBody : "";
+  const [, rerender] = useState(0);
+  const cached = id != null ? fullReplyCache.get(id) : undefined;
+  useEffect(() => {
+    if (!enabled || id == null || cached !== undefined || !isTrimmedReply(gridBody)) return;
+    let live = true;
+    loadFullReply(id).then((t) => { if (live && t !== null) rerender((n) => n + 1); });
+    return () => { live = false; };
+  }, [id, enabled, cached, gridBody]);
+  return cached ?? base;
+}
+/** Collapse the long runs of blank lines email bodies carry (signature images,
+ *  quoted-thread spacing) so a clamped preview shows real text, not whitespace. */
+function tidyReply(s: string): string {
+  return s.replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function previewReply(s: string): string {
+  return s.replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{2,}/g, "\n").trim();
+}
+
+function ReplyHoverCell({ body, fullId, clamp = 2, textClass = "text-xs" }: {
+  body: string | null | undefined; fullId?: number; clamp?: number; textClass?: string;
+}) {
+  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; maxH: number } | null>(null);
   const ref = useRef<HTMLParagraphElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
   const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setPos(null), 140); };
   useEffect(() => cancelClose, []);
+  // Full thread for the popup (fetched on first hover when the grid body was trimmed).
+  const full = useFullReply(fullId, !!pos && fullId != null, body);
+  const loadingFull = !!pos && fullId != null && isTrimmedReply(body) && full === body;
   if (!body) return <span className="text-muted-foreground/50 text-xs">No content</span>;
   const open = () => {
     cancelClose();
     const r = ref.current?.getBoundingClientRect();
-    if (r) setPos({ left: Math.max(8, Math.min(r.left, window.innerWidth - 440)), top: r.bottom + 4 });
+    if (!r) return;
+    const W = 520;
+    const maxH = Math.min(Math.round(window.innerHeight * 0.6), 520);
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - W - 16));
+    // Open below the text, or above it when there isn't room — never off-screen.
+    const below = window.innerHeight - r.bottom - 12;
+    setPos(below >= Math.min(maxH, 240) || below >= r.top
+      ? { left, top: r.bottom + 4, maxH: Math.min(maxH, below) }
+      : { left, bottom: window.innerHeight - r.top + 4, maxH: Math.min(maxH, r.top - 12) });
   };
   return (
     <>
@@ -1016,14 +1153,17 @@ function ReplyHoverCell({ body, clamp = 2, textClass = "text-xs" }: { body: stri
         onMouseEnter={open}
         onMouseLeave={scheduleClose}
         className={`${textClass} text-foreground/80 ${CLAMP[clamp] ?? "line-clamp-2"} whitespace-pre-wrap`}
-      >{body}</p>
+      >{previewReply(body)}</p>
       {pos && createPortal(
         <div
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
-          style={{ position: "fixed", left: pos.left, top: pos.top }}
-          className="z-[100] w-[420px] max-h-72 overflow-y-auto rounded-lg border bg-white p-3 text-xs leading-relaxed text-foreground whitespace-pre-wrap shadow-xl"
-        >{body}</div>,
+          style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxH }}
+          className="z-[100] w-[520px] overflow-y-auto overscroll-contain rounded-lg border bg-white p-3 text-xs leading-relaxed text-foreground whitespace-pre-wrap shadow-xl"
+        >
+          {tidyReply(loadingFull ? body.replace(/…$/, "") : full)}
+          {loadingFull && <span className="mt-2 block text-[11px] italic text-muted-foreground">Loading full thread…</span>}
+        </div>,
         document.body,
       )}
     </>
@@ -1246,14 +1386,17 @@ function RecRow({ label, name, email }: { label: string; name?: string | null; e
 
 // ── Bulk Review Queue overlay ──────────────────────────────────────────────
 function ReviewQueue({
-  cards, reviewed, approved, allReviewed, running, onClose, onPatch, onPatchMany, onRegenerate, onRun,
+  cards, baseCategory, reviewed, approved, allReviewed, running, onClose, onPatch, onPatchMany, onRegenerate, onRun,
+  onRecategorize, onBlacklist,
 }: {
-  cards: ReviewCard[]; reviewed: number; approved: number; allReviewed: boolean; running: boolean;
+  cards: ReviewCard[]; baseCategory: string; reviewed: number; approved: number; allReviewed: boolean; running: boolean;
   onClose: () => void; onPatch: (i: number, p: Partial<ReviewCard>) => void;
   onPatchMany: (indices: number[], p: Partial<ReviewCard>) => void;
   onRegenerate: (i: number) => void; onRun: () => void;
+  onRecategorize: (indices: number[], category: string) => void;
+  onBlacklist: (i: number) => void;
 }) {
-  const action = cardTypeFor(cards[0]?.category || "");
+  const action = cardTypeFor(baseCategory || cards[0]?.category || "");
   const actionLabel = action === "change-of-target" ? "Change of Target" : action === "send-reply" ? "Send Reply" : "Set Category";
 
   // Multi-select + drag-select across cards, so the flagged (doubtful) ones can be
@@ -1274,10 +1417,10 @@ function ReviewQueue({
     if (!dragging.current) return;
     setSel((p) => { const n = new Set(p); dragAdd.current ? n.add(i) : n.delete(i); return n; });
   };
-  const canApprove = (c: ReviewCard) => !c.loading && !c.error && (c.type === "category" || (!!c.message.trim() && !!c.toEmail));
+  const canApprove = (c: ReviewCard) => !c.applied && !c.loading && !c.error && (c.type === "category" || (!!c.message.trim() && !!c.toEmail));
   const pendingIdx = cards.map((c, i) => ({ c, i })).filter(({ c }) => c.status === "pending").map(({ i }) => i);
   const approveSelected = () => { onPatchMany([...sel].filter((i) => canApprove(cards[i])), { status: "approved" }); setSel(new Set()); };
-  const skipSelected = () => { onPatchMany([...sel], { status: "declined" }); setSel(new Set()); };
+  const skipSelected = () => { onPatchMany([...sel].filter((i) => !cards[i]?.applied), { status: "declined" }); setSel(new Set()); };
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/40">
@@ -1285,7 +1428,7 @@ function ReviewQueue({
         <div className="flex items-center justify-between gap-4 border-b bg-white px-6 py-4">
           <div>
             <h2 className="text-base font-semibold">Review Queue — Bulk {actionLabel}</h2>
-            <p className="text-xs text-muted-foreground">{cards[0]?.category} · confident matches are auto-approved — you only review the flagged ones</p>
+            <p className="text-xs text-muted-foreground">{baseCategory || cards[0]?.category} · confident matches are auto-approved — you only review the flagged ones · change any card&apos;s category to categorize it differently</p>
           </div>
           <div className="flex items-center gap-4">
             <div className="text-right">
@@ -1307,6 +1450,10 @@ function ReviewQueue({
               <span className="text-muted-foreground">· {sel.size} selected</span>
               <Button size="sm" className="h-7 text-xs" onClick={approveSelected}>Approve selected</Button>
               <Button variant="outline" size="sm" className="h-7 text-xs" onClick={skipSelected}>Skip selected</Button>
+              <Select value="" onValueChange={(cat) => { onRecategorize([...sel], cat); setSel(new Set()); }}>
+                <SelectTrigger className="h-7 w-[190px] text-xs"><SelectValue placeholder="Set category for selected…" /></SelectTrigger>
+                <SelectContent position="popper" className="max-h-[320px]">{LEAD_CATEGORIES.filter((cat) => cat !== "Open Response").map((cat) => <SelectItem key={cat} value={cat} className="text-xs">{cat}</SelectItem>)}</SelectContent>
+              </Select>
               <button onClick={() => setSel(new Set())} className="text-muted-foreground hover:text-foreground">Clear</button>
             </>
           )}
@@ -1317,6 +1464,7 @@ function ReviewQueue({
           {cards.map((c, i) => (
             <ReviewCardView
               key={c.row.id} card={c} index={i} onPatch={onPatch} onRegenerate={onRegenerate}
+              onRecategorize={(cat) => onRecategorize([i], cat)} onBlacklist={() => onBlacklist(i)}
               selected={sel.has(i)} onDragSelectStart={() => startDrag(i)} onDragSelectEnter={() => dragEnter(i)}
             />
           ))}
@@ -1339,12 +1487,18 @@ function ReviewQueue({
   );
 }
 
-function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, onDragSelectStart, onDragSelectEnter }: {
+function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, onRecategorize, onBlacklist, selected, onDragSelectStart, onDragSelectEnter }: {
   card: ReviewCard; index: number; onPatch: (i: number, p: Partial<ReviewCard>) => void; onRegenerate: (i: number) => void;
+  onRecategorize: (category: string) => void; onBlacklist: () => void;
   selected?: boolean; onDragSelectStart?: () => void; onDragSelectEnter?: () => void;
 }) {
   const ring = selected ? "border-indigo-400 bg-indigo-50/50 ring-1 ring-indigo-300"
     : c.status === "approved" ? "border-green-300 bg-green-50/40" : c.status === "declined" ? "border-gray-300 bg-gray-50/60 opacity-70" : "border-border bg-white";
+  const leadEmail = String(c.row.lead_email || c.row.from_email || "");
+  const leadDomain = extractDomain(leadEmail);
+  const personal = !!leadDomain && isPersonalDomain(leadDomain);
+  // Expanded view shows the FULL reply (the grid payload is trimmed to 600 chars).
+  const fullReply = useFullReply(c.row.id as number, c.expanded, c.row.reply_we_got);
   return (
     <div className={`rounded-xl border ${ring} transition-colors`} onMouseEnter={onDragSelectEnter}>
       <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-border/50">
@@ -1361,10 +1515,39 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, on
             <div className="text-sm font-medium truncate">{c.row.from_name || c.row.lead_name || c.row.lead_email}</div>
             <div className="text-[11px] text-muted-foreground truncate">{c.row.lead_email} · <span className="font-mono">{c.row.client_tag || "N/A"}</span></div>
           </div>
+          {/* Personal mailbox → blacklist just the address (grey "Do not contact").
+              Business domain → blacklist the whole company (black). */}
+          {leadDomain && (
+            c.blacklisted ? (
+              <span className="shrink-0 rounded-md border border-gray-300 bg-gray-100 px-2 py-1 text-[10px] font-medium text-gray-600">
+                {c.blacklisted === "domain" ? `✓ ${leadDomain} blacklisted` : "✓ Do not contact"}
+              </span>
+            ) : personal ? (
+              <button
+                type="button" onClick={onBlacklist} disabled={c.blacklisting}
+                title={`Blacklist ${leadEmail} and mark Do Not Contact`}
+                className="shrink-0 rounded-md bg-gray-200 px-2 py-1 text-[10px] font-medium text-gray-700 hover:bg-gray-300 disabled:opacity-50"
+              >{c.blacklisting ? "Blacklisting…" : "Do not contact"}</button>
+            ) : (
+              <button
+                type="button" onClick={onBlacklist} disabled={c.blacklisting}
+                title={`Blacklist the whole domain ${leadDomain} and mark Do Not Contact`}
+                className="shrink-0 rounded-md bg-gray-900 px-2 py-1 text-[10px] font-medium text-white hover:bg-black disabled:opacity-50"
+              >{c.blacklisting ? "Blacklisting…" : "Blacklist company"}</button>
+            )
+          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <CatPill cat={c.category} />
-          {c.status === "approved" && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">Approved</span>}
+          <Select value={c.category} onValueChange={onRecategorize} disabled={c.applied}>
+            <SelectTrigger className="h-7 w-auto max-w-[260px] gap-1.5 text-[11px]" title="Category this lead will be set to when the batch runs">
+              <CatPill cat={c.category} />
+            </SelectTrigger>
+            {/* popper: the trigger holds a pill (not a SelectValue), which Radix's
+                default item-aligned mode needs to position — without it the list
+                opens off-screen. */}
+            <SelectContent position="popper" align="end" className="max-h-[320px]">{LEAD_CATEGORIES.filter((cat) => cat !== "Open Response").map((cat) => <SelectItem key={cat} value={cat} className="text-xs">{cat}</SelectItem>)}</SelectContent>
+          </Select>
+          {c.status === "approved" && <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">{c.applied ? "Done" : "Approved"}</span>}
           {c.status === "declined" && <span className="rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-600">Declined</span>}
         </div>
       </div>
@@ -1373,8 +1556,8 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, on
         <div>
           <button onClick={() => onPatch(i, { expanded: !c.expanded })} className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground">Original reply {c.expanded ? "▾" : "▸ (hover to preview)"}</button>
           {c.expanded
-            ? <p className="mt-1 text-xs text-foreground/80 whitespace-pre-wrap">{c.row.reply_we_got || "No content"}</p>
-            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} clamp={4} textClass="text-[11px] leading-snug" /></div>}
+            ? <p className="mt-1 max-h-[420px] overflow-y-auto text-xs text-foreground/80 whitespace-pre-wrap">{fullReply ? tidyReply(fullReply) : "No content"}</p>
+            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} fullId={c.row.id as number} clamp={3} textClass="text-[11px] leading-snug" /></div>}
         </div>
 
         {c.loading ? (
@@ -1426,10 +1609,10 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, selected, on
         )}
 
         <div className="flex items-center justify-end gap-2 pt-1">
-          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={() => onPatch(i, { status: "declined" })} disabled={c.status === "declined"}>
+          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={() => onPatch(i, { status: "declined" })} disabled={c.applied || c.status === "declined"}>
             {c.type === "category" ? "Skip" : "Decline"}
           </Button>
-          <Button size="sm" className="h-8 text-xs" onClick={() => onPatch(i, { status: "approved" })} disabled={c.loading || !!c.error || c.status === "approved" || (c.type !== "category" && (!c.message.trim() || !c.toEmail))}>
+          <Button size="sm" className="h-8 text-xs" onClick={() => onPatch(i, { status: "approved" })} disabled={c.applied || c.loading || !!c.error || c.status === "approved" || (c.type !== "category" && (!c.message.trim() || !c.toEmail))}>
             Approve
           </Button>
         </div>
