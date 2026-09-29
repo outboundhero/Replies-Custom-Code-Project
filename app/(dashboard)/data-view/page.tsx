@@ -75,13 +75,14 @@ const DEFAULT_COLS: ColDef[] = [
   { id: "contact", label: "Contact", width: 240, min: 170, sortCol: "lead_name" },
   { id: "company", label: "Company", width: 160, min: 110, sortCol: "company_name" },
   { id: "recipients", label: "Recipients", width: 120, min: 96 },
-  { id: "reply", label: "Reply", width: 420, min: 200 },
+  { id: "reply", label: "Reply", width: 560, min: 200 },
   { id: "category", label: "Category", width: 200, min: 150, sortCol: "lead_category" },
   { id: "ai", label: "AI Suggested", width: 150, min: 110, sortCol: "ai_categorized_lead_category" },
   { id: "client", label: "Client", width: 90, min: 70, sortCol: "client_tag" },
   { id: "received", label: "Received", width: 120, min: 100, sortCol: "created_at" },
 ];
-const COLS_LS_KEY = "dataview-cols-v1";
+const COLS_LS_KEY = "dataview-cols-v2";
+const COLS_LS_KEY_V1 = "dataview-cols-v1"; // pre-widening layouts, migrated once on load
 
 type CardType = "category" | "send-reply" | "change-of-target";
 function cardTypeFor(cat: string): CardType {
@@ -189,12 +190,26 @@ export default function DataViewPage() {
   const [cols, setCols] = useState<ColDef[]>(DEFAULT_COLS);
   useEffect(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(COLS_LS_KEY) || "null") as { id: string; width: number }[] | null;
+      type Saved = { id: string; width: number }[] | null;
+      let saved = JSON.parse(localStorage.getItem(COLS_LS_KEY) || "null") as Saved;
+      let migrated = false;
+      if (!saved?.length) {
+        // One-time upgrade of a layout saved before the Reply column was widened
+        // (420 → 560): keep its order + other widths, bring Reply up to the new
+        // default. Saved under the new key, so later manual resizes stick.
+        const old = JSON.parse(localStorage.getItem(COLS_LS_KEY_V1) || "null") as Saved;
+        if (old?.length) {
+          const replyDefault = DEFAULT_COLS.find((c) => c.id === "reply")!.width;
+          saved = old.map((s) => (s.id === "reply" ? { ...s, width: Math.max(s.width, replyDefault) } : s));
+          migrated = true;
+        }
+      }
       if (saved?.length) {
         const byId = new Map(DEFAULT_COLS.map((c) => [c.id, c]));
         const next = saved.map((s) => byId.get(s.id) ? { ...byId.get(s.id)!, width: s.width } : null).filter(Boolean) as ColDef[];
         DEFAULT_COLS.forEach((c) => { if (!next.find((n) => n.id === c.id)) next.push(c); });
         setCols(next);
+        if (migrated) localStorage.setItem(COLS_LS_KEY, JSON.stringify(next.map((c) => ({ id: c.id, width: c.width }))));
       }
     } catch { /* */ }
   }, []);
@@ -709,7 +724,7 @@ export default function DataViewPage() {
         );
       }
       case "reply":
-        return <ReplyHoverCell body={r.reply_we_got} fullId={r.id as number} />;
+        return <ReplyHoverCell body={r.reply_we_got} fullId={r.id as number} clamp={3} />;
       case "category":
         return editingCell === r.id ? (
           <div onClick={(e) => e.stopPropagation()}>
