@@ -40,21 +40,42 @@ export async function GET(req: NextRequest) {
   }
 
   const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+  // One UPDATE over every eligible row hit Postgres's statement timeout once the
+  // backlog grew (~17k rows) — and a timed-out run archives NOTHING, so the
+  // backlog only kept growing. Archive in id batches instead, within a time
+  // budget; whatever's left is picked up by the next run.
+  const BATCH = 1000;
+  const budgetMs = 100_000;
+  const started = Date.now();
+  const archivedAt = new Date().toISOString();
+  let archived = 0;
+  let done = false;
   try {
-    const { data, error } = await supabase
-      .from("replies")
-      .update({ archived: true, archived_at: new Date().toISOString() })
-      .eq("archived", false)
-      .neq("lead_category", "Open Response")
-      .lt("categorized_at", cutoff) // NULLs excluded automatically (never timed → skip)
-      .select("id");
-    if (error) throw new Error(error.message);
-    const archived = data?.length ?? 0;
+    while (Date.now() - started < budgetMs) {
+      const { data: batch, error: selErr } = await supabase
+        .from("replies")
+        .select("id")
+        .eq("archived", false)
+        .neq("lead_category", "Open Response")
+        .lt("categorized_at", cutoff) // NULLs excluded automatically (never timed → skip)
+        .limit(BATCH);
+      if (selErr) throw new Error(selErr.message);
+      const ids = (batch || []).map((r) => r.id as number);
+      if (!ids.length) { done = true; break; }
+      const { error: updErr } = await supabase
+        .from("replies")
+        .update({ archived: true, archived_at: archivedAt })
+        .in("id", ids);
+      if (updErr) throw new Error(updErr.message);
+      archived += ids.length;
+      if (ids.length < BATCH) { done = true; break; }
+    }
     if (archived > 0) bumpCacheVersion();
-    await logActivity("archive-cleanup", "archived", { details: { archived, cutoff } });
-    return NextResponse.json({ ok: true, archived });
+    await logActivity("archive-cleanup", "archived", { details: { archived, cutoff, complete: done } });
+    return NextResponse.json({ ok: true, archived, complete: done });
   } catch (e) {
-    await logError("archive-cleanup", "run", (e as Error).message, { cutoff });
+    if (archived > 0) bumpCacheVersion(); // earlier batches did land
+    await logError("archive-cleanup", "run", (e as Error).message, { cutoff, archivedBeforeError: archived });
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
 }

@@ -86,7 +86,22 @@ let _goLiveCache: { map: Map<string, string>; ts: number } | null = null;
 export async function fetchGoLiveDates(): Promise<Map<string, string>> {
   if (_goLiveCache && Date.now() - _goLiveCache.ts < 5 * 60_000) return _goLiveCache.map;
   const sheets = google.sheets({ version: "v4", auth: getAuth() });
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "'Client Tracker'" });
+  // Several crons read the sheet at the top of the hour, which can trip Google's
+  // per-minute read quota. That quota resets within a minute, so retry after a
+  // pause; if it still fails, reuse a read from the last hour rather than making
+  // every go-live gate skip its run.
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "'Client Tracker'" });
+      break;
+    } catch (e) {
+      const quota = /quota|rate limit|429/i.test(String((e as Error)?.message ?? e));
+      if (quota && attempt < 2) { await new Promise((r) => setTimeout(r, attempt === 0 ? 8_000 : 20_000)); continue; }
+      if (_goLiveCache && Date.now() - _goLiveCache.ts < 60 * 60_000) return _goLiveCache.map;
+      throw e;
+    }
+  }
   const rows = res.data.values || [];
   const out = new Map<string, string>();
   if (rows.length >= 2) {

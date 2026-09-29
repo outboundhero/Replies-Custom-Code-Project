@@ -26,6 +26,9 @@ import { logError, logActivity } from "@/lib/errors";
 /** Bison error is "${status}: ${body}"; some statuses never recover on retry. */
 function isPermanentSendError(error?: string): boolean {
   if (!error) return false;
+  // Bison answers 400 "Sending disabled due to billing over-use" while the
+  // account is over its limit — that clears once billing is sorted, so retry.
+  if (/billing over-use/i.test(error)) return false;
   const status = parseInt(error.split(":")[0]?.trim() || "", 10);
   if (Number.isNaN(status)) return false;
   return [400, 401, 403, 404, 410, 422].includes(status);

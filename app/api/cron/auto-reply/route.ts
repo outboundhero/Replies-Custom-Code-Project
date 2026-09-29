@@ -93,6 +93,11 @@ interface BuildResult {
  */
 function isPermanentSendError(error: string | undefined): boolean {
   if (!error) return false;
+  // Bison answers 400 "Sending disabled due to billing over-use" while the
+  // account is over its limit. It clears once billing is sorted (OutboundClean
+  // was blocked 9/24–9/28), so keep the row queued and retry instead of dropping
+  // the reply for good.
+  if (/billing over-use/i.test(error)) return false;
   const status = parseInt(error.split(":")[0]?.trim() || "", 10);
   if (Number.isNaN(status)) return false;
   return status === 400 || status === 401 || status === 403
@@ -300,6 +305,13 @@ export async function GET(req: NextRequest) {
         await supabase
           .from("replies")
           .update({ auto_reply_sent_at: new Date().toISOString() })
+          .eq("id", row.id);
+      } else if (/billing over-use/i.test(result.error || "")) {
+        // Account-level block that can last days — retry hourly rather than
+        // every 2 min (keeps the reply queued without flooding the error log).
+        await supabase
+          .from("replies")
+          .update({ auto_reply_due_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() })
           .eq("id", row.id);
       }
       failed++;

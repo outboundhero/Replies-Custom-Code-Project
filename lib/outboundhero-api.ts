@@ -210,11 +210,21 @@ export async function sendReply(
     message: plainTextToEmailHtml(params.message),
     sender_email_id: params.senderEmailId,
     content_type: "html",
-    to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
+    to_emails: [{ name: String(params.toName || "").trim(), email_address: String(params.toEmail || "").trim() }],
   };
 
-  if (params.ccEmails?.length) payload.cc_emails = params.ccEmails;
-  if (params.bccEmails?.length) payload.bcc_emails = params.bccEmails;
+  // Bison 422s the WHOLE reply if any CC/BCC isn't a valid address (e.g. a
+  // client config saved as "Sanitize360@gmail.com " with a trailing space).
+  // Trim every address and drop any that still isn't valid, so one bad CC can't
+  // block the send.
+  const cleanRecipients = (list?: EmailRecipient[]) =>
+    (list || [])
+      .map((r) => ({ ...r, name: String(r.name || "").trim(), email_address: String(r.email_address || "").trim() }))
+      .filter((r) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(r.email_address));
+  const cc = cleanRecipients(params.ccEmails);
+  const bcc = cleanRecipients(params.bccEmails);
+  if (cc.length) payload.cc_emails = cc;
+  if (bcc.length) payload.bcc_emails = bcc;
 
   const res = await fetchWithTimeout(`${baseUrl}/api/replies/${params.replyId}/reply`, {
     method: "POST",
@@ -357,6 +367,14 @@ export async function sendOneOffReply(
     html?: boolean;
   },
 ): Promise<{ ok: boolean; error?: string; replyId?: number }> {
+  // Refuse an unusable recipient up front with a clear message. Bison otherwise
+  // tries it and the provider bounces it back as "Please re-connect this email
+  // account: Invalid address", which reads like a broken inbox (seen on a
+  // Change of Target to " beth@bayarts" — leading space, no TLD).
+  const toEmail = String(params.toEmail || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(toEmail)) {
+    return { ok: false, error: `Invalid recipient address "${params.toEmail}" — check the email (it needs a full domain like name@company.com).` };
+  }
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const res = await fetchWithTimeout(`${baseUrl}/api/replies/new`, {
     method: "POST",
@@ -366,7 +384,7 @@ export async function sendOneOffReply(
       message: params.html ? params.message : plainTextToEmailHtml(params.message),
       sender_email_id: params.senderEmailId,
       content_type: "html",
-      to_emails: [{ name: params.toName || "", email_address: params.toEmail }],
+      to_emails: [{ name: String(params.toName || "").trim(), email_address: toEmail }],
       // OB now rejects nulls for these — must be empty arrays. Hit during
       // a Change-of-Target re-pitch:
       //   422: "The cc emails field must be an array. (and 2 more errors)"
