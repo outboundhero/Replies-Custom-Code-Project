@@ -1588,8 +1588,8 @@ function ReviewCardView({ card: c, index: i, onPatch, onRegenerate, onRecategori
         <div>
           <button onClick={() => onPatch(i, { expanded: !c.expanded })} className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground">Original reply {c.expanded ? "▾" : "▸ (hover to preview)"}</button>
           {c.expanded
-            ? <p className="mt-1 max-h-[420px] overflow-y-auto text-xs text-foreground/80 whitespace-pre-wrap">{fullReply ? tidyReply(fullReply) : "No content"}</p>
-            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} fullId={c.row.id as number} clamp={3} textClass="text-[11px] leading-snug" /></div>}
+            ? <p className="mt-1 max-h-[420px] overflow-y-auto text-[13px] leading-snug text-foreground/80 whitespace-pre-wrap">{fullReply ? tidyReply(fullReply) : "No content"}</p>
+            : <div className="mt-1"><ReplyHoverCell body={c.row.reply_we_got} fullId={c.row.id as number} clamp={3} textClass="text-[13px] leading-snug" /></div>}
         </div>
 
         {c.loading ? (
