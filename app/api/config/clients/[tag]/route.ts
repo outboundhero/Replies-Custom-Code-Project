@@ -9,7 +9,7 @@
  * secret but not so sensitive that it needs a full JWT session.
  *
  * Example:
- *   curl "https://replies-custom-code-project.vercel.app/api/config/clients/JPC?secret=outboundhero2024"
+ *   curl "https://replies-custom-code-project.vercel.app/api/config/clients/JPC" -H "x-cron-secret: $CRON_SECRET"
  */
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
