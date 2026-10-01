@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { qualifyLead } from "@/lib/qualification/qualify-lead";
+import { getZipAudit, isCcgTag } from "@/lib/qualification/zip-audit";
 
 export const maxDuration = 60;
 
@@ -74,7 +75,12 @@ export async function POST(req: NextRequest) {
       .eq("id", id)
       .single();
 
-    return NextResponse.json({ ok: true, audit: after || {} });
+    // CCG ZIP audit (written by qualifyLead for CCG tags) — merged the same way.
+    const audit: Record<string, unknown> = { ...(after || {}) };
+    if (isCcgTag(String(r.client_tag || ""))) {
+      try { audit.zip_audit = await getZipAudit(Number(id)); } catch { /* shown on next load */ }
+    }
+    return NextResponse.json({ ok: true, audit });
   } catch (e) {
     console.error("[api/inbox/qualify] failed:", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

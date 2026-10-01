@@ -6,7 +6,8 @@ import { sendReply, forwardReply, sendOneOffReply, getFirstSentEmail, findSender
 import { blacklistDomain, blacklistEmail, isPersonalDomain, extractDomain } from "@/lib/processing/domain-blacklist";
 import { SHEET_PUSH_CATEGORIES, leadEmailInSheet } from "@/lib/push-to-sheet";
 import { pushReplyToSheet } from "@/lib/push-reply-to-sheet";
-import { setReplySheetOverride } from "@/lib/sheet-override";
+import { setReplySheetOverride, clearReplySheetOverride } from "@/lib/sheet-override";
+import { getZipAudit, saveZipAudit, auditCcgZip, isCcgTag } from "@/lib/qualification/zip-audit";
 import { htmlToText, textToHtml } from "@/lib/html-text";
 import { pushToGhl, isGhlPushCategory } from "@/lib/push-to-ghl";
 import { extractRedirectEmails, type RedirectCandidate } from "@/lib/processing/extract-redirect-email";
@@ -471,9 +472,28 @@ export async function POST(req: NextRequest) {
       }
 
       case "reallocate": {
-        const { client_tag } = body;
+        const { client_tag, forcePush } = body;
         const result = await applyReallocate(id, client_tag);
         if (!result.ok) throw new Error(result.error);
+        // ZIP-audit "Reallocate & push": one action — tag + CC + template above,
+        // then push to the NEW client's lead tracking sheet whatever the lead's
+        // status (Meeting Ready included), skipping only if the lead is already
+        // on that sheet. Awaited so the result shows immediately.
+        if (forcePush) {
+          await clearReplySheetOverride(id); // a per-lead override would still point at the OLD sheet
+          const { data: r } = await supabase.from("replies").select("lead_email").eq("id", id).single();
+          const email = String(r?.lead_email || "");
+          const push = (await leadEmailInSheet(client_tag, email))
+            ? { ok: true, alreadyInSheet: true }
+            : await pushReplyToSheet(id);
+          // Re-check the stored ZIP against the new tag so the audit reflects the move.
+          try {
+            const prior = await getZipAudit(id);
+            if (prior?.resolution && isCcgTag(client_tag)) await saveZipAudit(id, await auditCcgZip(client_tag, prior.resolution));
+          } catch { /* the audit refreshes on the next run anyway */ }
+          await logActivity("inbox", "reallocate-push", { client_tag, lead_email: email || undefined, details: { reply_id: id, push } });
+          return NextResponse.json({ ok: true, push });
+        }
         // Add the lead to the NEW client's tracking sheet so a reallocated lead
         // shows up under the new client — but only when it's in a sheet-push
         // category, and only if it isn't already there (dedup, so reallocating

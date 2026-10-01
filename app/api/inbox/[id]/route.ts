@@ -4,6 +4,7 @@ import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { getReplySheetOverride } from "@/lib/sheet-override";
+import { getZipAudit, isCcgTag } from "@/lib/qualification/zip-audit";
 import { isSubsequenceTag } from "@/lib/subsequence/config";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -140,6 +141,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           : null;
       }
     } catch { /* rules lookup failed → cards just won't render */ }
+
+    // CCG ZIP audit (CCG tags only) — shown on the Audit card with the
+    // Reallocate & push action.
+    try {
+      if (isCcgTag(String(data.client_tag || ""))) {
+        (data as Record<string, unknown>).zip_audit = await getZipAudit(Number(id));
+      }
+    } catch { /* no ZIP audit yet → the card shows "not run yet" */ }
 
     return NextResponse.json(data);
   } catch (error) {

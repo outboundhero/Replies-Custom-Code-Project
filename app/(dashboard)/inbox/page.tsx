@@ -568,6 +568,10 @@ export default function InboxPage() {
   const [ooMsg, setOoMsg] = useState("");
   const [ooCc, setOoCc] = useState<Recipient[]>([]);
   const [reallocTag, setReallocTag] = useState("");
+  const [zipReallocTag, setZipReallocTag] = useState(""); // CCG ZIP audit "Reallocate to"
+  const openLeadId = detail?.id ?? null; // normalise: no lead open = null (never undefined)
+  const [zipReallocFor, setZipReallocFor] = useState<unknown>(openLeadId);
+  if (zipReallocFor !== openLeadId) { setZipReallocFor(openLeadId); setZipReallocTag(""); } // new lead → recommended tag again
   const [sending, setSending] = useState<string | null>(null);
   // Change-AI-category + client-tag/sheet-override editors (below the lead details).
   const [aiSaving, setAiSaving] = useState(false);
@@ -1139,6 +1143,24 @@ export default function InboxPage() {
     if (d.ok) { toast.success("Sent"); setOoSubject(""); setOoMsg(""); setOoCc([]); } else toast.error(d.error || "Failed");
   }
 
+  // CCG ZIP audit → one action: reallocate (tag + CC/BCC + template) AND push to
+  // the new client's lead tracking sheet whatever the lead's status; skipped
+  // only when the lead is already on that sheet.
+  async function handleReallocPush(tagIn: string) {
+    if (!detail || !tagIn) return;
+    const tag = tagIn.toUpperCase();
+    setSending("realloc-push");
+    const d = await mutate({ action: "reallocate", id: detail.id, client_tag: tag, forcePush: true });
+    setSending(null);
+    if (!d.ok) { toast.error(d.error || "Reallocation failed"); return; }
+    const p = (d.push || {}) as { ok?: boolean; alreadyInSheet?: boolean; skipped?: string; error?: string };
+    if (p.alreadyInSheet) toast.success(`Reallocated to ${tag} — already on ${tag}'s lead sheet, not added again`);
+    else if (p.ok) toast.success(`Reallocated to ${tag} and pushed to ${tag}'s lead sheet`);
+    else toast.warning(`Reallocated to ${tag}, but the sheet push didn't go through: ${p.error || p.skipped || "unknown error"}`);
+    setZipReallocTag("");
+    loadBootstrap(); loadDetail(detail.id);
+  }
+
   async function handleRealloc() {
     if (!detail || !reallocTag) return;
     const tag = reallocTag.toUpperCase();
@@ -1668,14 +1690,24 @@ export default function InboxPage() {
 
             {/* Audit — industry + location split onto their own lines, with the
                 suggested client tag surfaced when an audit failed. */}
-            {(detail.industry_audit || detail.location_audit) && (() => {
+            {(detail.industry_audit || detail.location_audit || detail.zip_audit) && (() => {
               // qualification_reason is one combined string; split it back out.
               const parts = String(detail.qualification_reason || "").split(/\s*\|\s*/).map((s) => s.trim()).filter(Boolean);
               const industryReason = parts.find((p) => /^industry/i.test(p));
               const locationReason = parts.find((p) => /^location audit/i.test(p));
-              const metaReasons = parts.filter((p) => p !== industryReason && p !== locationReason);
+              const metaReasonsAll = parts.filter((p) => p !== industryReason && p !== locationReason);
               const industryBad = detail.industry_audit === "Failed" || detail.industry_audit === "Residential";
-              const locationBad = detail.location_audit === "Failed";
+              // CCG ZIP audit: an exact check of one verified ZIP against the
+              // client's ZIP list. When it applies it REPLACES the AI location
+              // verdict (badge, reason and suggestions).
+              const za = (detail.zip_audit || null) as null | {
+                verdict: "Passed" | "Failed" | "Needs review" | "No ZIP list"; reason: string; recommended: string[];
+                resolution: null | { zip: string | null; city: string | null; state: string | null; confidence: string; source: string; evidence: string; cityZips?: string[] };
+              };
+              const zipActive = !!za && za.verdict !== "No ZIP list";
+              // The old AI "Location source: …" line would contradict the ZIP result — hide it then.
+              const metaReasons = zipActive ? metaReasonsAll.filter((p) => !/^location source/i.test(p)) : metaReasonsAll;
+              const locationBad = zipActive ? false : detail.location_audit === "Failed";
               // Suggested client on a failed audit (non-CW leads store a tag here;
               // CW leads use suggested_client for routing messages, shown below).
               const isCW = !!detail.client_tag?.toUpperCase().startsWith("CW");
@@ -1691,7 +1723,9 @@ export default function InboxPage() {
                       {detail.industry_audit && (
                         <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${detail.industry_audit === "Passed" ? "bg-green-50 text-green-700" : detail.industry_audit === "Residential" ? "bg-yellow-50 text-yellow-700" : "bg-red-50 text-red-700"}`}>Ind: {detail.industry_audit}</span>
                       )}
-                      {detail.location_audit && (
+                      {zipActive ? (
+                        <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${za!.verdict === "Passed" ? "bg-green-50 text-green-700" : za!.verdict === "Failed" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>ZIP: {za!.verdict}</span>
+                      ) : detail.location_audit && (
                         <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${detail.location_audit === "Passed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>Loc: {detail.location_audit}</span>
                       )}
                     </span>
@@ -1701,7 +1735,47 @@ export default function InboxPage() {
                   {(
                     <div className="mt-3 space-y-2.5">
                       {industryReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Industry:</span> {industryReason.replace(/^industry audit:\s*/i, "")}</p>}
-                      {locationReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Location:</span> {locationReason.replace(/^location audit:\s*/i, "")}</p>}
+                      {zipActive ? (() => {
+                        const res = za!.resolution;
+                        const srcLabel = res?.source === "reply" ? "from the prospect's reply" : res?.source === "web" ? "verified on the web" : res?.source === "lead data" ? "from lead data" : "";
+                        const ccgTags = (allowedClientTags ?? clientTags).filter((t) => /^CCG/i.test(t) && t.toUpperCase() !== String(detail.client_tag || "").toUpperCase());
+                        const rec = za!.recommended || [];
+                        const options = [...rec, ...ccgTags.filter((t) => !rec.includes(t.toUpperCase()))];
+                        const picked = zipReallocTag || rec[0] || "";
+                        return (
+                          <div className="space-y-1.5">
+                            <p className="text-[11px] text-muted-foreground leading-relaxed">
+                              <span className="font-medium text-foreground/70">ZIP:</span>{" "}
+                              {res?.zip
+                                ? <><span className="font-mono font-semibold text-foreground">{res.zip}</span> · {res.city}, {res.state}</>
+                                : res?.cityZips?.length ? <>{res.city}, {res.state} <span className="text-muted-foreground/70">(city-level · {res.cityZips.length} ZIPs)</span></>
+                                : <span className="italic">not determined</span>}
+                              {srcLabel && <span className="text-muted-foreground/70"> · {srcLabel}{res?.confidence ? ` (${res.confidence} confidence)` : ""}</span>}
+                            </p>
+                            <p className={`text-[11px] leading-relaxed ${za!.verdict === "Passed" ? "text-green-700" : za!.verdict === "Failed" ? "text-red-700" : "text-amber-700"}`}>{za!.reason}</p>
+                            {res?.evidence && <p className="text-[10px] text-muted-foreground/70 leading-relaxed">Evidence: {res.evidence}</p>}
+                            {za!.verdict !== "Passed" && (
+                              <div className="flex flex-wrap items-center gap-2 border-t pt-2">
+                                <span className="text-[11px] text-muted-foreground shrink-0">Reallocate to</span>
+                                <div className="w-44">
+                                  <SearchableCombobox
+                                    value={picked}
+                                    onValueChange={(v) => setZipReallocTag((v || "").toUpperCase())}
+                                    options={options}
+                                    placeholder="Pick a CCG client…"
+                                    searchPlaceholder="Search CCG tags…"
+                                  />
+                                </div>
+                                <Button size="sm" className="h-7 text-xs" onClick={() => handleReallocPush(picked)} disabled={!picked || sending === "realloc-push"}>
+                                  {sending === "realloc-push" ? "Moving…" : "Reallocate & push"}
+                                </Button>
+                                {rec.length > 0 && !zipReallocTag && <span className="text-[10px] text-muted-foreground">recommended: {rec.join(" / ")}</span>}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })() : locationReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Location:</span> {locationReason.replace(/^location audit:\s*/i, "")}</p>}
+                      {za?.verdict === "No ZIP list" && <p className="text-[10px] text-amber-700 leading-relaxed">{za.reason}</p>}
                       {metaReasons.length > 0 && <p className="text-[10px] text-muted-foreground/70 leading-relaxed border-t pt-1.5">{metaReasons.join(" · ")}</p>}
                       {(() => {
                         const tags = suggested ? parseSuggestedTags(suggested, new Set(clientTags.map((t) => t.toUpperCase()))) : [];

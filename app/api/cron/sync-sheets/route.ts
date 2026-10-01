@@ -3,7 +3,11 @@ import { syncAll } from "@/lib/sync/sheets-to-supabase";
 import { syncServiceAreas } from "@/lib/service-area";
 
 export async function GET(req: NextRequest) {
-  const secret = req.headers.get("x-cron-secret") || req.nextUrl.searchParams.get("secret");
+  // Vercel cron sends "Authorization: Bearer <CRON_SECRET>".
+  const secret =
+    req.headers.get("x-cron-secret") ||
+    req.nextUrl.searchParams.get("secret") ||
+    (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
 
   if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

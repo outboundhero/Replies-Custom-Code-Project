@@ -24,6 +24,7 @@ import { runCwAutoReroute, type ZipSource } from "@/lib/processing/cw-router";
 import { getChurnedTags } from "@/lib/churn";
 import { reportMissingQualificationIfNeeded } from "@/lib/qualification/missing-qual-alert";
 import { geminiJSON } from "@/lib/gemini";
+import { isCcgTag, runCcgZipAudit } from "@/lib/qualification/zip-audit";
 
 interface QualifyLeadParams {
   campaignTag: string;
@@ -271,6 +272,20 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     await logError("tracked", "cw-auto-reroute", (error as Error).message, {
       tag: campaignTag, record_id: recordId,
     });
+  }
+
+  // 7b. CCG ZIP audit (CCG tags only): one verified ZIP → exact check against
+  // the client's ZIP list, stored separately (Turso zip_audit). Runs on every
+  // qualifyLead path — ingest, the audit-pending cron and the inbox Refresh.
+  if (replyRowId && isCcgTag(campaignTag)) {
+    try {
+      await runCcgZipAudit(replyRowId, campaignTag, {
+        replyText, companyName, leadEmail, website: enriched.website,
+        crmAddress: address, crmCity: city, crmState: state, googleMapsUrl, phone: String(phone || ""),
+      });
+    } catch (error) {
+      await logError("tracked", "ccg-zip-audit", (error as Error).message, { tag: campaignTag, row_id: replyRowId });
+    }
   }
 
   // 8. Log activity
