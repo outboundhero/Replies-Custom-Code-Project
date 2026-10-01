@@ -479,11 +479,6 @@ export default function InboxPage() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
-  // Audit card is MINIMIZED by default (Spencer's request) — the pass/fail badges
-  // stay visible; reasons + suggested client expand on click. Reset to collapsed
-  // whenever a different lead opens so it's always minimized by default.
-  const [auditOpen, setAuditOpen] = useState(false);
-  useEffect(() => { setAuditOpen(false); }, [detail?.id]);
   // Client Qualification Rules card — same pattern: minimized by default,
   // toggled open; reset to collapsed whenever a different lead opens.
   const [qualOpen, setQualOpen] = useState(false);
@@ -1688,13 +1683,9 @@ export default function InboxPage() {
               const hasDetail = !!industryReason || !!locationReason || metaReasons.length > 0 || (!isCW && (industryBad || locationBad));
               return (
                 <div className="rounded border bg-white px-4 py-3">
-                  {/* Collapsed header: label + pass/fail badges always visible; a
-                      chevron expands the reasons + suggested client below. */}
-                  <button
-                    type="button"
-                    onClick={() => setAuditOpen((o) => !o)}
-                    className="w-full flex items-center justify-between gap-2 text-left"
-                  >
+                  {/* Always open: the reasons + suggested client show every time
+                      (no collapse) so the location verdict is never hidden. */}
+                  <div className="w-full flex items-center justify-between gap-2 text-left">
                     <span className="flex items-center gap-1.5 flex-wrap min-w-0">
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Audit</span>
                       {detail.industry_audit && (
@@ -1704,14 +1695,11 @@ export default function InboxPage() {
                         <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${detail.location_audit === "Passed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>Loc: {detail.location_audit}</span>
                       )}
                     </span>
-                    <svg className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${auditOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="m6 9 6 6 6-6" /></svg>
-                  </button>
+                    <button onClick={() => handleRunAudit()} disabled={sending === "audit"} className="shrink-0 text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
+                  </div>
 
-                  {auditOpen && (
+                  {(
                     <div className="mt-3 space-y-2.5">
-                      <div className="flex justify-end -mt-1">
-                        <button onClick={() => handleRunAudit()} disabled={sending === "audit"} className="text-[10px] text-muted-foreground hover:text-primary disabled:opacity-50">{sending === "audit" ? "Refreshing…" : "↻ Refresh"}</button>
-                      </div>
                       {industryReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Industry:</span> {industryReason.replace(/^industry audit:\s*/i, "")}</p>}
                       {locationReason && <p className="text-[11px] text-muted-foreground leading-relaxed"><span className="font-medium text-foreground/70">Location:</span> {locationReason.replace(/^location audit:\s*/i, "")}</p>}
                       {metaReasons.length > 0 && <p className="text-[10px] text-muted-foreground/70 leading-relaxed border-t pt-1.5">{metaReasons.join(" · ")}</p>}
