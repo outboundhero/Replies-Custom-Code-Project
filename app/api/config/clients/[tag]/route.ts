@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { DEFAULT_INSTANCE } from "@/lib/bison-instances";
+import { BBS_TAGS, bbsRoutes } from "@/lib/processing/bbs-router";
 
 export async function GET(
   req: NextRequest,
@@ -104,5 +105,8 @@ export async function GET(
       last_run_at: row.auto_nurture_last_run_at || null,
     },
     updated_at: row.updated_at || null,
+    // Clients with per-lead CC routing (BBS: Nefi vs Junior by region). `cc`
+    // above is the saved default; each positive lead gets ONE of these routes.
+    ...(BBS_TAGS.includes(tag) ? { cc_routes: bbsRoutes() } : {}),
   });
 }

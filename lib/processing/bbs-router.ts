@@ -70,6 +70,18 @@ const JUNIOR_CC = {
   ...MITCH_CC,
 };
 
+/** Both BBS CC routes, for reporting (e.g. GET /api/config/clients/BBS). The
+ *  route is chosen per lead by routeLeadBbs: Junior only on an explicit Junior
+ *  assignment; Nefi otherwise (including "Not Sure"). */
+export function bbsRoutes() {
+  const list = (c: Record<string, string>) =>
+    [1, 2, 3].map((i) => ({ name: c[`cc_name_${i}`], email: c[`cc_email_${i}`] })).filter((x) => x.email);
+  return [
+    { route: "Nefi", region: "Northern Utah (also the default when the region is unclear)", cc: list(NEFI_CC), bcc: [], reply_template: NEFI_TEMPLATE },
+    { route: "Junior", region: "Nevada / Arizona / Southern Utah", cc: list(JUNIOR_CC), bcc: [], reply_template: JUNIOR_TEMPLATE },
+  ];
+}
+
 const SYSTEM_PROMPT = `#CONTEXT#
 You are an AI-powered web researcher. Determine whether a company should be assigned to "Nefi" or "Junior" based on the company's location information provided in the input fields and any referenced Google Maps URL.
 Nefi = Salt Lake City and Northern Utah region (Utah County, Davis County, Tooele County, Salt Lake County, Summit County)
