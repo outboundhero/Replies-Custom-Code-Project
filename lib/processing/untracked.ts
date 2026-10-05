@@ -18,6 +18,8 @@ import { isKnownClientReply } from "./cc-bcc-match";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
+import { applyReallocate } from "./apply-reallocate";
+import { isBbsTag } from "./bbs-router";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
 import { coerceInstance } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
@@ -356,6 +358,25 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
         await pauseSubsequenceOnReply({ replyRowId: prow.id as number, leadEmail: reply.from_email_address, clientTag: companyCode });
       }
     } catch { /* best-effort — never break untracked ingest */ }
+  }
+
+  // BBS: the client_config stamped above is only the Nefi route — route this
+  // lead (Nefi = Northern Utah, Junior = NV / AZ / Southern Utah) and apply that
+  // route's CC + template, exactly like Sync Template. Best-effort.
+  if (includeClientConfig && isBbsTag(companyCode)) {
+    try {
+      await _untrackedUpsert;
+      const { data: brow } = await supabase
+        .from("replies").select("id")
+        .eq("reply_id", reply.id).eq("campaign_id", 0).eq("bison_instance", bisonInstance)
+        .single();
+      if (brow?.id) {
+        const r = await applyReallocate(brow.id as number, companyCode);
+        if (!r.ok) throw new Error(r.error);
+      }
+    } catch (error) {
+      await logError("untracked", "bbs-routing", (error as Error).message, { tag: companyCode, lead_email: reply.from_email_address });
+    }
   }
 
   // 8. Send to master Clay table (all sections) — only for qualified replies

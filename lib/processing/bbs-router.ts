@@ -83,6 +83,12 @@ const JUNIOR_CC = {
   ...MITCH_CC,
 };
 
+/** Every BluMont address on either route — the client's own team, for
+ *  known-client detection (a reply with Junior on it is BluMont too). */
+export const BBS_CONTACT_EMAILS: string[] = [...new Set(
+  [NEFI_CC, JUNIOR_CC].flatMap((c) => [c.cc_email_1, c.cc_email_2, c.cc_email_3]).map((e) => e.toLowerCase()),
+)];
+
 /** Both BBS CC routes, for reporting (e.g. GET /api/config/clients/BBS). The
  *  route is chosen per lead by routeLeadBbs: Junior only on an explicit Junior
  *  assignment; Nefi otherwise (including "Not Sure"). */

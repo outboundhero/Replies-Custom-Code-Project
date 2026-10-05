@@ -19,7 +19,7 @@ import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { isKnownClientReply } from "./cc-bcc-match";
 import { markReplyInterested } from "@/lib/outboundhero-api";
 import { resolveTemplate } from "./template-resolver";
-import { BBS_TAGS, BBS_TRIGGER_CATEGORIES, routeLeadBbs, saveBbsRoute, type BbsAssignment } from "./bbs-router";
+import { BBS_TAGS, routeLeadBbs, saveBbsRoute, type BbsAssignment } from "./bbs-router";
 import supabase from "@/lib/supabase";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
@@ -117,11 +117,9 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
   // written downstream. Mitch is CC'd on both. The decision is stored per row
   // after the upsert so the inbox composer / Sync Template keep using it.
   let bbsRoute: { assignment: BbsAssignment; reason: string } | null = null;
-  if (
-    aiCategory &&
-    BBS_TAGS.includes(campaignTag) &&
-    BBS_TRIGGER_CATEGORIES.includes(aiCategory.toLowerCase())
-  ) {
+  // Routed for EVERY category that gets the client CC + template stamped (incl.
+  // Referral Given / Unrecognizable by AI), so those never fall back to Nefi.
+  if (includeClientConfig && BBS_TAGS.includes(campaignTag)) {
     try {
       const route = await routeLeadBbs({
         companyName: lead.company || "",

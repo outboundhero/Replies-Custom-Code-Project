@@ -15,6 +15,7 @@ import { generateReplyFromTemplate } from "@/lib/processing/generate-reply";
 import { stripQuotedHistory } from "@/lib/qualification/strip-quoted";
 import { buildConversationThread, threadToPrompt } from "@/lib/inbox/conversation-thread";
 import { coerceInstance } from "@/lib/bison-instances";
+import { isBbsTag, resolveBbsRouteForRow, bbsRouteFields } from "@/lib/processing/bbs-router";
 
 export const maxDuration = 45;
 
@@ -41,8 +42,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "This lead has no client tag, so there's no template to use." }, { status: 400 });
     }
 
-    const cfg = await db.execute({ sql: "SELECT reply_template FROM client_config WHERE client_tag = ?", args: [r.client_tag] });
-    const template = String(cfg.rows[0]?.reply_template || "").trim();
+    // BBS: the lead's route template (Nefi = Northern Utah, Junior = NV / AZ /
+    // Southern Utah) — client_config only holds the Nefi one.
+    const template = isBbsTag(r.client_tag)
+      ? bbsRouteFields((await resolveBbsRouteForRow(Number(id), { via: "generate-reply" })).assignment).reply_template
+      : String((await db.execute({ sql: "SELECT reply_template FROM client_config WHERE client_tag = ?", args: [r.client_tag] })).rows[0]?.reply_template || "").trim();
     if (!template) {
       return NextResponse.json({ ok: false, error: `No reply template is set for ${r.client_tag}. Add one in Clients first.` }, { status: 400 });
     }

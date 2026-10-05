@@ -12,6 +12,7 @@
  * bcc_email_1..2). Case-insensitive, whitespace-trimmed.
  */
 import db from "@/lib/db";
+import { BBS_CONTACT_EMAILS, isBbsTag } from "@/lib/processing/bbs-router";
 
 const CONTACT_KEYS = [
   "cc_email_1", "cc_email_2", "cc_email_3", "cc_email_4", "cc_email_5", "cc_email_6",
@@ -51,6 +52,7 @@ export async function loadAllClientContactEmails(): Promise<Set<string>> {
       }
     }
   } catch { /* table missing / error → empty set */ }
+  for (const e of BBS_CONTACT_EMAILS) set.add(e); // BBS's Junior route isn't in client_config
   _allContacts = { set, ts: now };
   return set;
 }
@@ -73,6 +75,7 @@ export async function loadClientContactEmails(clientTag: string | null | undefin
       for (const e of collectConfigEmails(row as Record<string, unknown>)) set.add(e);
     }
   } catch { /* table missing / error → empty set */ }
+  if (isBbsTag(tag)) for (const e of BBS_CONTACT_EMAILS) set.add(e);
   _byTag.set(tag, { set, ts: now });
   return set;
 }
@@ -95,6 +98,11 @@ export async function loadClientContactEmailMap(): Promise<Map<string, string[]>
       }
     }
   } catch { /* table missing / error → empty map */ }
+  for (const e of BBS_CONTACT_EMAILS) {
+    const arr = map.get(e) ?? [];
+    if (!arr.includes("BBS")) arr.push("BBS");
+    map.set(e, arr);
+  }
   _emailMap = { map, ts: now };
   return map;
 }
@@ -158,6 +166,7 @@ export async function isKnownClientReply(
   const emails = replyParticipantEmails(reply);
   if (!emails.length) return false;
   const contacts = config ? new Set(collectConfigEmails(config)) : await loadAllClientContactEmails();
+  if (config && isBbsTag(String(config.client_tag ?? ""))) for (const e of BBS_CONTACT_EMAILS) contacts.add(e);
   if (!contacts.size) return false;
   return emails.some((e) => contacts.has(e));
 }

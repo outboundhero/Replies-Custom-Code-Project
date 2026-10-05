@@ -43,7 +43,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     try {
       const aiCat = String(data.ai_categorized_lead_category || "");
       const tag = String(data.client_tag || "");
-      if (isBbsTag(tag) && POSITIVE_AI_CATEGORIES.includes(aiCat)) {
+      if (isBbsTag(tag) && (POSITIVE_AI_CATEGORIES.includes(aiCat) || data.cc_email_1)) {
         // BBS: CC the lead's route (Nefi = Northern Utah, Junior = NV / AZ /
         // Southern Utah), never the generic config — that's the Nefi route.
         const route = await resolveBbsRouteForRow(Number(id), { via: "inbox-open" });
