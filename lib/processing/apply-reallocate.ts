@@ -3,6 +3,7 @@ import db from "@/lib/db";
 import { resolveTemplate } from "@/lib/processing/template-resolver";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
 import { isChurned } from "@/lib/churn";
+import { isBbsTag, resolveBbsRouteForRow, bbsRouteFields } from "@/lib/processing/bbs-router";
 
 /**
  * Move a replies row to a different client tag and rewrite its CC/BCC + reply
@@ -15,7 +16,7 @@ import { isChurned } from "@/lib/churn";
 export async function applyReallocate(
   rowId: number,
   newClientTag: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; bbsRoute?: { assignment: string; reason: string } } | { ok: false; error: string }> {
   // Never move a lead to a CHURNED client (past its churn date) — they no longer
   // receive leads. Guards EVERY reallocate path: the suggested-tag click, the
   // Reallocate picker, and the CW ZIP auto-router. This is the hard stop that
@@ -28,7 +29,21 @@ export async function applyReallocate(
     sql: "SELECT * FROM client_config WHERE client_tag = ?",
     args: [newClientTag],
   });
-  const cfg = configResult.rows[0];
+  let cfg = configResult.rows[0] as Record<string, unknown> | undefined;
+  let bbsRoute: { assignment: string; reason: string } | undefined;
+
+  // BBS has two CC/template routes picked per lead by region — Nefi (Northern
+  // Utah) or Junior (NV / AZ / Southern Utah). Its client_config is only the
+  // Nefi route, so route this lead (Sync Template / Reallocate re-run it).
+  if (isBbsTag(newClientTag)) {
+    try {
+      const route = await resolveBbsRouteForRow(rowId, { force: true, via: "sync-template/reallocate" });
+      cfg = bbsRouteFields(route.assignment);
+      bbsRoute = { assignment: route.assignment, reason: route.reason };
+    } catch (e) {
+      return { ok: false, error: `Couldn't work out the BBS region (Nefi / Junior) for this lead: ${(e as Error).message}` };
+    }
+  }
 
   const updateData: Record<string, unknown> = {
     client_tag: newClientTag,
@@ -89,5 +104,5 @@ export async function applyReallocate(
   const { error } = await supabase.from("replies").update(updateData).eq("id", rowId);
   if (error) return { ok: false, error: error.message };
   bumpCacheVersion();
-  return { ok: true };
+  return { ok: true, bbsRoute };
 }

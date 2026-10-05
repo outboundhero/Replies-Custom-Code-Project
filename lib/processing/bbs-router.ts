@@ -8,9 +8,18 @@
  *
  * The trigger is enforced in tracked.ts — this module assumes the caller has
  * already checked the client tag and AI category.
+ *
+ * The decision is stored per reply row (Turso `bbs_route`) so every later path
+ * — the inbox / Data View composer, Sync Template, Reallocate — uses the lead's
+ * route instead of BBS's generic client_config (which is the Nefi route).
  */
+import db from "@/lib/db";
+import supabase from "@/lib/supabase";
+import { logActivity } from "@/lib/errors";
+import { zipInfo, stateCode } from "@/lib/qualification/zip-audit";
 
 export const BBS_TAGS = ["BBS"];
+export const isBbsTag = (tag: string | null | undefined) => BBS_TAGS.includes(String(tag ?? "").trim().toUpperCase());
 export const BBS_TRIGGER_CATEGORIES = ["interested", "meeting request", "follow up at a later date"];
 
 export type BbsAssignment = "Nefi" | "Junior" | "Not Sure";
@@ -27,15 +36,19 @@ export interface BbsRouteResult {
   reply_template: string;
 }
 
+// Same text as BBS's template in client_config (Clients page): names everyone
+// CC'd (Mitch is on both routes) and signs off as the Utah team.
 const NEFI_TEMPLATE = `Hi {FIRST_NAME},
 
-I'm CC'ing my bosses Jake and Nefi since you're interested in {CONTEXT} for {COMPANY}.
+I'm CC'ing my bosses Jake, Mitch, and Nefi since you're interested in {CONTEXT} for {COMPANY}.
 
-Jake or Nefi, can you please take it from here? Looks like a good number to call is {PHONE}
+Jake, Mitch, or Nefi, can you please take it from here? Looks like a good number to call is {PHONE}.
 
 Best,
 
-BluMont Building Services - Utah and Nevada
+{SENDER_NAME}
+
+BluMont Building Services - Utah
 Our Phone: (801) 783-6923`;
 
 const JUNIOR_TEMPLATE = `Hi {FIRST_NAME},
@@ -112,6 +125,66 @@ Junior = all of Nevada, all of Arizona, and Southern Utah (Washington County / S
    - Prefer county-based classification when available; otherwise use city/state heuristics above.
    - Only return "Not Sure" if you cannot determine the assignment with 90%+ confidence.`;
 
+/** CC fields + reply template for a route. Junior only on an explicit Junior
+ *  assignment; Nefi otherwise (including "Not Sure"). */
+export function bbsRouteFields(assignment: BbsAssignment) {
+  const isJunior = assignment === "Junior";
+  return { ...(isJunior ? JUNIOR_CC : NEFI_CC), reply_template: isJunior ? JUNIOR_TEMPLATE : NEFI_TEMPLATE };
+}
+
+// ── Deterministic region from the lead's address ───────────────────────────
+// Clear-cut cases never go to the AI: any Nevada / Arizona address → Junior; a
+// Utah ZIP in a Northern-Utah county → Nefi, in Washington / Iron county
+// (St. George, Cedar City) → Junior. Anything else falls through to the AI.
+const NEFI_UT_COUNTIES = new Set(["utah", "davis", "tooele", "salt lake", "summit"]);
+const JUNIOR_UT_COUNTIES = new Set(["washington", "iron"]);
+const STATE_NAME = { NV: "Nevada", AZ: "Arizona", UT: "Utah" } as Record<string, string>;
+
+function mapsQuery(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url.replace(/ /g, "+"));
+    return (u.searchParams.get("q") || u.searchParams.get("query") || "").replace(/\+/g, " ");
+  } catch { return ""; }
+}
+
+/** "…, North Las Vegas, NV 89032" → { state: "NV", zip: "89032" } — only the
+ *  state at the END of an address (so "Nevada City, CA" or "Utah Ave" don't count). */
+function stateFromAddress(text: string): { state: string; zip: string | null } | null {
+  const m = text.trim().match(/,\s*([A-Za-z]{2}|nevada|arizona|utah)\.?\s*(\d{5})?(?:-\d{4})?\s*(?:,\s*(?:usa|us|united states))?\s*$/i);
+  if (!m) return null;
+  const state = stateCode(m[1]);
+  return state ? { state, zip: m[2] || null } : null;
+}
+
+export async function bbsRegionFromLocation(loc: {
+  address?: string | null; city?: string | null; state?: string | null; googleMapsUrl?: string | null;
+}): Promise<{ assignment: "Nefi" | "Junior"; reason: string } | null> {
+  const candidates = [loc.address, mapsQuery(loc.googleMapsUrl), [loc.city, loc.state].filter(Boolean).join(", ")]
+    .map((s) => String(s ?? "").trim()).filter(Boolean);
+  let state = "", county = "", where = "";
+  for (const text of candidates) {
+    const hit = stateFromAddress(text);
+    if (!hit) continue;
+    const z = hit.zip ? await zipInfo(hit.zip).catch(() => null) : null;
+    // Trust the ZIP's county only when it's in the state the address names.
+    if (z && z.state === hit.state) { state = z.state; county = String(z.county || ""); where = `${z.city}, ${z.state} ${z.zip}`; break; }
+    if (!state) { state = hit.state; where = text; }
+  }
+  if (!state) { const s = stateCode(loc.state); if (s) { state = s; where = `state field "${loc.state}"`; } }
+  if (!state) return null;
+
+  if (state === "NV" || state === "AZ") {
+    return { assignment: "Junior", reason: `Address is in ${STATE_NAME[state]} (${where}).` };
+  }
+  if (state === "UT" && county) {
+    const c = county.toLowerCase().replace(/\s+county$/, "");
+    if (NEFI_UT_COUNTIES.has(c)) return { assignment: "Nefi", reason: `Address is in ${county} County, Northern Utah (${where}).` };
+    if (JUNIOR_UT_COUNTIES.has(c)) return { assignment: "Junior", reason: `Address is in ${county} County, Southern Utah (${where}).` };
+  }
+  return null;
+}
+
 export async function routeLeadBbs(input: {
   companyName: string;
   address: string | null;
@@ -121,6 +194,9 @@ export async function routeLeadBbs(input: {
   phone: string | null;
   replyText: string;
 }): Promise<BbsRouteResult> {
+  const fixed = await bbsRegionFromLocation(input).catch(() => null);
+  if (fixed) return { ...fixed, ...bbsRouteFields(fixed.assignment) };
+
   const userMessage = `Company: "${input.companyName}"
 Office Address: "${input.address || ""}"
 Location: "${input.city || ""}, ${input.state || ""}"
@@ -164,14 +240,72 @@ ${input.replyText.slice(0, 2000)}
   else if (assignmentRaw.toLowerCase() === "nefi") assignment = "Nefi";
 
   // Junior route ONLY for explicit Junior. Nefi or Not Sure → Nefi route.
-  const isJunior = assignment === "Junior";
-  const cc = isJunior ? JUNIOR_CC : NEFI_CC;
-  const template = isJunior ? JUNIOR_TEMPLATE : NEFI_TEMPLATE;
-
   return {
     assignment,
     reason: parsed.reason || "No reason provided",
-    ...cc,
-    reply_template: template,
+    ...bbsRouteFields(assignment),
   };
+}
+
+// ── Per-row storage (Turso bbs_route) ───────────────────────────────────────
+let tableReady: Promise<void> | null = null;
+function ensureBbsRouteTable(): Promise<void> {
+  if (!tableReady) {
+    tableReady = db.execute(`CREATE TABLE IF NOT EXISTS bbs_route (
+      reply_row_id INTEGER PRIMARY KEY, assignment TEXT NOT NULL, reason TEXT, routed_at TEXT
+    )`).then(() => undefined).catch((e) => { tableReady = null; throw e; });
+  }
+  return tableReady;
+}
+
+export async function saveBbsRoute(replyRowId: number, r: { assignment: BbsAssignment; reason: string }): Promise<void> {
+  await ensureBbsRouteTable();
+  await db.execute({
+    sql: `INSERT INTO bbs_route (reply_row_id, assignment, reason, routed_at) VALUES (?, ?, ?, datetime('now'))
+          ON CONFLICT(reply_row_id) DO UPDATE SET assignment = excluded.assignment, reason = excluded.reason, routed_at = excluded.routed_at`,
+    args: [replyRowId, r.assignment, r.reason],
+  });
+}
+
+export async function getStoredBbsRoute(replyRowId: number): Promise<{ assignment: BbsAssignment; reason: string } | null> {
+  await ensureBbsRouteTable();
+  const r = await db.execute({ sql: "SELECT assignment, reason FROM bbs_route WHERE reply_row_id = ?", args: [replyRowId] });
+  const row = r.rows[0];
+  return row ? { assignment: row.assignment as BbsAssignment, reason: String(row.reason ?? "") } : null;
+}
+
+/**
+ * The lead's BBS route: the stored decision, or (none stored / `force`) route it
+ * now from the row's address + reply and store it. `force` is Sync Template /
+ * Reallocate — re-run the routing so the operator gets the current answer.
+ */
+export async function resolveBbsRouteForRow(
+  replyRowId: number,
+  opts: { force?: boolean; via?: string } = {},
+): Promise<BbsRouteResult> {
+  if (!opts.force) {
+    const stored = await getStoredBbsRoute(replyRowId);
+    if (stored) return { ...stored, ...bbsRouteFields(stored.assignment) };
+  }
+  const { data: row, error } = await supabase
+    .from("replies")
+    .select("lead_email, company_name, address, city, state, google_maps_url, phone, reply_we_got")
+    .eq("id", replyRowId).single();
+  if (error || !row) throw new Error(`BBS routing: reply ${replyRowId} not found`);
+  const route = await routeLeadBbs({
+    companyName: String(row.company_name || ""),
+    address: row.address ? String(row.address) : null,
+    city: row.city ? String(row.city) : null,
+    state: row.state ? String(row.state) : null,
+    googleMapsUrl: row.google_maps_url ? String(row.google_maps_url) : null,
+    phone: row.phone ? String(row.phone) : null,
+    replyText: String(row.reply_we_got || ""),
+  });
+  await saveBbsRoute(replyRowId, route);
+  await logActivity("inbox", "bbs-routed", {
+    client_tag: "BBS",
+    lead_email: row.lead_email ? String(row.lead_email) : undefined,
+    details: { reply_row_id: replyRowId, assignment: route.assignment, reason: route.reason, via: opts.via || "inbox" },
+  });
+  return route;
 }

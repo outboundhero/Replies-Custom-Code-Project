@@ -522,7 +522,7 @@ export async function POST(req: NextRequest) {
         }
         const result = await applyReallocate(id, rowClientTag);
         if (!result.ok) throw new Error(result.error);
-        return NextResponse.json({ ok: true, client_tag: rowClientTag });
+        return NextResponse.json({ ok: true, client_tag: rowClientTag, bbs_route: result.bbsRoute ?? null });
       }
 
       case "send-reply": {

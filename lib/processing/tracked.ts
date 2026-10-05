@@ -19,7 +19,7 @@ import { qualifyLead } from "@/lib/qualification/qualify-lead";
 import { isKnownClientReply } from "./cc-bcc-match";
 import { markReplyInterested } from "@/lib/outboundhero-api";
 import { resolveTemplate } from "./template-resolver";
-import { BBS_TAGS, BBS_TRIGGER_CATEGORIES, routeLeadBbs } from "./bbs-router";
+import { BBS_TAGS, BBS_TRIGGER_CATEGORIES, routeLeadBbs, saveBbsRoute, type BbsAssignment } from "./bbs-router";
 import supabase from "@/lib/supabase";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
@@ -114,7 +114,9 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
 
   // 3c. BBS-only AI routing — pick Nefi (Northern Utah) or Junior (NV / AZ /
   // Southern UT) and override the CC fields + reply template before they get
-  // written downstream. Mitch is CC'd on both.
+  // written downstream. Mitch is CC'd on both. The decision is stored per row
+  // after the upsert so the inbox composer / Sync Template keep using it.
+  let bbsRoute: { assignment: BbsAssignment; reason: string } | null = null;
   if (
     aiCategory &&
     BBS_TAGS.includes(campaignTag) &&
@@ -143,6 +145,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
         cc_name_6: null, cc_email_6: null,
         reply_template: route.reply_template,
       };
+      bbsRoute = { assignment: route.assignment, reason: route.reason };
       await logActivity("tracked", "bbs-routed", {
         client_tag: campaignTag,
         lead_email: reply.from_email_address,
@@ -408,6 +411,10 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
     console.error("[tracked] Supabase upsert failed:", _upsertErr.message);
   } else {
     replyRowId = _upserted?.id as number | undefined;
+    if (bbsRoute && replyRowId) {
+      try { await saveBbsRoute(replyRowId, bbsRoute); }
+      catch (e) { console.error("[tracked] saveBbsRoute failed:", (e as Error).message); }
+    }
     // Invalidate the inbox counts/tags cache so the next page load sees
     // the new row immediately (instead of waiting up to 60s for TTL).
     bumpCacheVersion();

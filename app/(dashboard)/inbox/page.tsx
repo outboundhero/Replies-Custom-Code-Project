@@ -1260,7 +1260,13 @@ export default function InboxPage() {
     setSending("synctpl");
     const d = await mutate({ action: "sync-template", id: detail.id });
     setSending(null);
-    if (d.ok) { toast.success("Template + CC/BCC synced from the latest client config"); loadDetail(detail.id); }
+    if (d.ok) {
+      const r = d.bbs_route as { assignment?: string; reason?: string } | null | undefined;
+      toast.success(r?.assignment
+        ? `Synced the BBS ${r.assignment === "Junior" ? "Junior" : "Nefi"} template + CC — ${r.reason || ""}`.trim()
+        : "Template + CC/BCC synced from the latest client config");
+      loadDetail(detail.id);
+    }
     else toast.error(d.error || "Sync failed");
   }
 

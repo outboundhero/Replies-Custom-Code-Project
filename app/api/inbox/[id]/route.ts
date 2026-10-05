@@ -6,6 +6,7 @@ import { POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { getReplySheetOverride } from "@/lib/sheet-override";
 import { getZipAudit, isCcgTag } from "@/lib/qualification/zip-audit";
 import { isSubsequenceTag } from "@/lib/subsequence/config";
+import { isBbsTag, resolveBbsRouteForRow, bbsRouteFields } from "@/lib/processing/bbs-router";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   // Single session read (was requireAuth() + getSession() = two JWT verifies).
@@ -42,7 +43,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     try {
       const aiCat = String(data.ai_categorized_lead_category || "");
       const tag = String(data.client_tag || "");
-      if (tag && tag !== "N/A" && POSITIVE_AI_CATEGORIES.includes(aiCat)) {
+      if (isBbsTag(tag) && POSITIVE_AI_CATEGORIES.includes(aiCat)) {
+        // BBS: CC the lead's route (Nefi = Northern Utah, Junior = NV / AZ /
+        // Southern Utah), never the generic config — that's the Nefi route.
+        const route = await resolveBbsRouteForRow(Number(id), { via: "inbox-open" });
+        const f = bbsRouteFields(route.assignment) as Record<string, string | null | undefined>;
+        for (const k of ["cc_name_1", "cc_email_1", "cc_name_2", "cc_email_2", "cc_name_3", "cc_email_3",
+          "cc_name_4", "cc_email_4", "cc_name_5", "cc_email_5", "cc_name_6", "cc_email_6",
+          "bcc_name_1", "bcc_email_1", "bcc_name_2", "bcc_email_2"]) data[k] = f[k] ?? null;
+        (data as Record<string, unknown>).bbs_route = { assignment: route.assignment, reason: route.reason };
+      } else if (tag && tag !== "N/A" && POSITIVE_AI_CATEGORIES.includes(aiCat)) {
         const cfg = await db.execute({
           sql: `SELECT cc_name_1, cc_email_1, cc_name_2, cc_email_2, cc_name_3, cc_email_3,
                        cc_name_4, cc_email_4, cc_name_5, cc_email_5, cc_name_6, cc_email_6,
