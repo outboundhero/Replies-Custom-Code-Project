@@ -18,6 +18,7 @@
 import db from "@/lib/db";
 import {
   BISON_INSTANCES,
+  instanceFromWebhookPayload,
   DEFAULT_INSTANCE,
   coerceInstance,
   isValidInstance,
@@ -26,6 +27,7 @@ import {
 
 export {
   BISON_INSTANCES,
+  instanceFromWebhookPayload,
   DEFAULT_INSTANCE,
   coerceInstance,
   isValidInstance,

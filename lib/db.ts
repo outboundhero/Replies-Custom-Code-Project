@@ -5,6 +5,31 @@ const db = createClient({
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
+// Turso over HTTP reuses keep-alive sockets; when Turso has already closed an
+// idle one, the next request fails with "socket hang up" / ECONNRESET before it
+// reaches the database. That surfaced as dozens of failed webhooks + crons.
+// Retry those connection-level failures (never SQL errors) a couple of times,
+// centrally, so every caller gets it. Writes here are overwhelmingly upserts /
+// log inserts, so a rare duplicate on a request that DID land is harmless.
+const TRANSIENT = /socket hang up|ECONNRESET|EPIPE|ETIMEDOUT|ECONNREFUSED|fetch failed|other side closed|network|terminated/i;
+export function isTransientDbError(e: unknown): boolean {
+  const err = e as { message?: string; code?: string; cause?: { message?: string; code?: string } } | null;
+  return TRANSIENT.test(`${err?.message ?? ""} ${err?.code ?? ""} ${err?.cause?.message ?? ""} ${err?.cause?.code ?? ""}`);
+}
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      if (attempt >= 2 || !isTransientDbError(e)) throw e;
+      await new Promise((r) => setTimeout(r, 250 * 3 ** attempt)); // 250ms, 750ms
+    }
+  }
+}
+const rawExecute = db.execute.bind(db) as (...a: unknown[]) => ReturnType<typeof db.execute>;
+const rawBatch = db.batch.bind(db) as (...a: unknown[]) => ReturnType<typeof db.batch>;
+db.execute = ((...a: unknown[]) => withRetry(() => rawExecute(...a))) as typeof db.execute;
+db.batch = ((...a: unknown[]) => withRetry(() => rawBatch(...a))) as typeof db.batch;
+
 export default db;
 
 // ── Schema initialization ──

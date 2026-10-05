@@ -21,6 +21,7 @@
 import db from "@/lib/db";
 import { processTrackedReply } from "@/lib/processing/tracked";
 import { processUntrackedReply } from "@/lib/processing/untracked";
+import { instanceFromWebhookPayload } from "@/lib/bison-instances";
 
 interface ErrorRow {
   id: number;
@@ -170,11 +171,20 @@ export async function retryAirtableErrorsBatch(opts: RetryBatchOptions = {}): Pr
         opts.onProgress?.({ processed, succeeded, failed, unrecoverable });
         return;
       }
+      // Replay under the instance the webhook came from (it used to default to
+      // outboundhero → FacilityReach / OutboundClean / CleaningOutbound replies
+      // were saved under the wrong instance). Unknown → leave it for a human.
+      const instanceKey = instanceFromWebhookPayload(payload);
+      if (!instanceKey) {
+        unrecoverable++;
+        opts.onProgress?.({ processed, succeeded, failed, unrecoverable });
+        return;
+      }
       try {
         if (err.workflow === "tracked") {
-          await processTrackedReply(payload as Parameters<typeof processTrackedReply>[0]);
+          await processTrackedReply(payload as Parameters<typeof processTrackedReply>[0], instanceKey);
         } else if (err.workflow === "untracked") {
-          await processUntrackedReply(payload as Parameters<typeof processUntrackedReply>[0]);
+          await processUntrackedReply(payload as Parameters<typeof processUntrackedReply>[0], instanceKey);
         } else {
           return;
         }

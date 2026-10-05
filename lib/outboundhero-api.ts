@@ -174,6 +174,28 @@ async function ensureLeadVarsResolvable(instanceKey: string, leadId: number, var
   await updateLeadCustomVars(instanceKey, leadId, [...existing, ...additions]);
 }
 
+/**
+ * Clean an address the way people paste them: whitespace, "mailto:", <angle
+ * brackets>, quotes, and trailing sentence punctuation — e.g. "please cc
+ * john@payneandpowell.com." → "john@payneandpowell.com" (Bison 422s the whole
+ * reply on "john@payneandpowell.com.").
+ */
+export function normalizeEmailAddress(raw: unknown): string {
+  let e = String(raw ?? "").trim().replace(/^mailto:/i, "");
+  e = e.replace(/^[<("'\[\s]+/, "").replace(/[>)"'\]\s.,;:!?]+$/, "");
+  return e.trim();
+}
+/** Strict enough to match what Bison accepts: no empty or dangling domain labels. */
+export function isValidEmailAddress(e: string): boolean {
+  return /^[^\s@<>()",;:]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/.test(e);
+}
+/** Normalize every CC/BCC and drop any still-invalid one, so one bad address can't block the send. */
+export function cleanRecipients(list?: EmailRecipient[]): EmailRecipient[] {
+  return (list || [])
+    .map((r) => ({ ...r, name: String(r.name || "").trim(), email_address: normalizeEmailAddress(r.email_address) }))
+    .filter((r) => isValidEmailAddress(r.email_address));
+}
+
 export async function sendReply(
   instanceKey: string,
   params: {
@@ -210,17 +232,13 @@ export async function sendReply(
     message: plainTextToEmailHtml(params.message),
     sender_email_id: params.senderEmailId,
     content_type: "html",
-    to_emails: [{ name: String(params.toName || "").trim(), email_address: String(params.toEmail || "").trim() }],
+    to_emails: [{ name: String(params.toName || "").trim(), email_address: normalizeEmailAddress(params.toEmail) }],
   };
 
   // Bison 422s the WHOLE reply if any CC/BCC isn't a valid address (e.g. a
   // client config saved as "Sanitize360@gmail.com " with a trailing space).
   // Trim every address and drop any that still isn't valid, so one bad CC can't
   // block the send.
-  const cleanRecipients = (list?: EmailRecipient[]) =>
-    (list || [])
-      .map((r) => ({ ...r, name: String(r.name || "").trim(), email_address: String(r.email_address || "").trim() }))
-      .filter((r) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(r.email_address));
   const cc = cleanRecipients(params.ccEmails);
   const bcc = cleanRecipients(params.bccEmails);
   if (cc.length) payload.cc_emails = cc;
@@ -371,8 +389,8 @@ export async function sendOneOffReply(
   // tries it and the provider bounces it back as "Please re-connect this email
   // account: Invalid address", which reads like a broken inbox (seen on a
   // Change of Target to " beth@bayarts" — leading space, no TLD).
-  const toEmail = String(params.toEmail || "").trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(toEmail)) {
+  const toEmail = normalizeEmailAddress(params.toEmail);
+  if (!isValidEmailAddress(toEmail)) {
     return { ok: false, error: `Invalid recipient address "${params.toEmail}" — check the email (it needs a full domain like name@company.com).` };
   }
   const { baseUrl, token } = getInstanceConfig(instanceKey);
@@ -388,7 +406,7 @@ export async function sendOneOffReply(
       // OB now rejects nulls for these — must be empty arrays. Hit during
       // a Change-of-Target re-pitch:
       //   422: "The cc emails field must be an array. (and 2 more errors)"
-      cc_emails: params.ccEmails?.length ? params.ccEmails : [],
+      cc_emails: cleanRecipients(params.ccEmails),
       bcc_emails: [],
       attachments: [],
     }),

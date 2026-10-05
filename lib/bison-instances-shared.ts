@@ -50,6 +50,22 @@ export function isValidInstance(key: string | null | undefined): key is BisonIns
 }
 
 /** Coerce any string to a valid instance key, falling back to the default. */
+/**
+ * The Bison instance a webhook came from, read from its `event.instance_url`
+ * (e.g. "https://personal.outboundclean.com" → "outboundclean"). Null when it
+ * can't be told — callers must NOT fall back to the default instance, or the
+ * row is stamped with the wrong instance (every later Send Reply / blacklist /
+ * thread lookup then hits the wrong Bison).
+ */
+export function instanceFromWebhookPayload(payload: unknown): BisonInstanceKey | null {
+  const url = (payload as { event?: { instance_url?: string } } | null)?.event?.instance_url;
+  if (!url) return null;
+  let host: string;
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return null; }
+  const hit = BISON_INSTANCES.find((i) => new URL(i.baseUrl).hostname.toLowerCase() === host);
+  return hit ? hit.key : null;
+}
+
 export function coerceInstance(key: string | null | undefined): BisonInstanceKey {
   return isValidInstance(key) ? key : DEFAULT_INSTANCE;
 }

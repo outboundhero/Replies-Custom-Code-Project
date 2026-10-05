@@ -34,6 +34,7 @@ import { buildNotInterestedReply } from "@/lib/processing/not-interested-reply";
 import { htmlToText } from "@/lib/html-text";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance } from "@/lib/bison-instances";
+import db from "@/lib/db";
 
 export const maxDuration = 60;
 
@@ -126,6 +127,18 @@ function isExpectedSendFailure(error: string | undefined): boolean {
   const status = parseInt(error.split(":")[0]?.trim() || "", 10);
   if (status === 404 || status === 410) return true;            // reply/lead/campaign gone
   return /selected sender email id is invalid|sender_email_id/i.test(error); // mailbox disconnected
+}
+
+/** True when this lead's billing-block failure is already on the Error Log. */
+async function billingErrorAlreadyLogged(stage: string, rowId: number): Promise<boolean> {
+  try {
+    const r = await db.execute({
+      sql: `SELECT 1 FROM error_log WHERE stage = ? AND message LIKE '%billing over-use%'
+              AND CAST(json_extract(payload, '$.row_id') AS INTEGER) = ? LIMIT 1`,
+      args: [stage, rowId],
+    });
+    return r.rows.length > 0;
+  } catch { return false; } // when unsure, log
 }
 
 async function buildBodyForKind(row: DueRow, instanceKey: string): Promise<{ ok: true; build: BuildResult } | { ok: false; reason: string }> {
@@ -301,6 +314,9 @@ export async function GET(req: NextRequest) {
         // Disconnected/removed sender mailbox (or deleted resource) — routine
         // churn for an automated re-send, not an actionable error. Log quietly.
         await logActivity("inbox", `${kind}-auto-reply-skipped`, { lead_email: row.lead_email ?? undefined, details: { row_id: row.id, reason: result.error, bison_instance: instanceKey } });
+      } else if (/billing over-use/i.test(result.error || "") && (await billingErrorAlreadyLogged(`${kind}-auto-reply`, row.id))) {
+        // Billing block: the row is retried hourly until it clears. One Error
+        // Log entry per lead is enough — the 10/1 block logged 83 for 13 leads.
       } else {
         await logError("inbox", `${kind}-auto-reply`, result.error || "sendReply !ok", {
           row_id: row.id,

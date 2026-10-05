@@ -6,7 +6,7 @@ import { processTrackedReply } from "@/lib/processing/tracked";
 import { processUntrackedReply } from "@/lib/processing/untracked";
 import { sendToClayWebhook } from "@/lib/clay";
 import { blacklistDomain, blacklistEmail } from "@/lib/processing/domain-blacklist";
-import { coerceInstance } from "@/lib/bison-instances";
+import { coerceInstance, instanceFromWebhookPayload } from "@/lib/bison-instances";
 import { sendReply } from "@/lib/outboundhero-api";
 
 export async function POST(req: NextRequest) {
@@ -226,13 +226,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // The replay must be stamped with the Bison instance the webhook came from.
+  // (It used to omit it → every retried FacilityReach / OutboundClean /
+  // CleaningOutbound reply was saved as "outboundhero".)
+  const instanceKey = instanceFromWebhookPayload(payload);
+  if (!instanceKey) {
+    return NextResponse.json(
+      { error: "Can't tell which Bison instance this webhook came from (no recognisable event.instance_url) — not retrying, to avoid saving it under the wrong instance." },
+      { status: 400 },
+    );
+  }
+
   // Retry the processing
   try {
     const workflow = entry.workflow as string;
     if (workflow === "tracked") {
-      await processTrackedReply(payload as Parameters<typeof processTrackedReply>[0]);
+      await processTrackedReply(payload as Parameters<typeof processTrackedReply>[0], instanceKey);
     } else if (workflow === "untracked") {
-      await processUntrackedReply(payload as Parameters<typeof processUntrackedReply>[0]);
+      await processUntrackedReply(payload as Parameters<typeof processUntrackedReply>[0], instanceKey);
     } else {
       return NextResponse.json({ error: `Unknown workflow: ${workflow}` }, { status: 400 });
     }
