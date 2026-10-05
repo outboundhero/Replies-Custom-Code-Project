@@ -4,8 +4,8 @@ import { jwtVerify, SignJWT, type JWTPayload } from "jose";
 const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "default-secret-change-me");
 const SESSION_MAX_AGE = 60 * 60 * 24 * 7; // 7 days
 
-/** Routes accessible by inbox_manager role */
-const INBOX_MANAGER_ROUTES = ["/inbox", "/clients", "/qualification"];
+/** Routes accessible by inbox_manager role (client-scoped ones get /inbox only) */
+const INBOX_MANAGER_ROUTES = ["/inbox", "/data-view", "/clients", "/qualification"];
 
 /**
  * Sliding-session renew: re-sign the same identity with a fresh 7-day window and

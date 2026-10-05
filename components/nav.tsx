@@ -56,7 +56,7 @@ const items: NavItem[] = [
     defaultOpen: true,
     children: [
       { href: "/inbox", label: "Inbox (Beta)" },
-      { href: "/data-view", label: "Data View", adminOnly: true },
+      { href: "/data-view", label: "Data View" }, // inbox managers too (not client-scoped ones — see canSee)
       { href: "/archive", label: "Archive", adminOnly: true },
     ],
   },
