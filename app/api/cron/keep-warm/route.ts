@@ -26,6 +26,7 @@ const ROUTES = [
   "/api/onboarding",
   "/api/inbox?mode=bootstrap&view=base-clients-cherry",
   "/api/data-view?sort=created_at.desc&limit=50&offset=0",
+  "/api/data-view?sort=created_at.desc&limit=100&offset=0&category=Open%20Response",
   "/api/sheet-pushes",
 ];
 

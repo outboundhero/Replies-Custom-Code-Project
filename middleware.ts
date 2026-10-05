@@ -72,9 +72,10 @@ export async function middleware(req: NextRequest) {
 
     // Inbox manager: restrict to allowed routes
     if (role === "inbox_manager") {
-      // Root "/" always redirects inbox managers to /inbox
+      // Root "/": internal inbox managers start in the Data View (their main
+      // workspace); client-scoped accounts in their Inbox.
       if (pathname === "/") {
-        return NextResponse.redirect(new URL("/inbox", req.url));
+        return NextResponse.redirect(new URL(isScoped ? "/inbox" : "/data-view", req.url));
       }
 
       // Scoped users are inbox-only: anything outside /inbox bounces back.

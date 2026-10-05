@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { prefetchDataView } from "@/lib/data-view-prefetch";
+import { prefetchDataView, dataViewDefaultCategory } from "@/lib/data-view-prefetch";
 
 interface NavLink {
   href: string;
@@ -112,6 +112,18 @@ export function Nav({
     return !link.adminOnly;
   };
 
+  // Internal inbox managers work mainly in the Data View: the Inbox group sits
+  // first, with Data View at its top. Admins keep the standard order.
+  const navItems: NavItem[] = role === "inbox_manager" && !isScoped
+    ? [
+        ...items.filter((i) => isGroup(i) && i.label === "Inbox").map((g) => ({
+          ...(g as NavGroup),
+          children: [...(g as NavGroup).children].sort((a, b) => Number(b.href === "/data-view") - Number(a.href === "/data-view")),
+        })),
+        ...items.filter((i) => !(isGroup(i) && i.label === "Inbox")),
+      ]
+    : items;
+
   const linkClass = (active: boolean) =>
     cn(
       "block px-3 py-2 rounded-md text-sm transition-colors",
@@ -124,7 +136,10 @@ export function Nav({
   const warmed = useRef<Map<string, number>>(new Map());
   function warmHref(href: string) {
     try { router.prefetch(href); } catch { /* */ }
-    if (href === "/data-view") { prefetchDataView(); return; } // fills the page's hydrate buffer
+    if (href === "/data-view") { // fills the page's hydrate buffer with the user's default view
+      prefetchDataView(dataViewDefaultCategory({ role, allowedClientTags: initialAllowedClientTags }));
+      return;
+    }
     const url = WARM_ENDPOINT[href];
     if (!url) return;
     const now = Date.now();
@@ -141,7 +156,7 @@ export function Nav({
         <p className="text-xs text-muted-foreground">Reply Router</p>
       </div>
       <nav className="flex-1 p-2 space-y-1">
-        {items.map((item) => {
+        {navItems.map((item) => {
           if (isGroup(item)) {
             const kids = item.children.filter(canSee);
             if (!kids.length) return null;

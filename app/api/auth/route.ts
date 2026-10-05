@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
       : null;
 
     await createSession(user.email, user.role, allowedClientTags);
-    return NextResponse.json({ ok: true, role: user.role });
+    return NextResponse.json({ ok: true, role: user.role, scoped: !!allowedClientTags?.length });
   } catch (error) {
     console.error("[auth] Login failed:", error);
     return NextResponse.json({ error: "Authentication failed" }, { status: 500 });

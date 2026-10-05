@@ -23,7 +23,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { InstanceBadge } from "@/components/instance-badge";
 import { initials } from "@/components/email-participants";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
-import { peekDataView, DATA_VIEW_PAGE_SIZE } from "@/lib/data-view-prefetch";
+import { peekDataView, dataViewDefaultCategory, DATA_VIEW_PAGE_SIZE } from "@/lib/data-view-prefetch";
+import { useSession } from "@/components/session-provider";
 import {
   computeReplyRecipients, sendReplyTemplateFor, isSendReplyCategory,
   PRIMARY_CONTACT_CATEGORY, CAT_DOT, type Recipient,
@@ -51,6 +52,37 @@ type Row = Record<string, any>;
 
 // ── Advanced filter builder (Airtable-style, AND-combined) ─────────────────
 interface Cond { field: string; op: string; value: string }
+
+// ── Saved views — a user's own named filter / grouping / sort presets. Private
+// to them (stored server-side per login) and never the page default: every
+// visit opens on the default view (Open Response for inbox managers). ──
+interface ViewState {
+  search: string; clientTag: string; category: string; aiCategory: string; from: string; to: string;
+  groupBy: string; advFilters: Cond[]; sortCol: string; sortAsc: boolean;
+}
+interface SavedView { id: number; name: string; state: ViewState; updated_at: string }
+function defaultViewState(category: string): ViewState {
+  return { search: "", clientTag: "", category, aiCategory: "", from: "", to: "", groupBy: "", advFilters: [], sortCol: "created_at", sortAsc: false };
+}
+/** Coerce a stored view into a well-formed state (unknown keys / types dropped). */
+function normalizeViewState(raw: unknown): ViewState {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const s = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : "");
+  const conds = Array.isArray(o.advFilters)
+    ? (o.advFilters as unknown[]).filter((c): c is Cond => !!c && typeof c === "object"
+        && typeof (c as Cond).field === "string" && typeof (c as Cond).op === "string" && typeof (c as Cond).value === "string")
+        .map((c) => ({ field: c.field, op: c.op, value: c.value }))
+    : [];
+  return {
+    search: s("search"), clientTag: s("clientTag"), category: s("category"), aiCategory: s("aiCategory"),
+    from: s("from"), to: s("to"), groupBy: s("groupBy"), advFilters: conds,
+    sortCol: s("sortCol") || "created_at", sortAsc: o.sortAsc === true,
+  };
+}
+/** Comparable fingerprint — blank filter conditions don't count as a change. */
+function viewKey(v: ViewState): string {
+  return JSON.stringify({ ...v, search: v.search.trim(), advFilters: v.advFilters.filter((c) => c.value.trim()) });
+}
 const FILTER_FIELDS: { id: string; label: string; type: "text" | "select" | "client" | "date"; options?: string[] }[] = [
   { id: "lead_name", label: "Contact name", type: "text" },
   { id: "lead_email", label: "Lead email", type: "text" },
@@ -189,11 +221,17 @@ function recipientCount(names?: string | null, emails?: string | null): number {
 }
 
 export default function DataViewPage() {
+  // Internal inbox managers open every visit on the Open Response queue (the
+  // pre-selected Category filter — changeable, and back to Open Response on the
+  // next visit). Admins open unfiltered.
+  const session = useSession();
+  const defaultCategory = dataViewDefaultCategory(session);
+
   // ── Filters ──
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search, 300);
   const [clientTag, setClientTag] = useState("");
-  const [category, setCategory] = useState("");
+  const [category, setCategory] = useState(defaultCategory);
   const [aiCategory, setAiCategory] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -290,7 +328,7 @@ export default function DataViewPage() {
   // ── Data — hydrate synchronously from the app-load prefetch when fresh, so
   //    the first open paints instantly (same pattern as the inbox). ──
   const bootRef = useRef<ReturnType<typeof peekDataView> | undefined>(undefined);
-  if (bootRef.current === undefined) bootRef.current = peekDataView();
+  if (bootRef.current === undefined) bootRef.current = peekDataView(defaultCategory);
   const boot = bootRef.current;
   const [rows, setRows] = useState<Row[]>(boot?.rows ?? []);
   const [offset, setOffset] = useState(boot?.rows.length ?? 0);
@@ -445,6 +483,58 @@ export default function DataViewPage() {
     setAdvFilters([]); setShowFilters(false);
   }
   const anyFilter = !!(search || clientTag || category || aiCategory || from || to || activeAdvCount);
+
+  // ── Saved views ──
+  const [views, setViews] = useState<SavedView[]>([]);
+  const [activeViewId, setActiveViewId] = useState<number | null>(null); // null = the default view
+  useEffect(() => {
+    fetch("/api/data-view/views").then((r) => (r.ok ? r.json() : null)).then((d) => {
+      if (Array.isArray(d?.views)) setViews(d.views.map((v: SavedView) => ({ ...v, state: normalizeViewState(v.state) })));
+    }).catch(() => {});
+  }, []);
+  const currentView = useMemo<ViewState>(
+    () => ({ search, clientTag, category, aiCategory, from, to, groupBy, advFilters, sortCol, sortAsc }),
+    [search, clientTag, category, aiCategory, from, to, groupBy, advFilters, sortCol, sortAsc],
+  );
+  const activeView = views.find((v) => v.id === activeViewId) ?? null;
+  const viewDirty = viewKey(currentView) !== viewKey(activeView ? activeView.state : defaultViewState(defaultCategory));
+  function applyView(v: ViewState) {
+    setSearch(v.search); setClientTag(v.clientTag); setCategory(v.category); setAiCategory(v.aiCategory);
+    setFrom(v.from); setTo(v.to); setGroupBy(v.groupBy); setAdvFilters(v.advFilters);
+    setSortCol(v.sortCol); setSortAsc(v.sortAsc);
+    setCollapsed(new Set()); setShowFilters(false);
+  }
+  async function saveView(name: string): Promise<boolean> {
+    const res = await fetch("/api/data-view/views", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, state: currentView }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || !d.view) { toast.error(d.error || "Couldn't save the view"); return false; }
+    const saved: SavedView = { ...d.view, state: normalizeViewState(d.view.state) };
+    setViews((prev) => [...prev.filter((v) => v.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" })));
+    setActiveViewId(saved.id);
+    toast.success(d.replaced ? `Updated “${saved.name}”` : `Saved “${saved.name}”`);
+    return true;
+  }
+  async function updateActiveView() {
+    if (!activeView) return;
+    const res = await fetch("/api/data-view/views", {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: activeView.id, state: currentView }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { toast.error(d.error || "Couldn't update the view"); return; }
+    setViews((prev) => prev.map((v) => (v.id === activeView.id ? { ...v, state: currentView } : v)));
+    toast.success(`Updated “${activeView.name}”`);
+  }
+  async function deleteView(id: number) {
+    const res = await fetch(`/api/data-view/views?id=${id}`, { method: "DELETE" });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); toast.error(d.error || "Couldn't delete the view"); return; }
+    setViews((prev) => prev.filter((v) => v.id !== id));
+    if (activeViewId === id) setActiveViewId(null); // filters stay as they are
+    toast.success("View deleted");
+  }
   function patchFilter(i: number, patch: Partial<Cond>) {
     setAdvFilters((prev) => prev.map((f, j) => {
       if (j !== i) return f;
@@ -922,6 +1012,18 @@ export default function DataViewPage() {
               <p className="text-xs text-muted-foreground">{loading ? "Loading…" : `${rows.length}${hasMore ? "+" : ""} replies`}{selectedCount > 0 ? ` · ${selectedCount} selected` : ""}</p>
             </div>
             <div className="flex items-center gap-2 relative">
+              <ViewsMenu
+                views={views}
+                activeId={activeViewId}
+                dirty={viewDirty}
+                defaultLabel={defaultCategory || "All replies"}
+                onOpen={() => setShowFilters(false)}
+                onPickDefault={() => { setActiveViewId(null); applyView(defaultViewState(defaultCategory)); }}
+                onPick={(v) => { setActiveViewId(v.id); applyView(v.state); }}
+                onSave={saveView}
+                onUpdate={updateActiveView}
+                onDelete={deleteView}
+              />
               {/* Airtable-style multi-condition Filter */}
               <button
                 onClick={() => setShowFilters((s) => !s)}
@@ -1227,6 +1329,136 @@ export default function DataViewPage() {
   );
 }
 
+// ── Views menu — the default view + the user's own saved views ─────────────
+function ViewsMenu({ views, activeId, dirty, defaultLabel, onOpen, onPickDefault, onPick, onSave, onUpdate, onDelete }: {
+  views: SavedView[]; activeId: number | null; dirty: boolean; defaultLabel: string;
+  onOpen: () => void; onPickDefault: () => void; onPick: (v: SavedView) => void;
+  onSave: (name: string) => Promise<boolean>; onUpdate: () => void; onDelete: (id: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirmId, setConfirmId] = useState<number | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => { setOpen(false); setConfirmId(null); setName(""); }, []);
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: MouseEvent) => { if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) close(); };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    document.addEventListener("mousedown", down); document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); };
+  }, [open, close]);
+
+  const active = views.find((v) => v.id === activeId) ?? null;
+  const label = active ? active.name : "Default view";
+  const nameTaken = !!name.trim() && views.some((v) => v.name.toLowerCase() === name.trim().replace(/\s+/g, " ").toLowerCase());
+  async function submit() {
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    const ok = await onSave(name.trim());
+    setSaving(false);
+    if (ok) close();
+  }
+  const check = (on: boolean) => (
+    <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${on ? "bg-primary text-primary-foreground" : "border"}`}>
+      {on && <svg className="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}><path d="M5 13l4 4L19 7" /></svg>}
+    </span>
+  );
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        onClick={() => { if (open) close(); else { onOpen(); setOpen(true); } }}
+        className={`inline-flex h-8 max-w-[260px] items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition-colors ${active ? "border-primary/40 bg-primary/5 text-primary" : "hover:bg-muted"}`}
+        title="Views — the default view and your saved views"
+      >
+        <svg className="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M4 6h16M4 12h16M4 18h10" /></svg>
+        <span className="truncate">{label}</span>
+        {dirty && <span className="shrink-0 font-normal text-muted-foreground">· edited</span>}
+        <svg className="h-3 w-3 shrink-0 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-10 z-40 w-[320px] rounded-xl border bg-white shadow-xl animate-in fade-in slide-in-from-top-1">
+          <div className="p-2">
+            <button
+              onClick={() => { onPickDefault(); close(); }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-muted/60"
+            >
+              {check(activeId === null)}
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-medium">Default view</span>
+                <span className="block text-[11px] text-muted-foreground">{defaultLabel} · where everyone starts</span>
+              </span>
+            </button>
+          </div>
+
+          <div className="border-t px-2 pb-2 pt-2">
+            <p className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">My views</p>
+            {views.length === 0 ? (
+              <p className="px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                No saved views yet. Set up the filters, grouping and sorting you want, then save them below — only you will see them.
+              </p>
+            ) : (
+              <div className="max-h-[240px] overflow-y-auto">
+                {views.map((v) => (
+                  <div key={v.id} className="group flex items-center gap-1 rounded-lg hover:bg-muted/60">
+                    {confirmId === v.id ? (
+                      <div className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5">
+                        <span className="truncate text-xs">Delete “{v.name}”?</span>
+                        <span className="flex shrink-0 gap-1">
+                          <button onClick={() => { onDelete(v.id); setConfirmId(null); }} className="rounded-md bg-destructive px-2 py-1 text-[11px] font-medium text-white hover:opacity-90">Delete</button>
+                          <button onClick={() => setConfirmId(null)} className="rounded-md border px-2 py-1 text-[11px] hover:bg-muted">Cancel</button>
+                        </span>
+                      </div>
+                    ) : (
+                      <>
+                        <button onClick={() => { onPick(v); close(); }} className="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left">
+                          {check(activeId === v.id)}
+                          <span className="truncate text-xs font-medium">{v.name}</span>
+                        </button>
+                        <button
+                          onClick={() => setConfirmId(v.id)}
+                          className="mr-1.5 h-6 w-6 shrink-0 rounded-md text-sm leading-none text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-destructive group-hover:opacity-100"
+                          title={`Delete “${v.name}”`}
+                        >×</button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2 border-t p-3">
+            {active && dirty && (
+              <button
+                onClick={() => { onUpdate(); close(); }}
+                className="w-full truncate rounded-md border border-primary/40 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/10"
+              >
+                Update “{active.name}” with current filters
+              </button>
+            )}
+            <p className="text-[11px] font-medium">Save current filters as a new view</p>
+            <div className="flex gap-1.5">
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+                placeholder="View name, e.g. BBS interested"
+                maxLength={60}
+                className="h-8 text-xs"
+              />
+              <Button size="sm" className="h-8 text-xs" disabled={!name.trim() || saving} onClick={submit}>{saving ? "Saving…" : "Save"}</Button>
+            </div>
+            {nameTaken && <p className="text-[11px] text-amber-600">You already have a view with this name — saving will replace it.</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Reply cell with a hover popover showing the FULL reply ─────────────────
 // The grid cells are overflow-hidden, so the full-reply box is rendered in a
 // portal at a fixed position (never clipped). A short close delay lets the mouse
@@ -1286,7 +1518,7 @@ function previewReply(s: string): string {
 function ReplyHoverCell({ body, fullId, clamp = 2, textClass = "text-xs" }: {
   body: string | null | undefined; fullId?: number; clamp?: number; textClass?: string;
 }) {
-  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; maxH: number } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; maxH: number; w: number } | null>(null);
   const ref = useRef<HTMLParagraphElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
@@ -1300,14 +1532,15 @@ function ReplyHoverCell({ body, fullId, clamp = 2, textClass = "text-xs" }: {
     cancelClose();
     const r = ref.current?.getBoundingClientRect();
     if (!r) return;
-    const W = 520;
+    // Wide enough to read long replies / threads comfortably; never wider than the screen.
+    const W = Math.min(800, window.innerWidth - 24);
     const maxH = Math.min(Math.round(window.innerHeight * 0.6), 520);
     const left = Math.max(8, Math.min(r.left, window.innerWidth - W - 16));
     // Open below the text, or above it when there isn't room — never off-screen.
     const below = window.innerHeight - r.bottom - 12;
     setPos(below >= Math.min(maxH, 240) || below >= r.top
-      ? { left, top: r.bottom + 4, maxH: Math.min(maxH, below) }
-      : { left, bottom: window.innerHeight - r.top + 4, maxH: Math.min(maxH, r.top - 12) });
+      ? { left, top: r.bottom + 4, maxH: Math.min(maxH, below), w: W }
+      : { left, bottom: window.innerHeight - r.top + 4, maxH: Math.min(maxH, r.top - 12), w: W });
   };
   return (
     <>
@@ -1321,8 +1554,8 @@ function ReplyHoverCell({ body, fullId, clamp = 2, textClass = "text-xs" }: {
         <div
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
-          style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxH }}
-          className="z-[100] w-[520px] overflow-y-auto overscroll-contain rounded-lg border bg-white p-3 text-xs leading-relaxed text-foreground whitespace-pre-wrap shadow-xl"
+          style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxH, width: pos.w }}
+          className="z-[100] overflow-y-auto overscroll-contain rounded-lg border bg-white p-3 text-xs leading-relaxed text-foreground whitespace-pre-wrap shadow-xl"
         >
           {tidyReply(loadingFull ? body.replace(/…$/, "") : full)}
           {loadingFull && <span className="mt-2 block text-[11px] italic text-muted-foreground">Loading full thread…</span>}

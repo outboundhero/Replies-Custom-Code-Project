@@ -33,9 +33,10 @@ export default function LoginPage() {
 
       if (res.ok) {
         const data = await res.json();
-        // Inbox managers go to inbox by default
+        // Internal inbox managers start in the Data View; client-scoped
+        // accounts in their Inbox.
         if (data.role === "inbox_manager") {
-          router.push("/inbox");
+          router.push(data.scoped ? "/inbox" : "/data-view");
         } else {
           router.push("/");
         }
