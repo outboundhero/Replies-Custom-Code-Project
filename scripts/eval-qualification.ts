@@ -49,10 +49,11 @@ async function main() {
         actual = r.result; reason = r.reason;
       } else {
         const i = fx.input;
-        const r = await auditLocation(
-          i.city || null, i.state || null, i.address || null, i.zip || null,
-          i.inclusionLocations || "", "high", i.hqAnchor || null,
-        );
+        const r = await auditLocation({
+          city: i.city || null, state: i.state || null, country: null, address: i.address || null, zip: i.zip || null,
+          sourceLabel: "the lead's custom variables (CRM)", confidence: "high",
+          inclusionLocations: i.inclusionLocations || "", hqAnchor: i.hqAnchor || null,
+        });
         actual = r.result; reason = r.reason;
       }
     } catch (e) {

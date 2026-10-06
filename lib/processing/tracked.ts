@@ -495,6 +495,7 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
         airtableBaseId: section.airtable_base_id,
         airtableTableId: section.airtable_table_id,
         bisonInstance,
+        senderName: sender_email.name || undefined,
       });
     } catch (error) {
       // Never let an audit failure lose the reply — it's already saved; the

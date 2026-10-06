@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
   // Supabase row id. This is the backstop for any ingest audit that failed.
   const { data: rows, error } = await supabase
     .from("replies")
-    .select("id, client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, from_email, reply_we_got, email_subject, airtable_record_id, airtable_base_id, bison_instance, ai_categorized_lead_category")
+    .select("id, client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, from_email, reply_we_got, email_subject, airtable_record_id, airtable_base_id, bison_instance, ai_categorized_lead_category, sender_name")
     .in("ai_categorized_lead_category", QUALIFYING_CATEGORIES)
     .is("industry_audit", null)
     .neq("client_tag", "N/A")
@@ -82,6 +82,7 @@ export async function GET(req: NextRequest) {
           airtableBaseId: (r.airtable_base_id as string) || undefined,
           airtableTableId: r.airtable_record_id ? AIRTABLE_TABLE_ID : undefined,
           bisonInstance: (r.bison_instance as string) || undefined,
+          senderName: (r.sender_name as string) || undefined,
         });
         audited++;
       } catch (e) {

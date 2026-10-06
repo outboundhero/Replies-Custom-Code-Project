@@ -1,12 +1,15 @@
 /**
- * Lead data enrichment via GPT with web search.
- * Gathers verified company data from multiple sources before auditing.
+ * Lead data enrichment via GPT (company name / industry / location best guess).
+ * Gathers company data from the reply + CRM before auditing. The industry audit
+ * then verifies the industry with a live Google search (lib/qualification/
+ * industry-audit.ts), and the location audit takes its location from the lead's
+ * reply first, CRM second (lib/qualification/qualify-lead.ts).
  *
- * Data sources (in order of reliability):
- * 1. Company website (via web search) — MOST RELIABLE
- * 2. Email signature from reply text — RELIABLE
- * 3. Custom variables from CRM — LEAST RELIABLE
+ * Note: this call used to pass OpenAI's `web_search_preview` tool, which the
+ * Chat Completions API rejects (400) — every lead with a business email domain
+ * silently fell back to CRM-only data from 2026-04-17 until it was removed.
  */
+import { logError } from "@/lib/errors";
 
 /** Personal/free email domains — don't extract website from these */
 const PERSONAL_DOMAINS = new Set([
@@ -52,11 +55,10 @@ const SYSTEM_PROMPT = `You are a lead data enrichment assistant for a commercial
 
 DATA SOURCES — STRICT PRIORITY for LOCATION (city/state/address/zip):
 1. The lead's REPLY TEXT — both body ("we're in Indianapolis", "our facility at 123 Main St") AND email signature block. THIS BEATS EVERYTHING ELSE for location. If the reply mentions any city/state/address of the lead's company, USE THAT.
-2. Company website (only if the reply has no location info) — search the web for the domain.
-3. CRM custom variables (city/state/address fields) — LEAST RELIABLE, often outdated. Use ONLY when the reply and website both yielded nothing.
+2. CRM custom variables (city/state/address fields) — LEAST RELIABLE, often outdated. Use ONLY when the reply yielded nothing.
 
 DATA SOURCES — for INDUSTRY (in priority order):
-1. Company website (most reliable — search the web for the domain)
+1. What you know about the company's website domain (if it is a well-known business)
 2. Email signature (titles, taglines, "Building Maintenance" etc.)
 3. Company NAME — infer the industry from it when 1 & 2 give nothing
    (e.g. "Wealthquest Financial Svc" → "financial services";
@@ -64,7 +66,7 @@ DATA SOURCES — for INDUSTRY (in priority order):
 
 YOUR TASKS:
 1. Scan the ENTIRE reply text for any mention of the lead's location — body sentences, signature blocks, "Sent from my…" sigs included. If found, that IS the location, full stop.
-2. If a company website domain is provided, search the web for it and extract industry + address. Industry from the website always wins over signature.
+2. If a company website domain is provided, use it as a clue to the industry (the industry audit verifies it with a live web search afterwards).
 3. Cross-reference. NEVER use CRM city/state when the reply spelled out a different one — even when the CRM matches a "passing" service area (it might be wrong).
 4. If no website domain is available (generic email like gmail), rely on reply + signature; CRM is a last-resort fallback.
 
@@ -128,7 +130,6 @@ export async function enrichLead(input: EnrichInput): Promise<EnrichedLeadData> 
         temperature: 0,
         max_tokens: 300,
         response_format: { type: "json_object" },
-        tools: domain ? [{ type: "web_search_preview" }] : undefined,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userParts.join("\n") },
@@ -137,6 +138,7 @@ export async function enrichLead(input: EnrichInput): Promise<EnrichedLeadData> 
     });
 
     if (!response.ok) {
+      await reportEnrichFailure(`OpenAI ${response.status}: ${(await response.text()).slice(0, 200)}`);
       return fallback(input, domain);
     }
 
@@ -160,9 +162,21 @@ export async function enrichLead(input: EnrichInput): Promise<EnrichedLeadData> 
       dataSources: parsed.data_sources || "CRM only",
       confidence: (["high", "medium", "low"].includes(parsed.confidence) ? parsed.confidence : "low") as EnrichedLeadData["confidence"],
     };
-  } catch {
+  } catch (e) {
+    await reportEnrichFailure((e as Error).message);
     return fallback(input, domain);
   }
+}
+
+// Enrichment used to fail SILENTLY (an unsupported web-search option made every
+// business-domain lead fall back to CRM-only data for months, unnoticed). Now
+// failures are logged — at most once per 10 minutes per instance so an outage
+// can't flood the Error Log.
+let lastFailureLog = 0;
+async function reportEnrichFailure(message: string): Promise<void> {
+  if (Date.now() - lastFailureLog < 10 * 60_000) return;
+  lastFailureLog = Date.now();
+  try { await logError("tracked", "qualification-enrich", `Lead enrichment failed (audits fall back to CRM data): ${message}`, {}); } catch { /* never block the audit */ }
 }
 
 function fallback(input: EnrichInput, domain: string | null): EnrichedLeadData {

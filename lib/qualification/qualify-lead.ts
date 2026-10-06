@@ -48,12 +48,16 @@ interface QualifyLeadParams {
   airtableTableId?: string;
   /** Bison workspace the original reply came from — surfaced in the activity log. */
   bisonInstance?: string;
+  /** Our sending rep's name — their signature / outreach text can appear inside
+   *  a lead's reply (e.g. ticket auto-replies paste our email inline) and must
+   *  never be taken as the lead's location. */
+  senderName?: string;
 }
 
 export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   const {
     campaignTag, companyName, city, state, address, googleMapsUrl, phone,
-    leadEmail, replyText, replySubject, replyRowId, recordId, airtableBaseId, airtableTableId, bisonInstance,
+    leadEmail, replyText, replySubject, replyRowId, recordId, airtableBaseId, airtableTableId, bisonInstance, senderName,
   } = params;
 
   // 1. Get exclusion/inclusion rules from Supabase
@@ -82,7 +86,8 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
       state,
       address,
       googleMapsUrl,
-      phone: String(phone || ""),
+      // Junk CRM values like "there" aren't phone numbers (needs 7+ digits).
+      phone: String(phone || "").replace(/\D/g, "").length >= 7 ? String(phone) : "",
       replyText: leadMessage,
     });
   } catch (error) {
@@ -111,30 +116,26 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     industryResult = { result: "Passed", reason: "Industry audit error — defaulting to Passed" };
   }
 
-  // 4. Location audit. Priority of sources is now explicit:
-  //   1. Anything the LEAD said in their reply (body or signature)
-  //   2. The enriched location (website + signature parsing)
-  //   3. CRM custom variables (built into enrichment as last resort)
-  // Step 1 is a separate strict GPT extraction so the audit can't be
-  // fooled into passing a lead on stale CRM city/state when the lead
-  // themselves spelled out a different location.
-  let locResolved = {
-    city: enriched.city,
-    state: enriched.state,
-    address: enriched.address,
-    zip: enriched.zip,
-    source: `enrichment (${enriched.dataSources})`,
-    confidence: enriched.confidence,
-  };
+  // 4. Location audit. The location comes from ONE source, in this order, and
+  //    is never mixed with another (a reply city + the CRM street address used
+  //    to be blended, which passed a UK lead on its Oklahoma CRM address):
+  //      1. the lead's reply (body)
+  //      2. the signature in the lead's reply
+  //      3. the CRM custom variables (address / city / state) — only when the
+  //         reply has no location at all
+  //    The audit reason says which source was used and quotes the lead's words.
+  let locResolved = crmLocation(address, city, state, googleMapsUrl, enriched.zip);
   try {
-    const replyLoc = await extractReplyLocation(leadMessage);
-    if (replyLoc && (replyLoc.city || replyLoc.address)) {
+    const replyLoc = await extractReplyLocation(leadMessage, { senderName });
+    if (replyLoc) {
       locResolved = {
-        city: replyLoc.city || enriched.city,
-        state: replyLoc.state || enriched.state,
-        address: replyLoc.address || enriched.address,
-        zip: replyLoc.zip || enriched.zip,
-        source: `lead reply (${replyLoc.source})`,
+        city: replyLoc.city || "",
+        state: replyLoc.state || "",
+        country: replyLoc.country || "",
+        address: replyLoc.address || "",
+        zip: replyLoc.zip || "",
+        source: replyLoc.source === "signature" ? "signature" : "reply",
+        evidence: replyLoc.evidence,
         // Anything the lead wrote about themselves is high confidence.
         confidence: "high",
       };
@@ -143,21 +144,38 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     await logError("tracked", "qualification-extract-reply-location", (error as Error).message, {
       tag: campaignTag, record_id: recordId,
     });
-    // Fall through with enrichment-only location.
+    // Fall through with the CRM location.
   }
+  const sourceLabel = LOCATION_SOURCE_LABEL[locResolved.source];
+  const resolvedText = [locResolved.address, locResolved.city, locResolved.state, locResolved.zip, locResolved.country]
+    .filter(Boolean).join(", ");
 
   let locationResult: { result: "Passed" | "Failed"; reason: string };
   try {
-    locationResult = await auditLocation(
-      locResolved.city, locResolved.state, locResolved.address, locResolved.zip,
-      inclusionLocations, locResolved.confidence, hqAnchor,
-    );
+    locationResult = await auditLocation({
+      city: locResolved.city || null,
+      state: locResolved.state || null,
+      country: locResolved.country || null,
+      address: locResolved.address || null,
+      zip: locResolved.zip || null,
+      sourceLabel,
+      leadMessage: locResolved.source === "crm" ? null : leadMessage,
+      confidence: locResolved.confidence,
+      inclusionLocations,
+      hqAnchor,
+    });
   } catch (error) {
     await logError("tracked", "qualification-location", (error as Error).message, {
       tag: campaignTag, record_id: recordId,
     });
     locationResult = { result: "Failed", reason: "Location audit error" };
   }
+  // Say where the location was checked from, in the reason itself (the inbox
+  // Audit card shows this line). "|" separates reason parts, so keep it out.
+  const checkedFrom = locResolved.source === "crm"
+    ? `Checked from ${sourceLabel} (no location in the lead's reply) → ${resolvedText || "none"}.`
+    : `Checked from ${sourceLabel}: "${locResolved.evidence}" → ${resolvedText}.`;
+  locationResult = { ...locationResult, reason: `${checkedFrom} ${locationResult.reason}`.replace(/\|/g, "/") };
 
   // 5. Build qualification reason with enrichment context
   const reasons: string[] = [];
@@ -169,7 +187,6 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
     reasons.push(`Industry audit: ${industryResult.reason}`);
   }
   reasons.push(`Location audit: ${locationResult.reason}`);
-  reasons.push(`Location source: ${locResolved.source} → ${[locResolved.address, locResolved.city, locResolved.state, locResolved.zip].filter(Boolean).join(", ") || "(none)"}`);
   if (enriched.website) reasons.push(`Website: ${enriched.website}`);
   if (enriched.industry) reasons.push(`Verified industry: ${enriched.industry}`);
   reasons.push(`Data: ${enriched.dataSources} (${enriched.confidence} confidence)`);
@@ -179,7 +196,14 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   let suggestedClients = "";
   if (industryResult.result !== "Passed" || locationResult.result !== "Passed") {
     try {
-      suggestedClients = await findFittingClients(campaignTag, enriched);
+      // Match on the location the audit actually used, not the CRM/enrichment guess.
+      suggestedClients = await findFittingClients(campaignTag, {
+        ...enriched,
+        city: locResolved.city,
+        state: [locResolved.state, locResolved.country && !/^(united states|usa?|us)$/i.test(locResolved.country) ? locResolved.country : ""].filter(Boolean).join(", "),
+        address: locResolved.address,
+        zip: locResolved.zip,
+      });
     } catch (error) {
       await logError("tracked", "qualification-cross-client", (error as Error).message, {
         tag: campaignTag, record_id: recordId,
@@ -256,7 +280,7 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
   try {
     const zipSource: ZipSource = !locResolved.zip
       ? "missing"
-      : locResolved.source.startsWith("lead reply")
+      : locResolved.source !== "crm"
         ? "reply_signature"
         : "enrichment";
     await runCwAutoReroute({
@@ -456,4 +480,32 @@ ${clientsList}`,
   } catch {
     return "";
   }
+}
+
+
+// ── Location sources ──────────────────────────────────────────────────────────
+type LocationSource = "reply" | "signature" | "crm";
+const LOCATION_SOURCE_LABEL: Record<LocationSource, string> = {
+  reply: "the lead's reply",
+  signature: "the signature in the lead's reply",
+  crm: "the lead's custom variables (CRM)",
+};
+interface ResolvedLocation {
+  city: string; state: string; country: string; address: string; zip: string;
+  source: LocationSource; evidence: string; confidence: string;
+}
+
+/** The CRM custom-variable location — used only when the reply names none.
+ *  Falls back to the Google Maps query when there's no address. The ZIP keeps
+ *  the enrichment's value (what the CW ZIP router has always received). */
+function crmLocation(address: string, city: string, state: string, googleMapsUrl: string, enrichedZip: string): ResolvedLocation {
+  let addr = String(address || "").trim();
+  if (!addr && googleMapsUrl) {
+    try { addr = (new URL(googleMapsUrl.replace(/ /g, "+")).searchParams.get("q") || "").replace(/\+/g, " ").trim(); } catch { /* bad URL */ }
+  }
+  return {
+    city: String(city || "").trim(), state: String(state || "").trim(), country: "",
+    address: addr, zip: String(enrichedZip || "").trim(),
+    source: "crm", evidence: "", confidence: "low",
+  };
 }

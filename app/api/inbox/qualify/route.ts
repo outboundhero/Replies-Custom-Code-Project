@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
 
     const { data: r, error } = await supabase
       .from("replies")
-      .select("client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, from_email, reply_we_got, email_subject, airtable_record_id, airtable_base_id")
+      .select("client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, from_email, reply_we_got, email_subject, airtable_record_id, airtable_base_id, sender_name")
       .eq("id", id)
       .single();
     if (error || !r) return NextResponse.json({ error: "Reply not found" }, { status: 404 });
@@ -63,6 +63,7 @@ export async function POST(req: NextRequest) {
       recordId: (r.airtable_record_id as string) || undefined,
       airtableBaseId: (r.airtable_base_id as string) || undefined,
       airtableTableId: r.airtable_record_id ? AIRTABLE_TABLE_ID : undefined,
+      senderName: (r.sender_name as string) || undefined,
     });
 
     // Return the freshly-written audit fields so the inbox can merge them into

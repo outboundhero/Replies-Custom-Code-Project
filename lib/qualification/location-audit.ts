@@ -9,6 +9,11 @@
  * Measures FROM the client's office anchor (hq_anchor) when available, and
  * also accepts the broader free-form service area (inclusion_locations).
  * ~20 mile / ~20 minute threshold, generous (default to Passed when in range).
+ *
+ * The lead location comes from ONE source (the lead's reply, the signature in
+ * the reply, or the CRM custom variables — see qualify-lead.ts) and is never a
+ * mix of them. When it came from the reply, the lead's own message is passed
+ * too, so the auditor reads their exact words (e.g. a UK postcode).
  */
 
 import { geminiJSON } from "@/lib/gemini";
@@ -18,52 +23,65 @@ interface LocationAuditResult {
   reason: string;
 }
 
+export interface LocationAuditInput {
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  address: string | null;
+  zip: string | null;
+  /** Human label of where the location came from, e.g. "the lead's reply". */
+  sourceLabel: string;
+  /** The lead's own new message (only sent when the location came from it). */
+  leadMessage?: string | null;
+  confidence: string;
+  inclusionLocations: string;
+  hqAnchor: string | null;
+}
+
 const SYSTEM_PROMPT = `You are a geographic proximity auditor for a B2B commercial-services company. Decide if a LEAD is close enough to a CLIENT's service area to be worth pursuing.
 
 You are given:
-1. LEAD LOCATION — raw, possibly partial (city/state/address/zip from the lead's own reply or CRM).
+1. LEAD LOCATION — from ONE source, named in LOCATION SOURCE (the lead's own reply, the signature in their reply, or CRM data). When it came from the reply, the lead's own message is included — their words are authoritative.
 2. CLIENT OFFICE ANCHOR — the client's office as "City, State" or a ZIP. This is the precise point to measure distance FROM. May be blank.
 3. CLIENT SERVICE AREA — a broader free-form description (zips, counties, cities, or whole states). May span MULTIPLE regions — read all of it.
 
 USE GOOGLE SEARCH to:
-- Resolve the lead's location to a real place. Disambiguate same-named towns using any state given (e.g. "Belmont, NC" is near Charlotte NC, NOT Belmont CA).
+- Resolve the lead's location to a real place (ZIPs and non-US postcodes included). Disambiguate same-named towns using any state / country given (e.g. "Belmont, NC" is near Charlotte NC, NOT Belmont CA).
 - Look up the actual DRIVING distance/time between the lead and the client office anchor.
 
 PASS if ANY of these is true:
 - The lead is within ~20 miles OR ~20 minutes driving of the client office anchor.
 - The lead's city/zip/county/state is contained in the client service area list (e.g. service area lists the lead's state or a county/zip that contains the lead).
-Be GENEROUS — if there's any reasonable chance the lead is in range, PASS. A lead in the SAME city as the client passes. Never fail for "too vague" when a city + state are present.
+Be GENEROUS within the client's country — if there's any reasonable chance the lead is in range, PASS. A lead in the SAME city as the client passes. Never fail for "too vague" when a city + state are present.
 
-FAIL only if the lead is clearly and obviously OUTSIDE all listed service areas AND more than ~20 miles / ~20 minutes from the office anchor.
+FAIL if:
+- The lead is in a DIFFERENT COUNTRY from the client's office / service area (e.g. a UK postcode or "United Kingdom" for a US client) — always Failed, never generous.
+- The lead is clearly and obviously OUTSIDE all listed service areas AND more than ~20 miles / ~20 minutes from the office anchor.
 
 Respond with JSON only, no other text:
-{"result":"Passed"|"Failed","leadResolved":"City, ST","miles":number_or_null,"reason":"one sentence stating the resolved locations and approximate distance"}`;
+{"result":"Passed"|"Failed","leadResolved":"City, Region, Country","miles":number_or_null,"reason":"one sentence stating the resolved locations and approximate distance"}`;
 
-export async function auditLocation(
-  city: string | null,
-  state: string | null,
-  address: string | null,
-  zip: string | null,
-  inclusionLocations: string,
-  confidence: string,
-  hqAnchor: string | null = null,
-): Promise<LocationAuditResult> {
+export async function auditLocation(input: LocationAuditInput): Promise<LocationAuditResult> {
+  const { city, state, country, address, zip, sourceLabel, leadMessage, confidence, inclusionLocations, hqAnchor } = input;
+
   // No service-area constraint AND no anchor → nothing to measure against.
   if (!inclusionLocations?.trim() && !hqAnchor?.trim()) {
     return { result: "Passed", reason: "No service area or office anchor defined — all locations accepted" };
   }
 
-  const leadLocation = [address, city, state, zip ? `ZIP: ${zip}` : null].filter(Boolean).join(", ");
+  const leadLocation = [address, city, state, zip ? `ZIP/postcode: ${zip}` : null, country].filter(Boolean).join(", ");
   if (!leadLocation) {
     return { result: "Failed", reason: "No location data available for this lead" };
   }
 
   const userMessage = [
     `LEAD LOCATION: "${leadLocation}"`,
+    `LOCATION SOURCE: ${sourceLabel}`,
+    leadMessage ? `LEAD'S OWN MESSAGE:\n"""${leadMessage.slice(0, 1200)}"""` : null,
     `LEAD DATA CONFIDENCE: ${confidence}`,
     `CLIENT OFFICE ANCHOR: "${hqAnchor?.trim() || "(not provided)"}"`,
     `CLIENT SERVICE AREA: "${inclusionLocations?.trim() || "(not provided)"}"`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   try {
     const parsed = await geminiJSON<{ result?: string; reason?: string; leadResolved?: string; miles?: number | null }>({
