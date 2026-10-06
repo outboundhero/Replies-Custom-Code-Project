@@ -20,6 +20,7 @@ import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import { applyReallocate } from "./apply-reallocate";
 import { isBbsTag } from "./bbs-router";
+import { notifyLeadRush, recordCategoryChange, isLeadRushTag } from "@/lib/leadrush";
 import type { EmailBisonUntrackedPayload, UntrackedConfig } from "@/lib/types";
 import { coerceInstance } from "@/lib/bison-instances";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
@@ -377,6 +378,22 @@ export async function processUntrackedReply(payload: EmailBisonUntrackedPayload,
     } catch (error) {
       await logError("untracked", "bbs-routing", (error as Error).message, { tag: companyCode, lead_email: reply.from_email_address });
     }
+  }
+
+  // LeadRush CRM (OH / DM4PM / UJ): category history + notify on an automatic
+  // hot category (Meeting-Ready Lead). Best-effort — never breaks ingest.
+  if (isLeadRushTag(companyCode)) {
+    try {
+      await _untrackedUpsert;
+      const { data: lrow } = await supabase
+        .from("replies").select("id")
+        .eq("reply_id", reply.id).eq("campaign_id", 0).eq("bison_instance", bisonInstance)
+        .single();
+      if (lrow?.id) {
+        await recordCategoryChange(lrow.id as number, companyCode, leadCategoryValue, null, "ingest");
+        await notifyLeadRush(lrow.id as number, companyCode, leadCategoryValue);
+      }
+    } catch { /* best-effort */ }
   }
 
   // 8. Send to master Clay table (all sections) — only for qualified replies

@@ -20,6 +20,7 @@ import { isKnownClientReply } from "./cc-bcc-match";
 import { markReplyInterested } from "@/lib/outboundhero-api";
 import { resolveTemplate } from "./template-resolver";
 import { BBS_TAGS, routeLeadBbs, saveBbsRoute, type BbsAssignment } from "./bbs-router";
+import { notifyLeadRush, recordCategoryChange, isLeadRushTag } from "@/lib/leadrush";
 import supabase from "@/lib/supabase";
 import { logError, logActivity } from "@/lib/errors";
 import db from "@/lib/db";
@@ -649,6 +650,14 @@ export async function processTrackedReply(payload: EmailBisonWebhookPayload, ins
         lead_email: reply.from_email_address,
       });
     }
+  }
+
+  // 6b-4. LeadRush CRM (OH / DM4PM / UJ): start the category history and notify
+  // when the reply lands hot on its own (Meeting-Ready Lead — the client's team
+  // is on the thread). Team-confirmed categories notify from the inbox.
+  if (replyRowId && isLeadRushTag(campaignTag)) {
+    await recordCategoryChange(replyRowId, campaignTag, leadCategoryValue, null, "ingest");
+    await notifyLeadRush(replyRowId, campaignTag, leadCategoryValue);
   }
 
   // 6c. Domain blacklisting (trigger phrases in reply)

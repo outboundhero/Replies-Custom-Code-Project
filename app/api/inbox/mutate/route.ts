@@ -24,6 +24,7 @@ import { syncReplyStatusToBison } from "@/lib/bison-reply-status";
 import { handleDm4pmSubsequenceAction } from "@/lib/dm4pm/inbox-actions";
 import * as dm4pmSub from "@/lib/dm4pm/subsequence-store";
 import { isSubsequenceTag } from "@/lib/subsequence/config";
+import { notifyLeadRush, recordCategoryChange } from "@/lib/leadrush";
 
 // Category change + send-reply now do extra best-effort work (phone waterfall:
 // reply AI + optional website scrape for the sheet; the handoff-email sheet
@@ -236,6 +237,14 @@ export async function POST(req: NextRequest) {
         if (error) throw new Error(error.message);
         // Counts cache stale now — category moved between buckets.
         bumpCacheVersion();
+
+        // LeadRush CRM (OH / DM4PM / UJ): keep the category history and notify on
+        // hot categories. After the response — durable (queued + retried by the
+        // leadrush-retry cron), so it never slows or blocks the category change.
+        after(async () => {
+          await recordCategoryChange(id, rowClientTag, String(category || "Open Response"), session.email, "inbox");
+          await notifyLeadRush(id, rowClientTag, category);
+        });
 
         // ── Speed-to-Lead timing (best-effort; columns may not exist until the
         // sql/2026-07_speed_to_lead.sql migration is run, so a failure here must

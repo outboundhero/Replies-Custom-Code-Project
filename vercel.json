@@ -124,6 +124,10 @@
     {
       "path": "/api/cron/sync-sheets",
       "schedule": "20 */6 * * *"
+    },
+    {
+      "path": "/api/cron/leadrush-retry",
+      "schedule": "*/10 * * * *"
     }
   ]
 }
