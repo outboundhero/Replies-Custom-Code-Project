@@ -19,6 +19,9 @@ export function stripQuotedHistory(text: string): string {
   // so these do NOT require a leading newline.
   const markers: RegExp[] = [
     /\bOn\s.{0,160}?\bwrote:/i,                  // "On Thu, Jul 23, 2026 at 4:25 PM X <e> wrote:"
+    // …the same header wrapped onto a second line by the mail client:
+    // "On Tue, Oct 6, 2026, 9:11 AM Latrice West <\nlatrice@x.co> wrote:"
+    /\bOn\s[^\n]{0,160}\n[^\n]{0,160}?\bwrote:/i,
     /-{2,}\s*Original Message\s*-{2,}/i,         // "-----Original Message-----"
     /-{2,}\s*Forwarded message\s*-{2,}/i,
     /\bFrom:\s.{0,200}?\b(?:Sent|Date):\s/i,     // Outlook header block
