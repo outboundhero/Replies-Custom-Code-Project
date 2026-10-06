@@ -243,7 +243,9 @@ export async function qualifyLead(params: QualifyLeadParams): Promise<void> {
       qualification_reason: qualificationReason,
       suggested_client: suggestedClients || null,
       audit_city: locResolved.city || null,
-      audit_state: locResolved.state || null,
+      // No state (e.g. a UK postcode) → the country, so "Find Best Fit" never
+      // pairs the reply's city with the CRM state ("Weston-super-Mare, Oklahoma").
+      audit_state: locResolved.state || locResolved.country || null,
       audit_industry: enriched.industry || null,
       updated_at: new Date().toISOString(),
     };
