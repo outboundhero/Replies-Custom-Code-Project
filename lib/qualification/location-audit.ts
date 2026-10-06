@@ -51,12 +51,12 @@ USE GOOGLE SEARCH to:
 
 PASS if ANY of these is true:
 - The lead is within ~20 miles OR ~20 minutes driving of the client office anchor.
-- The lead's city/zip/county/state is contained in the client service area list (e.g. service area lists the lead's state or a county/zip that contains the lead).
+- The lead's city/zip/county/state/country is contained in the client service area list (e.g. service area lists the lead's state, a county/zip that contains the lead, or the lead's whole country such as "United States" / "nationwide"). Containment ALONE is enough — distance from the office does NOT matter then (a Massachusetts lead PASSES for a client whose service area is "United States", even if the office is in California).
 Be GENEROUS within the client's country — if there's any reasonable chance the lead is in range, PASS. A lead in the SAME city as the client passes. Never fail for "too vague" when a city + state are present.
 
 FAIL if:
 - The lead is in a DIFFERENT COUNTRY from the client's office / service area (e.g. a UK postcode or "United Kingdom" for a US client) — always Failed, never generous.
-- The lead is clearly and obviously OUTSIDE all listed service areas AND more than ~20 miles / ~20 minutes from the office anchor.
+- The lead is NOT contained in any listed service area AND is more than ~20 miles / ~20 minutes from the office anchor.
 
 Respond with JSON only, no other text:
 {"result":"Passed"|"Failed","leadResolved":"City, Region, Country","miles":number_or_null,"reason":"one sentence stating the resolved locations and approximate distance"}`;
