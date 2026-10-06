@@ -75,6 +75,7 @@ IMPORTANT:
 - NEVER leave "industry" blank. If the website and signature yield nothing, give your BEST-GUESS industry from the company name (a short generic description like "financial services", "restaurant", "law firm"). Only leave it empty if the name is truly opaque (e.g. "ABC LLC").
 - Focus on determining the LOCATION accurately — this is critical for proximity matching
 - If the company appears to be residential (house cleaning, maid service, Airbnb), note that in the industry field
+- The lead is a PROSPECT being offered cleaning. Asking for cleaning / a quote does NOT make them a cleaning company — only use a cleaning / janitorial industry when the company itself provides cleaning (its name or signature says so)
 
 Respond with JSON only, no other text:
 {
@@ -91,6 +92,27 @@ Respond with JSON only, no other text:
 
 export async function enrichLead(input: EnrichInput): Promise<EnrichedLeadData> {
   const domain = extractDomain(input.leadEmail);
+
+  // Business email → no model call. Without web access the model GUESSES the
+  // industry from the reply, and a prospect asking for cleaning ("quote for
+  // cleaning our premises") came back as "cleaning services" — a false
+  // COMPETITOR flag in the industry audit. The industry audit verifies the
+  // industry itself with a live Google search on the company name + domain
+  // (this is also how these leads were effectively audited while the old
+  // web-search call was failing), and the location audit reads the reply.
+  if (domain) {
+    return {
+      companyName: input.companyName,
+      website: domain,
+      industry: "",
+      city: input.city,
+      state: input.state,
+      address: input.address,
+      zip: "",
+      dataSources: "CRM + company email domain (industry verified by web search)",
+      confidence: "low",
+    };
+  }
 
   const userParts: string[] = [
     `Company name (from CRM): "${input.companyName || "unknown"}"`,
