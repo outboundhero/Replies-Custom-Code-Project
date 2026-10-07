@@ -129,8 +129,54 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const map = await loadClientContactEmailMap();
       const body = [data.reply_we_got, data.email_subject]
         .filter(Boolean).map(String).join("\n");
-      (data as Record<string, unknown>).client_email_flags = findClientEmailsInText(body, map);
-    } catch { (data as Record<string, unknown>).client_email_flags = []; }
+      const bodyFlags = findClientEmailsInText(body, map);
+      (data as Record<string, unknown>).client_email_flags = bodyFlags;
+
+      // "Already sent over to the client": any client's configured CC/BCC contact
+      // on this thread — From / To / CC / BCC of the reply, or written in the
+      // email text (e.g. our handoff's CC header in the quoted thread). Grouped by
+      // client; several clients = shared contacts (e.g. regional franchises).
+      type Hit = { email: string; name: string; where: "from" | "to" | "cc" | "bcc" | "email text" };
+      const byTag = new Map<string, Hit[]>();
+      const add = (tag: string, hit: Hit) => {
+        const list = byTag.get(tag) ?? [];
+        if (!list.some((h) => h.email === hit.email)) list.push(hit);
+        byTag.set(tag, list);
+      };
+      const pairs = (names: unknown, emails: unknown) => {
+        const es = String(emails || "").split(",").map((x) => x.trim()).filter(Boolean);
+        const ns = String(names || "").split(",").map((x) => x.trim());
+        return es.map((email, i) => ({ email, name: ns[i] || "" }));
+      };
+      const fields: [Hit["where"], unknown, unknown][] = [
+        ["from", data.from_name, data.from_email || data.lead_email],
+        ["to", data.to_name, data.to_email],
+        ["cc", data.prospect_cc_name, data.prospect_cc_email],
+        ["bcc", data.prospect_bcc_name, data.prospect_bcc_email],
+      ];
+      for (const [where, names, emails] of fields) {
+        for (const p of pairs(names, emails)) {
+          const email = p.email.toLowerCase();
+          for (const tag of map.get(email) ?? []) add(tag, { email, name: p.name, where });
+        }
+      }
+      for (const f of bodyFlags) for (const tag of f.clientTags) add(tag, { email: f.email, name: "", where: "email text" });
+      const current = String(data.client_tag || "").toUpperCase();
+      // A contact shared by several clients doesn't make every one of them a
+      // recipient: drop a client whose matched contacts are ALL also matched by a
+      // client with more of its people on the thread (johnl@ is on 6 CCG clients,
+      // but johnl@ + sjose@ together = CCGSLTX only). Equal matches stay — "one
+      // of these clients".
+      const entries = [...byTag.entries()];
+      const kept = entries.filter(([, mine]) => !entries.some(([, other]) =>
+        other.length > mine.length && mine.every((h) => other.some((o) => o.email === h.email))));
+      (data as Record<string, unknown>).client_thread = kept
+        .map(([tag, contacts]) => ({ tag, contacts }))
+        .sort((a, b) => Number(b.tag === current) - Number(a.tag === current) || a.tag.localeCompare(b.tag));
+    } catch {
+      (data as Record<string, unknown>).client_email_flags = [];
+      (data as Record<string, unknown>).client_thread = [];
+    }
 
     // The tagged client's qualification rules — Industry Exclusion (col N) and
     // Location Inclusion (col P) — surfaced read-only in the detail panel for the

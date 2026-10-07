@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { Fragment, useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -1557,31 +1557,73 @@ export default function InboxPage() {
               </div>
             </div>
 
-            {/* Client-email flag: the reply BODY contains a client's configured
-                CC/BCC contact email → strong signal of which client this reply is
-                really for (esp. when the same lead sits under multiple clients).
-                Flag only — never auto-reassigns. Green = matches the current tag;
-                amber = a DIFFERENT client's email is present. */}
-            {Array.isArray(detail.client_email_flags) && detail.client_email_flags.length > 0 && (
-              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900 space-y-1">
-                <div className="flex items-center gap-1.5 font-semibold"><span>🏷️</span> Client contact email found in this reply</div>
-                {detail.client_email_flags.map((f: { email: string; clientTags: string[] }) => (
-                  <div key={f.email} className="pl-5 flex flex-wrap items-center gap-1">
-                    <span className="font-mono break-all">{f.email}</span>
-                    <span>→ belongs to</span>
-                    {f.clientTags.map((t: string) => {
-                      const isCurrent = String(detail.client_tag || "").toUpperCase() === t;
-                      return (
-                        <span key={t} className={`font-mono font-bold px-1.5 py-0.5 rounded ${isCurrent ? "bg-emerald-100 text-emerald-800" : "bg-amber-200 text-amber-900"}`}>{t}</span>
-                      );
-                    })}
-                    {f.clientTags.every((t: string) => String(detail.client_tag || "").toUpperCase() !== t) && (
-                      <span className="text-amber-700">— differs from current tag ({detail.client_tag || "N/A"})</span>
-                    )}
+            {/* Already-handed-off caution: a client's configured CC/BCC contact is on
+                this thread (From / To / CC / BCC, or in the email text) → the thread
+                has already been sent over to that client. Several clients = a
+                contact shared by related clients (e.g. regional franchises). */}
+            {Array.isArray(detail.client_thread) && detail.client_thread.length > 0 && (() => {
+              type ThreadHit = { email: string; name: string; where: "from" | "to" | "cc" | "bcc" | "email text" };
+              const clients = detail.client_thread as { tag: string; contacts: ThreadHit[] }[];
+              const current = String(detail.client_tag || "").toUpperCase();
+              const multi = clients.length > 1;
+              const whereLabel: Record<ThreadHit["where"], string> = { from: "sent this reply", to: "on To", cc: "CC'd", bcc: "BCC'd", "email text": "in the email thread" };
+              // Same people for every client (a contact shared by related clients) →
+              // list them once instead of repeating them per client.
+              const contactKey = (hs: ThreadHit[]) => hs.map((h) => h.email).sort().join(",");
+              const shared = multi && clients.every((c) => contactKey(c.contacts) === contactKey(clients[0].contacts));
+              const contactList = (hs: ThreadHit[]) => hs.map((h, i) => (
+                <span key={h.email}>
+                  {h.name ? <span className="font-medium">{h.name} </span> : null}
+                  <span className="font-mono break-all">{h.email}</span>
+                  <span className="text-orange-800/70"> ({whereLabel[h.where]})</span>
+                  {i < hs.length - 1 ? "," : ""}
+                </span>
+              ));
+              const chip = (t: string) => (
+                <span key={t} className={`inline-block font-mono font-bold px-1.5 py-0.5 rounded text-[12px] ${t === current ? "bg-orange-200 text-orange-950" : "bg-white text-orange-950 ring-1 ring-orange-300"}`}>{t}</span>
+              );
+              return (
+                <div role="alert" className="rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-3 text-orange-950 shadow-sm">
+                  <div className="flex items-start gap-2.5">
+                    <svg className="mt-0.5 h-5 w-5 shrink-0 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                    </svg>
+                    <div className="min-w-0 space-y-1.5">
+                      <p className="text-sm font-semibold leading-snug">
+                        {multi ? (
+                          <>This email thread has already been sent over to one of these clients:{" "}
+                            {clients.map((c, i) => (
+                              <Fragment key={c.tag}>{i > 0 && <span className="font-normal">{i === clients.length - 1 ? " or " : ", "}</span>}{chip(c.tag)}</Fragment>
+                            ))}
+                          </>
+                        ) : (
+                          <>This email thread has already been sent over to the client {chip(clients[0].tag)}</>
+                        )}
+                      </p>
+                      <p className="text-xs text-orange-900/80">Their team is already on this email — check before sending anything else to this lead.</p>
+                      {shared ? (
+                        <p className="flex flex-wrap items-baseline gap-x-1.5 text-xs">
+                          {contactList(clients[0].contacts)}
+                          <span className="text-orange-800/80">— a contact for all of these clients</span>
+                        </p>
+                      ) : (
+                        <ul className="space-y-0.5 text-xs">
+                          {clients.map((c) => (
+                            <li key={c.tag} className="flex flex-wrap items-baseline gap-x-1.5">
+                              {multi && <span className="font-mono font-semibold">{c.tag}:</span>}
+                              {contactList(c.contacts)}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {current && current !== "N/A" && !clients.some((c) => c.tag === current) && (
+                        <p className="text-xs font-semibold text-orange-800">Note: this lead is tagged {current}, not {clients.map((c) => c.tag).join(" / ")}.</p>
+                      )}
+                    </div>
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
+              );
+            })()}
 
             {/* Out-of-office re-send schedule (§21): when the original cold email
                 is (or was) queued to re-send on the lead's stated return date. */}
