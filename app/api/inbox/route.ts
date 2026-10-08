@@ -195,19 +195,49 @@ async function fetchLeads(args: {
   }
   const subseqOk = await hasSubseqColumns();
   const select = subseqOk ? `${LEADS_SELECT}, dm4pm_subseq_status, dm4pm_subseq_step` : LEADS_SELECT;
-  let q = supabase
-    .from("replies")
-    .select(select)
-    .order("created_at", { ascending: false })
-    .range(offset, offset + limit - 1);
-  if (await hasArchivedColumn()) q = q.eq("archived", false); // active inbox only
-  if (clientTag) q = q.eq("client_tag", clientTag);
-  else if (allowed && allowed.length) q = q.in("client_tag", allowed);
-  if (category) q = q.eq("lead_category", category);
-  if (workflow) q = q.eq("workflow", workflow);
-  if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
-  if (aiCategory) q = q.eq("ai_categorized_lead_category", aiCategory);  // §18 filter
-  q = applyView(q, view, subseqOk) as typeof q;
+  const archivedCol = await hasArchivedColumn();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const applyFilters = (q: any): any => {
+    if (archivedCol) q = q.eq("archived", false); // active inbox only
+    if (clientTag) q = q.eq("client_tag", clientTag);
+    else if (allowed && allowed.length) q = q.in("client_tag", allowed);
+    if (category) q = q.eq("lead_category", category);
+    if (workflow) q = q.eq("workflow", workflow);
+    if (search) q = q.or(`lead_email.ilike.%${search}%,company_name.ilike.%${search}%,lead_name.ilike.%${search}%`);
+    if (aiCategory) q = q.eq("ai_categorized_lead_category", aiCategory);  // §18 filter
+    return applyView(q, view, subseqOk);
+  };
+
+  // Small buckets (Open Response, Meeting Set, …) — fetch ALL matching ids with
+  // NO ORDER BY, sort them here, then load just the page by id. "ORDER BY
+  // created_at LIMIT n" on a rare bucket can make Postgres walk the whole table
+  // newest-first looking for matches (8-9s cold → statement timeout: the
+  // 2026-10-09 "Open Response won't load" outage). Without the ORDER BY it can
+  // only use the category indexes, so it stays fast cold or warm. Big buckets
+  // (> PROBE_CAP matches) use the ordered query, which is fast for them.
+  if (category) {
+    // Must stay BELOW PostgREST's max-rows (1000 on Supabase): a capped
+    // response would otherwise look like a complete small bucket.
+    const PROBE_CAP = 900;
+    const { data: ids, error: probeErr } = await applyFilters(
+      supabase.from("replies").select("id, created_at").limit(PROBE_CAP + 1),
+    );
+    if (!probeErr && Array.isArray(ids) && ids.length <= PROBE_CAP) {
+      const sorted = (ids as Array<{ id: number; created_at: string }>)
+        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "") || b.id - a.id);
+      const pageIds = sorted.slice(offset, offset + limit).map((r) => r.id);
+      if (pageIds.length === 0) return { replies: [], page: { limit, offset, returned: 0, hasMore: false } };
+      const { data: rows, error } = await supabase.from("replies").select(select).in("id", pageIds);
+      if (error) throw new Error(error.message);
+      const byId = new Map((rows as unknown as Array<{ id: number }> || []).map((r) => [r.id, r]));
+      const ordered = pageIds.map((id) => byId.get(id)).filter(Boolean);
+      return { replies: ordered, page: { limit, offset, returned: ordered.length, hasMore: offset + limit < sorted.length } };
+    }
+  }
+
+  const q = applyFilters(
+    supabase.from("replies").select(select).order("created_at", { ascending: false }).range(offset, offset + limit - 1),
+  );
   const { data: rows, error } = await q;
   if (error) throw new Error(error.message);
   const returned = rows?.length || 0;
