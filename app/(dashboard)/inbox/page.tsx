@@ -467,6 +467,8 @@ export default function InboxPage() {
     boot?.firstCategory ? { [boot.firstCategory]: boot.leads as unknown as ReplyListItem[] } : {}
   );
   const [loadingCat, setLoadingCat] = useState<string | null>(null);
+  // Per-bucket load failure (shown with a Retry instead of a silent empty list).
+  const [catError, setCatError] = useState<Record<string, string>>({});
   // Every category section starts COLLAPSED (user preference) — no bucket opens
   // on its own; the first bucket's leads are still preloaded for instant expand.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -626,23 +628,33 @@ export default function InboxPage() {
 
   // Load leads for a specific category (paginated). `append` pulls the next
   // page and concatenates; otherwise it loads the first page.
+  // A transient failure (e.g. a slow moment on the database) is retried
+  // automatically with a short backoff; only a persistent one shows an error.
   async function loadCategoryLeads(cat: string, append = false) {
     setLoadingCat(cat);
-    try {
-      const offset = append ? (catPage[cat]?.offset ?? 0) : 0;
-      const p = new URLSearchParams({ category: cat, offset: String(offset), limit: "100" });
-      if (debouncedSearch) p.set("search", debouncedSearch);
-      if (filterClient) p.set("client_tag", filterClient);
-      if (filterAi) p.set("ai_category", filterAi);
-      if (view && view !== "all") p.set("view", view);
-      const res = await fetch(`/api/inbox?${p}`);
-      if (res.ok) {
+    const offset = append ? (catPage[cat]?.offset ?? 0) : 0;
+    const p = new URLSearchParams({ category: cat, offset: String(offset), limit: "100" });
+    if (debouncedSearch) p.set("search", debouncedSearch);
+    if (filterClient) p.set("client_tag", filterClient);
+    if (filterAi) p.set("ai_category", filterAi);
+    if (view && view !== "all") p.set("view", view);
+    let lastErr = "";
+    for (const wait of [0, 800, 2500]) {
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      try {
+        const res = await fetch(`/api/inbox?${p}`);
+        if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
+        if (!res.ok) { lastErr = `HTTP ${res.status}`; continue; }
         const d = await res.json();
         const rows: ReplyListItem[] = d.replies || [];
         setCategoryLeads((prev) => ({ ...prev, [cat]: append ? [...(prev[cat] || []), ...rows] : rows }));
         setCatPage((prev) => ({ ...prev, [cat]: { offset: offset + rows.length, hasMore: !!d.page?.hasMore } }));
-      }
-    } catch { /* */ }
+        setCatError((prev) => { if (!(cat in prev)) return prev; const n = { ...prev }; delete n[cat]; return n; });
+        setLoadingCat(null);
+        return;
+      } catch (e) { lastErr = (e as Error).message || "network error"; }
+    }
+    setCatError((prev) => ({ ...prev, [cat]: lastErr || "failed" }));
     setLoadingCat(null);
   }
 
@@ -703,7 +715,21 @@ export default function InboxPage() {
   // authenticated /api/inbox route (which enforces per-user client scoping).
   useEffect(() => {
     const activeView = getView(view);
+    // Throttled refresh: first one ~0.6s after a signal, then at most every 4s
+    // while signals keep coming; a hidden tab skips it and catches up once when
+    // shown again (each refresh re-queries the database for every open inbox).
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastRun = 0;
+    let dirty = false;
+    const run = () => {
+      timer = null;
+      if (document.visibilityState !== "visible") { dirty = true; return; }
+      dirty = false;
+      lastRun = Date.now();
+      refreshLiveRef.current?.();
+    };
+    const onVisible = () => { if (dirty && document.visibilityState === "visible" && !timer) run(); };
+    document.addEventListener("visibilitychange", onVisible);
     const channel = realtimeSupabase
       .channel("inbox-realtime")
       .on("broadcast", { event: "reply-change" }, ({ payload }) => {
@@ -722,12 +748,16 @@ export default function InboxPage() {
         if (f.category && (sig.lead_category || "Open Response") !== f.category) return;
         if (f.ai && (sig.ai_categorized_lead_category || "") !== f.ai) return;
         // Coalesce bursts, then refresh via the authenticated route.
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => refreshLiveRef.current?.(), 600);
+        if (timer) return;
+        timer = setTimeout(run, Math.max(600, 4000 - (Date.now() - lastRun)));
       })
       .subscribe();
 
-    return () => { if (timer) clearTimeout(timer); realtimeSupabase.removeChannel(channel); };
+    return () => {
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      realtimeSupabase.removeChannel(channel);
+    };
   }, [allowedClientTags, view]);
 
   // Non-blocking Google-Sheet URL (cached per client tag) — pops the Sheet
@@ -1419,6 +1449,12 @@ export default function InboxPage() {
                 <>
                   {loadingCat === cat && !categoryLeads[cat] && (
                     <div className="px-3 py-2 text-[10px] text-muted-foreground">Loading...</div>
+                  )}
+                  {loadingCat !== cat && catError[cat] && (
+                    <div className="px-3 py-2 text-[10px] text-rose-700 bg-rose-50/60 border-b flex items-center gap-2">
+                      <span className="flex-1">Couldn&apos;t load these leads — please retry.</span>
+                      <button type="button" onClick={() => loadCategoryLeads(cat, !!categoryLeads[cat])} className="font-semibold underline underline-offset-2 hover:text-rose-900">Retry</button>
+                    </div>
                   )}
                   {categoryLeads[cat]?.map((r) => {
                     const viewers = presenceByLead.get(r.id);

@@ -10,8 +10,12 @@
  * cursors use), so a lead switch shows up on everyone else's screen right away.
  *
  * Online/offline is handled ourselves:
- *   - every client re-broadcasts its state on a heartbeat; a viewer whose
- *     heartbeats stop (closed tab / crash) is pruned after TTL_MS.
+ *   - a client re-broadcasts its state on a heartbeat — only while its tab is
+ *     visible AND it has a lead open (nothing else is ever rendered); a viewer
+ *     whose heartbeats stop (closed / hidden tab, crash) is pruned after TTL_MS.
+ *     Kept deliberately slow: every message fans out to every open inbox, and
+ *     Supabase bills Realtime per delivered message (the old 4s beat from every
+ *     tab, hidden ones included, blew through the monthly quota).
  *   - a graceful tab close broadcasts an explicit "leaving" so the color clears
  *     immediately instead of waiting for the TTL.
  *   - on join we broadcast "hello"; everyone replies with their state, so a
@@ -48,9 +52,10 @@ interface Entry {
 }
 
 const CHANNEL = "inbox-presence";
-const HEARTBEAT_MS = 4000; // re-announce so others keep us alive
-const TTL_MS = 11000;      // drop a viewer we haven't heard from in this long
-const PRUNE_MS = 3000;     // sweep for expired viewers
+const HEARTBEAT_MS = 20000; // re-announce so others keep us alive (visible + on a lead only)
+const TTL_MS = 50000;       // drop a viewer we haven't heard from in this long
+const PRUNE_MS = 5000;      // sweep for expired viewers (local only — no messages)
+const HELLO_MIN_GAP_MS = 30000; // at most one "who's here?" per this long
 
 export function useInboxPresence(
   client: SupabaseClient,
@@ -116,11 +121,16 @@ export function useInboxPresence(
       payload: { email: e || "", name: n, color: c, leadId: leadRef.current, at: openedAtRef.current } });
   }
 
+  // "Who's here?" makes EVERY viewer answer — throttle it.
+  const lastHelloRef = useRef<number>(0);
   function sendHello() {
     const ch = channelRef.current;
     if (!ch || !subscribedRef.current) return;
+    if (Date.now() - lastHelloRef.current < HELLO_MIN_GAP_MS) return;
+    lastHelloRef.current = Date.now();
     void ch.send({ type: "broadcast", event: "hello", payload: {} });
   }
+  const isVisible = () => typeof document === "undefined" || document.visibilityState === "visible";
 
   function sendLeave() {
     const ch = channelRef.current;
@@ -154,7 +164,9 @@ export function useInboxPresence(
 
     channel
       .on("broadcast", { event: "viewing" }, ({ payload }) => onViewing(payload))
-      .on("broadcast", { event: "hello" }, () => sendState()) // newcomer asked — announce ourselves
+      // Newcomer asked — announce ourselves, but only if there's something to
+      // show (we're on a lead in a visible tab); others are never rendered.
+      .on("broadcast", { event: "hello" }, () => { if (isVisible() && typeof leadRef.current === "number") sendState(); })
       .subscribe((status) => {
         if (debug) console.debug("[presence] status:", status);
         if (status === "SUBSCRIBED") {
@@ -166,21 +178,21 @@ export function useInboxPresence(
         }
       });
 
-    const hb = setInterval(() => { sendState(); }, HEARTBEAT_MS);
+    const hb = setInterval(() => { if (isVisible() && typeof leadRef.current === "number") sendState(); }, HEARTBEAT_MS);
     const pruneTimer = setInterval(() => { recompute(); }, PRUNE_MS);
 
     const onUnload = () => { sendLeave(); };
     window.addEventListener("beforeunload", onUnload);
     window.addEventListener("pagehide", onUnload);
 
-    // Regaining focus (from a throttled background tab) → re-announce + re-sync.
+    // Tab shown again → re-announce + re-sync (hello is throttled). Window
+    // focus alone doesn't re-sync — it fires on every alt-tab.
     const onVisible = () => {
-      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      if (!isVisible()) return;
       sendState();
       sendHello();
     };
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onVisible);
 
     return () => {
       clearInterval(hb);
@@ -188,7 +200,6 @@ export function useInboxPresence(
       window.removeEventListener("beforeunload", onUnload);
       window.removeEventListener("pagehide", onUnload);
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onVisible);
       sendLeave();
       subscribedRef.current = false;
       channelRef.current = null;
