@@ -8,8 +8,9 @@
  * for every serverless instance (the old in-process cache was per-instance and
  * missed constantly).
  *
- * Wire this to a Vercel cron (every ~10 min) in vercel.json. Also callable
- * manually after a big sync to refresh immediately.
+ * Runs every 3 hours (vercel.json) under the heavy-query lease — it's the
+ * single heaviest query on the shared database (pg_stat_statements,
+ * 2026-10-09: ~87h of DB time, 30-60s per call at the old 10-min cadence).
  *
  * Requires the table (run once in Supabase):
  *   CREATE TABLE IF NOT EXISTS nurture_summary_cache (
@@ -20,8 +21,9 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import supabase from "@/lib/supabase";
+import { acquireHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const NURTURE_DAYS = 45;
 
@@ -36,7 +38,22 @@ export async function GET(req: NextRequest) {
 
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
-  const { data, error } = await supabase.rpc("nurture_clients_summary", { cutoff: cutoffIso });
+  // nurture_clients_summary scans every nurture table (~6.5M rows, 30-60s) on
+  // the database the inbox shares — run it every 3h (vercel.json), and never
+  // alongside another heavy Nurture query: wait for the heavy lease.
+  const holder = leaseHolder("nurture-summary");
+  let leased = false;
+  for (let i = 0; i < 15 && !leased; i++) {
+    leased = await acquireHeavyLease(holder, 150_000);
+    if (!leased) await new Promise((r) => setTimeout(r, 10_000));
+  }
+  if (!leased) return NextResponse.json({ ok: false, skipped: "another heavy Nurture query held the lease for 2.5 min" });
+  let data: unknown, error: { message: string } | null = null;
+  try {
+    ({ data, error } = await supabase.rpc("nurture_clients_summary", { cutoff: cutoffIso }));
+  } finally {
+    await releaseHeavyLease(holder).catch(() => {});
+  }
   if (error) {
     return NextResponse.json({ error: `RPC failed: ${error.message}` }, { status: 500 });
   }

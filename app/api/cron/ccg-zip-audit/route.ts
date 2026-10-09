@@ -37,9 +37,12 @@ export async function GET(req: NextRequest) {
   if (!tags.length) return NextResponse.json({ ok: true, audited: 0, note: "no active CCG tags" });
 
   const since = new Date(Date.now() - 30 * 86400_000).toISOString();
+  // Ids only first (cheap: no reply text), then full rows just for the few
+  // still to audit — this ran every 10 min re-reading 400 full replies
+  // (avg ~3.3s on the shared database).
   const { data, error } = await supabase
     .from("replies")
-    .select("id, client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, reply_we_got")
+    .select("id, client_tag")
     .in("client_tag", tags)
     .in("ai_categorized_lead_category", CATEGORIES)
     .gte("created_at", since)
@@ -60,7 +63,18 @@ export async function GET(req: NextRequest) {
       if (!nowHasList) done.add(Number(row.reply_row_id));
     }
   }
-  const todo = (data || []).filter((r) => !done.has(r.id as number)).slice(0, PER_RUN);
+  const todoIds = (data || []).filter((r) => !done.has(r.id as number)).slice(0, PER_RUN).map((r) => r.id as number);
+  type Row = { id: number; client_tag: string; company_name: string | null; city: string | null; state: string | null; address: string | null; google_maps_url: string | null; phone: string | null; lead_email: string | null; reply_we_got: string | null };
+  let todo: Row[] = [];
+  if (todoIds.length) {
+    const full = await supabase
+      .from("replies")
+      .select("id, client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, reply_we_got")
+      .in("id", todoIds);
+    if (full.error) return NextResponse.json({ error: full.error.message }, { status: 500 });
+    const byId = new Map(((full.data || []) as Row[]).map((r) => [r.id, r]));
+    todo = todoIds.map((id) => byId.get(id)).filter(Boolean) as Row[];
+  }
 
   let audited = 0, failed = 0, i = 0;
   await Promise.all(Array.from({ length: 4 }, async () => {

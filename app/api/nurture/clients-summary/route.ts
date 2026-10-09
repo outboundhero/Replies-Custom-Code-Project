@@ -85,6 +85,7 @@
  *   $$;
  */
 
+import { acquireHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
@@ -110,6 +111,9 @@ export async function GET(req: Request) {
   const denied = await requireAdmin();
   if (denied) return denied;
 
+  // ?fresh=1 skips this instance's 5-min memo but still reads the cron-filled
+  // table: the live RPC scans ~6.5M rows (30-60s) on the shared database, so
+  // it only runs when the table is empty — and then under the heavy lease.
   const fresh = new URL(req.url).searchParams.get("fresh") === "1";
   const now = Date.now();
   if (!fresh && cache && now - cache.ts < CACHE_TTL_MS) {
@@ -125,10 +129,8 @@ export async function GET(req: Request) {
     const notChurned = (c: ClientSummary) => !churned.has(c.clientTag.toUpperCase());
 
     // Fast path: read the precomputed cache table (refreshed by the
-    // refresh-nurture-summary cron). This is a sub-100ms indexed read vs the
-    // ~8s live RPC, and — unlike the in-process cache — it's shared across all
-    // serverless instances. Skip it on ?fresh=1 (force live recompute).
-    if (!fresh) {
+    // refresh-nurture-summary cron) — shared across all serverless instances.
+    {
       const { data: cached, error: cacheErr } = await supabase
         .from("nurture_summary_cache")
         .select("client_tag, ready, eligible, waiting, added");
@@ -148,7 +150,16 @@ export async function GET(req: Request) {
       // through to the live RPC so the hub still works.
     }
 
-    const { data, error } = await supabase.rpc("nurture_clients_summary", { cutoff: cutoffIso });
+    const holder = leaseHolder("clients-summary");
+    if (!(await acquireHeavyLease(holder, 150_000))) {
+      return NextResponse.json({ error: "Counts are being computed — try again in a minute." }, { status: 503 });
+    }
+    let data: unknown, error: { message: string; hint?: string } | null = null;
+    try {
+      ({ data, error } = await supabase.rpc("nurture_clients_summary", { cutoff: cutoffIso }));
+    } finally {
+      await releaseHeavyLease(holder).catch(() => {});
+    }
     if (error) {
       const msg = error.message || "";
       const hint = error.hint || "";
