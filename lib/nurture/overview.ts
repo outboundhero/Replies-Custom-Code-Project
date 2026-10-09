@@ -348,6 +348,22 @@ export async function buildOverview(onlyTag?: string): Promise<{
 }
 
 // ── Cron work: per-tag SQL stats (rotating, stalest first) ───────────────────
+/**
+ * Is the shared database busy right now? Times a trivial primary-key read
+ * (normally ~50-150ms); the stats cron yields — skips or stops — when it's
+ * slow, so the inbox always comes first.
+ */
+export async function dbIsBusy(thresholdMs = 700): Promise<boolean> {
+  const one = async () => {
+    const t = Date.now();
+    const { error } = await supabase.from("replies").select("id").order("id", { ascending: false }).limit(1);
+    return error ? Infinity : Date.now() - t;
+  };
+  const a = await one();
+  if (a < thresholdMs) return false;
+  return (await one()) >= thresholdMs; // confirm (network blips happen)
+}
+
 const LEASE_TTL_MS = 150_000;      // > the stats function's 120s statement timeout
 const FAIL_BACKOFF_MS = 60 * 60_000; // a tag that failed isn't retried by the cron for an hour
 
@@ -361,7 +377,7 @@ const FAIL_BACKOFF_MS = 60 * 60_000; // a tag that failed isn't retried by the c
  *     older than `minAgeMs`, and skips tags that failed in the last hour.
  * 2026-10-09: 3 parallel stats queries starved the inbox into timeouts.
  */
-export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; tags?: string[]; minAgeMs?: number } = {}): Promise<{ refreshed: string[]; failed: Array<{ tag: string; error: string }>; busy?: boolean }> {
+export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; tags?: string[]; minAgeMs?: number; yieldToLoad?: boolean } = {}): Promise<{ refreshed: string[]; failed: Array<{ tag: string; error: string }>; busy?: boolean; yielded?: boolean }> {
   await ensureOverviewTables();
   const started = Date.now();
   const { tags: active, churned } = await activeClientTags();
@@ -396,6 +412,7 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
   if (order.length === 0) return { refreshed, failed };
 
   const holder = leaseHolder("tag-stats");
+  let yielded = false;
   if (!(await acquireHeavyLease(holder, LEASE_TTL_MS))) return { refreshed, failed, busy: true };
   try {
     const outOfTime = () => !!opts.maxMs && Date.now() - started > opts.maxMs;
@@ -438,13 +455,14 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
     };
     for (const tag of order) {
       if (outOfTime()) break;
+      if (opts.yieldToLoad && (await dbIsBusy())) { yielded = true; break; } // inbox first
       const err = await one(tag);
       if (err) failed.push({ tag, error: err });
     }
   } finally {
     await releaseHeavyLease(holder).catch(() => {});
   }
-  return { refreshed, failed };
+  return { refreshed, failed, yielded };
 }
 
 /** Mark a tag's cached numbers as outdated (the next cron run refreshes it first). */
@@ -466,8 +484,8 @@ export async function refreshTagStatsNow(tag: string, minGapMs = 60_000): Promis
   const r = await db.execute({ sql: "SELECT computed_at FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [tag.toUpperCase()] });
   const at = r.rows[0]?.computed_at ? new Date(String(r.rows[0].computed_at)).getTime() : 0;
   if (Date.now() - at < minGapMs) return { status: "recent" };
-  const res = await refreshTagStats({ tags: [tag] });
-  if (res.busy) { await markTagStatsDirty(tag); return { status: "queued" }; }
+  const res = await refreshTagStats({ tags: [tag], yieldToLoad: true });
+  if (res.busy || res.yielded) { await markTagStatsDirty(tag); return { status: "queued" }; }
   if (res.failed.length) { await markTagStatsDirty(tag); return { status: "failed", error: res.failed[0].error }; }
   return { status: res.refreshed.length ? "refreshed" : "failed", error: res.refreshed.length ? undefined : "unknown client" };
 }

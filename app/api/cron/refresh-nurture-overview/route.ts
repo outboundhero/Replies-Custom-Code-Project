@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
     // Light on the shared database: one tag at a time, ~60s of work per run,
     // only tags whose numbers are > 3h old (a full rotation fits well inside
     // that). Last contact (Bison only) gets the rest of the budget.
-    const stats = await refreshTagStats(tag ? { tags: [tag] } : { maxTags: 60, maxMs: 60_000, minAgeMs: 3 * 3_600_000 });
+    const stats = await refreshTagStats(tag ? { tags: [tag] } : { maxTags: 60, maxMs: 60_000, minAgeMs: 3 * 3_600_000, yieldToLoad: true });
     // A big tag started near the stats budget can still run ~2-3 min, so give
     // last contact only what's left of a 270s envelope (maxDuration 300s).
     const left = 270_000 - (Date.now() - started);
@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
       // Self-healing (retried after an hour) — log, but keep it out of the Error Log.
       console.error("[cron/refresh-nurture-overview] stats failed:", stats.failed.slice(0, 5));
     }
-    return NextResponse.json({ ok: true, statsRefreshed: stats.refreshed.length, statsBusy: !!stats.busy, statsFailed: stats.failed, lastContact });
+    return NextResponse.json({ ok: true, statsRefreshed: stats.refreshed.length, statsBusy: !!stats.busy, statsYielded: !!stats.yielded, statsFailed: stats.failed, lastContact });
   } catch (e) {
     await logError("nurture-overview", "cron", (e as Error).message);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
