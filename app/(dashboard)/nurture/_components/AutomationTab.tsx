@@ -577,7 +577,7 @@ function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle
 
   return (
     <div
-      onClick={() => router.push(`/nurture/c/${encodeURIComponent(c.clientTag)}`)}
+      onClick={() => router.push(`/nurture/classic/c/${encodeURIComponent(c.clientTag)}`)}
       onMouseEnter={onDragEnter}
       className={`group flex items-center gap-4 px-4 py-3 cursor-pointer transition-colors hover:bg-muted/40 ${danger ? "border-l-2 border-l-amber-400" : "border-l-2 border-l-transparent"}`}
     >

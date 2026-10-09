@@ -9,6 +9,7 @@
  *
  * Auth: GET = any admin session; POST = admin.
  */
+import { scheduleOverviewRebuild } from "@/lib/nurture/overview-snapshot";
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
@@ -72,5 +73,6 @@ export async function POST(req: NextRequest) {
   await db.batch(ops, "write");
 
   const confirmedAt = await getMapConfirmedAt(clientTag);
+  scheduleOverviewRebuild(); // Nurture pages show the new mapping
   return NextResponse.json({ ok: true, saved: entries.length, confirmedAt });
 }

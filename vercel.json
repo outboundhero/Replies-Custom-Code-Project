@@ -42,8 +42,8 @@
       "schedule": "*/30 * * * *"
     },
     {
-      "path": "/api/cron/sync-churned-clients",
-      "schedule": "0 6 * * *"
+      "path": "/api/cron/sync-churned-clients?pt=1",
+      "schedule": "0 15,16,19,20 * * *"
     },
     {
       "path": "/api/cron/refresh-nurture-campaigns",
@@ -128,6 +128,14 @@
     {
       "path": "/api/cron/leadrush-retry",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/nurture-auto-map?pt=1",
+      "schedule": "10 15,16,19,20 * * *"
+    },
+    {
+      "path": "/api/cron/refresh-nurture-overview",
+      "schedule": "7,17,27,37,47,57 * * * *"
     }
   ]
 }

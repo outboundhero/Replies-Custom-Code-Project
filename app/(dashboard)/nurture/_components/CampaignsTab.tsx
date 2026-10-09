@@ -119,7 +119,7 @@ export default function CampaignsTab() {
           <div className="divide-y">
             {routings.map((r) => (
               <RoutingRow key={`${r.clientTag}:${r.instance}`} r={r} combinedMin={combinedMin} compMin={compMin}
-                onOpen={() => router.push(`/nurture/c/${encodeURIComponent(r.clientTag)}`)}
+                onOpen={() => router.push(`/nurture/classic/c/${encodeURIComponent(r.clientTag)}`)}
                 onCheck={() => checkNow(r.clientTag)} checking={checking === r.clientTag} />
             ))}
           </div>

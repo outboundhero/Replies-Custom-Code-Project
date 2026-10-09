@@ -16,6 +16,7 @@ import { listCampaigns } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES } from "@/lib/bison-instances";
 import { reactivateCompletedNurture } from "@/lib/nurture/reactivate-completed";
+import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 
 export const maxDuration = 300;
 
@@ -58,20 +59,50 @@ export async function GET(req: NextRequest) {
   );
 
   // Only replace if we got a usable snapshot — never wipe the cache to empty
-  // because every instance happened to fail this tick.
+  // because every instance happened to fail this tick. Delete + re-insert run
+  // in ONE transaction (batch), so a reader never sees a half-filled cache.
   if (rows.length > 0) {
     const now = new Date().toISOString();
-    await db.execute("DELETE FROM nurture_campaigns_cache");
-    for (let i = 0; i < rows.length; i += 100) {
-      const chunk = rows.slice(i, i + 100);
-      await db.batch(
-        chunk.map((r) => ({
-          sql: "INSERT OR REPLACE INTO nurture_campaigns_cache (id, uuid, name, status, client_tag, total_leads, bison_instance, synced_at) VALUES (?,?,?,?,?,?,?,?)",
-          args: [r.id, r.uuid, r.name, r.status, r.client_tag, r.total_leads, r.bison_instance, now],
+    await db.batch([
+      "DELETE FROM nurture_campaigns_cache",
+      ...rows.map((r) => ({
+        sql: "INSERT OR REPLACE INTO nurture_campaigns_cache (id, uuid, name, status, client_tag, total_leads, bison_instance, synced_at) VALUES (?,?,?,?,?,?,?,?)",
+        args: [r.id, r.uuid, r.name, r.status, r.client_tag, r.total_leads, r.bison_instance, now],
+      })),
+    ], "write");
+  }
+
+  // Also snapshot every tagged NON-nurture ("main") campaign — the Nurture
+  // overview shows active main campaigns per client tag. Same lists as above,
+  // so no extra Bison calls. Replaced per instance only when that instance's
+  // list came back (a failed instance keeps its previous snapshot).
+  try {
+    await db.execute(
+      `CREATE TABLE IF NOT EXISTS main_campaigns_cache (
+        id INTEGER, bison_instance TEXT, client_tag TEXT, name TEXT, status TEXT,
+        total_leads INTEGER, synced_at TEXT, PRIMARY KEY (id, bison_instance)
+      )`,
+    );
+    const now = new Date().toISOString();
+    for (let idx = 0; idx < settled.length; idx++) {
+      const s = settled[idx];
+      if (s.status !== "fulfilled") continue;
+      const key = BISON_INSTANCES[idx].key;
+      const mains = s.value
+        .filter((c) => !/\bnurture\b/i.test(c.name || ""))
+        .map((c) => ({ c, tag: extractTagFromCampaignName(c.name) }))
+        .filter((x) => !!x.tag);
+      // One transaction per instance (same reason as above).
+      await db.batch([
+        { sql: "DELETE FROM main_campaigns_cache WHERE bison_instance = ?", args: [key] },
+        ...mains.map(({ c, tag }) => ({
+          sql: "INSERT OR REPLACE INTO main_campaigns_cache (id, bison_instance, client_tag, name, status, total_leads, synced_at) VALUES (?,?,?,?,?,?,?)",
+          args: [c.id, key, tag, c.name, c.status, c.total_leads ?? 0, now],
         })),
-        "write",
-      );
+      ], "write");
     }
+  } catch (e) {
+    console.error("[cron/refresh-nurture-campaigns] main-campaign snapshot failed:", (e as Error).message);
   }
 
   // Revive any nurture campaigns that have gone "completed" (Bison stops them,
@@ -88,6 +119,12 @@ export async function GET(req: NextRequest) {
     revived = await reactivateCompletedNurture({ campaignsByInstance });
   } catch (e) {
     console.error("[cron/refresh-nurture-campaigns] revive-completed failed:", (e as Error).message);
+  }
+
+  // The Nurture pages read a precomputed overview — refresh it with the new
+  // campaign snapshot. Never let it sink the refresh.
+  try { await rebuildOverviewSnapshot(); } catch (e) {
+    console.error("[cron/refresh-nurture-campaigns] overview snapshot failed:", (e as Error).message);
   }
 
   return NextResponse.json({

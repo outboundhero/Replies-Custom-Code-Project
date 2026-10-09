@@ -30,7 +30,7 @@ const WARM_ENDPOINT: Record<string, string> = {
   "/sections": "/api/config/sections",
   "/untracked": "/api/config/untracked",
   "/qualification": "/api/config/qualification",
-  "/nurture": "/api/config/clients",
+  "/nurture": "/api/nurture/overview",
   "/migrate": "/api/config/clients",
   "/users": "/api/users",
   "/onboarding": "/api/onboarding",
@@ -164,7 +164,7 @@ export function Nav({
           }
           if (!canSee(item)) return null;
           return (
-            <Link key={item.href} href={item.href} onMouseEnter={() => warmHref(item.href)} className={linkClass(pathname === item.href)}>
+            <Link key={item.href} href={item.href} onMouseEnter={() => warmHref(item.href)} className={linkClass(pathname === item.href || (item.href === "/nurture" && !!pathname?.startsWith("/nurture/")))}>
               {item.label}
             </Link>
           );

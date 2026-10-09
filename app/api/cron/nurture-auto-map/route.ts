@@ -16,6 +16,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runAutoMapSweep } from "@/lib/nurture/auto-map";
 import { logError } from "@/lib/errors";
+import { pacificHour } from "@/lib/pacific-time";
+import { setCronState } from "@/lib/nurture/overview";
+import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -32,9 +35,20 @@ export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const dry = ["1", "true", "yes"].includes((sp.get("dry") || "").toLowerCase());
   const limit = sp.get("limit") ? Math.max(1, Number(sp.get("limit")) || 0) : 25;
+  // "Nurture refresh ~10 min after each Sync Churned" (8:10 / 12:10 Pacific) —
+  // same ?pt=1 gate as sync-churned-clients. The regular 3-hourly runs keep going.
+  if (sp.get("pt") === "1" && ![8, 12].includes(pacificHour())) {
+    return NextResponse.json({ ok: true, skipped: "not 8 / 12 o'clock Pacific" });
+  }
 
   try {
     const res = await runAutoMapSweep({ dryRun: dry, limit, maxMs: 270_000 });
+    if (!dry) {
+      try {
+        await setCronState("nurture:auto-map", { at: new Date().toISOString(), checked: res.checked, newlyMapped: res.newlyMapped.length, remapped: res.remapped.length });
+        await rebuildOverviewSnapshot();
+      } catch { /* display-only */ }
+    }
     return NextResponse.json({
       ok: true,
       dry,
