@@ -39,6 +39,8 @@ export async function GET(req: NextRequest) {
   // Newest-first: a positive-category lead, not yet audited. No longer requires
   // an Airtable link (leads have none post-cutover) — the audit keys on the
   // Supabase row id. This is the backstop for any ingest audit that failed.
+  // Served by idx_replies_pending_audit_v2 (sql/2026-10_audit_pending_index.sql):
+  // change these filters and that index together, or this scans all of replies.
   const { data: rows, error } = await supabase
     .from("replies")
     .select("id, client_tag, company_name, city, state, address, google_maps_url, phone, lead_email, from_email, reply_we_got, email_subject, airtable_record_id, airtable_base_id, bison_instance, ai_categorized_lead_category, sender_name")

@@ -1,3 +1,6 @@
+-- SUPERSEDED by sql/2026-10_audit_pending_index.sql (the cron stopped filtering
+-- on airtable_record_id at the Airtable cutover, so this index no longer applies).
+--
 -- Keep the audit-pending cron cheap on Disk IO. A partial index over ONLY the
 -- un-audited, Airtable-linked leads in the POSITIVE AI categories the cron
 -- looks at — i.e. the actual audit backlog, which is small and shrinks as leads
