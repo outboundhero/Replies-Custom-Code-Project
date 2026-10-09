@@ -152,15 +152,6 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
   // Skip churned clients (Status=Churned + Churn Date) — no sync for them.
   const churned = await getChurnedTags();
   if (churned.size > 0) tags = tags.filter((t) => !churned.has((t || "").toUpperCase()));
-  // Sort oldest-synced first so each tick covers different clients.
-  // Clients never synced have synced_at = epoch and sort first.
-  const lastSyncedByTag = await loadLastSyncedByTag(instanceKey);
-  tags.sort((a, b) => {
-    const at = lastSyncedByTag.get(a) || "";
-    const bt = lastSyncedByTag.get(b) || "";
-    return at.localeCompare(bt);
-  });
-
   // ── Cache the instance's full campaign list ONCE per tick. ──
   // Before this, each syncOneClient call independently fetched the
   // campaign list via Bison's search filter (4 status filters × 12
@@ -177,6 +168,11 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
     state.errors.push(`[${instanceKey}] listCampaigns failed (whole instance skipped): ${(e as Error).message}`);
     return { instance: instanceKey, ...state };
   }
+
+  // Sort oldest-swept first so each tick covers different clients; never-swept
+  // clients sort first.
+  const lastSweptByTag = await loadLastSweptByTag(instanceKey, allCampaigns);
+  tags.sort((a, b) => (lastSweptByTag.get(a.toUpperCase()) || "").localeCompare(lastSweptByTag.get(b.toUpperCase()) || ""));
 
   for (const tag of tags) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) {
@@ -228,17 +224,32 @@ async function listClientTagsForInstance(instanceKey: BisonInstanceKey): Promise
   return out;
 }
 
-async function loadLastSyncedByTag(instanceKey: BisonInstanceKey): Promise<Map<string, string>> {
-  const { data } = await supabase
-    .from("nurture_sequence_finished")
-    .select("client_tag, synced_at")
-    .eq("bison_instance", instanceKey)
-    .order("synced_at", { ascending: false });
+/** Per-campaign "last swept" times from the Turso cursor table. */
+async function loadLastSwept(instanceKey: string): Promise<Map<number, string>> {
+  await ensureCursorTable();
+  const out = new Map<number, string>();
+  try {
+    const res = await db.execute({ sql: "SELECT campaign_id, last_swept_at FROM nurture_sync_cursor WHERE bison_instance = ?", args: [instanceKey] });
+    for (const r of res.rows) out.set(Number(r.campaign_id), String(r.last_swept_at || ""));
+  } catch { /* first run — everything counts as never swept */ }
+  return out;
+}
+
+/**
+ * Per-client "last swept" = the newest sweep of any of the client's campaigns,
+ * from the Turso cursor table. (This used to scan + sort the whole
+ * nurture_sequence_finished table for the instance on every cron tick — a
+ * heavy query on the database the inbox shares, and silently truncated to
+ * PostgREST's 1000-row cap so the rotation was wrong anyway.)
+ */
+async function loadLastSweptByTag(instanceKey: BisonInstanceKey, campaigns: OutboundCampaign[]): Promise<Map<string, string>> {
+  const swept = await loadLastSwept(instanceKey);
   const out = new Map<string, string>();
-  for (const r of data || []) {
-    const tag = (r.client_tag as string) || "";
+  for (const c of campaigns) {
+    const tag = (extractTagFromCampaignName(c.name) || "").toUpperCase();
     if (!tag) continue;
-    if (!out.has(tag)) out.set(tag, r.synced_at as string);
+    const at = swept.get(c.id) || "";
+    if (at > (out.get(tag) || "")) out.set(tag, at);
   }
   return out;
 }
@@ -366,16 +377,8 @@ async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyn
   // outboundhero's 477 campaigns get processed in Bison's default order
   // every tick — small/early campaigns hog every run and bottom-of-list
   // clients (like JPH) never get reached before the rate limit fires.
-  const { data: lastSynced } = await supabase
-    .from("nurture_sequence_finished")
-    .select("ob_campaign_id, synced_at")
-    .eq("bison_instance", instanceKey)
-    .order("synced_at", { ascending: false });
-  const lastSyncedByCampaign = new Map<number, string>();
-  for (const r of lastSynced || []) {
-    const id = r.ob_campaign_id as number;
-    if (!lastSyncedByCampaign.has(id)) lastSyncedByCampaign.set(id, r.synced_at as string);
-  }
+  // (From the Turso cursor table — no scan of nurture_sequence_finished.)
+  const lastSyncedByCampaign = await loadLastSwept(instanceKey);
   outboundCampaigns.sort((a, b) => {
     const at = lastSyncedByCampaign.get(a.id) || "";
     const bt = lastSyncedByCampaign.get(b.id) || "";
@@ -488,20 +491,42 @@ async function processLeadWindow(
       let newCandidates = candidates;
       let skipped = 0;
       if (clientTag && candidates.length > 0) {
-        const uniqueEmails = [...new Set(candidates.map((l) => (l.email || "").toLowerCase()).filter(Boolean))];
+        // Look up each email as Bison spells it AND lower-cased: rows are stored
+        // with Bison's casing, and these are exact (index-backed) matches.
+        const lookup = [...new Set(candidates.flatMap((l) => {
+          const e = (l.email || "").trim();
+          return e ? [e, e.toLowerCase()] : [];
+        }))];
         const known = new Set<string>();
-        for (let i = 0; i < uniqueEmails.length; i += 300) {
-          const chunk = uniqueEmails.slice(i, i + 300);
+        const knownLeadIds = new Set<number>();
+        let seqLookupFailed = false;
+        for (let i = 0; i < lookup.length; i += 300) {
+          const chunk = lookup.slice(i, i + 300);
           const [seq, rep, leg] = await Promise.all([
             supabase.from("nurture_sequence_finished").select("email").eq("client_tag", clientTag).in("email", chunk),
             supabase.from("replies").select("lead_email").eq("client_tag", clientTag).in("lead_email", chunk),
             supabase.from("nurture_legacy_leads").select("lead_email").eq("client_tag", clientTag).in("lead_email", chunk),
           ]);
+          if (seq.error) seqLookupFailed = true;
           for (const r of seq.data || []) known.add(String((r as { email?: string }).email ?? "").toLowerCase());
           for (const r of rep.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
           for (const r of leg.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
         }
-        newCandidates = candidates.filter((l) => !known.has((l.email || "").toLowerCase()));
+        // Safety net: if the by-email check failed (e.g. a timeout), at least
+        // never re-send rows we already hold for THIS campaign (cheap lookup on
+        // the (ob_lead_id, ob_campaign_id, bison_instance) unique index) — a
+        // re-upsert would overwrite sequence_finished_at and restart the lead's
+        // 45-day cooldown.
+        if (seqLookupFailed) {
+          console.warn(`[nurture-sync] ${instanceKey} ${campaign.name}: by-email duplicate check failed — fell back to per-campaign check`);
+          const ids = [...new Set(candidates.map((l) => l.id))];
+          for (let i = 0; i < ids.length; i += 500) {
+            const { data } = await supabase.from("nurture_sequence_finished").select("ob_lead_id")
+              .eq("ob_campaign_id", campaign.id).eq("bison_instance", instanceKey).in("ob_lead_id", ids.slice(i, i + 500));
+            for (const r of data || []) knownLeadIds.add(Number((r as { ob_lead_id: number }).ob_lead_id));
+          }
+        }
+        newCandidates = candidates.filter((l) => !known.has((l.email || "").trim().toLowerCase()) && !knownLeadIds.has(l.id));
         skipped = candidates.length - newCandidates.length;
       }
 
