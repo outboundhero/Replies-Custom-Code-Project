@@ -10,9 +10,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { getOverview, overviewPayload, snapshotBuiltAt, scheduleOverviewRebuild } from "@/lib/nurture/overview-snapshot";
 
-// Runs next to Turso (Mumbai): each read is one short hop, not a trip from the US.
-export const preferredRegion = "bom1";
-
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 

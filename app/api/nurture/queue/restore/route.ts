@@ -13,9 +13,6 @@ import { markTagStatsDirty } from "@/lib/nurture/overview";
 import { ensureRemovalsTable, dropFirstPageCache } from "@/lib/nurture/queue-removals";
 import { logActivity } from "@/lib/errors";
 
-// Runs next to Supabase (Singapore), where the queue queries execute; Turso (Mumbai) is one short hop.
-export const preferredRegion = "sin1";
-
 export const maxDuration = 120;
 
 export async function POST(req: NextRequest) {

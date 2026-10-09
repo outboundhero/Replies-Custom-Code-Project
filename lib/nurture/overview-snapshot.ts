@@ -11,6 +11,8 @@
  *   • stale-while-revalidate: a read older than FRESH_MS (crons normally
  *     rebuild every ~10 min, so this only kicks in if they stall) is still served
  *     instantly and a rebuild is kicked off in the background (after()).
+ *   • each server keeps the last parsed snapshot in memory: a read is still one
+ *     round trip, but the ~600KB payload only travels when it actually changed.
  */
 import { after } from "next/server";
 import db from "@/lib/db";
@@ -28,6 +30,13 @@ function ensureTable(): Promise<void> {
   return tableReady;
 }
 
+// The newest snapshot this server has seen (parsed), so unchanged reads skip the payload.
+let memo: { data: Overview; builtAt: string } | null = null;
+const remember = (o: { data: Overview; builtAt: string }) => {
+  if (!memo || o.builtAt > memo.builtAt) memo = o;
+  return o;
+};
+
 async function buildAndStore(): Promise<{ data: Overview; builtAt: string }> {
   await ensureTable();
   // builtAt = when the build STARTED (= "data as of"). Stored only if newer than
@@ -40,7 +49,7 @@ async function buildAndStore(): Promise<{ data: Overview; builtAt: string }> {
           WHERE excluded.built_at > nurture_overview_snapshot.built_at`,
     args: [JSON.stringify(data), builtAt],
   });
-  return { data, builtAt };
+  return remember({ data, builtAt });
 }
 
 // One background rebuild at a time per server (concurrent callers share it).
@@ -86,12 +95,18 @@ export function scheduleOverviewRebuild(opts: { ifOlderThanMs?: number } = {}): 
 export async function getOverview(opts: { fresh?: boolean } = {}): Promise<{ data: Overview; builtAt: string }> {
   if (opts.fresh) return rebuildOverviewSnapshot({ force: true });
   await ensureTable();
-  const r = await db.execute("SELECT payload, built_at FROM nurture_overview_snapshot WHERE id = 1");
+  // The payload comes back only if the stored snapshot differs from ours.
+  const known = memo;
+  const r = await db.execute({
+    sql: "SELECT built_at, CASE WHEN built_at = ? THEN NULL ELSE payload END AS payload FROM nurture_overview_snapshot WHERE id = 1",
+    args: [known?.builtAt ?? ""],
+  });
   const row = r.rows[0];
   if (!row) return rebuildOverviewSnapshot();
   const builtAt = String(row.built_at);
   if (Date.now() - new Date(builtAt).getTime() > FRESH_MS) scheduleOverviewRebuild({ ifOlderThanMs: FRESH_MS });
-  return { data: JSON.parse(String(row.payload)) as Overview, builtAt };
+  if (row.payload == null && known) return known; // unchanged since we last read it
+  return remember({ data: JSON.parse(String(row.payload)) as Overview, builtAt });
 }
 
 // ── response shapes shared by the API routes and the server-rendered pages ──

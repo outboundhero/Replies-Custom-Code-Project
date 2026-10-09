@@ -12,9 +12,6 @@ import { getOverview, clientPayload, getCachedFirstQueuePage } from "@/lib/nurtu
 import type { QueueContact } from "../../_ui/queue-cache";
 import NurtureClientView from "../../_ui/client-view";
 
-// Runs next to Turso (Mumbai): each read is one short hop, not a trip from the US.
-export const preferredRegion = "bom1";
-
 export const dynamic = "force-dynamic";
 // This request's render time — relative times ("5 min ago") hydrate against it.
 const requestTime = () => Date.now();

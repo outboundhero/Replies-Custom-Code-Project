@@ -11,9 +11,6 @@ import { activeClientTags } from "@/lib/nurture/overview";
 import { parseQueueFilters, toRpcArgs, toQueueContact } from "@/lib/nurture/queue-filters";
 import { acquireHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
 
-// Runs next to Supabase (Singapore), where the queue queries execute; Turso (Mumbai) is one short hop.
-export const preferredRegion = "sin1";
-
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
