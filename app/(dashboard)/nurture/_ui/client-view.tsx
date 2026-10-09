@@ -36,6 +36,7 @@ interface QueueFilters { search: string; email: string; web: string; source: str
 const NO_FILTERS: QueueFilters = { search: "", email: "", web: "", source: "", tld: "", overlap: false };
 const PAGE = QUEUE_PAGE;
 const PREFETCH_MAX = 5000;
+const PAGE1_FRESH_MS = 30 * 60_000;
 const ESP_LABEL: Record<string, string> = { google: "Google", outlook: "Outlook", segs: "SEGs" };
 const SRC = Object.fromEntries(SOURCE_ROWS.map((r) => [r.key, r]));
 const QUICK_TLDS = [".in", ".ca", ".nz"];
@@ -145,6 +146,16 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
     const key = queueQuery(tag, fApplied, offset);
     const cached = force ? null : getCachedQueue(key);
     const fkey = JSON.stringify(fApplied);
+    // Unfiltered first page: the server's cached copy (refreshed with the
+    // client's stats) is used as-is while under 30 min old — on big clients
+    // the live query is heavy (up to ~30s), so it only runs on Refresh, a
+    // filter / page change, or after a removal.
+    if (!force && !cached && initialQueue && key === queueQuery(tag, NO_FILTERS, 0) && Date.now() - initialQueue.at < PAGE1_FRESH_MS) {
+      setQ({ ...initialQueue, key, fkey });
+      setUnfilteredTotal(initialQueue.total);
+      setQLoading(false);
+      return;
+    }
     if (cached) {
       setQ({ ...cached, key, fkey });
       if (!filtersActive(fApplied)) setUnfilteredTotal(cached.total);
@@ -167,7 +178,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
       if (res.total > offset + PAGE && res.total <= PREFETCH_MAX) prefetchQueuePage(tag, fApplied, offset + PAGE);
     } catch (e) { if (seq === qSeq.current) setQError((e as Error).message); }
     finally { if (seq === qSeq.current) setQLoading(false); }
-  }, [tag, fApplied, offset]);
+  }, [tag, fApplied, offset, initialQueue]);
   // The live queue is only queried once the Queue tab is opened (each query
   // scans this client's whole queue); until then the cached first page shows.
   useEffect(() => { if (tab === "q") void loadQueue(); }, [tab, loadQueue]);
@@ -544,6 +555,9 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
           <div className="card tbl" style={{ marginTop: 14 }}>
             <div className="qbar">
               <span className="cnt">{q ? fmt(q.total) : "…"}</span> {filtersActive(fApplied) ? "contacts match" : "contacts in queue"}
+              {q && Date.now() - q.at > 120_000 && !qLoading && (
+                <span style={{ fontSize: 11.5 }}>· as of {ago(new Date(q.at).toISOString())} · <button type="button" className="linkish" style={{ fontWeight: 500, fontSize: 11.5 }} onClick={() => { dropQueueCache(tag); void loadQueue(true); }}>Refresh</button></span>
+              )}
               <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center" }}>
                 <span style={{ fontSize: 11.5 }}>Quick remove by domain:</span>
                 {QUICK_TLDS.map((t) => <button key={t} type="button" className="btn btn-sm" disabled={busy} onClick={() => quickRemoveDomain(t)}>{t}</button>)}
