@@ -35,6 +35,8 @@ import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
 const CURSOR_WINDOW_LEADS = 2000;          // leads per sweep request-window
 const CURSOR_WINDOW_MS = 30_000;           // per request-window time cap
 const PER_CAMPAIGN_MS = 60_000;            // max time on ONE campaign per run (may span several windows)
+const UPSERT_BATCH = 250;                  // rows per upsert call (smooth writes on the shared DB)
+const UPSERT_PAUSE_MS = 150;               // breather between upsert batches
 const RESWEEP_MS = 18 * 60 * 60 * 1000;    // re-scan a fully-drained campaign at most this often (for new finishers)
 
 interface CursorState { cursor: string | null; completed_at: string | null }
@@ -419,7 +421,9 @@ async function processCampaigns(
     return now - Date.parse(st.completed_at) > RESWEEP_MS;
   });
   const deadline = now + (opts.maxMs ?? 240_000);
-  const CONCURRENCY = 4;
+  // 2 campaigns at a time (was 4): each one writes new rows to the database
+  // the inbox shares — fewer parallel write streams keeps inbox queries fast.
+  const CONCURRENCY = 2;
   await parallelForEach(queue, CONCURRENCY, async (campaign) => {
     if (Date.now() >= deadline) return;
     state.campaignsScanned++;
@@ -610,9 +614,22 @@ async function processLeadWindow(
       // — see the Phase-1 SQL. Without bison_instance in the conflict key,
       // two instances issuing the same numeric IDs would overwrite each
       // other.
-      const { error } = await supabase
-        .from("nurture_sequence_finished")
-        .upsert(dedupedRows, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
+      //
+      // Written in small batches with a short breather between them: one big
+      // upsert of up to 2000 rows (× several campaigns at once) is a write
+      // burst on the database the inbox shares (2026-10-09 catch-up runs of
+      // ~10k new rows made inbox queries time out). Same rows, smoother load.
+      let error: { message: string } | null = null;
+      let written = 0;
+      for (let i = 0; i < dedupedRows.length; i += UPSERT_BATCH) {
+        if (i > 0) await new Promise((r) => setTimeout(r, UPSERT_PAUSE_MS));
+        const batch = dedupedRows.slice(i, i + UPSERT_BATCH);
+        const res = await supabase
+          .from("nurture_sequence_finished")
+          .upsert(batch, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
+        if (res.error) { error = res.error; break; }
+        written += batch.length;
+      }
 
       // ESP split of what we're writing this run (for the live progress UI).
       const esp: SyncEspBreakdown = { google: 0, outlook: 0, segs: 0, other: 0 };
@@ -622,15 +639,12 @@ async function processLeadWindow(
         else esp.other++;
       }
 
-      if (error) {
-        errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
-      } else {
-        state.upserted += dedupedRows.length;
-      }
+      state.upserted += written; // rows actually written, even if a later batch failed
+      if (error) errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
       onProgress?.({
         phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
         status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
-        candidates: newCandidates.length, upserted: error ? 0 : dedupedRows.length, skipped, esp,
+        candidates: newCandidates.length, upserted: written, skipped, esp,
         error: error ? error.message : undefined,
       });
       // ESP populated inline above from lead.tags — no more fire-and-
