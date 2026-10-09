@@ -30,7 +30,6 @@ const WARM_ENDPOINT: Record<string, string> = {
   "/sections": "/api/config/sections",
   "/untracked": "/api/config/untracked",
   "/qualification": "/api/config/qualification",
-  "/nurture": "/api/nurture/overview",
   "/migrate": "/api/config/clients",
   "/users": "/api/users",
   "/onboarding": "/api/onboarding",

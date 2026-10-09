@@ -9,9 +9,9 @@
  *
  * Auth: GET = any admin session; POST = admin.
  */
-import { scheduleOverviewRebuild } from "@/lib/nurture/overview-snapshot";
+import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, requireAdmin } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getClientInstances } from "@/lib/nurture/group-routing";
@@ -19,7 +19,7 @@ import { getClientInstances } from "@/lib/nurture/group-routing";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const denied = await requireAuth();
+  const denied = await requireAdmin(); // admin-only (it exposes any client's campaigns)
   if (denied) return denied;
   const clientTag = (req.nextUrl.searchParams.get("clientTag") || "").trim();
   if (!clientTag) return NextResponse.json({ error: "clientTag required" }, { status: 400 });
@@ -65,7 +65,8 @@ export async function POST(req: NextRequest) {
     });
   }
   ops.push({ sql: "INSERT OR IGNORE INTO client_config (client_tag) VALUES (?)", args: [clientTag] });
-  if (body.confirm === false) {
+  // An empty map is never "confirmed" (auto-map would then never fill it in).
+  if (body.confirm === false || entries.length === 0) {
     ops.push({ sql: "UPDATE client_config SET nurture_map_confirmed_at = NULL, updated_at = datetime('now') WHERE client_tag = ?", args: [clientTag] });
   } else {
     ops.push({ sql: "UPDATE client_config SET nurture_map_confirmed_at = datetime('now'), updated_at = datetime('now') WHERE client_tag = ?", args: [clientTag] });
@@ -73,6 +74,6 @@ export async function POST(req: NextRequest) {
   await db.batch(ops, "write");
 
   const confirmedAt = await getMapConfirmedAt(clientTag);
-  scheduleOverviewRebuild(); // Nurture pages show the new mapping
+  await rebuildOverviewSnapshot({ force: true }).catch(() => {}); // Nurture pages show the new mapping
   return NextResponse.json({ ok: true, saved: entries.length, confirmedAt });
 }

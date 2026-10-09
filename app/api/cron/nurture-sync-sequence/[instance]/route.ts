@@ -7,8 +7,8 @@
  * /api/cron/nurture-sync-sequence call ran out of budget before
  * outboundhero finished its loop.
  *
- * Routed to via vercel.json cron entries staggered every ~90 minutes so
- * the four instances don't all hit Bison at once.
+ * Routed to via vercel.json cron entries — each instance every 20 minutes,
+ * staggered 5 minutes apart so the four don't all hit Bison at once.
  *
  * Auth: same CRON_SECRET pattern as the combined route.
  */

@@ -10,7 +10,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  type OverviewTag, fmt, ago, ptTime, lastContactText, Ico, TypeBadge, Avatar, MappingPill, Batches,
+  type OverviewTag, fmt, ago, ptTime, lastContactText, useNow, Ico, TypeBadge, Avatar, MappingPill, Batches,
   StatusCell, Skel, BarRow, ESP_ROWS, sourceValues, useToast, Toast, ActionsMenu,
 } from "./shared";
 
@@ -45,25 +45,28 @@ function normEnding(v: string, kind: "email" | "web"): string {
   return s && !s.startsWith(".") && CATALOG_RE.test("." + s) ? "." + s : s;
 }
 
-export default function NurtureOverview({ initial, initialError }: { initial: OverviewResp | null; initialError: string | null }) {
+export default function NurtureOverview({ initial, initialError, serverNow }: { initial: OverviewResp | null; initialError: string | null; serverNow: number }) {
   const router = useRouter();
+  const now = useNow(serverNow);
   const [data, setData] = useState<OverviewResp | null>(initial);
   const [error, setError] = useState<string | null>(initialError);
   const { toast, show, hide } = useToast();
 
   // Polls send the builtAt we have; the server answers { unchanged } unless a
   // newer snapshot exists, so an idle open tab costs one tiny read a minute.
+  // Returns whether it succeeded (failures show a Retry note, never silently).
   const builtAtRef = useRef<string | null>(initial?.builtAt ?? null);
-  const load = useCallback(async (fresh = false) => {
+  const load = useCallback(async (fresh = false): Promise<boolean> => {
     try {
       const qs = fresh ? "?fresh=1" : builtAtRef.current ? `?since=${encodeURIComponent(builtAtRef.current)}` : "";
       const r = await fetch(`/api/nurture/overview${qs}`, { cache: "no-store" });
-      if (r.redirected || r.status === 401) { window.location.href = "/login"; return; }
+      if (r.redirected || r.status === 401) { window.location.href = "/login"; return false; }
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       if (!d.unchanged) { setData(d); builtAtRef.current = d.builtAt ?? null; }
       setError(null);
-    } catch (e) { setError((e as Error).message); }
+      return true;
+    } catch (e) { setError((e as Error).message); return false; }
   }, []);
   // Painted from the server snapshot; keep it current while the tab is open.
   const hadInitial = useRef(!!initial);
@@ -147,6 +150,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
     if (tag) hoverTimer.current = setTimeout(() => router.prefetch(`/nurture/c/${encodeURIComponent(tag)}`), 250);
   };
+  useEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
 
   // ── actions
   const [churnBusy, setChurnBusy] = useState(false);
@@ -156,14 +160,21 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
       const r = await fetch("/api/nurture/churn-sync", { method: "POST" });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      await load(); // the route already rebuilt the overview
       show(`Churn synced — ${d.churned} churned client${d.churned === 1 ? "" : "s"}`);
-      await load(true);
     } catch (e) { show(`Churn sync failed: ${(e as Error).message}`, { bad: true }); }
     setChurnBusy(false);
   }
 
   const a = data?.automation, tiles = data?.tiles;
-  const stale = (iso?: string, hours = 26) => !!iso && Date.now() - new Date(iso).getTime() > hours * 3_600_000;
+  // Amber once a run is overdue: churn sync runs at 8 AM + 12 PM PT (gap ≤ 20h),
+  // the nurture refresh (auto-map) every 3h.
+  const stale = (iso: string | undefined, hours: number) => !!iso && now - new Date(iso).getTime() > hours * 3_600_000;
+  async function rebuildNow() {
+    show("Rebuilding the overview…", { ms: 120_000 });
+    const ok = await load(true);
+    show(ok ? "Overview up to date" : "Rebuild failed — try again in a minute", { bad: !ok });
+  }
   const oldestStats = useMemo(() => {
     const at = (data?.tags ?? []).map((t) => t.stats?.computed_at).filter(Boolean) as string[];
     return at.length ? at.sort()[0] : null;
@@ -183,7 +194,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
               <button type="button" role="menuitem" disabled={churnBusy} onClick={() => { close(); void syncChurnNow(); }}>
                 {Ico.sync}<span>Sync churned now<span className="mi-sub">Re-read the Client Tracker&apos;s churned list</span></span>
               </button>
-              <button type="button" role="menuitem" onClick={() => { close(); show("Rebuilding the overview…", { ms: 15000 }); void load(true).then(() => show("Overview up to date")); }}>
+              <button type="button" role="menuitem" onClick={() => { close(); void rebuildNow(); }}>
                 {Ico.refresh}<span>Rebuild overview now<span className="mi-sub">Re-merge campaigns, mapping + cached numbers</span></span>
               </button>
               <hr />
@@ -196,8 +207,8 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
       </div>
 
       <div className="content">
-        {error && !data && (
-          <div className="banner bad" style={{ marginTop: 0, marginBottom: 14 }}>{Ico.warnTri}Couldn&apos;t load the Nurture overview: {error}<button type="button" className="linkish" style={{ marginLeft: "auto", color: "inherit" }} onClick={() => void load()}>Retry</button></div>
+        {error && (
+          <div className="banner bad" style={{ marginTop: 0, marginBottom: 14 }}>{Ico.warnTri}{data ? "Couldn’t refresh the overview — showing the last numbers loaded." : `Couldn’t load the Nurture overview: ${error}`}<button type="button" className="linkish" style={{ marginLeft: "auto", color: "inherit" }} onClick={() => void load()}>Retry</button></div>
         )}
 
         <div className="auto-row">
@@ -208,7 +219,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
               <div className="val">Daily · 8:00 AM &amp; 12:00 PM PT</div>
               <div className="meta">
                 {!data ? <Skel w={180} /> : a?.churnSync?.at ? (
-                  <><span className={stale(a.churnSync.at) ? "dot-warn" : "dot-live"} />Last run {ptTime(a.churnSync.at)} · {fmt(a.churnSync.active ?? tiles?.activeClients)} clients · {a.churnSync.manual ? "manual" : "automatic"}</>
+                  <><span className={stale(a.churnSync.at, 26) ? "dot-warn" : "dot-live"} />Last run {ptTime(a.churnSync.at, now)} · {fmt(a.churnSync.active ?? tiles?.activeClients)} clients · {a.churnSync.manual ? "manual" : "automatic"}</>
                 ) : (<><span className="dot-idle" />Waiting for the first scheduled run</>)}
               </div>
             </div>
@@ -220,7 +231,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
               <div className="val">~10 min after each sync</div>
               <div className="meta">
                 {!data ? <Skel w={180} /> : a?.refresh?.at ? (
-                  <><span className={stale(a.refresh.at) ? "dot-warn" : "dot-live"} />Last run {ptTime(a.refresh.at)} · {fmt(a.mappedTags)} tags mapped · automatic</>
+                  <><span className={stale(a.refresh.at, 4) ? "dot-warn" : "dot-live"} />Last run {ptTime(a.refresh.at, now)} · {fmt(a.mappedTags)} tags mapped · automatic</>
                 ) : (<><span className="dot-idle" />{fmt(a?.mappedTags)} tags mapped · first run pending</>)}
               </div>
             </div>
@@ -238,7 +249,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
         <div className="stats">
           <div className="stat card"><div className="k">Clients in nurture</div><div className="v tnum">{tiles ? fmt(tiles.inNurture) : <Skel />}{tiles && <small>of {fmt(tiles.activeClients)} active</small>}</div></div>
           <div className="stat card"><div className="k">Contacts in queues</div><div className="v tnum">{tiles ? fmt(tiles.contactsInQueues) : <Skel w={90} />}{tiles && tiles.statsCoverage < tiles.activeClients && <small>· {tiles.statsCoverage} of {tiles.activeClients} tags counted</small>}</div></div>
-          <div className="stat card"><div className="k">Mapping correct</div><div className="v tnum">{tiles ? fmt(tiles.mappingOk) : <Skel />}{tiles && <small>· {fmt(tiles.mappingBad)} need attention</small>}</div></div>
+          <div className="stat card"><div className="k">Mapping correct</div><div className="v tnum">{tiles ? fmt(tiles.mappingOk) : <Skel />}{tiles && <small>· {fmt(tiles.mappingBad)} need{tiles.mappingBad === 1 ? "s" : ""} attention</small>}</div></div>
           <div className="stat card"><div className="k">Tags with errors</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{tiles ? fmt(tiles.tagsWithErrors) : <Skel />}</div></div>
         </div>
 
@@ -252,7 +263,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
           <span className="lbl">Type</span>
           <div className="seg">
             {([["all", "All"], ["Cleaning", "Cleaning"], ["Non-Cleaning", "Non-cleaning"], ["OS", "OS"]] as const).map(([v, l]) => (
-              <button key={v} type="button" className={type === v ? "on" : ""} onClick={() => setType(v)}>{l}</button>
+              <button key={v} type="button" className={type === v ? "on" : ""} aria-pressed={type === v} onClick={() => setType(v)}>{l}</button>
             ))}
           </div>
           <div className="field"><input type="text" aria-label="Email ends with" placeholder="Email ends with…" style={{ minWidth: 150 }} value={emailEnd} onChange={(e) => setEmailEnd(e.target.value)} onKeyDown={onEndingKey} /></div>
@@ -263,9 +274,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
             <option value="clean">Healthy</option>
             <option value="map">Mapping issue</option>
           </select>
-          {remoteState === "needs-enter" && <span className="searching">Press Enter to search every queue</span>}
           {remoteState === "loading" && <span className="searching">{Ico.spinner}Searching every queue…</span>}
-          {remoteState === "error" && <span className="searching" style={{ color: "var(--red-fg)" }}>Search failed: {remote?.error} — press Enter to retry</span>}
           <button type="button" className="clear" onClick={clearAll}>Clear</button>
         </div>
 
@@ -283,9 +292,11 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
                     <tr key={i}>{Array.from({ length: 8 }, (_, j) => <td key={j}>{j < 7 ? <Skel w={j === 0 ? 110 : 60} /> : null}</td>)}</tr>
                   ))
                 ) : remoteState === "needs-enter" ? (
-                  <tr><td colSpan={8}><div className="empty">Press <b>Enter</b> to search every client&apos;s queue for contacts ending in that. Endings like <b>.in</b>, <b>.co.uk</b> or <b>gmail.com</b> filter instantly.</div></td></tr>
+                  <tr><td colSpan={8}><div className="empty">Press <b>Enter</b> to search every client&apos;s queue for contacts ending in “{emailMode === "remote" ? emailKey : webKey}”. Endings like <b>.in</b>, <b>.co.uk</b> or <b>gmail.com</b> filter instantly.</div></td></tr>
                 ) : remoteState === "loading" ? (
                   <tr><td colSpan={8}><div className="empty">Searching every client&apos;s queue… this can take up to a minute.</div></td></tr>
+                ) : remoteState === "error" ? (
+                  <tr><td colSpan={8}><div className="empty">The search didn&apos;t finish ({remote?.error}). Press <b>Enter</b> in the filter to try again.</div></td></tr>
                 ) : rows.length === 0 ? (
                   <tr><td colSpan={8}><div className="empty">{filtersOn ? "No client tags match these filters." : "No active client tags."}</div></td></tr>
                 ) : rows.map((c) => {
@@ -293,7 +304,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
                   return (
                     <Fragment key={c.tag}>
                       <tr className={`link${isOpen ? " open" : ""}`} onClick={() => toggleRow(c.tag)} onMouseEnter={() => hoverRow(c.tag)} onMouseLeave={() => hoverRow(null)}
-                        tabIndex={0} aria-expanded={isOpen} aria-label={`${c.tag} — ${isOpen ? "collapse" : "expand"} nurture overview`}
+                        tabIndex={0} aria-expanded={isOpen}
                         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleRow(c.tag); } }}>
                         <td>
                           <div className="tagcell">
@@ -308,13 +319,13 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
                         </td>
                         <td><MappingPill mapping={c.mapping} issues={c.mapIssues} /></td>
                         <td><Batches b={c.batches} extra={c.extraLiveBatches} /></td>
-                        <td className="muted" style={{ fontSize: 12.5 }}>{lastContactText(c)}</td>
-                        <td className="num mono">{c.stats ? fmt(c.stats.queue) : <span className="muted" title="Queue numbers are being computed (refreshed every ~10 min)">…</span>}</td>
+                        <td className="muted" style={{ fontSize: 12.5 }}>{lastContactText(c, now)}</td>
+                        <td className="num mono">{c.stats ? fmt(c.stats.queue) : <span className="muted" title="Queue numbers haven’t been computed yet">…</span>}</td>
                         <td><StatusCell errors={c.errors} /></td>
                         <td style={{ textAlign: "right" }}>{Ico.chevron}</td>
                       </tr>
                       {isOpen && (
-                        <tr className="exprow"><td colSpan={8}><ExpandInner c={c} onOpen={() => openClient(c.tag)} /></td></tr>
+                        <tr className="exprow"><td colSpan={8}><ExpandInner c={c} now={now} onOpen={() => openClient(c.tag)} /></td></tr>
                       )}
                     </Fragment>
                   );
@@ -327,7 +338,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
         <div className="foot">
           <b>Nurture batches</b> N1·N2·N3: <span className="batch b-on">live</span> <span className="batch b-wait">waiting</span> <span className="batch b-off">not needed</span>. &nbsp;<b>Mapping</b> auto-confirms — <span className="pill p-ok" style={{ fontSize: 10 }}>Mapped</span> / <span className="pill p-bad" style={{ fontSize: 10 }}>Needs attention</span>. &nbsp;<b>Last contact</b> is per tag. Hover a <b>Status</b> badge for the fix.
           {data && (
-            <><br />Queue numbers refresh every ~10 min{oldestStats ? ` (oldest ${ago(oldestStats)})` : ""} · campaigns synced {ago(data.campaignsSyncedAt)}.</>
+            <><br />Queue numbers are recomputed every few hours{oldestStats ? ` (oldest ${ago(oldestStats, now)})` : ""} · campaigns synced {ago(data.campaignsSyncedAt, now)}.</>
           )}
         </div>
       </div>
@@ -337,7 +348,7 @@ export default function NurtureOverview({ initial, initialError }: { initial: Ov
 }
 
 /* inline expandable row → quick nurture overview for the client, in place */
-function ExpandInner({ c, onOpen }: { c: OverviewTag; onOpen: () => void }) {
+function ExpandInner({ c, now, onOpen }: { c: OverviewTag; now: number; onOpen: () => void }) {
   const s = c.stats;
   const queue = s?.queue ?? 0, added = c.added ?? 0;
   const pipe: Array<[string, number | null]> = [
@@ -358,7 +369,7 @@ function ExpandInner({ c, onOpen }: { c: OverviewTag; onOpen: () => void }) {
           <div><span className="camp"><span className="d" style={{ background: c.nurtureActive ? "var(--violet-fg)" : "#d0d0d6" }} />{c.nurtureActive} nurture active</span></div>
           <div style={{ marginTop: 3 }}><MappingPill mapping={c.mapping} issues={c.mapIssues} /></div>
           <div style={{ marginTop: 4 }}><Batches b={c.batches} extra={c.extraLiveBatches} /></div>
-          <div><button type="button" className="btn btn-sm" style={{ marginTop: 10 }} onClick={onOpen}>Open full view &amp; queue →</button></div>
+          <button type="button" className="btn btn-sm" style={{ marginTop: 10 }} onClick={onOpen}>Open full view &amp; queue →</button>
         </div>
       </div>
       <div className="exp-col">
@@ -369,7 +380,7 @@ function ExpandInner({ c, onOpen }: { c: OverviewTag; onOpen: () => void }) {
           ))}
         </div>
         <div style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 9 }}>
-          <b style={{ color: "var(--foreground)", fontWeight: 600 }} className="tnum">{s ? fmt(queue) : "—"}</b> in queue · last contact {lastContactText(c)}
+          <b style={{ color: "var(--foreground)", fontWeight: 600 }} className="tnum">{s ? fmt(queue) : "—"}</b> in queue · last contact {lastContactText(c, now).toLowerCase()}
         </div>
       </div>
       <div className="exp-col">

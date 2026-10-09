@@ -7,15 +7,15 @@
  *   • Queue — the tag's pending contacts, paged + filtered in the database,
  *     with remove (single / selected / all matching / by domain) + Undo.
  * Everything the previous page did (sync, route-all, per-lead push/skip…) is
- * still one click away under Actions → Open classic view.
+ * still under Actions → Open classic view.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import TargetCampaigns from "../_components/TargetCampaigns";
 import {
-  type OverviewTag, type BatchState, fmt, ago, lastContactText, Ico, TypeBadge, Avatar, MappingPill, StatusCell, HoverTip,
+  type OverviewTag, type BatchState, fmt, ago, ptDate, lastContactText, useNow, Ico, TypeBadge, Avatar, MappingPill, StatusCell, HoverTip,
   Skel, BarRow, ESP_ROWS, SOURCE_ROWS, sourceValues, useToast, Toast, ConfirmDialog, ActionsMenu,
 } from "./shared";
 import { type QueueResult, type QueueContact, QUEUE_PAGE, queueQuery, getCachedQueue, isFresh, fetchQueue, prefetchQueuePage, dropQueueCache } from "./queue-cache";
@@ -32,6 +32,8 @@ export interface ClientResp {
   batches: Array<{ batch: number; state: BatchState; campaigns: BatchCampaign[] }>;
   builtAt: string;
 }
+interface MapCampaign { id: number; name: string; status: string; client_tag: string | null; bison_instance: string; total_leads?: number }
+interface RemovalRow { id: number; removedAt: string; removedBy: string | null; mode: string; contacts: number; rows: number; status: string; filters: Record<string, unknown> | null; restoredAt: string | null; undoable: boolean }
 interface QueueFilters { search: string; email: string; web: string; source: string; tld: string; overlap: boolean }
 const NO_FILTERS: QueueFilters = { search: "", email: "", web: "", source: "", tld: "", overlap: false };
 const PAGE = QUEUE_PAGE;
@@ -42,6 +44,7 @@ const SRC = Object.fromEntries(SOURCE_ROWS.map((r) => [r.key, r]));
 const QUICK_TLDS = [".in", ".ca", ".nz"];
 // Country-code endings worth flagging (the team prunes non-US contacts).
 const isFlagTld = (t: string | null) => !!t && /^\.[a-z]{2}$/.test(t) && ![".us", ".co", ".io", ".ai", ".me", ".tv"].includes(t);
+const pl = (n: number, word: string) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
 
 function statusPill(status: string | null) {
   const s = (status || "").toLowerCase();
@@ -66,14 +69,17 @@ function describeFilters(f: Record<string, unknown> | null): string {
 }
 const filtersActive = (f: QueueFilters) => !!(f.search.trim() || f.email.trim() || f.web.trim() || f.source || f.tld || f.overlap);
 
-export default function NurtureClientView({ tag, initial, initialError, initialQueue }: {
+export default function NurtureClientView({ tag, initial, initialError, initialQueue, serverNow }: {
   tag: string; initial: ClientResp | null; initialError: string | null;
-  initialQueue: QueueResult | null;   // first page cached by the stats refresh (painted, then refreshed live)
+  initialQueue: QueueResult | null;   // first page cached on the server with the client's stats
+  serverNow: number;
 }) {
   const router = useRouter();
+  const now = useNow(serverNow);
   const { toast, show, hide } = useToast();
 
-  // ── client data (painted from the server snapshot; re-read after actions)
+  // ── client data (painted from the server snapshot; re-read after actions —
+  // every action route rebuilds the snapshot before it answers)
   const [data, setData] = useState<ClientResp | null>(initial);
   const [error, setError] = useState<string | null>(initialError);
   const loadClient = useCallback(async (fresh = false) => {
@@ -114,77 +120,91 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
 
   // ── queue
   const [f, setF] = useState<QueueFilters>(NO_FILTERS);
-  const [fApplied, setFApplied] = useState<QueueFilters>(NO_FILTERS); // debounced text
+  const [fApplied, setFApplied] = useState<QueueFilters>(NO_FILTERS);
   const [offset, setOffset] = useState(0);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [allMatching, setAllMatching] = useState(false);
-  // Apply filter edits after a short pause; a new filter set starts on page 1
+  // Rows of the current selection (it can span pages) — for the panel deltas.
+  const selRows = useRef<Map<string, QueueContact>>(new Map());
+  // Apply filter edits — typing after a pause (every query scans the whole
+  // queue), dropdowns + the checkbox at once. A new filter set starts on page 1
   // with nothing selected (a selection never carries across filters).
   useEffect(() => {
     if (JSON.stringify(f) === JSON.stringify(fApplied)) return;
-    const t = setTimeout(() => { setFApplied(f); setOffset(0); setSel(new Set()); setAllMatching(false); }, 350);
+    const typing = f.source === fApplied.source && f.tld === fApplied.tld && f.overlap === fApplied.overlap;
+    const t = setTimeout(() => {
+      setFApplied(f); setOffset(0); setSel(new Set()); setAllMatching(false); selRows.current.clear();
+    }, typing ? 900 : 0);
     return () => clearTimeout(t);
   }, [f, fApplied]);
-  // Queue pages come from a browser cache first (instant when this page/filter
-  // was seen or prefetched), then refresh from the server unless very fresh.
-  // Page 1 loads in the background as soon as the client page opens.
-  const firstPage = (): QueueResult | null => {
-    const c = getCachedQueue(queueQuery(tag, NO_FILTERS, 0));
-    if (c && (!initialQueue || c.at >= initialQueue.at)) return c;
-    return initialQueue;
+
+  // The server's cached first page: shown as-is while under 30 min old (on big
+  // clients the live query is heavy — up to ~30s), dropped as soon as this page
+  // changes the queue (it no longer matches).
+  const seed = useRef<QueueResult | null>(initialQueue);
+  const pickFirstPage = (seedPage: QueueResult | null): QueueResult | null => {
+    const cached = getCachedQueue(queueQuery(tag, NO_FILTERS, 0));
+    return cached && (!seedPage || cached.at >= seedPage.at) ? cached : seedPage;
   };
   const [q, setQ] = useState<(QueueResult & { key: string; fkey: string }) | null>(() => {
-    const c = firstPage();
-    return c ? { ...c, key: queueQuery(tag, NO_FILTERS, 0), fkey: JSON.stringify(NO_FILTERS) } : null;
+    const p = pickFirstPage(initialQueue);
+    return p ? { ...p, key: queueQuery(tag, NO_FILTERS, 0), fkey: JSON.stringify(NO_FILTERS) } : null;
   });
   const [qLoading, setQLoading] = useState(false);
   const [qError, setQError] = useState<string | null>(null);
-  const [unfilteredTotal, setUnfilteredTotal] = useState<number | null>(() => firstPage()?.total ?? null);
+  const [unfilteredTotal, setUnfilteredTotal] = useState<number | null>(() => pickFirstPage(initialQueue)?.total ?? null);
+  // Queue pages come from a browser cache first (instant when this page/filter
+  // was seen or prefetched), then refresh from the server unless very fresh.
   const qSeq = useRef(0);
   const loadQueue = useCallback(async (force = false) => {
     const seq = ++qSeq.current;
     const key = queueQuery(tag, fApplied, offset);
-    const cached = force ? null : getCachedQueue(key);
     const fkey = JSON.stringify(fApplied);
-    // Unfiltered first page: the server's cached copy (refreshed with the
-    // client's stats) is used as-is while under 30 min old — on big clients
-    // the live query is heavy (up to ~30s), so it only runs on Refresh, a
-    // filter / page change, or after a removal.
-    if (!force && !cached && initialQueue && key === queueQuery(tag, NO_FILTERS, 0) && Date.now() - initialQueue.at < PAGE1_FRESH_MS) {
-      setQ({ ...initialQueue, key, fkey });
-      setUnfilteredTotal(initialQueue.total);
-      setQLoading(false);
+    const cached = force ? null : getCachedQueue(key);
+    const s0 = seed.current;
+    if (!force && !cached && s0 && key === queueQuery(tag, NO_FILTERS, 0) && Date.now() - s0.at < PAGE1_FRESH_MS) {
+      setQ({ ...s0, key, fkey });
+      setUnfilteredTotal(s0.total);
+      setQLoading(false); setQError(null);
       return;
     }
     if (cached) {
       setQ({ ...cached, key, fkey });
       if (!filtersActive(fApplied)) setUnfilteredTotal(cached.total);
       if (isFresh(cached)) {
-        setQLoading(false);
+        setQLoading(false); setQError(null);
         if (cached.total > offset + PAGE && cached.total <= PREFETCH_MAX) prefetchQueuePage(tag, fApplied, offset + PAGE);
         return;
       }
     }
-    setQLoading(true);
+    setQLoading(true); setQError(null);
     try {
       const res = await fetchQueue(key);
       if (seq !== qSeq.current) return;
-      if (res.contacts.length === 0 && offset > 0 && res.total > 0) { setOffset(Math.max(0, Math.floor((res.total - 1) / PAGE) * PAGE)); return; }
+      if (res.contacts.length === 0 && offset > 0) {
+        // Past the end (e.g. after removals) — step back to the real last page.
+        setOffset(res.total > 0 ? Math.floor((res.total - 1) / PAGE) * PAGE : 0);
+        return;
+      }
       setQ({ ...res, key, fkey });
       if (!filtersActive(fApplied)) setUnfilteredTotal(res.total);
-      setQError(null);
       // Next page in the background — only for smaller queues, where it's a
       // cheap query (every page query scans the whole queue in the database).
       if (res.total > offset + PAGE && res.total <= PREFETCH_MAX) prefetchQueuePage(tag, fApplied, offset + PAGE);
     } catch (e) { if (seq === qSeq.current) setQError((e as Error).message); }
     finally { if (seq === qSeq.current) setQLoading(false); }
-  }, [tag, fApplied, offset, initialQueue]);
+  }, [tag, fApplied, offset]);
+  // Remove / undo / refresh finish after awaits — they reload with the filters
+  // and page showing THEN, not the ones from when they started.
+  const loadQueueRef = useRef(loadQueue);
+  useEffect(() => { loadQueueRef.current = loadQueue; }, [loadQueue]);
   // The live queue is only queried once the Queue tab is opened (each query
   // scans this client's whole queue); until then the cached first page shows.
   useEffect(() => { if (tab === "q") void loadQueue(); }, [tab, loadQueue]);
+  /** Forget every cached copy of this queue (after it changed). */
+  const queueChanged = () => { seed.current = null; dropQueueCache(tag); };
 
   // Recent removals (Undo lives here too, not only in the toast).
-  interface RemovalRow { id: number; removedAt: string; removedBy: string | null; mode: string; contacts: number; rows: number; status: string; filters: Record<string, unknown> | null; restoredAt: string | null; undoable: boolean }
   const [removals, setRemovals] = useState<RemovalRow[] | null>(null);
   const loadRemovals = useCallback(async () => {
     try {
@@ -194,70 +214,80 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
     } catch { /* non-critical */ }
   }, [tag]);
   useEffect(() => { if (tab === "q" && removals === null) void loadRemovals(); }, [tab, removals, loadRemovals]);
-  // Rows of the current selection (it can span pages) — for the panel deltas.
-  const selRows = useRef<Map<string, QueueContact>>(new Map());
 
   const setFilter = <K extends keyof QueueFilters>(k: K, v: QueueFilters[K]) => setF((x) => ({ ...x, [k]: v }));
 
-  // The live queue size (from the queue endpoint) beats the ~10-min cached stat.
+  // The live queue size (from the queue endpoint) beats the cached stat.
   const queueCount = unfilteredTotal ?? s?.queue ?? null;
 
   // ── remove / undo
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<null | { title: string; body: React.ReactNode; label: string; run: () => Promise<void> }>(null);
+  const removedText = (n: number) => `${pl(n, "contact")} removed from the queue`;
 
   async function doRemove(body: Record<string, unknown>, describe: (n: number) => string, removedRows?: QueueContact[]) {
     setBusy(true);
+    show("Removing…", { ms: 300_000 });
     try {
       const r = await fetch("/api/nurture/queue/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag, ...body }) });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        if (r.status === 409) { dropQueueCache(tag); void loadQueue(true); } // the set changed — show the fresh one
+        if (r.status === 409) { queueChanged(); void loadQueueRef.current(true); } // the set changed — show the fresh one
         throw new Error(d.error || `HTTP ${r.status}`);
       }
+      const n = Number(d.contacts) || 0;
       setSel(new Set()); setAllMatching(false); selRows.current.clear();
-      if (unfilteredTotal != null) setUnfilteredTotal(Math.max(0, unfilteredTotal - (d.contacts || 0)));
-      if (removedRows?.length && d.contacts) {
+      if (n) setUnfilteredTotal((t) => (t == null ? t : Math.max(0, t - n)));
+      if (removedRows?.length && n) {
         const dd = deltaOf(removedRows);
         applyDelta(dd, -1);
         if (d.removalId) undoDeltas.current.set(d.removalId, dd);
       }
-      dropQueueCache(tag);
-      await loadQueue(true);
+      queueChanged();
+      await loadQueueRef.current(true);
       void loadRemovals();
       const removalId = d.removalId as number | null;
-      show(d.contacts ? describe(d.contacts) : "Nothing to remove — those contacts already left the queue", {
+      show(n ? describe(n) : "Nothing to remove — those contacts already left the queue", {
         undo: d.undoable && removalId ? () => void doUndo(removalId) : undefined,
       });
     } catch (e) { show(`Remove failed: ${(e as Error).message}`, { bad: true }); }
     setBusy(false);
   }
+  const [undoing, setUndoing] = useState<number | null>(null);
+  const undoingRef = useRef(false);
   async function doUndo(removalId: number) {
+    if (undoingRef.current) return; // one at a time (toast + list both offer it)
+    undoingRef.current = true; setUndoing(removalId);
+    show("Restoring…", { ms: 120_000 });
     try {
       const r = await fetch("/api/nurture/queue/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ removalId }) });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      setUnfilteredTotal(null);
+      const back = Number(d.rows) > 0 ? Number(d.contacts) || 0 : 0;
+      if (back) setUnfilteredTotal((t) => (t == null ? t : t + back));
       const dd = undoDeltas.current.get(removalId);
-      if (dd) { applyDelta(dd, 1); undoDeltas.current.delete(removalId); }
-      dropQueueCache(tag);
-      await loadQueue(true);
+      if (dd && back) applyDelta(dd, 1);
+      undoDeltas.current.delete(removalId);
+      queueChanged();
+      await loadQueueRef.current(true);
       void loadRemovals();
-      show(`Restored — ${fmt(d.rows)} queue row${d.rows === 1 ? "" : "s"} back`);
+      show(back ? `Restored ${pl(back, "contact")} to the queue` : "Nothing to restore — those contacts were added to a campaign or restored since");
     } catch (e) { show(`Undo failed: ${(e as Error).message}`, { bad: true }); }
+    finally { undoingRef.current = false; setUndoing(null); }
   }
-  const plural = (n: number) => (n === 1 ? "1 contact removed from queue" : `${fmt(n)} contacts removed from queue`);
 
-  function removeOne(x: QueueContact) { void doRemove({ emails: [x.email] }, plural, [x]); }
+  function removeOne(x: QueueContact) { void doRemove({ emails: [x.email] }, removedText, [x]); }
   function removeSelected() {
     if (allMatching) {
       if (!q || q.fkey !== JSON.stringify(fApplied)) return; // results still loading for these filters
       const total = q.total;
       setConfirm({
-        title: `Remove ${fmt(total)} contact${total === 1 ? "" : "s"}?`,
-        body: <>Every contact matching the current filters will leave <b>{tag}</b>&apos;s nurture queue, so they won&apos;t be routed to nurture campaigns. Nothing changes in Bison, and you can undo it.</>,
+        title: `Remove ${pl(total, "contact")}?`,
+        body: filtersActive(fApplied)
+          ? <>Every contact matching the current filters will leave <b>{tag}</b>&apos;s nurture queue, so they won&apos;t be routed to nurture campaigns. Nothing changes in Bison, and you can undo it.</>
+          : <>Every contact in <b>{tag}</b>&apos;s nurture queue will leave it, so none of them will be routed to nurture campaigns. Nothing changes in Bison, and you can undo it.</>,
         label: `Remove ${fmt(total)}`,
-        run: () => doRemove({ all: true, ...fApplied, expected: total }, plural),
+        run: () => doRemove({ all: true, ...fApplied, expected: total }, removedText),
       });
       return;
     }
@@ -269,37 +299,46 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
         title: `Remove ${fmt(emails.length)} selected contacts?`,
         body: <>They&apos;ll leave <b>{tag}</b>&apos;s nurture queue. Nothing changes in Bison, and you can undo it.</>,
         label: `Remove ${fmt(emails.length)}`,
-        run: () => doRemove({ emails }, plural, rows),
+        run: () => doRemove({ emails }, removedText, rows),
       });
-    } else void doRemove({ emails }, plural, rows);
+    } else void doRemove({ emails }, removedText, rows);
   }
   async function quickRemoveDomain(tld: string) {
     // Live count first, so the confirmation shows the exact number.
     setBusy(true);
+    show(`Counting ${tld} contacts…`, { ms: 120_000 });
     let n = 0;
     try { n = (await fetchQueue(queueQuery(tag, { tld }, 0))).total; }
     catch (e) { setBusy(false); show(`Couldn't count ${tld} contacts: ${(e as Error).message}`, { bad: true }); return; }
     setBusy(false);
     if (!n) { show(`No ${tld} contacts in this queue`); return; }
+    hide();
     setConfirm({
       title: `Remove every ${tld} contact?`,
-      body: <><b>{fmt(n)}</b> contact{n === 1 ? "" : "s"} with a <b>{tld}</b> email will leave <b>{tag}</b>&apos;s nurture queue (ignores the filters above). Nothing changes in Bison, and you can undo it.</>,
+      body: <><b>{pl(n, "contact")}</b> with a <b>{tld}</b> email will leave <b>{tag}</b>&apos;s nurture queue (ignores the filters above). Nothing changes in Bison, and you can undo it.</>,
       label: `Remove ${fmt(n)} ${tld}`,
-      run: () => doRemove({ all: true, tld, expected: n }, (k) => `${fmt(k)} ${tld} contact${k === 1 ? "" : "s"} removed from queue`),
+      run: () => doRemove({ all: true, tld, expected: n }, (k) => `${pl(k, `${tld} contact`)} removed from the queue`),
     });
   }
 
   // ── actions
   const [mapOpen, setMapOpen] = useState(false);
-  const [mapCampaigns, setMapCampaigns] = useState<Array<{ id: number; name: string; status: string; client_tag: string | null; bison_instance: string; total_leads?: number }> | null>(null);
+  const [mapCampaigns, setMapCampaigns] = useState<MapCampaign[] | null>(null);
+  const [mapErr, setMapErr] = useState<string | null>(null);
+  const loadMapCampaigns = useCallback(() => {
+    setMapErr(null);
+    fetch(`/api/nurture/campaigns?clientTag=${encodeURIComponent(tag)}`, { cache: "no-store" })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        return d;
+      })
+      .then((d) => setMapCampaigns(d.campaigns ?? []))
+      .catch((e: Error) => setMapErr(e.message));
+  }, [tag]);
   function openMapEditor() {
     setMapOpen(true);
-    if (!mapCampaigns) {
-      fetch(`/api/nurture/campaigns?clientTag=${encodeURIComponent(tag)}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => setMapCampaigns(d?.campaigns ?? []))
-        .catch(() => setMapCampaigns([]));
-    }
+    if (!mapCampaigns) loadMapCampaigns();
   }
   const [actBusy, setActBusy] = useState(false);
   async function setAuto(enabled: boolean) {
@@ -308,23 +347,27 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
       const r = await fetch("/api/clients/auto-nurture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientTag: tag, enabled }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      const next = await loadClient();
+      // The setting is saved; if the overview rebuild lagged, show it anyway.
+      if (next && next.client.autoOn !== enabled) setData({ ...next, client: { ...next.client, autoOn: enabled } });
       show(enabled ? `Auto-nurture on for ${tag}` : `Auto-nurture off for ${tag}`);
-      await loadClient(true);
     } catch (e) { show(`Couldn't change auto-nurture: ${(e as Error).message}`, { bad: true }); }
     setActBusy(false);
   }
   async function refreshNumbers() {
     setActBusy(true);
-    show("Recomputing this client's numbers…", { ms: 20000 });
+    show("Recomputing this client's numbers…", { ms: 300_000 });
     try {
       const r = await fetch("/api/nurture/refresh-stats", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag }) });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      dropQueueCache(tag);
-      await Promise.all([loadClient(), tab === "q" ? loadQueue(true) : Promise.resolve()]);
+      const fresh = d.stats === "refreshed" || d.stats === "recent";
+      queueChanged();
+      if (fresh && tab !== "q") setUnfilteredTotal(null); // the new stats count is current
+      await Promise.all([loadClient(), tab === "q" ? loadQueueRef.current(true) : Promise.resolve()]);
       show(d.stats === "refreshed" ? "Numbers refreshed"
         : d.stats === "recent" ? "Numbers were refreshed under a minute ago — showing the latest"
-        : d.stats === "queued" ? "Another recompute is running — this client is next (within ~10 min)"
+        : d.stats === "queued" ? "Busy right now — this client is queued for the next run (usually within ~10 min)"
         : `Couldn't recompute right now (${d.statsError || "error"}) — it's queued for the next run`);
     } catch (e) { show(`Refresh failed: ${(e as Error).message}`, { bad: true }); }
     setActBusy(false);
@@ -340,8 +383,13 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
     }
     return out;
   }, [data]);
+  const ready = s ? Math.max(0, s.ready - dNow.ready) : null;
+  const eligible = s?.eligible != null ? Math.max(0, s.eligible - dNow.eligible) : null;
+  const held = ready != null && eligible != null ? Math.max(0, eligible - ready) : 0;
+  const cooldown = s?.cooldown != null ? Math.max(0, s.cooldown - dNow.cooldown) : null;
   const forecast = s?.forecast ?? [];
   const fmax = Math.max(1, ...forecast);
+  const fsum = forecast.reduce((t, n) => t + n, 0);
   const src = sourceValues(s, c?.stoppedRecovered ?? 0);
   const srcTotal = src.reduce((t, r) => t + r.value, 0);
   const espTotal = ESP_ROWS.reduce((t, r) => t + Number(s?.esps?.[r.key] ?? 0), 0);
@@ -349,14 +397,18 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
   const pageRows = q?.contacts ?? [];
   const allOnPage = pageRows.length > 0 && pageRows.every((x) => sel.has(x.email));
   const selCount = allMatching ? (q?.total ?? 0) : sel.size;
+  const showingCurrent = !!q && q.key === queueQuery(tag, fApplied, offset);
 
+  const header = (
+    <div className="hd"><div><h2>Nurture System</h2><div className="sub">Re-engage soft-negative, out-of-office and sequence-finished leads across every client.</div></div></div>
+  );
   if (error && !data) {
     return (
       <div className="nx -m-6">
-        <div className="hd"><div><h2>Nurture System</h2><div className="sub">Re-engage soft-negative, out-of-office and sequence-finished leads across every client.</div></div></div>
+        {header}
         <div className="content">
           <Link className="back" href="/nurture">{Ico.back} All client tags</Link>
-          <div className="banner bad">{Ico.warnTri}{error}</div>
+          <div className="banner bad">{Ico.warnTri}{error}<button type="button" className="linkish" style={{ marginLeft: "auto", color: "inherit" }} onClick={() => void loadClient()}>Retry</button></div>
         </div>
       </div>
     );
@@ -395,45 +447,48 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
           <div>
             <h2>{tag}</h2>
             <div className="sub">
-              {c ? (<><TypeBadge type={c.type} style={{ margin: 0 }} /> &nbsp;·&nbsp; {c.group ? `Group ${c.group}` : "No group"} &nbsp;·&nbsp; {c.mainActive} main + {c.nurtureActive} nurture campaigns</>) : <Skel w={260} />}
+              {c ? (<><TypeBadge type={c.type} style={{ margin: 0 }} /> &nbsp;·&nbsp; {c.group ? `Group ${c.group}` : "No group"} &nbsp;·&nbsp; {c.mainActive} main + {c.nurtureActive} nurture campaign{c.nurtureActive === 1 ? "" : "s"} active</>) : <Skel w={260} />}
             </div>
           </div>
           <div className="right">
-            <div className="lastc">Last contact<br /><b>{c ? lastContactText(c) : "…"}</b></div>
+            <div className="lastc">Last contact<br /><b>{c ? lastContactText(c, now) : "…"}</b></div>
             <div>{c ? <StatusCell errors={c.errors} /> : null}</div>
           </div>
         </div>
 
+        {error && (
+          <div className="banner warn">{Ico.warnTri}Couldn&apos;t refresh this client — showing the last numbers loaded.<button type="button" className="linkish" style={{ marginLeft: "auto", color: "inherit" }} onClick={() => void loadClient()}>Retry</button></div>
+        )}
         {c && (c.prelaunch ? (
-          <div className="banner info">{Ico.info}Pre-launch — go-live is in the future. Campaigns are paused and nurture is held until launch (per the go-live gate).</div>
+          <div className="banner info">{Ico.info}Pre-launch — the go-live date is in the future. Campaigns stay paused and nurture is held until launch.</div>
         ) : c.errors.length ? (
-          <div className={`banner ${c.errors.some((e) => e.k === "noleads" || e.k === "map") ? "bad" : "warn"}`}>{Ico.warnTri}{c.errors.map((e) => e.lab).join(" · ")} — see Status for the fix.</div>
+          <div className={`banner ${c.errors.some((e) => e.k === "noleads" || e.k === "map") ? "bad" : "warn"}`}>{Ico.warnTri}{c.errors.map((e) => e.lab).join(" · ")} — hover the status badge{c.errors.length === 1 ? "" : "s"} above for the fix.</div>
         ) : null)}
         {c && !c.prelaunch && !c.autoOn && (
-          <div className="banner info">{Ico.info}Auto-nurture is off for {tag} — ready leads aren&apos;t routed automatically. Turn it back on from Actions.</div>
+          <div className="banner info">{Ico.info}Auto-nurture is off for {tag} — ready leads aren&apos;t routed automatically. Turn it on from Actions.</div>
         )}
 
         <div className="panels5">
           <div className="card panel"><div className="k">In queue</div><div className="v tnum">{queueCount != null ? fmt(queueCount) : <Skel />}</div><div className="mm">contacts pending</div></div>
-          <div className="card panel"><div className="k">Ready to send</div><div className="v tnum" style={{ color: "var(--emerald-fg)" }}>{s ? fmt(Math.max(0, s.ready - dNow.ready)) : <Skel />}</div><div className="mm">{s && s.eligible - dNow.eligible > s.ready - dNow.ready ? <>past 45-day cooldown · <span title="Past the cooldown but not routable yet — not marked safe, or its ESP isn't confirmed — so auto-push holds them">{fmt(Math.max(0, (s.eligible - dNow.eligible) - (s.ready - dNow.ready)))} held</span></> : "past 45-day cooldown"}</div></div>
-          <div className="card panel"><div className="k">In cooldown</div><div className="v tnum">{s ? fmt(Math.max(0, s.cooldown - dNow.cooldown)) : <Skel />}</div><div className="mm">waiting to become eligible</div></div>
+          <div className="card panel"><div className="k">Ready to send</div><div className="v tnum" style={{ color: "var(--emerald-fg)" }}>{ready != null ? fmt(ready) : <Skel />}</div><div className="mm">{held > 0 ? <>past 45-day cooldown · <span title="Past the cooldown but not routable yet — not marked safe, or its ESP isn't confirmed — so auto-push holds them">{fmt(held)} held</span></> : "past 45-day cooldown"}</div></div>
+          <div className="card panel"><div className="k">In cooldown</div><div className="v tnum">{cooldown != null ? fmt(cooldown) : s ? "—" : <Skel />}</div><div className="mm">waiting to become eligible</div></div>
           <div className="card panel"><div className="k">Added to campaigns</div><div className="v tnum">{c ? fmt(c.added) : <Skel />}</div><div className="mm">already pushed</div></div>
-          <div className="card panel" title={s?.overlap_at ? `Counted ${ago(s.overlap_at)} (refreshed overnight)` : "Counted overnight"}><div className="k">Overlapping</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{s ? fmt(s.overlap) : <Skel />}</div><div className="mm">also in other tags</div></div>
+          <div className="card panel" title={s?.overlap_at ? `Counted ${ago(s.overlap_at, now)} (recounted overnight)` : "Counted overnight"}><div className="k">Overlapping</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{s ? (s.overlap != null ? fmt(s.overlap) : "—") : <Skel />}</div><div className="mm">also in other tags</div></div>
         </div>
 
-        <div className="tabs">
-          <button type="button" className={tab === "ov" ? "on" : ""} onClick={() => setTab("ov")}>{Ico.grid}Nurture overview</button>
-          <button type="button" className={tab === "q" ? "on" : ""} onClick={() => setTab("q")}>{Ico.lines}Queue <span className="cnt">{queueCount != null ? fmt(queueCount) : "…"}</span></button>
+        <div className="tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={tab === "ov"} className={tab === "ov" ? "on" : ""} onClick={() => setTab("ov")}>{Ico.grid}Nurture overview</button>
+          <button type="button" role="tab" aria-selected={tab === "q"} className={tab === "q" ? "on" : ""} onClick={() => setTab("q")}>{Ico.lines}Queue <span className="cnt">{queueCount != null ? fmt(queueCount) : "…"}</span></button>
         </div>
 
         {/* TAB: overview */}
-        <div className={tab === "ov" ? "" : "hidden"}>
+        <div className={tab === "ov" ? "" : "hidden"} role="tabpanel">
           <div className="card cardpad">
             <div className="card-h"><h3>Nurture pipeline</h3><span className="hint">how leads flow from finished → sending</span></div>
             <div className="pipe">
               {([
                 ["Synced", s ? (s.queue + added) : null, "queued + already added", "var(--muted-foreground)"],
-                ["Ready", s ? Math.max(0, s.ready - dNow.ready) : null, "eligible + safe + ESP confirmed", "var(--emerald-fg)"],
+                ["Ready", ready, "eligible + safe + ESP confirmed", "var(--emerald-fg)"],
                 ["Routed", c ? c.added : null, "added to campaigns", "var(--violet-fg)"],
                 ["Sending", c ? c.sendingLeads : null, c?.sendingLeads ? "in active nurture campaigns" : "not yet", "var(--blue-fg)"],
               ] as Array<[string, number | null, string, string]>).map(([label, v, sub, color], i) => (
@@ -480,10 +535,10 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
                 const [txt, cls] = b.state === "on" ? ["Live", "p-ok"] : b.state === "wait" ? ["Waiting to activate", "p-warn"] : ["Not needed yet", "p-mute"];
                 const leads = b.campaigns.reduce((t, x) => t + x.totalLeads, 0);
                 return (
-                  <div key={b.batch} className="maprow" title={b.campaigns.map((x) => `${x.name} (${x.status}, ${fmt(x.totalLeads)} leads)`).join("\n") || undefined}>
+                  <div key={b.batch} className="maprow" title={b.campaigns.map((x) => `${x.name} (${x.status}, ${pl(x.totalLeads, "lead")})`).join("\n") || undefined}>
                     <span style={{ fontFamily: "var(--mono)", fontWeight: 600, fontSize: 12, width: 100 }}>N{b.batch} · Batch {b.batch}</span>
                     <span className={`pill ${cls}`} style={{ fontSize: 10.5 }}>{txt}</span>
-                    <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted-foreground)" }} className="tnum">{leads ? `${fmt(leads)} leads` : "—"}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted-foreground)" }} className="tnum">{leads ? pl(leads, "lead") : "—"}</span>
                   </div>
                 );
               })}
@@ -498,24 +553,24 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
               {s && (c?.stoppedRecovered ?? 0) > 0 && <div style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 10 }}>Stopped-recovered leads go straight into campaigns (never queued).</div>}
             </div>
             <div className="card cardpad">
-              <div className="card-h"><h3>ESP routing</h3><span className="hint">Outlook vs everything else</span></div>
+              <div className="card-h"><h3>ESP routing</h3><span className="hint">which ESP campaign each contact goes to</span></div>
               {s ? ESP_ROWS.map((r) => <BarRow key={r.key} label={r.label} value={Number(s.esps?.[r.key] ?? 0)} total={espTotal} color={r.color} />) : <Skel w={200} />}
-              {s && s.esp_unresolved > 0 && <div style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 10 }}>{fmt(s.esp_unresolved)} still awaiting ESP detection (held until confirmed).</div>}
+              {s && (s.esp_unresolved ?? 0) > 0 && <div style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 10 }}>{pl(s.esp_unresolved ?? 0, "contact")} still awaiting ESP detection (held until confirmed).</div>}
             </div>
             <div className="card cardpad">
               <div className="card-h"><h3>Eligibility forecast</h3><span className="hint">next 30 days</span></div>
               <div className="foremini">
                 {s ? forecast.map((n, i) => (
-                  <i key={i} className={n > 0 && n >= fmax * 0.7 ? "hot" : ""} style={{ height: `${Math.max(3, (n / fmax) * 100)}%` }} title={`${i === 0 ? "Today" : i === 1 ? "Tomorrow" : `In ${i} days`}: ${fmt(n)} contact${n === 1 ? "" : "s"}`} />
+                  <i key={i} className={n > 0 && n >= fmax * 0.7 ? "hot" : ""} style={{ height: `${Math.max(3, (n / fmax) * 100)}%` }} title={`${i === 0 ? "Within a day" : `In ${pl(i, "day")}`}: ${pl(n, "contact")}`} />
                 )) : null}
               </div>
-              <div className="mm" style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 8 }}>Leads crossing the 45-day cooldown, by day.{s ? ` ${fmt(forecast.reduce((t, n) => t + n, 0))} in the next 30 days.` : ""}</div>
+              <div className="mm" style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 8 }}>Leads crossing the 45-day cooldown, by day.{s ? (fsum ? ` ${fmt(fsum)} in the next 30 days.` : " None in the next 30 days.") : ""}</div>
             </div>
           </div>
         </div>
 
         {/* TAB: queue */}
-        <div className={tab === "q" ? "" : "hidden"}>
+        <div className={tab === "q" ? "" : "hidden"} role="tabpanel">
           <div className="qfilters">
             <div className="field">{Ico.search}<input type="text" aria-label="Search name or email" placeholder="Search name or email…" value={f.search} onChange={(e) => setFilter("search", e.target.value)} /></div>
             <div className="field"><input type="text" aria-label="Email ends with" placeholder="Email ends with…" style={{ minWidth: 145 }} value={f.email} onChange={(e) => setFilter("email", e.target.value)} /></div>
@@ -536,7 +591,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
               <input type="checkbox" checked={f.overlap} onChange={(e) => setFilter("overlap", e.target.checked)} /> Overlapping only
             </label>
             {filtersActive(f) && <button type="button" className="clear" style={{ marginLeft: 0 }} onClick={() => setF(NO_FILTERS)}>Clear</button>}
-            {qLoading && <span className="searching">{Ico.spinner}{q && q.key === queueQuery(tag, fApplied, offset) ? "Refreshing…" : "Loading…"}</span>}
+            {qLoading && <span className="searching">{Ico.spinner}{showingCurrent ? "Refreshing…" : "Loading…"}</span>}
           </div>
 
           {selCount > 0 && (
@@ -554,10 +609,12 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
 
           <div className="card tbl" style={{ marginTop: 14 }}>
             <div className="qbar">
-              <span className="cnt">{q ? fmt(q.total) : "…"}</span> {filtersActive(fApplied) ? "contacts match" : "contacts in queue"}
-              {q && Date.now() - q.at > 120_000 && !qLoading && (
-                <span style={{ fontSize: 11.5 }}>· as of {ago(new Date(q.at).toISOString())} · <button type="button" className="linkish" style={{ fontWeight: 500, fontSize: 11.5 }} onClick={() => { dropQueueCache(tag); void loadQueue(true); }}>Refresh</button></span>
-              )}
+              <span className="cnt">{q ? fmt(q.total) : "…"}</span> {filtersActive(fApplied) ? (q?.total === 1 ? "contact matches" : "contacts match") : (q?.total === 1 ? "contact in queue" : "contacts in queue")}
+              {qError && q && !qLoading ? (
+                <span style={{ fontSize: 11.5 }}>· <span style={{ color: "var(--red-fg)" }}>Couldn&apos;t refresh ({qError})</span> · <button type="button" className="linkish" style={{ fontWeight: 500, fontSize: 11.5 }} onClick={() => void loadQueue(true)}>Retry</button></span>
+              ) : q && now - q.at > 120_000 && !qLoading ? (
+                <span style={{ fontSize: 11.5 }}>· as of {ago(new Date(q.at).toISOString(), now)} · <button type="button" className="linkish" style={{ fontWeight: 500, fontSize: 11.5 }} onClick={() => { queueChanged(); void loadQueue(true); }}>Refresh</button></span>
+              ) : null}
               <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center" }}>
                 <span style={{ fontSize: 11.5 }}>Quick remove by domain:</span>
                 {QUICK_TLDS.map((t) => <button key={t} type="button" className="btn btn-sm" disabled={busy} onClick={() => quickRemoveDomain(t)}>{t}</button>)}
@@ -578,7 +635,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
                     <th>Contact</th><th>Website</th><th className="ctr">Domain</th><th>Source</th><th className="ctr">ESP</th><th>Eligible</th><th className="ctr">Overlap</th><th></th>
                   </tr>
                 </thead>
-                <tbody style={{ opacity: q && q.key !== queueQuery(tag, fApplied, offset) ? 0.55 : 1, transition: "opacity .12s" }}>
+                <tbody style={{ opacity: q && !showingCurrent ? 0.55 : 1, transition: "opacity .12s" }}>
                   {qError && !q ? (
                     <tr><td colSpan={9}><div className="empty">Couldn&apos;t load the queue: {qError} <button type="button" className="linkish" onClick={() => void loadQueue()}>Retry</button></div></td></tr>
                   ) : !q ? (
@@ -586,7 +643,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
                   ) : pageRows.length === 0 ? (
                     <tr><td colSpan={9}><div className="empty">{filtersActive(fApplied) ? "No contacts match these filters." : "This queue is empty — nothing waiting to be nurtured."}</div></td></tr>
                   ) : pageRows.map((x) => {
-                    const days = Math.max(0, Math.ceil((new Date(x.eligibleAt).getTime() - Date.now()) / 86_400_000));
+                    const daysLeft = Math.floor((new Date(x.eligibleAt).getTime() - now) / 86_400_000);
                     const srcRow = SRC[x.source] ?? SRC.other;
                     return (
                       <tr key={x.email}>
@@ -613,8 +670,8 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
                         <td><span className={`src ${srcRow.cls}`}>{srcRow.label}</span></td>
                         <td className="ctr mono" style={{ fontSize: 11, color: "var(--muted-foreground)" }} title={x.espResolved ? undefined : "ESP not confirmed yet — held until the ESP check stamps it"}>{ESP_LABEL[x.esp] ?? x.esp}{x.espResolved ? "" : "?"}</td>
                         <td style={{ fontSize: 12.5, color: x.isReady ? "var(--emerald-fg)" : "var(--muted-foreground)", fontWeight: x.isReady ? 600 : 400 }}
-                          title={x.isEligible && !x.isReady ? "Past the cooldown but not routable yet — not marked safe, or its ESP isn't confirmed — so auto-push holds it" : `Eligible ${new Date(x.eligibleAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}>
-                          {x.isReady ? "Ready" : x.isEligible ? "Held" : `in ${days}d`}
+                          title={x.isEligible && !x.isReady ? "Past the cooldown but not routable yet — not marked safe, or its ESP isn't confirmed — so auto-push holds it" : `Eligible ${ptDate(x.eligibleAt)}`}>
+                          {x.isReady ? "Ready" : x.isEligible ? "Held" : daysLeft < 1 ? "in <1d" : `in ${daysLeft}d`}
                         </td>
                         <td className="ctr">
                           {x.overlapTags.length ? (
@@ -645,21 +702,21 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
               <div className="qbar"><span className="cnt">Recent removals</span><span style={{ marginLeft: "auto", fontSize: 11.5 }}>Undo puts exactly those contacts back in the queue</span></div>
               {removals.slice(0, 6).map((r) => (
                 <div key={r.id} className="maprow" style={{ padding: "9px 16px" }}>
-                  <span className="tnum" style={{ fontWeight: 600, minWidth: 110 }}>{fmt(r.contacts)} contact{r.contacts === 1 ? "" : "s"}</span>
+                  <span className="tnum" style={{ fontWeight: 600, minWidth: 110 }}>{pl(r.contacts, "contact")}</span>
                   <span className="muted" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {r.mode === "all-matching" ? describeFilters(r.filters) : "selected"} · {ago(r.removedAt)}{r.removedBy ? ` · ${r.removedBy}` : ""}
+                    {r.mode === "all-matching" ? describeFilters(r.filters) : "selected"} · {ago(r.removedAt, now)}{r.removedBy ? ` · ${r.removedBy}` : ""}
                   </span>
                   {r.status === "failed" ? <span className="pill p-bad" style={{ fontSize: 10 }}>Failed</span>
                     : r.restoredAt ? <span className="pill p-mute" style={{ fontSize: 10 }}>Undone</span>
-                    : r.undoable ? <button type="button" className="btn btn-sm" onClick={() => void doUndo(r.id)}>Undo</button>
+                    : r.undoable ? <button type="button" className="btn btn-sm" disabled={undoing !== null} onClick={() => void doUndo(r.id)}>{undoing === r.id ? "Undoing…" : "Undo"}</button>
                     : <span className="pill p-mute" style={{ fontSize: 10 }} title="Made before the database update, so the exact rows weren't recorded">No undo</span>}
                 </div>
               ))}
             </div>
           )}
           <div className="foot">
-            <b>Overlap</b> flags a contact whose email is also waiting in another active client&apos;s queue — hover to see which. &nbsp;·&nbsp; <b>Remove</b> works one at a time, in bulk by selection, or by domain (.in / .ca / .nz) in one click — it only takes contacts out of this nurture queue (nothing changes in Bison) and can be undone.
-            {s && <><br />Panel numbers come from the last recompute ({ago(s.computed_at)}; refreshed every few hours, and within ~10 min after a change); the queue list is live.</>}
+            <b>Overlap</b> flags a contact whose email is also waiting in another active client&apos;s queue — hover to see which. &nbsp;·&nbsp; <b>Remove</b> works one at a time, by selection, or by domain (.in / .ca / .nz) — it only takes contacts out of this nurture queue (nothing changes in Bison) and can be undone.
+            {s && <><br />Panel numbers come from the last recompute ({ago(s.computed_at, now)}; refreshed every few hours, and within ~10 min after a change); the list below is live unless it shows “as of”.</>}
           </div>
         </div>
       </div>
@@ -674,15 +731,23 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
         onConfirm={async () => { const run = confirm?.run; if (!run) return; await run(); setConfirm(null); }}
       />
 
-      <Dialog open={mapOpen} onOpenChange={(o) => { setMapOpen(o); if (!o) void loadClient(true); }}>
+      <Dialog open={mapOpen} onOpenChange={setMapOpen}>
         <DialogContent className="sm:max-w-3xl">
           <DialogTitle>Target campaigns · {tag}</DialogTitle>
-          {mapCampaigns == null ? (
+          <DialogDescription>Ready leads route only to the campaigns picked here — business emails to the B2B instance, personal emails to the B2C one.</DialogDescription>
+          {mapErr ? (
+            <div className="rounded-lg border bg-card px-4 py-5 text-sm text-muted-foreground">
+              Couldn&apos;t load the campaign list ({mapErr}).{" "}
+              <button type="button" className="underline font-medium text-foreground" onClick={loadMapCampaigns}>Retry</button>
+            </div>
+          ) : mapCampaigns == null ? (
             <div className="rounded-lg border bg-card p-4 h-28 animate-pulse" />
           ) : (
             <TargetCampaigns
               clientTag={tag}
               campaigns={mapCampaigns}
+              autoConfirm
+              onSaved={() => void loadClient()}
               onSendingEnabled={() => {
                 // One-time handoff: the classic page only starts the enable flow if
                 // this token (same tag, < 2 min old) is present — a bare ?enable=1

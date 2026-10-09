@@ -198,7 +198,7 @@ export default function NurtureHub() {
       )}
       {summaryError && (
         <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-          Couldn't load counts: {summaryError}. Cards still show tags — click into a client to see their detail page.
+          Couldn&apos;t load counts: {summaryError}. Cards still show tags — click into a client to see their detail page.
         </div>
       )}
 

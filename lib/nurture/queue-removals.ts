@@ -28,6 +28,12 @@ export function ensureRemovalsTable(): Promise<void> {
   return ready;
 }
 
+/** Drop a tag's cached first queue page (after its queue changed). */
+export async function dropFirstPageCache(tag: string): Promise<void> {
+  try { await db.execute({ sql: "DELETE FROM nurture_queue_page1_cache WHERE client_tag = ?", args: [tag.toUpperCase()] }); }
+  catch { /* table may not exist yet */ }
+}
+
 /** A removal can be undone once, only if we know exactly which rows it flagged. */
 export function isUndoable(r: { status?: unknown; ids_json?: unknown; restored_at?: unknown; row_count?: unknown }): boolean {
   return (r.status == null || r.status === "done") && !!r.ids_json && !r.restored_at && Number(r.row_count) > 0;

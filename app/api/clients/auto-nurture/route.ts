@@ -13,7 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { requireAdmin } from "@/lib/auth";
 import { bumpVersion } from "@/lib/server-cache";
-import { scheduleOverviewRebuild } from "@/lib/nurture/overview-snapshot";
+import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 
 export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
@@ -66,6 +66,6 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  scheduleOverviewRebuild(); // Nurture pages show the new auto state
+  await rebuildOverviewSnapshot({ force: true }).catch(() => {}); // Nurture pages show the new auto state
   return NextResponse.json({ ok: true, clientTag, enabled });
 }

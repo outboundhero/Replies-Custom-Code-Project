@@ -27,26 +27,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
+import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 
 export const maxDuration = 60;
 
 const NURTURE_DAYS = 45;
 const MAX_IDS = 1000;
-
-const EXCLUDED_AI_CATEGORIES = [
-  "Interested",
-  "Meeting Request",
-  "Meeting Set",
-  "Do Not Contact",
-  "Wrong Person",
-  "Wrong Person (Change of Target)",
-  "Not Interested",
-  "Mailbox No Longer Active",
-  "Automated Error Message",
-  "Automated Catch-All Message",
-  "Referral Given",
-  "Internally Forwarded",
-];
 
 const NOISE_SENDER_PATTERNS = [
   "%@public.govdelivery.com",

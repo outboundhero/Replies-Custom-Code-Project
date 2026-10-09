@@ -10,6 +10,8 @@ import { getOverview, overviewPayload } from "@/lib/nurture/overview-snapshot";
 import NurtureOverview from "./_ui/overview-view";
 
 export const dynamic = "force-dynamic";
+// This request's render time — relative times ("5 min ago") hydrate against it.
+const requestTime = () => Date.now();
 
 export default async function NurturePage() {
   // Admin-only (middleware already enforces it; the page reads data directly).
@@ -18,5 +20,5 @@ export default async function NurturePage() {
   let error: string | null = null;
   try { initial = overviewPayload(await getOverview()); }
   catch (e) { error = (e as Error).message; }
-  return <NurtureOverview initial={initial} initialError={error} />;
+  return <NurtureOverview initial={initial} initialError={error} serverNow={requestTime()} />;
 }

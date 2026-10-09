@@ -16,7 +16,7 @@
 
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
-import { listCampaigns, listCampaignLeads, sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
+import { listCampaigns, sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead, type OutboundCampaign } from "@/lib/outboundhero-api";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
@@ -188,7 +188,7 @@ async function syncInstanceByClients(instanceKey: BisonInstanceKey, state: Insta
       // fully-drained clients return instantly (all campaigns skipped), so the
       // budget focuses on backlog clients until they're caught up.
       const r = await syncOneClient(instanceKey, tag, {
-        maxMs: 60_000,
+        maxMs: Math.max(5_000, Math.min(60_000, SOFT_BUDGET_MS - (Date.now() - startedAt))), // never past the run's budget
         preloadedCampaigns: allCampaigns,
       });
       state.campaignsScanned += r.campaignsScanned;
@@ -350,7 +350,6 @@ export async function syncOneClient(
 async function syncOneInstance(instanceKey: BisonInstanceKey, state: InstanceSyncState): Promise<InstanceSyncResult> {
   // `state` is owned by the caller so withTimeout can snapshot live
   // counts if the timer fires before the function returns.
-  const errors = state.errors;
 
   // Server-side status filter — Bison returns ONLY these statuses, so
   // we never page through drafts / archived / failed. On outboundhero
@@ -434,10 +433,13 @@ async function processCampaigns(
         const window = await sweepCampaignLeadsCursor(instanceKey, campaign.id, cursor, {
           leadCampaignStatus: "sequence_finished", maxLeads: CURSOR_WINDOW_LEADS, maxMs: CURSOR_WINDOW_MS,
         });
-        await processLeadWindow(instanceKey, campaign, window.leads, state, opts.onProgress);
+        // The saved position only moves past leads that were fully handled — a
+        // failed window is re-read next run instead of being skipped.
+        const ok = await processLeadWindow(instanceKey, campaign, window.leads, state, opts.onProgress);
+        if (!ok) break;
         cursor = window.nextCursor;
         await saveCursor(instanceKey, campaign.id, cursor, window.done);
-        if (window.done || !cursor || Date.now() >= campDeadline || Date.now() >= deadline) break;
+        if (window.done || !cursor || window.leads.length === 0 /* no progress (Bison error) */ || Date.now() >= campDeadline || Date.now() >= deadline) break;
       }
     } catch (e) {
       state.errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}) sweep: ${(e as Error).message}`);
@@ -454,9 +456,9 @@ async function processLeadWindow(
   leads: OutboundLead[],
   state: InstanceSyncState,
   onProgress?: SyncProgressFn,
-): Promise<void> {
+): Promise<boolean> { // true = window fully handled (safe to advance the cursor)
   const errors = state.errors;
-  if (leads.length === 0) return;
+  if (leads.length === 0) return true;
   try {
 
       const candidates = leads.filter((lead) => {
@@ -502,35 +504,27 @@ async function processLeadWindow(
           return e ? [e, e.toLowerCase()] : [];
         }))];
         const known = new Set<string>();
-        const knownLeadIds = new Set<number>();
-        let seqLookupFailed = false;
-        for (let i = 0; i < lookup.length; i += 300) {
-          const chunk = lookup.slice(i, i + 300);
+        // 100 values per lookup: one email can have several rows (one per
+        // campaign), and PostgREST silently caps a response at 1000 rows — a
+        // capped or failed lookup would miss known leads, so it fails the window
+        // (re-read next run) instead of guessing.
+        for (let i = 0; i < lookup.length; i += 100) {
+          const chunk = lookup.slice(i, i + 100);
           const [seq, rep, leg] = await Promise.all([
             supabase.from("nurture_sequence_finished").select("email").eq("client_tag", clientTag).in("email", chunk),
             supabase.from("replies").select("lead_email").eq("client_tag", clientTag).in("lead_email", chunk),
             supabase.from("nurture_legacy_leads").select("lead_email").eq("client_tag", clientTag).in("lead_email", chunk),
           ]);
-          if (seq.error) seqLookupFailed = true;
+          const bad = [seq, rep, leg].find((r) => r.error || (r.data?.length ?? 0) >= 1000);
+          if (bad) {
+            console.warn(`[nurture-sync] ${instanceKey} ${campaign.name}: duplicate check ${bad.error ? `failed (${bad.error.message})` : "hit the 1000-row cap"} — window will be retried next run`);
+            return false;
+          }
           for (const r of seq.data || []) known.add(String((r as { email?: string }).email ?? "").toLowerCase());
           for (const r of rep.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
           for (const r of leg.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
         }
-        // Safety net: if the by-email check failed (e.g. a timeout), at least
-        // never re-send rows we already hold for THIS campaign (cheap lookup on
-        // the (ob_lead_id, ob_campaign_id, bison_instance) unique index) — a
-        // re-upsert would overwrite sequence_finished_at and restart the lead's
-        // 45-day cooldown.
-        if (seqLookupFailed) {
-          console.warn(`[nurture-sync] ${instanceKey} ${campaign.name}: by-email duplicate check failed — fell back to per-campaign check`);
-          const ids = [...new Set(candidates.map((l) => l.id))];
-          for (let i = 0; i < ids.length; i += 500) {
-            const { data } = await supabase.from("nurture_sequence_finished").select("ob_lead_id")
-              .eq("ob_campaign_id", campaign.id).eq("bison_instance", instanceKey).in("ob_lead_id", ids.slice(i, i + 500));
-            for (const r of data || []) knownLeadIds.add(Number((r as { ob_lead_id: number }).ob_lead_id));
-          }
-        }
-        newCandidates = candidates.filter((l) => !known.has((l.email || "").trim().toLowerCase()) && !knownLeadIds.has(l.id));
+        newCandidates = candidates.filter((l) => !known.has((l.email || "").trim().toLowerCase()));
         skipped = candidates.length - newCandidates.length;
       }
 
@@ -541,7 +535,7 @@ async function processLeadWindow(
           status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
           candidates: 0, upserted: 0, skipped, esp: { google: 0, outlook: 0, segs: 0, other: 0 },
         });
-        return;
+        return true;
       }
 
       // Resolve ESP at INGESTION so every lead is routable the moment it lands.
@@ -624,9 +618,12 @@ async function processLeadWindow(
       for (let i = 0; i < dedupedRows.length; i += UPSERT_BATCH) {
         if (i > 0) await new Promise((r) => setTimeout(r, UPSERT_PAUSE_MS));
         const batch = dedupedRows.slice(i, i + UPSERT_BATCH);
+        // ignoreDuplicates (ON CONFLICT DO NOTHING): a row we already hold is
+        // never overwritten — that would reset its sequence_finished_at and
+        // restart the lead's 45-day cooldown.
         const res = await supabase
           .from("nurture_sequence_finished")
-          .upsert(batch, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance" });
+          .upsert(batch, { onConflict: "ob_lead_id,ob_campaign_id,bison_instance", ignoreDuplicates: true });
         if (res.error) { error = res.error; break; }
         written += batch.length;
       }
@@ -641,6 +638,7 @@ async function processLeadWindow(
 
       state.upserted += written; // rows actually written, even if a later batch failed
       if (error) errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${error.message}`);
+      const windowOk = !error;
       onProgress?.({
         phase: "campaign", instance: instanceKey, campaignId: campaign.id, name: campaign.name,
         status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
@@ -651,6 +649,7 @@ async function processLeadWindow(
       // forget EmailGuard chain. Bison's `default: true` tags are the
       // canonical mailbox-provider signal, free, and never lost to
       // Lambda timeouts.
+      return windowOk;
     } catch (e) {
       const msg = (e as Error).message;
       errors.push(`[${instanceKey}] Campaign ${campaign.id} (${campaign.name}): ${msg}`);
@@ -659,6 +658,7 @@ async function processLeadWindow(
         status: campaign.status ?? "", totalLeads: campaign.total_leads ?? 0,
         candidates: 0, upserted: 0, esp: { google: 0, outlook: 0, segs: 0, other: 0 }, error: msg,
       });
+      return false;
     }
 }
 

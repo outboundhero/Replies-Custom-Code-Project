@@ -504,7 +504,10 @@ function pickUuid(row: Record<string, unknown>): string | null {
 
 export async function listCampaigns(
   instanceKey: string,
-  opts?: { nameContains?: string; statuses?: string[]; search?: string },
+  // strict: retry a failed page once, then THROW instead of returning a
+  // silently partial list — for callers that write caches or re-point maps
+  // from the result (a missing page would look like "campaign gone").
+  opts?: { nameContains?: string; statuses?: string[]; search?: string; strict?: boolean },
 ): Promise<OutboundCampaign[]> {
   // Bison rejects multi-status in one call ("The selected status is
   // invalid."), so fan out — one status-scoped paginated call per status,
@@ -538,7 +541,7 @@ export function listCampaignsCached(
 async function listCampaignsForStatus(
   instanceKey: string,
   status: string | undefined,
-  opts?: { nameContains?: string; search?: string },
+  opts?: { nameContains?: string; search?: string; strict?: boolean },
 ): Promise<OutboundCampaign[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
@@ -597,6 +600,12 @@ async function listCampaignsForStatus(
           const r = await fetchPage(pagesToFetch[myIdx]);
           results[myIdx] = r.rows;
         } catch (e) {
+          if (opts?.strict) {
+            // One retry, then fail the whole list (never a silent partial).
+            await new Promise((res) => setTimeout(res, 1000));
+            results[myIdx] = (await fetchPage(pagesToFetch[myIdx])).rows;
+            continue;
+          }
           console.warn(`[outboundhero:${instanceKey}] listCampaigns page error:`, (e as Error).message);
           results[myIdx] = [];
         }
@@ -810,16 +819,18 @@ export async function sweepCampaignLeadsCursor(
   for (;;) {
     const url = `${baseUrl}/api/campaigns/${campaignId}/leads?pagination_type=cursor&per_page=100${filter}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     let res: Response;
+    // Every retry is bounded by a count AND the window deadline (a stream of
+    // 429s used to retry forever, past the caller's time budget).
+    const canRetry = () => ++retries <= 8 && Date.now() < deadline;
     try {
       res = await fetchWithTimeout(url, { headers, timeoutMs: 30_000 });
     } catch {
-      if (++retries <= 6) { await new Promise((r) => setTimeout(r, 1500 * retries)); continue; }
+      if (canRetry()) { await new Promise((r) => setTimeout(r, 1500 * Math.min(retries, 4))); continue; }
       return { leads: out, nextCursor: cursor, done: false }; // give up this window; caller resumes
     }
     if (!res.ok) {
-      if (res.status === 429) { await new Promise((r) => setTimeout(r, 1500)); continue; }
-      if ((res.status === 502 || res.status === 503 || res.status === 504) && ++retries <= 6) {
-        await new Promise((r) => setTimeout(r, 1500 * retries)); continue;
+      if ((res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) && canRetry()) {
+        await new Promise((r) => setTimeout(r, 1500 * Math.min(retries, 4))); continue;
       }
       return { leads: out, nextCursor: cursor, done: false };
     }

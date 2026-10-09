@@ -33,7 +33,9 @@ export async function GET(req: NextRequest) {
 
   // Pull nurture campaigns from every instance (allSettled so one bad instance
   // doesn't sink the snapshot).
-  const settled = await Promise.allSettled(BISON_INSTANCES.map((i) => listCampaigns(i.key)));
+  // strict: a failed page fails that instance (its cached rows are kept)
+  // instead of silently dropping campaigns from the cache.
+  const settled = await Promise.allSettled(BISON_INSTANCES.map((i) => listCampaigns(i.key, { strict: true })));
   const rows: Row[] = [];
   const failures: string[] = [];
   settled.forEach((s, idx) => {
@@ -58,18 +60,22 @@ export async function GET(req: NextRequest) {
     )`,
   );
 
-  // Only replace if we got a usable snapshot — never wipe the cache to empty
-  // because every instance happened to fail this tick. Delete + re-insert run
-  // in ONE transaction (batch), so a reader never sees a half-filled cache.
-  if (rows.length > 0) {
+  // Replace ONLY the instances that answered (a failed instance keeps its last
+  // rows), each in one transaction so a reader never sees a half-filled cache.
+  {
     const now = new Date().toISOString();
-    await db.batch([
-      "DELETE FROM nurture_campaigns_cache",
-      ...rows.map((r) => ({
-        sql: "INSERT OR REPLACE INTO nurture_campaigns_cache (id, uuid, name, status, client_tag, total_leads, bison_instance, synced_at) VALUES (?,?,?,?,?,?,?,?)",
-        args: [r.id, r.uuid, r.name, r.status, r.client_tag, r.total_leads, r.bison_instance, now],
-      })),
-    ], "write");
+    for (let idx = 0; idx < settled.length; idx++) {
+      if (settled[idx].status !== "fulfilled") continue;
+      const key = BISON_INSTANCES[idx].key;
+      const mine = rows.filter((r) => r.bison_instance === key);
+      await db.batch([
+        { sql: "DELETE FROM nurture_campaigns_cache WHERE bison_instance = ?", args: [key] },
+        ...mine.map((r) => ({
+          sql: "INSERT OR REPLACE INTO nurture_campaigns_cache (id, uuid, name, status, client_tag, total_leads, bison_instance, synced_at) VALUES (?,?,?,?,?,?,?,?)",
+          args: [r.id, r.uuid, r.name, r.status, r.client_tag, r.total_leads, r.bison_instance, now],
+        })),
+      ], "write");
+    }
   }
 
   // Also snapshot every tagged NON-nurture ("main") campaign — the Nurture

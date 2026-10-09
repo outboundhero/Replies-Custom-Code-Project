@@ -93,8 +93,11 @@ export function ensureOverviewTables(): Promise<void> {
       "CREATE TABLE IF NOT EXISTS cron_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)",
       "CREATE TABLE IF NOT EXISTS nurture_queue_page1_cache (client_tag TEXT PRIMARY KEY, payload TEXT, computed_at TEXT)",
       "CREATE TABLE IF NOT EXISTS nurture_tag_stats_dirty (client_tag TEXT PRIMARY KEY, dirty_at TEXT)",
-      "CREATE TABLE IF NOT EXISTS nurture_tag_stats_fail (client_tag TEXT PRIMARY KEY, attempted_at TEXT, error TEXT)",
-    ], "write").then(() => undefined).catch((e) => { tablesReady = null; throw e; });
+      "CREATE TABLE IF NOT EXISTS nurture_tag_stats_fail (client_tag TEXT PRIMARY KEY, attempted_at TEXT, error TEXT, failures INTEGER)",
+    ], "write")
+      // Upgrade tables created before a column existed (no-op once added).
+      .then(() => db.execute("ALTER TABLE nurture_tag_stats_fail ADD COLUMN failures INTEGER").catch(() => undefined))
+      .then(() => undefined).catch((e) => { tablesReady = null; throw e; });
   }
   return tablesReady;
 }
@@ -145,8 +148,8 @@ export async function activeClientTags(): Promise<{ tags: string[]; churned: str
   return { tags, churned };
 }
 
-/** Build the overview for every active tag (or just `onlyTag`). */
-export async function buildOverview(onlyTag?: string): Promise<{
+/** Build the overview for every active tag. */
+export async function buildOverview(): Promise<{
   tags: OverviewTag[];
   churned: string[];
   automation: { churnSync: CronState | null; refresh: CronState | null; mappedTags: number };
@@ -154,7 +157,7 @@ export async function buildOverview(onlyTag?: string): Promise<{
 }> {
   await ensureOverviewTables();
   const { tags: allTags, churned } = await activeClientTags();
-  const wanted = onlyTag ? allTags.filter((t) => t.toUpperCase() === onlyTag.toUpperCase()) : allTags;
+  const wanted = allTags;
 
   const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows] = await Promise.all([
     getAllClientInstances(),
@@ -262,6 +265,8 @@ export async function buildOverview(onlyTag?: string): Promise<{
     else if (unmapped) mapIssues.push(`${unmapped} of ${slots} ESP slots have no nurture campaign.`);
     if (missing) mapIssues.push(`${missing} mapped campaign${missing > 1 ? "s" : ""} no longer exist${missing > 1 ? "" : "s"} in Bison.`);
     if (archived) mapIssues.push(`${archived} mapped campaign${archived > 1 ? "s are" : " is"} archived.`);
+    // Auto-push only routes to a confirmed map (auto-map confirms the maps it fills).
+    if (inst && map.length > 0 && !cfg?.confirmed) mapIssues.push("The target campaigns aren't confirmed yet, so ready leads aren't routed (saving them confirms them).");
     const mapping: "ok" | "bad" = mapIssues.length ? "bad" : "ok";
 
     // ── batches N1..N3 (per tag, across its instances)
@@ -315,15 +320,15 @@ export async function buildOverview(onlyTag?: string): Promise<{
     // ── status badges (each with the hover "what + how to fix")
     const errors: StatusBadge[] = [];
     if (prelaunch) {
-      errors.push({ k: "prelaunch", lab: "Pre-launch", tip: "Go-live is in the future — campaigns stay paused and nurture is held until launch (go-live gate)." });
+      errors.push({ k: "prelaunch", lab: "Pre-launch", tip: "Go-live is in the future — campaigns stay paused and nurture is held until launch." });
     } else {
       if (inst && map.length === 0) errors.push({ k: "map", lab: "No mapping", tip: `No canonical [Nurture] campaigns are mapped. Create them in Bison (${tag}: Google + Custom / Outlook / SEGs [Nurture] (… Client)) and the refresh maps them automatically.` });
       else if (mapping === "bad") errors.push({ k: "map", lab: "Mapping issue", tip: mapIssues.join(" ") + " Fix the campaigns in Bison, or edit Target campaigns." });
-      if (drafts) errors.push({ k: "draft", lab: "Campaigns in draft", tip: `${drafts} mapped nurture campaign${drafts > 1 ? "s hold" : " holds"} leads but ${drafts > 1 ? "are" : "is"} still in Draft, so nothing sends. Usually no sender inboxes for this client are connected on that instance — auto-launch skips a campaign with no senders. Tag + connect the inboxes, then run Enable sending.` });
+      if (drafts) errors.push({ k: "draft", lab: "Campaigns in draft", tip: `${drafts} mapped nurture campaign${drafts > 1 ? "s hold" : " holds"} leads but ${drafts > 1 ? "are" : "is"} still in Draft, so nothing sends. Usually no sender inboxes for this client are connected on that instance — auto-launch skips a campaign with no senders. Tag + connect the inboxes, then Target campaigns → Edit → Save & enable sending.` });
       if (archived) errors.push({ k: "archived", lab: "Archived on active", tip: `An archived nurture campaign is still mapped for this active client. Re-point the map to a live campaign (Target campaigns → Edit).` });
       if (stats && main.active > 0 && hoursAgo(stats.last_new_at) > NO_LEADS_HOURS) {
         const since = stats.last_new_at ? `since ${new Date(stats.last_new_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "at all";
-        errors.push({ k: "noleads", lab: "Not receiving leads", tip: `No new contacts have entered this tag's queue ${since} despite ${main.active} active main campaign${main.active > 1 ? "s" : ""}. Check ESP tagging + the sequence-finished sync.` });
+        errors.push({ k: "noleads", lab: "Not receiving leads", tip: `No new leads have entered this tag's queue ${since} despite ${main.active} active main campaign${main.active > 1 ? "s" : ""}. Check ESP tagging + the sequence-finished sync.` });
       }
     }
 
@@ -381,7 +386,9 @@ export async function lightStatsInstalled(): Promise<boolean> {
 
 const LEASE_TTL_MS = 150_000;
 const BETWEEN_TAGS_MS = 2_000;   // pause between heavy per-tag queries      // > the stats function's 120s statement timeout
-const FAIL_BACKOFF_MS = 60 * 60_000; // a tag that failed isn't retried by the cron for an hour
+// A tag whose stats failed waits 1h, then 2h, 4h … up to 24h before the cron
+// retries it (a tag that always times out must not cost 120s every hour).
+const failBackoffMs = (failures: number) => Math.min(24, 2 ** Math.max(0, failures - 1)) * 3_600_000;
 
 /**
  * Recompute per-tag queue stats (+ the queue tab's cached first page).
@@ -406,11 +413,11 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
     const [statRows, dirtyRows, failRows] = await Promise.all([
       db.execute("SELECT client_tag, computed_at FROM nurture_tag_stats_cache"),
       db.execute("SELECT client_tag FROM nurture_tag_stats_dirty ORDER BY dirty_at"),
-      db.execute("SELECT client_tag, attempted_at FROM nurture_tag_stats_fail"),
+      db.execute("SELECT client_tag, attempted_at, failures FROM nurture_tag_stats_fail"),
     ]);
     const at = new Map(statRows.rows.map((x) => [String(x.client_tag).toUpperCase(), String(x.computed_at || "")]));
     const failedRecently = new Set(failRows.rows
-      .filter((x) => Date.now() - new Date(String(x.attempted_at)).getTime() < FAIL_BACKOFF_MS)
+      .filter((x) => Date.now() - new Date(String(x.attempted_at)).getTime() < failBackoffMs(Number(x.failures) || 1))
       .map((x) => String(x.client_tag).toUpperCase()));
     let stale = [...active].sort((a, b) => (at.get(a.toUpperCase()) || "").localeCompare(at.get(b.toUpperCase()) || ""));
     if (opts.minAgeMs) {
@@ -444,7 +451,9 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
       if (error || !data) {
         const msg = error?.message || "no data";
         await db.execute({
-          sql: "INSERT INTO nurture_tag_stats_fail (client_tag, attempted_at, error) VALUES (?, ?, ?) ON CONFLICT(client_tag) DO UPDATE SET attempted_at = excluded.attempted_at, error = excluded.error",
+          sql: `INSERT INTO nurture_tag_stats_fail (client_tag, attempted_at, error, failures) VALUES (?, ?, ?, 1)
+                ON CONFLICT(client_tag) DO UPDATE SET attempted_at = excluded.attempted_at, error = excluded.error,
+                  failures = COALESCE(nurture_tag_stats_fail.failures, 1) + 1`,
           args: [tag.toUpperCase(), new Date().toISOString(), msg.slice(0, 300)],
         });
         return msg;
@@ -455,6 +464,7 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
       if (statsOnly.overlap === undefined) {
         statsOnly.overlap = prev.overlap ?? null;
         statsOnly.overlap_at = prev.overlap_at ?? (prev.overlap != null ? prev.computed_at : null);
+        statsOnly.overlap_tried_at = (prev as { overlap_tried_at?: string }).overlap_tried_at ?? null;
       } else {
         statsOnly.overlap_at = statsOnly.computed_at;
       }
@@ -496,7 +506,9 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
       if (!first) await new Promise((r) => setTimeout(r, BETWEEN_TAGS_MS)); // let the disk breathe
       first = false;
       if (opts.yieldToLoad && (await dbIsBusy())) { yielded = true; break; } // inbox first
-      const err = await one(tag);
+      let err: string | null;
+      try { err = await one(tag); } catch (e) { err = (e as Error).message || "error"; } // one bad tag never aborts the run
+      if (err === "lost the heavy-query lease") break;
       if (err) failed.push({ tag, error: err });
     }
   } finally {
@@ -511,43 +523,45 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
  * overnight (0–6 AM Pacific), one tag at a time, under the heavy lease and
  * yielding to load; each tag is refreshed at most once a day.
  */
-export async function refreshTagOverlap(opts: { maxMs: number }): Promise<{ refreshed: string[]; skipped?: string }> {
+export async function refreshTagOverlap(opts: { finishBy: number }): Promise<{ refreshed: string[]; skipped?: string }> {
   await ensureOverviewTables();
-  const started = Date.now();
   const refreshed: string[] = [];
   const { tags: active, churned } = await activeClientTags();
   const r = await db.execute("SELECT client_tag, stats FROM nurture_tag_stats_cache");
-  const overlapAt = new Map<string, string>();
+  // Last ATTEMPT per tag (success or failure) — a tag that times out is not
+  // retried again the same night.
+  const triedAt = new Map<string, string>();
   for (const row of r.rows) {
     try {
-      const st = JSON.parse(String(row.stats)) as Partial<TagStats>;
-      overlapAt.set(String(row.client_tag).toUpperCase(), String(st.overlap_at ?? (st.overlap != null ? st.computed_at : "") ?? ""));
+      const st = JSON.parse(String(row.stats)) as Partial<TagStats> & { overlap_tried_at?: string };
+      triedAt.set(String(row.client_tag).toUpperCase(), String(st.overlap_tried_at ?? st.overlap_at ?? (st.overlap != null ? st.computed_at : "") ?? ""));
     } catch { /* skip */ }
   }
   const cutoff = Date.now() - 20 * 3_600_000;
   const order = [...active]
-    .filter((t) => { const at = overlapAt.get(t.toUpperCase()); return !at || new Date(at).getTime() < cutoff; })
-    .sort((a, b) => (overlapAt.get(a.toUpperCase()) || "").localeCompare(overlapAt.get(b.toUpperCase()) || ""));
+    .filter((t) => triedAt.has(t.toUpperCase()))                       // only tags that have stats to update
+    .filter((t) => { const at = triedAt.get(t.toUpperCase()); return !at || new Date(at).getTime() < cutoff; })
+    .sort((a, b) => (triedAt.get(a.toUpperCase()) || "").localeCompare(triedAt.get(b.toUpperCase()) || ""));
   if (!order.length) return { refreshed, skipped: "all fresh" };
   const holder = leaseHolder("tag-overlap");
   if (!(await acquireHeavyLease(holder, LEASE_TTL_MS))) return { refreshed, skipped: "lease busy" };
   try {
     let first = true;
     for (const tag of order) {
-      if (Date.now() - started > opts.maxMs) break;
+      // Only start a tag that can finish (its query may take up to 120s).
+      if (Date.now() + 125_000 > opts.finishBy) break;
       if (!first) await new Promise((res) => setTimeout(res, BETWEEN_TAGS_MS));
       first = false;
       if (await dbIsBusy()) return { refreshed, skipped: "database busy" };
       if (!(await renewHeavyLease(holder, LEASE_TTL_MS))) break;
       const { data, error } = await supabase.rpc("nurture_tag_overlap", { p_tag: tag, p_ignore_tags: churned });
-      if (error) { if (/function|schema cache/i.test(error.message)) return { refreshed, skipped: "nurture_tag_overlap not installed" }; continue; }
+      if (error && /function|schema cache/i.test(error.message)) return { refreshed, skipped: "nurture_tag_overlap not installed" };
       const row = await db.execute({ sql: "SELECT stats FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [tag.toUpperCase()] });
       if (!row.rows[0]) continue;
       const st = JSON.parse(String(row.rows[0].stats)) as Record<string, unknown>;
-      st.overlap = Number(data) || 0;
-      st.overlap_at = new Date().toISOString();
+      st.overlap_tried_at = new Date().toISOString();
+      if (!error) { st.overlap = Number(data) || 0; st.overlap_at = st.overlap_tried_at; refreshed.push(tag); }
       await db.execute({ sql: "UPDATE nurture_tag_stats_cache SET stats = ? WHERE client_tag = ?", args: [JSON.stringify(st), tag.toUpperCase()] });
-      refreshed.push(tag);
     }
   } finally {
     await releaseHeavyLease(holder).catch(() => {});
@@ -574,6 +588,7 @@ export async function refreshTagStatsNow(tag: string, minGapMs = 60_000): Promis
   const r = await db.execute({ sql: "SELECT computed_at FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [tag.toUpperCase()] });
   const at = r.rows[0]?.computed_at ? new Date(String(r.rows[0].computed_at)).getTime() : 0;
   if (Date.now() - at < minGapMs) return { status: "recent" };
+  if (!(await lightStatsInstalled())) { await markTagStatsDirty(tag); return { status: "queued" }; }
   const res = await refreshTagStats({ tags: [tag], yieldToLoad: true });
   if (res.busy || res.yielded) { await markTagStatsDirty(tag); return { status: "queued" }; }
   if (res.failed.length) { await markTagStatsDirty(tag); return { status: "failed", error: res.failed[0].error }; }

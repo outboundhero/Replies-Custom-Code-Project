@@ -145,7 +145,8 @@ export async function listInstanceNurtureCampaignsCached(instance: string): Prom
   const hit = campaignCache.get(instance);
   if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.campaigns;
 
-  const all = await listCampaigns(instance);
+  // strict: an incomplete list would make a mapped campaign look "gone" and get re-pointed.
+  const all = await listCampaigns(instance, { strict: true });
   const canonical: CanonicalCampaign[] = [];
   for (const c of all) {
     if (!isCanonicalNurtureCampaign(c.name)) continue;

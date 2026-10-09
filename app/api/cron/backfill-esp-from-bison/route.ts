@@ -17,6 +17,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import supabase from "@/lib/supabase";
+import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 import { resolveInstanceForClient } from "@/lib/bison-instances";
 import { findLeadByEmail } from "@/lib/outboundhero-api";
 import { pickEspFromTags, bucketEsp } from "@/lib/nurture/esp";
@@ -33,13 +34,6 @@ const NURTURE_DAYS = 45;
 // query param if needed.
 const PER_CALL_CAP = 400;
 const CONCURRENCY = 10;
-
-const EXCLUDED_AI_CATEGORIES = [
-  "Interested", "Meeting Request", "Meeting Set", "Do Not Contact",
-  "Wrong Person", "Wrong Person (Change of Target)", "Not Interested",
-  "Mailbox No Longer Active", "Automated Error Message",
-  "Automated Catch-All Message", "Referral Given", "Internally Forwarded",
-];
 
 interface Job {
   source: "seq" | "reply" | "legacy";

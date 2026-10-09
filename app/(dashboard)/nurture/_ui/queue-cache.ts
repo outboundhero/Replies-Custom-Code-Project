@@ -1,9 +1,10 @@
 /**
  * Browser-side cache for Nurture queue pages, so the Queue tab paints
- * instantly: page 1 is prefetched when a row is expanded on the overview and
- * when a client page opens, the next page is prefetched after each load, and
- * revisiting a page/filter shows the cached copy while a fresh one loads.
- * Lives for the browser session (module scope survives client navigation).
+ * instantly: the first page arrives with the client page (cached on the server
+ * with the client's stats), the next page is prefetched after each load
+ * (smaller queues only), and revisiting a page/filter shows the cached copy
+ * while a fresh one loads. Lives for the browser session (module scope
+ * survives client navigation).
  */
 export interface QueueContact {
   email: string; name: string | null; company: string | null; website: string | null; tld: string | null;

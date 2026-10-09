@@ -2,13 +2,13 @@
  * GET /api/cron/refresh-nurture-summary?secret=X
  *
  * Recomputes the per-client nurture counts via the heavy nurture_clients_summary
- * RPC (scans replies + seq + legacy, ~8s) and persists them into the
+ * RPC (scans replies + seq + legacy, 30-60s) and persists them into the
  * nurture_summary_cache table. The hub's /api/nurture/clients-summary endpoint
  * reads that table instead of running the RPC live, so the dashboard is instant
  * for every serverless instance (the old in-process cache was per-instance and
  * missed constantly).
  *
- * Runs every 3 hours (vercel.json) under the heavy-query lease — it's the
+ * Runs 3x a day — 1:47 & 5:47 AM and 1:47 PM Pacific (DST) — under the heavy-query lease; it's the
  * single heaviest query on the shared database (pg_stat_statements,
  * 2026-10-09: ~87h of DB time, 30-60s per call at the old 10-min cadence).
  *
@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
   // nurture_clients_summary scans every nurture table (~6.5M rows, 30-60s) on
-  // the database the inbox shares — run it every 3h (vercel.json), and never
+  // the database the inbox shares — run it 3x a day (vercel.json), and never
   // alongside another heavy Nurture query: wait for the heavy lease.
   const holder = leaseHolder("nurture-summary");
   let leased = false;

@@ -96,18 +96,19 @@ export async function getOverview(opts: { fresh?: boolean } = {}): Promise<{ dat
 
 // ── response shapes shared by the API routes and the server-rendered pages ──
 
-/** Overview table row: drops the client-page-only fields to keep the payload small. */
+/** Overview table row: exactly the fields the overview page renders / filters on. */
 function lean(t: OverviewTag) {
   const s = t.stats;
-  const { slots: _slots, batchCampaigns: _bc, ...rest } = t;
-  void _slots; void _bc;
   return {
-    ...rest,
+    tag: t.tag, type: t.type, prelaunch: t.prelaunch,
+    mainActive: t.mainActive, nurtureActive: t.nurtureActive, sendingLeads: t.sendingLeads,
+    mapping: t.mapping, mapIssues: t.mapIssues, batches: t.batches, extraLiveBatches: t.extraLiveBatches,
+    lastContactDay: t.lastContactDay, lastContactCheckedAt: t.lastContactCheckedAt,
+    added: t.added, stoppedRecovered: t.stoppedRecovered, errors: t.errors,
     stats: s ? {
-      queue: s.queue, ready: s.ready, eligible: s.eligible, cooldown: s.cooldown, overlap: s.overlap,
-      esp_unresolved: s.esp_unresolved, sources: s.sources, esps: s.esps,
+      queue: s.queue, ready: s.ready, sources: s.sources, esps: s.esps,
       email_endings: s.email_endings, site_endings: s.site_endings, email_domains: s.email_domains,
-      last_new_at: s.last_new_at, computed_at: s.computed_at,
+      computed_at: s.computed_at,
     } : null,
   };
 }

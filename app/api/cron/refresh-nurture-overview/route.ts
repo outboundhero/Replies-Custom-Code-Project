@@ -44,10 +44,9 @@ export async function GET(req: NextRequest) {
       ? { checked: 0, failed: 0, skipped: "out of time" }
       : await refreshLastContact(tag ? { tag, maxMs: left } : { maxCampaigns: 120, maxMs: Math.min(90_000, left), minAgeMs: 2 * 3_600_000 });
     // Overnight (0–6 AM Pacific) only: the heavy "Overlapping" counts.
-    const leftAfter = 250_000 - (Date.now() - started);
-    const overlap = !tag && pacificHour() < 6 && leftAfter > 30_000
-      ? await refreshTagOverlap({ maxMs: Math.min(90_000, leftAfter - 20_000) })
-      : { refreshed: [] as string[], skipped: "daytime" };
+    const overlap = !tag && pacificHour() < 6
+      ? await refreshTagOverlap({ finishBy: started + 285_000 }) // leaves time for the snapshot rebuild
+      : { refreshed: [] as string[], skipped: tag ? "single client" : "daytime" };
     await rebuildOverviewSnapshot(); // pages read this precomputed copy
     if (stats.busy) console.log("[cron/refresh-nurture-overview] stats skipped: another heavy query holds the lease");
     if (stats.failed.length) {

@@ -9,12 +9,14 @@
 --     (+ for replies/legacy: has a reply, AI category not hard-blocked) —
 --     same filters as nurture_clients_summary().
 --   • a CONTACT is one email per client tag (a lead with several rows — e.g. it
---     finished two sequences — counts once); its eligibility comes from its
---     earliest trigger (reply_time / sequence_finished_at / reply_at).
---   • eligible = trigger ≥ 45 days ago; ready = eligible AND safe
---     (sequence-finished rows are always safe) — same as the "Ready" tile.
+--     finished two sequences — counts once); its details come from its
+--     earliest row (reply_time / sequence_finished_at / reply_at), its status
+--     from what auto-push would route (see nurture_queue_contacts).
+--   • eligible = trigger ≥ 45 days ago; ready = eligible AND safe AND ESP
+--     confirmed (sequence-finished rows are always safe) — what auto-push routes.
 --   • ESP bucket = lib/nurture/esp.ts effectiveEsp(): stored host → outlook /
---     segs / google, else the consumer-Microsoft-domain heuristic.
+--     segs / google, else the consumer-Microsoft-domain heuristic (a ready
+--     contact shows the ESP of the row auto-push would send).
 --   • overlap = the same email is ALSO pending in another client tag's queue.
 --   • remove = the existing nurture "skip" flag (reversible; never touches Bison).
 --
@@ -61,7 +63,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS nurture_seq_tag_email_idx
 -- Re-runnable: drop first so a changed return shape never blocks CREATE.
 DROP FUNCTION IF EXISTS nurture_tags_with_suffix(text, text, text[]);
 DROP FUNCTION IF EXISTS nurture_queue_restore_rows(text, bigint[], bigint[], bigint[]);
-DROP FUNCTION IF EXISTS nurture_queue_restore(text, text[]);
+DROP FUNCTION IF EXISTS nurture_queue_restore(text, text[]);  -- retired: Undo is exact, by row id
 DROP FUNCTION IF EXISTS nurture_queue_remove(text, text[], boolean, text, text, text, text, text, boolean, text[]);
 DROP FUNCTION IF EXISTS nurture_tag_overlap(text, text[]);
 DROP FUNCTION IF EXISTS nurture_tag_stats(text, text[]);
@@ -75,14 +77,16 @@ DROP FUNCTION IF EXISTS nurture_contact_site(text, text);
 DROP FUNCTION IF EXISTS nurture_domain_endings(text);
 DROP FUNCTION IF EXISTS nurture_personal_domains();
 
--- Hard-blocked AI categories (same list as nurture_clients_summary + /api/nurture).
+-- Hard-blocked AI categories (same list as lib/nurture/excluded-categories.ts,
+-- which auto-push and every nurture route use).
 CREATE OR REPLACE FUNCTION nurture_excluded_categories()
 RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
   SELECT ARRAY[
     'Interested','Meeting Request','Meeting Set','Do Not Contact',
     'Wrong Person','Wrong Person (Change of Target)','Not Interested',
     'Mailbox No Longer Active','Automated Error Message',
-    'Automated Catch-All Message','Referral Given','Internally Forwarded'
+    'Automated Catch-All Message','Referral Given','Internally Forwarded',
+    'Meeting-Ready Lead','Meeting Ready Lead'
   ]::text[]
 $$;
 
@@ -223,6 +227,9 @@ LANGUAGE sql STABLE AS $$
            bool_or(b.safe AND b.trigger_at <= now() - interval '45 days'
                    AND coalesce(btrim(b.esp_host), '') <> '') AS ready_any,
            min(b.trigger_at) FILTER (WHERE b.safe AND b.trigger_at > now() - interval '45 days') AS next_safe_trigger,
+           (array_agg(b.esp_host ORDER BY b.trigger_at, b.src, b.row_id)
+              FILTER (WHERE b.safe AND b.trigger_at <= now() - interval '45 days'
+                      AND coalesce(btrim(b.esp_host), '') <> ''))[1] AS ready_esp,
            count(*)::int AS n
     FROM b GROUP BY b.email
   ),
@@ -233,8 +240,8 @@ LANGUAGE sql STABLE AS $$
   SELECT f.email, f.src, f.row_id, f.first_name, f.last_name, f.company,
          nurture_contact_site(f.website, f.email),
          f.source,
-         nurture_esp_bucket(f.esp_host, f.email),
-         coalesce(btrim(f.esp_host), '') <> '',
+         nurture_esp_bucket(coalesce(a.ready_esp, f.esp_host), f.email),
+         coalesce(btrim(coalesce(a.ready_esp, f.esp_host)), '') <> '',
          f.trigger_at,
          CASE WHEN NOT a.ready_any AND a.next_safe_trigger IS NOT NULL THEN a.next_safe_trigger ELSE f.trigger_at END
            + interval '45 days',
@@ -249,9 +256,14 @@ $$;
 
 -- Other client tags whose queue ALSO holds each of these emails (overlap).
 -- p_ignore_tags: tags to disregard (e.g. churned clients).
+-- work_mem: with a big tag's whole email list, the email-index bitmap outgrows
+-- the default 4MB, goes lossy, and every row on those pages is re-checked
+-- against the full array — minutes instead of ~3s (measured at 20k contacts).
 CREATE OR REPLACE FUNCTION nurture_email_other_tags(p_tag text, p_emails text[], p_ignore_tags text[] DEFAULT '{}')
 RETURNS TABLE (email text, tags text[])
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE
+SET work_mem = '64MB'
+AS $$
   WITH hits AS (
     SELECT lower(r.lead_email) AS email, r.client_tag AS tag
     FROM replies r
@@ -337,7 +349,7 @@ AS $$
   page AS (
     SELECT f.*, count(*) OVER () AS total_count
     FROM f
-    ORDER BY CASE WHEN f.is_ready THEN 0 WHEN NOT f.is_eligible THEN 1 ELSE 2 END, f.trigger_at ASC, f.email ASC
+    ORDER BY CASE WHEN f.is_ready THEN 0 WHEN NOT f.is_eligible THEN 1 ELSE 2 END, f.eligible_at ASC, f.email ASC
     LIMIT greatest(1, least(coalesce(p_limit, 50), 500)) OFFSET greatest(0, coalesce(p_offset, 0))
   ),
   ov AS (
@@ -347,7 +359,7 @@ AS $$
          p.esp_resolved, p.trigger_at, p.eligible_at, p.is_eligible, p.is_ready, p.tld, p.row_count,
          coalesce(ov.tags, '{}'::text[]), p.total_count
   FROM page p LEFT JOIN ov ON ov.email = p.email
-  ORDER BY CASE WHEN p.is_ready THEN 0 WHEN NOT p.is_eligible THEN 1 ELSE 2 END, p.trigger_at ASC, p.email ASC
+  ORDER BY CASE WHEN p.is_ready THEN 0 WHEN NOT p.is_eligible THEN 1 ELSE 2 END, p.eligible_at ASC, p.email ASC
 $$;
 
 -- Per-tag numbers for the client page + overview (one JSON object), plus the
@@ -371,7 +383,7 @@ AS $$
   ),
   pg AS (
     SELECT c.* FROM c
-    ORDER BY CASE WHEN c.is_ready THEN 0 WHEN NOT c.is_eligible THEN 1 ELSE 2 END, c.trigger_at ASC, c.email ASC
+    ORDER BY CASE WHEN c.is_ready THEN 0 WHEN NOT c.is_eligible THEN 1 ELSE 2 END, c.eligible_at ASC, c.email ASC
     LIMIT 50
   ),
   pov AS (SELECT * FROM nurture_email_other_tags(p_tag, ARRAY(SELECT pg.email FROM pg), p_ignore_tags))
@@ -394,7 +406,7 @@ AS $$
                          'website', pg.website, 'tld', pg.tld, 'source', pg.source, 'esp', pg.esp, 'esp_resolved', pg.esp_resolved,
                          'trigger_at', pg.trigger_at, 'eligible_at', pg.eligible_at, 'is_eligible', pg.is_eligible,
                          'is_ready', pg.is_ready, 'row_count', pg.row_count, 'overlap_tags', coalesce(pov.tags, '{}'::text[]))
-                       ORDER BY CASE WHEN pg.is_ready THEN 0 WHEN NOT pg.is_eligible THEN 1 ELSE 2 END, pg.trigger_at, pg.email)
+                       ORDER BY CASE WHEN pg.is_ready THEN 0 WHEN NOT pg.is_eligible THEN 1 ELSE 2 END, pg.eligible_at, pg.email)
                        FROM pg LEFT JOIN pov ON pov.email = pg.email), '[]'::jsonb),
     'computed_at',   now()
   )
@@ -488,32 +500,6 @@ BEGIN
 END
 $$;
 
--- Undo a remove by email (clears the skip flags for these emails in this tag).
--- Kept for manual use; the UI's Undo uses nurture_queue_restore_rows.
-CREATE OR REPLACE FUNCTION nurture_queue_restore(p_tag text, p_emails text[])
-RETURNS jsonb LANGUAGE plpgsql VOLATILE
-SET statement_timeout = '60s'
-AS $$
-DECLARE
-  target text[];
-  n_reply int := 0; n_seq int := 0; n_legacy int := 0;
-BEGIN
-  SELECT array_agg(DISTINCT lower(btrim(x))) INTO target
-  FROM unnest(coalesce(p_emails, '{}'::text[])) x WHERE coalesce(btrim(x), '') <> '';
-  IF target IS NULL THEN RETURN jsonb_build_object('rows', 0); END IF;
-  UPDATE replies SET nurture_skipped = false
-   WHERE client_tag = p_tag AND lower(lead_email) = ANY (target) AND nurture_added_at IS NULL AND nurture_skipped IS TRUE;
-  GET DIAGNOSTICS n_reply = ROW_COUNT;
-  UPDATE nurture_sequence_finished SET skipped = false
-   WHERE client_tag = p_tag AND lower(email) = ANY (target) AND added_at IS NULL AND skipped IS TRUE;
-  GET DIAGNOSTICS n_seq = ROW_COUNT;
-  UPDATE nurture_legacy_leads SET nurture_skipped = false
-   WHERE client_tag = p_tag AND lower(lead_email) = ANY (target) AND nurture_added_at IS NULL AND nurture_skipped IS TRUE;
-  GET DIAGNOSTICS n_legacy = ROW_COUNT;
-  RETURN jsonb_build_object('rows', n_reply + n_seq + n_legacy);
-END
-$$;
-
 -- Undo one specific remove: clears the skip flag on exactly the rows that
 -- remove flagged (ids from nurture_queue_remove), still scoped to the tag and
 -- only while the row hasn't been added since.
@@ -593,7 +579,6 @@ BEGIN
     'nurture_tag_stats(text, text[])',
     'nurture_tag_overlap(text, text[])',
     'nurture_queue_remove(text, text[], boolean, text, text, text, text, text, boolean, text[])',
-    'nurture_queue_restore(text, text[])',
     'nurture_queue_restore_rows(text, bigint[], bigint[], bigint[])',
     'nurture_tags_with_suffix(text, text, text[])'
   ] LOOP

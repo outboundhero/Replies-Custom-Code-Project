@@ -22,6 +22,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
+import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 
 // Allow longer timeout — large legacy table can make page queries slow.
 export const maxDuration = 60;
@@ -32,28 +33,6 @@ const DEFAULT_LIMIT = 50;
 // fetching the full set (up to 1000) of selected leads in one call.
 // The default page size stays 50; only explicit overrides go higher.
 const MAX_LIMIT = 2000;
-
-/**
- * AI / Lead categories that should NEVER appear in the nurture queue.
- * Mirrors HARD_BLOCK_AI_CATEGORIES in lib/nurture/safety-classifier.ts.
- *
- * Two reasons: hot leads already in active conversation (Interested,
- * Meeting Request, Meeting Set), and hard opt-outs / dead mailboxes.
- */
-const EXCLUDED_AI_CATEGORIES = [
-  "Interested",
-  "Meeting Request",
-  "Meeting Set",
-  "Do Not Contact",
-  "Wrong Person",
-  "Wrong Person (Change of Target)",
-  "Not Interested",
-  "Mailbox No Longer Active",
-  "Automated Error Message",
-  "Automated Catch-All Message",
-  "Referral Given",
-  "Internally Forwarded",
-];
 
 /**
  * Sender email patterns we never want in the nurture queue. These are

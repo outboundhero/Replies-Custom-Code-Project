@@ -19,6 +19,8 @@
  * Safety principle: when in doubt, exclude. Default to "unknown".
  */
 
+import { NURTURE_EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
+
 export type NurtureSafety = "safe" | "unsafe" | "unknown";
 export type NurtureBucket = "soft_negative" | "out_of_office" | "other" | null;
 
@@ -28,54 +30,8 @@ export interface NurtureSafetyResult {
   reason: string;
 }
 
-/**
- * Lead categories that DISQUALIFY a row from the nurture queue.
- *
- * Two reasons to block:
- *
- * (a) Already-engaged (a nurture sequence here would step on an active
- *     conversation handled by sales/CS):
- *       - Interested, Meeting Request, Meeting Set
- *
- * (b) Definitively-not-contactable (already opted out, wrong contact, or
- *     not a human at all):
- *       - Do Not Contact, Wrong Person, Wrong Person (Change of Target),
- *         Not Interested, Mailbox No Longer Active,
- *         Automated Error Message, Automated Catch-All Message
- *
- * Categories that REMAIN nurture candidates (decided by reply-text safety
- * classifier, not hard-blocked):
- *   - Out Of Office, Follow Up at a Later Date, Open Response,
- *     Unrecognizable by AI
- *
- * Includes both the AI-Categorized variant ("Meeting Request") and the
- * human Lead-Category variant ("Meeting Set") because the import maps
- * either to original_ai_category.
- */
-const HARD_BLOCK_AI_CATEGORIES = new Set([
-  // Hot leads — already engaged, nurture would interfere
-  "Interested",
-  "Meeting Request",
-  "Meeting Set",
-  // Meeting-Ready Lead is the system's most common hot-lead category (CC/BCC
-  // known-client match + AI). These were delivered to the client as interested
-  // leads — nurturing them again re-targets a lead sales already owns.
-  "Meeting-Ready Lead",
-  "Meeting Ready Lead",
-  // Hard opt-outs / bad contacts
-  "Do Not Contact",
-  "Wrong Person",
-  "Wrong Person (Change of Target)",
-  "Not Interested",
-  // Dead mailboxes / bots
-  "Mailbox No Longer Active",
-  "Automated Error Message",
-  "Automated Catch-All Message",
-  // Lead has handed us off — original address is no longer the right
-  // recipient, so nurture would be pointless or rude.
-  "Referral Given",
-  "Internally Forwarded",
-]);
+// Lead categories that disqualify a row from the nurture queue (shared list).
+const HARD_BLOCK_AI_CATEGORIES = new Set<string>(NURTURE_EXCLUDED_AI_CATEGORIES);
 
 const HARD_NO_PATTERNS: { regex: RegExp; reason: string }[] = [
   // Explicit opt-out

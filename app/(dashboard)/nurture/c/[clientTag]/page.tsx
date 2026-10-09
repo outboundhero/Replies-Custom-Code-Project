@@ -1,8 +1,9 @@
 /**
  * Nurture System — one client tag. Server-rendered from the precomputed
  * overview snapshot (one Turso read), so header, panels, pipeline, target
- * campaigns and analytics arrive filled in; the queue's first page loads in
- * the background straight away. The interactive view is ../../_ui/client-view.tsx.
+ * campaigns and analytics arrive filled in, together with the queue's first
+ * page as cached by the last stats run. The interactive view is
+ * ../../_ui/client-view.tsx.
  */
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
@@ -12,6 +13,8 @@ import type { QueueContact } from "../../_ui/queue-cache";
 import NurtureClientView from "../../_ui/client-view";
 
 export const dynamic = "force-dynamic";
+// This request's render time — relative times ("5 min ago") hydrate against it.
+const requestTime = () => Date.now();
 
 export default async function NurtureClientPage({ params }: { params: Promise<{ clientTag: string }> }) {
   // Admin-only (middleware already enforces it; the page reads data directly).
@@ -31,5 +34,5 @@ export default async function NurtureClientPage({ params }: { params: Promise<{ 
   const initialQueue = initial && firstPage
     ? { total: firstPage.total, contacts: firstPage.contacts as QueueContact[], at: new Date(firstPage.computedAt).getTime() }
     : null;
-  return <NurtureClientView tag={initial?.client.tag ?? tag} initial={initial} initialError={error} initialQueue={initialQueue} />;
+  return <NurtureClientView tag={initial?.client.tag ?? tag} initial={initial} initialError={error} initialQueue={initialQueue} serverNow={requestTime()} />;
 }

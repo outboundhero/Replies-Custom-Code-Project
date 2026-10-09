@@ -1,7 +1,8 @@
 /**
  * GET /api/nurture/overview[?fresh=1][&since=<builtAt>] — everything the
  * Nurture overview page shows, served from the precomputed snapshot (one Turso
- * read; refreshed in the background when older than a minute). ?fresh=1
+ * read; the crons rebuild it every ~10 min, and a read older than 15 min also
+ * triggers a background rebuild). ?fresh=1
  * rebuilds first. ?since=<builtAt the page already has> → { unchanged: true }
  * when nothing was rebuilt since (the page polls; skips the ~250KB payload).
  */

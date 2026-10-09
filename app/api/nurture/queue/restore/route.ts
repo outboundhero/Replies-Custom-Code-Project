@@ -10,7 +10,7 @@ import { requireAdmin, getSession } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { markTagStatsDirty } from "@/lib/nurture/overview";
-import { ensureRemovalsTable } from "@/lib/nurture/queue-removals";
+import { ensureRemovalsTable, dropFirstPageCache } from "@/lib/nurture/queue-removals";
 import { logActivity } from "@/lib/errors";
 
 export const maxDuration = 120;
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     const claim = await db.execute({
       sql: `UPDATE nurture_queue_removals SET restored_at = ?, restored_by = ?
             WHERE id = ? AND restored_at IS NULL AND ids_json IS NOT NULL AND (status IS NULL OR status = 'done')
-            RETURNING client_tag, ids_json`,
+            RETURNING client_tag, ids_json, contacts`,
       args: [new Date().toISOString(), session?.email ?? null, removalId],
     });
     const rec = claim.rows[0];
@@ -58,9 +58,9 @@ export async function POST(req: NextRequest) {
     }
 
     await db.execute({ sql: "UPDATE nurture_queue_removals SET restored_rows = ? WHERE id = ?", args: [restored, removalId] });
-    if (restored > 0) await markTagStatsDirty(tag);
+    if (restored > 0) { await markTagStatsDirty(tag); await dropFirstPageCache(tag); }
     await logActivity("nurture", "queue-restore", { client_tag: tag, details: { by: session?.email, removal_id: removalId, rows: restored } });
-    return NextResponse.json({ ok: true, rows: restored });
+    return NextResponse.json({ ok: true, rows: restored, contacts: Number(rec.contacts) || 0 });
   } catch (e) {
     console.error("[api/nurture/queue/restore]", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

@@ -25,7 +25,7 @@ const extractTagFromCampaignName = (name: string | null | undefined): string => 
 interface Campaign { id: number; name: string; status: string; client_tag: string | null; bison_instance: string; total_leads?: number }
 interface MapEntry { bison_instance: string; esp: Esp; campaign_id: number; campaign_name: string | null; lane: string | null }
 
-const ESPS: Esp[] = ["outlook", "google", "segs"];
+const ESPS: Esp[] = ["google", "outlook", "segs"];
 const LANE_LABEL: Record<string, string> = { b2b: "Business", b2c: "Personal" };
 // Each instance's slot label — B2B/B2C #1 (Group 1) or #2 (Group 2).
 const INSTANCE_SLOT: Record<string, string> = {
@@ -34,11 +34,16 @@ const INSTANCE_SLOT: Record<string, string> = {
 };
 
 export default function TargetCampaigns({
-  clientTag, campaigns, onConfirmedChange, onSendingEnabled,
+  clientTag, campaigns, onConfirmedChange, onSendingEnabled, autoConfirm = false, onSaved,
 }: {
   clientTag: string;
   campaigns: Campaign[];
   onConfirmedChange?: (confirmedAt: string | null) => void;
+  // New Nurture page: maps are always saved confirmed (auto-confirm model) —
+  // no draft / "not confirmed" states, which would silently pause auto-push.
+  autoConfirm?: boolean;
+  // Called after a successful save (so the parent only reloads when needed).
+  onSaved?: () => void;
   // Called after confirm has (a) saved the map, (b) attached inboxes +
   // activated the mapped campaigns. The parent uses this to kick off the
   // "route all ready" drain so leads land in now-live campaigns.
@@ -49,13 +54,19 @@ export default function TargetCampaigns({
   // selection: `${instance}::${esp}` -> campaignId (0 = none)
   const [sel, setSel] = useState<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError(null);
     fetch(`/api/nurture/campaign-map?clientTag=${encodeURIComponent(clientTag)}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        return d;
+      })
       .then((d) => {
         setInstances(d.instances || null);
         setConfirmedAt(d.confirmedAt || null);
@@ -65,6 +76,7 @@ export default function TargetCampaigns({
         setSel(m);
         setDirty(false);
       })
+      .catch((e: Error) => setLoadError(e.message))
       .finally(() => setLoading(false));
   }, [clientTag, onConfirmedChange]);
   useEffect(() => { load(); }, [load]);
@@ -126,13 +138,16 @@ export default function TargetCampaigns({
       setConfirmedAt(d.confirmedAt || null);
       onConfirmedChange?.(d.confirmedAt || null);
       setDirty(false);
+      onSaved?.();
       if (!confirm) { toast.success("Saved (not confirmed — sending stays disabled)."); return; }
 
       // CONFIRM-ONLY ("Confirm draft"): mark the map confirmed so it counts as
       // confirmed everywhere (auto-push cron, route-all, the Automation-tab bulk
       // Enable / Auto button) — but do NOT start sending now. Enable it later.
       if (!enableSending) {
-        toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — sending not started (enable from here or the Automation tab).`);
+        toast.success(autoConfirm
+          ? `Saved ${entries.length} target campaign${entries.length === 1 ? "" : "s"}.`
+          : `Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — sending not started (enable from here or the Automation tab).`);
         return;
       }
 
@@ -141,10 +156,20 @@ export default function TargetCampaigns({
       // persistent progress panel.
       toast.success(`Confirmed ${entries.length} target campaign${entries.length === 1 ? "" : "s"} — enabling sending…`);
       onSendingEnabled?.();
+    } catch (e) {
+      toast.error(`Save failed: ${(e as Error).message}`);
     } finally { setSaving(false); }
   }
 
   if (loading) return <div className="rounded-lg border bg-card p-4 h-28 animate-pulse" />;
+  if (loadError) {
+    return (
+      <div className="rounded-lg border bg-card px-4 py-5 text-sm text-muted-foreground">
+        Couldn&apos;t load the target campaigns ({loadError}).{" "}
+        <button type="button" className="underline font-medium text-foreground" onClick={load}>Retry</button>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-lg border bg-card">
@@ -153,9 +178,13 @@ export default function TargetCampaigns({
           <p className="text-sm font-semibold">Target campaigns</p>
           <span className="text-[11px] text-muted-foreground">leads route by lane → instance → ESP</span>
         </div>
-        {confirmedAt && !dirty
-          ? <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700"><ShieldCheck className="size-3.5" /> Confirmed</span>
-          : <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700"><ShieldAlert className="size-3.5" /> {dirty ? "Unsaved changes" : "Not confirmed · sending disabled"}</span>}
+        {autoConfirm
+          ? (dirty || (!confirmedAt && chosen > 0)
+              ? <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700"><ShieldAlert className="size-3.5" /> {dirty ? "Unsaved changes" : "Not confirmed — Save to start routing"}</span>
+              : null)
+          : confirmedAt && !dirty
+            ? <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700"><ShieldCheck className="size-3.5" /> Confirmed</span>
+            : <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700"><ShieldAlert className="size-3.5" /> {dirty ? "Unsaved changes" : "Not confirmed · sending disabled"}</span>}
       </div>
 
       {!instances ? (
@@ -203,12 +232,14 @@ export default function TargetCampaigns({
           <div className="flex items-center gap-3 pt-1">
             <span className="text-xs text-muted-foreground">{chosen}/{mappable} cells mapped</span>
             <div className="ml-auto flex gap-2">
-              <button disabled={saving} onClick={() => save(false)} className="px-3 h-8 text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50">Save draft</button>
-              <button disabled={saving || chosen === 0} onClick={() => save(true, false)} title="Mark the map confirmed without sending — you can enable later from here or the Automation tab" className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
-                {saving ? <Loader2 className="size-3 animate-spin" /> : <ShieldCheck className="size-3" />} Confirm draft
+              {!autoConfirm && (
+                <button disabled={saving} onClick={() => save(false)} className="px-3 h-8 text-xs rounded-md border hover:bg-muted/50 disabled:opacity-50">Save draft</button>
+              )}
+              <button disabled={saving || chosen === 0 || (autoConfirm && !dirty && !!confirmedAt)} onClick={() => save(true, false)} title={autoConfirm ? "Save these target campaigns" : "Mark the map confirmed without sending — you can enable later from here or the Automation tab"} className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
+                {saving ? <Loader2 className="size-3 animate-spin" /> : <ShieldCheck className="size-3" />} {autoConfirm ? "Save" : "Confirm draft"}
               </button>
               <button disabled={saving || chosen === 0} onClick={() => save(true, true)} className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
-                {saving ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />} Confirm & enable sending
+                {saving ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />} {autoConfirm ? "Save & enable sending" : "Confirm & enable sending"}
               </button>
             </div>
           </div>

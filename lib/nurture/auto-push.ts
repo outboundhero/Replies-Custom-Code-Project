@@ -17,7 +17,7 @@
 
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
-import { effectiveEsp, type Esp } from "@/lib/nurture/esp";
+import { effectiveEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
 import { fetchNotYetLiveTags, NURTURE_GOLIVE_LAG_DAYS } from "@/lib/google-sheets";
 import { getClientInstances } from "@/lib/nurture/group-routing";
@@ -26,19 +26,10 @@ import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate, type BucketResult } from "@/lib/nurture/route-candidates";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 import { logActivity, logError } from "@/lib/errors";
+import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 
 const NURTURE_DAYS = 45;
 const PER_CLIENT_CAP = 200;
-
-const EXCLUDED_AI_CATEGORIES = [
-  "Interested", "Meeting Request", "Meeting Set",
-  // Meeting-Ready Lead = interested leads already delivered to the client
-  // (CC/BCC known-client match + AI). Never re-target these in nurture.
-  "Meeting-Ready Lead", "Meeting Ready Lead", "Do Not Contact",
-  "Wrong Person", "Wrong Person (Change of Target)", "Not Interested",
-  "Mailbox No Longer Active", "Automated Error Message",
-  "Automated Catch-All Message", "Referral Given", "Internally Forwarded",
-];
 
 // Candidate + BucketResult now live in lib/nurture/route-candidates.ts (shared
 // with the source-campaign routing flow).

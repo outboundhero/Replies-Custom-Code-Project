@@ -11,27 +11,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
+import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 
 // Counts can be expensive after large imports; default 10s is not enough.
 export const maxDuration = 60;
 
 const NURTURE_DAYS = 45;
-
-// Mirror of EXCLUDED_AI_CATEGORIES in /api/nurture/route.ts — keep in sync.
-const EXCLUDED_AI_CATEGORIES = [
-  "Interested",
-  "Meeting Request",
-  "Meeting Set",
-  "Do Not Contact",
-  "Wrong Person",
-  "Wrong Person (Change of Target)",
-  "Not Interested",
-  "Mailbox No Longer Active",
-  "Automated Error Message",
-  "Automated Catch-All Message",
-  "Referral Given",
-  "Internally Forwarded",
-];
 
 // Noise-sender patterns are intentionally NOT filtered in this counts
 // endpoint — see comment in baseReplies() / baseLegacy(). They live in

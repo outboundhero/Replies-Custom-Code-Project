@@ -6,6 +6,8 @@
 -- ready / eligible / waiting stay as row sums (consistent with the drill-page
 -- counts endpoint).
 --
+-- Excluded categories = lib/nurture/excluded-categories.ts (keep in sync).
+--
 -- Deploy: run in the Supabase SQL editor (same as sql/inbox_category_counts.sql).
 -- Used by GET /api/nurture/clients-summary and the refresh-nurture-summary cron.
 
@@ -20,7 +22,8 @@ AS $$
       'Interested','Meeting Request','Meeting Set','Do Not Contact',
       'Wrong Person','Wrong Person (Change of Target)','Not Interested',
       'Mailbox No Longer Active','Automated Error Message',
-      'Automated Catch-All Message','Referral Given','Internally Forwarded'
+      'Automated Catch-All Message','Referral Given','Internally Forwarded',
+      'Meeting-Ready Lead','Meeting Ready Lead'
     ]) AS cat
   ),
   unioned AS (

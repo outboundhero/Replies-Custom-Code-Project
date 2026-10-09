@@ -14,7 +14,8 @@ import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { activeClientTags, markTagStatsDirty } from "@/lib/nurture/overview";
 import { parseQueueFilters, toRpcArgs } from "@/lib/nurture/queue-filters";
-import { ensureRemovalsTable } from "@/lib/nurture/queue-removals";
+import { ensureRemovalsTable, dropFirstPageCache } from "@/lib/nurture/queue-removals";
+import { acquireHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
 import { logActivity } from "@/lib/errors";
 
 export const maxDuration = 300;
@@ -39,7 +40,19 @@ export async function POST(req: NextRequest) {
     if (!tag) return NextResponse.json({ error: `${rawTag} isn't an active client.` }, { status: 404 });
     const filters = parseQueueFilters(body || {});
 
-    // "All matching": confirm the set is what the user saw, and bounded.
+    // "All matching" scans the whole queue twice (count + remove): it takes the
+    // system-wide heavy lease, must carry the count the user confirmed, and is
+    // capped.
+    let holder: string | null = null;
+    if (all) {
+      const expected = Number(body?.expected);
+      if (!Number.isFinite(expected)) return NextResponse.json({ error: "expected count required for remove-all" }, { status: 400 });
+      holder = leaseHolder("queue-remove-all");
+      if (!(await acquireHeavyLease(holder, 150_000))) {
+        return NextResponse.json({ error: "Another heavy queue job is running — try again in a minute." }, { status: 429 });
+      }
+    }
+    try {
     if (all) {
       const { data, error } = await supabase.rpc("nurture_queue_page", {
         p_tag: tag, ...toRpcArgs(filters), p_ignore_tags: churned, p_limit: 1, p_offset: 0,
@@ -51,7 +64,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `That's ${total.toLocaleString()} contacts — narrow the filters (max ${MAX_BULK.toLocaleString()} per removal).`, total }, { status: 400 });
       }
       const expected = Number(body?.expected);
-      if (Number.isFinite(expected) && Math.abs(total - expected) > Math.max(5, Math.round(expected * 0.02))) {
+      if (Math.abs(total - expected) > Math.max(5, Math.round(expected * 0.02))) {
         return NextResponse.json({ error: `The matching set changed (now ${total.toLocaleString()} contacts) — review it and confirm again.`, total }, { status: 409 });
       }
     }
@@ -79,17 +92,25 @@ export async function POST(req: NextRequest) {
     const ids = Array.isArray(data?.reply_ids)
       ? { reply: data.reply_ids as number[], seq: data.seq_ids as number[], legacy: data.legacy_ids as number[] }
       : null;
-    await db.execute({
+    // Record the exact rows (retried once — without it Undo isn't possible).
+    const done = {
       sql: "UPDATE nurture_queue_removals SET status = 'done', contacts = ?, row_count = ?, ids_json = ?, emails_json = ? WHERE id = ?",
       args: [contacts, rows, ids ? JSON.stringify(ids) : null, Array.isArray(data?.emails) ? JSON.stringify(data.emails) : null, removalId],
-    });
+    };
+    try { await db.execute(done); } catch { await new Promise((r) => setTimeout(r, 500)); await db.execute(done); }
 
-    if (rows > 0) await markTagStatsDirty(tag); // the next stats run (≤10 min) picks it up first
+    if (rows > 0) {
+      await markTagStatsDirty(tag);      // the next stats run (≤10 min) picks it up first
+      await dropFirstPageCache(tag);     // the cached first page no longer matches the queue
+    }
     await logActivity("nurture", "queue-remove", {
       client_tag: tag,
       details: { by: session?.email, removal_id: removalId, contacts, rows, mode: all ? "all-matching" : "selected", filters: all ? filters : undefined, sample: (data?.emails || []).slice(0, 20) },
     });
     return NextResponse.json({ ok: true, contacts, rows, removalId, undoable: !!ids && rows > 0 });
+    } finally {
+      if (holder) await releaseHeavyLease(holder).catch(() => {});
+    }
   } catch (e) {
     console.error("[api/nurture/queue/remove]", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

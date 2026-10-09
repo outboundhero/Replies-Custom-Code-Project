@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { rebuildChurnedClients } from "@/lib/churn";
 import { activeClientTags, setCronState } from "@/lib/nurture/overview";
-import { scheduleOverviewRebuild } from "@/lib/nurture/overview-snapshot";
+import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 
 export const maxDuration = 60;
 
@@ -23,7 +23,7 @@ export async function POST() {
       const { tags: active } = await activeClientTags();
       await setCronState("nurture:churn-sync", { at: new Date().toISOString(), churned: count, active: active.length, manual: true });
     } catch { /* display-only */ }
-    scheduleOverviewRebuild();
+    await rebuildOverviewSnapshot({ force: true }).catch(() => {}); // the page reloads right after
     return NextResponse.json({ ok: true, churned: count, tags });
   } catch (e) {
     return NextResponse.json({ error: `sheet read failed: ${(e as Error).message}` }, { status: 500 });

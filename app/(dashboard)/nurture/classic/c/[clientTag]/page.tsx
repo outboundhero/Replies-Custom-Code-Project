@@ -1629,7 +1629,7 @@ export default function NurturePage() {
             href={`/nurture/c/${encodeURIComponent(lockedClientTag)}`}
             className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground mb-1.5 ml-4"
           >
-            Back to the new view
+            Back to Nurture System
           </Link>
           <h1 className="text-[26px] font-semibold tracking-tight flex items-center gap-3">
             Nurture
@@ -3027,7 +3027,7 @@ function EmptyState({
       <div className="px-6 py-16 text-center">
         <p className="text-base font-medium">{unscored.toLocaleString()} eligible leads not scored yet</p>
         <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">
-          The classifier hasn't run on these rows yet. Click below — it processes 200 replies + 200 legacy rows per click. Re-run a few times until everything is classified.
+          The classifier hasn&apos;t run on these rows yet. Click below — it processes 200 replies + 200 legacy rows per click. Re-run a few times until everything is classified.
         </p>
         <Button size="sm" onClick={onClassify} disabled={classifying} className="mt-4">
           {classifying ? "Classifying…" : "Classify Unclassified"}
