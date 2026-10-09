@@ -39,7 +39,7 @@
     },
     {
       "path": "/api/cron/refresh-nurture-summary",
-      "schedule": "*/10 * * * *"
+      "schedule": "*/30 * * * *"
     },
     {
       "path": "/api/cron/sync-churned-clients",
