@@ -159,7 +159,7 @@ export async function buildOverview(): Promise<{
   const { tags: allTags, churned } = await activeClientTags();
   const wanted = allTags;
 
-  const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows] = await Promise.all([
+  const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows, expRows] = await Promise.all([
     getAllClientInstances(),
     fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS).catch(() => new Set<string>()),
     db.execute("SELECT id, name, status, client_tag, total_leads, bison_instance, synced_at FROM nurture_campaigns_cache"),
@@ -174,7 +174,10 @@ export async function buildOverview(): Promise<{
     getCronState<CronState>("nurture:churn-sync"),
     getCronState<CronState>("nurture:auto-map"),
     db.execute("SELECT UPPER(client_tag) AS t, COUNT(*) AS n FROM nurture_stopped_recovered WHERE added_at IS NOT NULL GROUP BY 1").catch(() => ({ rows: [] as unknown[] })),
+    db.execute("SELECT DISTINCT UPPER(client_tag) AS t, bison_instance AS i, old_campaign_id AS id FROM nurture_campaign_expansions").catch(() => ({ rows: [] as unknown[] })),
   ]);
+  // Campaigns that were already duplicated into a newer batch, per tag + instance.
+  const duplicatedFrom = new Set((expRows.rows as Array<Record<string, unknown>>).map((r) => `${r.t}:${r.i}:${r.id}`));
 
   const up = (v: unknown) => String(v ?? "").trim().toUpperCase();
   let campaignsSyncedAt: string | null = null;
@@ -265,6 +268,10 @@ export async function buildOverview(): Promise<{
     else if (unmapped) mapIssues.push(`${unmapped} of ${slots} ESP slots have no nurture campaign.`);
     if (missing) mapIssues.push(`${missing} mapped campaign${missing > 1 ? "s" : ""} no longer exist${missing > 1 ? "" : "s"} in Bison.`);
     if (archived) mapIssues.push(`${archived} mapped campaign${archived > 1 ? "s are" : " is"} archived.`);
+    // A cell still pointing at a campaign that was already duplicated: new leads go
+    // to the older batch, and expansion refuses to duplicate it again.
+    const stale = map.filter((m) => duplicatedFrom.has(`${T}:${m.instance}:${m.id}`)).length;
+    if (stale) mapIssues.push(`${stale} target campaign${stale > 1 ? "s point" : " points"} at an older batch that was already duplicated — switch ${stale > 1 ? "them" : "it"} to the newest batch.`);
     // Auto-push only routes to a confirmed map (auto-map confirms the maps it fills).
     if (inst && map.length > 0 && !cfg?.confirmed) mapIssues.push("The target campaigns aren't confirmed yet, so ready leads aren't routed (saving them confirms them).");
     const mapping: "ok" | "bad" = mapIssues.length ? "bad" : "ok";

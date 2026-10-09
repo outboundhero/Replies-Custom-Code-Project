@@ -185,6 +185,27 @@ export async function expandCampaignsForClient(
       row.reason = `below threshold (${gate.combinedContacted} contacted, ${gate.pct.toFixed(0)}%; need ≥${CONTACTED_LEADS_MIN} contacted & ≥${CONTACTED_MIN_PCT}%)`;
       result.instances.push(row); continue;
     }
+    // Never duplicate the same campaign twice. A mapped campaign that was already
+    // the source of an expansion means the map points at an OLDER batch (moved
+    // back by hand, or by the Sep-2026 auto-map bug) — cloning it again spawns a
+    // duplicate batch (JPM / JPLV / JPC got a second batch this way). Skip and
+    // flag it; the fix is to point the map at the newest batch.
+    const ids = details.map((d) => d.entry.campaign_id);
+    const prior = await db.execute({
+      sql: `SELECT old_campaign_id, batch, created_at FROM nurture_campaign_expansions
+            WHERE UPPER(client_tag) = ? AND bison_instance = ? AND old_campaign_id IN (${ids.map(() => "?").join(",")})
+            ORDER BY created_at DESC LIMIT 1`,
+      args: [TAG, instance, ...ids],
+    });
+    const p = prior.rows[0];
+    if (p) {
+      row.reason = `already duplicated from campaign ${p.old_campaign_id} on ${String(p.created_at).slice(0, 10)} (batch ${p.batch}) — the map points at an older batch`;
+      if (!opts.dryRun) {
+        await logError("nurture-expand", `STALE-MAP:${TAG}/${instance}`,
+          `Not duplicated: ${row.reason}. Point the target campaigns at the newest batch.`, { ids });
+      }
+      result.instances.push(row); continue;
+    }
     if (!fired) { row.reason = "not fired (nurture gated off)"; result.instances.push(row); continue; }
     if (opts.dryRun) { row.reason = "would expand (dry-run)"; result.instances.push(row); continue; }
 
