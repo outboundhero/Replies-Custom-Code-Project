@@ -9,6 +9,9 @@ import "./nurture-system.css";
 import { getOverview, overviewPayload } from "@/lib/nurture/overview-snapshot";
 import NurtureOverview from "./_ui/overview-view";
 
+// Runs next to Turso (Mumbai): each read is one short hop, not a trip from the US.
+export const preferredRegion = "bom1";
+
 export const dynamic = "force-dynamic";
 // This request's render time — relative times ("5 min ago") hydrate against it.
 const requestTime = () => Date.now();

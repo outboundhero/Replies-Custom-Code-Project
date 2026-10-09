@@ -4,6 +4,9 @@ import { requireAdmin } from "@/lib/auth";
 import db from "@/lib/db";
 import { ensureRemovalsTable, isUndoable } from "@/lib/nurture/queue-removals";
 
+// Runs next to Turso (Mumbai): each read is one short hop, not a trip from the US.
+export const preferredRegion = "bom1";
+
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {

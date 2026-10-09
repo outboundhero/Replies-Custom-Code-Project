@@ -18,6 +18,9 @@ import { ensureRemovalsTable, dropFirstPageCache } from "@/lib/nurture/queue-rem
 import { acquireHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
 import { logActivity } from "@/lib/errors";
 
+// Runs next to Supabase (Singapore), where the queue queries execute; Turso (Mumbai) is one short hop.
+export const preferredRegion = "sin1";
+
 export const maxDuration = 300;
 
 const MAX_BULK = 20_000;
