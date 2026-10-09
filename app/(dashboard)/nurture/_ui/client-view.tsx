@@ -418,7 +418,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
           <div className="card panel"><div className="k">Ready to send</div><div className="v tnum" style={{ color: "var(--emerald-fg)" }}>{s ? fmt(Math.max(0, s.ready - dNow.ready)) : <Skel />}</div><div className="mm">{s && s.eligible - dNow.eligible > s.ready - dNow.ready ? <>past 45-day cooldown · <span title="Past the cooldown but not routable yet — not marked safe, or its ESP isn't confirmed — so auto-push holds them">{fmt(Math.max(0, (s.eligible - dNow.eligible) - (s.ready - dNow.ready)))} held</span></> : "past 45-day cooldown"}</div></div>
           <div className="card panel"><div className="k">In cooldown</div><div className="v tnum">{s ? fmt(Math.max(0, s.cooldown - dNow.cooldown)) : <Skel />}</div><div className="mm">waiting to become eligible</div></div>
           <div className="card panel"><div className="k">Added to campaigns</div><div className="v tnum">{c ? fmt(c.added) : <Skel />}</div><div className="mm">already pushed</div></div>
-          <div className="card panel"><div className="k">Overlapping</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{s ? fmt(s.overlap) : <Skel />}</div><div className="mm">also in other tags</div></div>
+          <div className="card panel" title={s?.overlap_at ? `Counted ${ago(s.overlap_at)} (refreshed overnight)` : "Counted overnight"}><div className="k">Overlapping</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{s ? fmt(s.overlap) : <Skel />}</div><div className="mm">also in other tags</div></div>
         </div>
 
         <div className="tabs">

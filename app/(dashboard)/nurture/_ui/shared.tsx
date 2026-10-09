@@ -16,7 +16,7 @@ export interface TagStats {
   queue: number; eligible: number; ready: number; cooldown: number; esp_unresolved: number; overlap: number;
   sources: Record<string, number>; esps: Record<string, number>; tlds?: Record<string, number>;
   email_endings?: Record<string, number>; site_endings?: Record<string, number>; email_domains?: Record<string, number>;
-  forecast?: number[]; last_new_at: string | null; computed_at: string;
+  forecast?: number[]; last_new_at: string | null; computed_at: string; overlap_at?: string | null;
 }
 export interface OverviewTag {
   tag: string; type: ClientType; group: number | null; b2b: string | null; b2c: string | null;

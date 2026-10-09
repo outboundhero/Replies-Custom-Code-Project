@@ -15,7 +15,8 @@
  * ?tag=X refreshes just that client (both parts) — used after queue changes.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { refreshTagStats, refreshLastContact } from "@/lib/nurture/overview";
+import { refreshTagStats, refreshLastContact, refreshTagOverlap } from "@/lib/nurture/overview";
+import { pacificHour } from "@/lib/pacific-time";
 import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 import { logError } from "@/lib/errors";
 
@@ -42,13 +43,18 @@ export async function GET(req: NextRequest) {
     const lastContact = left < 10_000
       ? { checked: 0, failed: 0, skipped: "out of time" }
       : await refreshLastContact(tag ? { tag, maxMs: left } : { maxCampaigns: 120, maxMs: Math.min(90_000, left), minAgeMs: 2 * 3_600_000 });
+    // Overnight (0–6 AM Pacific) only: the heavy "Overlapping" counts.
+    const leftAfter = 250_000 - (Date.now() - started);
+    const overlap = !tag && pacificHour() < 6 && leftAfter > 30_000
+      ? await refreshTagOverlap({ maxMs: Math.min(90_000, leftAfter - 20_000) })
+      : { refreshed: [] as string[], skipped: "daytime" };
     await rebuildOverviewSnapshot(); // pages read this precomputed copy
     if (stats.busy) console.log("[cron/refresh-nurture-overview] stats skipped: another heavy query holds the lease");
     if (stats.failed.length) {
       // Self-healing (retried after an hour) — log, but keep it out of the Error Log.
       console.error("[cron/refresh-nurture-overview] stats failed:", stats.failed.slice(0, 5));
     }
-    return NextResponse.json({ ok: true, statsRefreshed: stats.refreshed.length, statsBusy: !!stats.busy, statsYielded: !!stats.yielded, statsFailed: stats.failed, lastContact });
+    return NextResponse.json({ ok: true, statsRefreshed: stats.refreshed.length, statsBusy: !!stats.busy, statsYielded: !!stats.yielded, statsFailed: stats.failed, lastContact, overlap: { refreshed: overlap.refreshed.length, skipped: overlap.skipped } });
   } catch (e) {
     await logError("nurture-overview", "cron", (e as Error).message);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

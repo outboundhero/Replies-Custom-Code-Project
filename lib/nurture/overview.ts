@@ -41,6 +41,7 @@ export interface TagStats {
   email_endings: Record<string, number>; site_endings: Record<string, number>;
   email_domains?: Record<string, number>;  // personal mailbox domains (newer stats only)
   forecast: number[]; overlap: number; last_new_at: string | null; computed_at: string;
+  overlap_at?: string;                     // when `overlap` was computed (overnight job)
 }
 
 export interface NurtureCampaignRef {
@@ -364,7 +365,22 @@ export async function dbIsBusy(thresholdMs = 700): Promise<boolean> {
   return (await one()) >= thresholdMs; // confirm (network blips happen)
 }
 
-const LEASE_TTL_MS = 150_000;      // > the stats function's 120s statement timeout
+/**
+ * Is the light stats SQL (patch 2: no overlap scan, first page in the same
+ * pass) installed? Probed with nurture_tag_overlap on a tag that doesn't
+ * exist (instant). Until it is, the stats CRON stays off — the old function
+ * was a 10-30s disk-bound query that slowed the inbox. Cached 10 min.
+ */
+let lightProbe: { at: number; ok: boolean } | null = null;
+export async function lightStatsInstalled(): Promise<boolean> {
+  if (lightProbe && Date.now() - lightProbe.at < 600_000) return lightProbe.ok;
+  const { error } = await supabase.rpc("nurture_tag_overlap", { p_tag: "__probe__", p_ignore_tags: [] });
+  lightProbe = { at: Date.now(), ok: !error };
+  return lightProbe.ok;
+}
+
+const LEASE_TTL_MS = 150_000;
+const BETWEEN_TAGS_MS = 2_000;   // pause between heavy per-tag queries      // > the stats function's 120s statement timeout
 const FAIL_BACKOFF_MS = 60 * 60_000; // a tag that failed isn't retried by the cron for an hour
 
 /**
@@ -410,6 +426,8 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
   const refreshed: string[] = [];
   const failed: Array<{ tag: string; error: string }> = [];
   if (order.length === 0) return { refreshed, failed };
+  // Automatic runs wait for the light stats SQL (see lightStatsInstalled).
+  if (!opts.tags && !(await lightStatsInstalled())) return { refreshed, failed, yielded: true };
 
   const holder = leaseHolder("tag-stats");
   let yielded = false;
@@ -419,6 +437,9 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
     const one = async (tag: string): Promise<string | null> => {
       if (!(await renewHeavyLease(holder, LEASE_TTL_MS))) return "lost the heavy-query lease";
       const startedAt = new Date().toISOString();
+      const prevRow = await db.execute({ sql: "SELECT stats FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [tag.toUpperCase()] });
+      let prev: Partial<TagStats> = {};
+      try { prev = prevRow.rows[0] ? JSON.parse(String(prevRow.rows[0].stats)) : {}; } catch { /* ignore */ }
       const { data, error } = await supabase.rpc("nurture_tag_stats", { p_tag: tag, p_ignore_tags: churned });
       if (error || !data) {
         const msg = error?.message || "no data";
@@ -428,15 +449,31 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
         });
         return msg;
       }
+      // The light stats pass (SQL patch 2) returns the queue's first page and no
+      // overlap count (that's computed overnight) — keep the last known overlap.
+      const { page1, ...statsOnly } = data as Record<string, unknown> & { page1?: Array<Record<string, unknown>> };
+      if (statsOnly.overlap === undefined) {
+        statsOnly.overlap = prev.overlap ?? null;
+        statsOnly.overlap_at = prev.overlap_at ?? (prev.overlap != null ? prev.computed_at : null);
+      } else {
+        statsOnly.overlap_at = statsOnly.computed_at;
+      }
       await db.batch([
         { sql: "INSERT INTO nurture_tag_stats_cache (client_tag, stats, computed_at) VALUES (?, ?, ?) ON CONFLICT(client_tag) DO UPDATE SET stats = excluded.stats, computed_at = excluded.computed_at",
-          args: [tag.toUpperCase(), JSON.stringify(data), new Date().toISOString()] },
+          args: [tag.toUpperCase(), JSON.stringify(statsOnly), new Date().toISOString()] },
         { sql: "DELETE FROM nurture_tag_stats_dirty WHERE client_tag = ? AND dirty_at <= ?", args: [tag.toUpperCase(), startedAt] },
         { sql: "DELETE FROM nurture_tag_stats_fail WHERE client_tag = ?", args: [tag.toUpperCase()] },
       ], "write");
       refreshed.push(tag);
-      // The queue tab's first page, cached while those rows are hot — the client
-      // page paints it instantly and refreshes live behind it. Best-effort.
+      // The queue tab's first page — straight from the stats pass when the
+      // database returns it (no second scan); older SQL: a separate query.
+      if (Array.isArray(page1)) {
+        await db.execute({
+          sql: "INSERT INTO nurture_queue_page1_cache (client_tag, payload, computed_at) VALUES (?, ?, ?) ON CONFLICT(client_tag) DO UPDATE SET payload = excluded.payload, computed_at = excluded.computed_at",
+          args: [tag.toUpperCase(), JSON.stringify({ total: Number(statsOnly.queue) || 0, contacts: page1.map(toQueueContact) }), new Date().toISOString()],
+        });
+        return null;
+      }
       try {
         await renewHeavyLease(holder, LEASE_TTL_MS);
         const pg = await supabase.rpc("nurture_queue_page", {
@@ -453,8 +490,11 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
       } catch { /* the live queue still works */ }
       return null;
     };
+    let first = true;
     for (const tag of order) {
       if (outOfTime()) break;
+      if (!first) await new Promise((r) => setTimeout(r, BETWEEN_TAGS_MS)); // let the disk breathe
+      first = false;
       if (opts.yieldToLoad && (await dbIsBusy())) { yielded = true; break; } // inbox first
       const err = await one(tag);
       if (err) failed.push({ tag, error: err });
@@ -463,6 +503,56 @@ export async function refreshTagStats(opts: { maxTags?: number; maxMs?: number; 
     await releaseHeavyLease(holder).catch(() => {});
   }
   return { refreshed, failed, yielded };
+}
+
+/**
+ * The "Overlapping" count per tag (contacts also queued in another active
+ * client's queue). It's the heaviest part of the numbers, so it runs only
+ * overnight (0–6 AM Pacific), one tag at a time, under the heavy lease and
+ * yielding to load; each tag is refreshed at most once a day.
+ */
+export async function refreshTagOverlap(opts: { maxMs: number }): Promise<{ refreshed: string[]; skipped?: string }> {
+  await ensureOverviewTables();
+  const started = Date.now();
+  const refreshed: string[] = [];
+  const { tags: active, churned } = await activeClientTags();
+  const r = await db.execute("SELECT client_tag, stats FROM nurture_tag_stats_cache");
+  const overlapAt = new Map<string, string>();
+  for (const row of r.rows) {
+    try {
+      const st = JSON.parse(String(row.stats)) as Partial<TagStats>;
+      overlapAt.set(String(row.client_tag).toUpperCase(), String(st.overlap_at ?? (st.overlap != null ? st.computed_at : "") ?? ""));
+    } catch { /* skip */ }
+  }
+  const cutoff = Date.now() - 20 * 3_600_000;
+  const order = [...active]
+    .filter((t) => { const at = overlapAt.get(t.toUpperCase()); return !at || new Date(at).getTime() < cutoff; })
+    .sort((a, b) => (overlapAt.get(a.toUpperCase()) || "").localeCompare(overlapAt.get(b.toUpperCase()) || ""));
+  if (!order.length) return { refreshed, skipped: "all fresh" };
+  const holder = leaseHolder("tag-overlap");
+  if (!(await acquireHeavyLease(holder, LEASE_TTL_MS))) return { refreshed, skipped: "lease busy" };
+  try {
+    let first = true;
+    for (const tag of order) {
+      if (Date.now() - started > opts.maxMs) break;
+      if (!first) await new Promise((res) => setTimeout(res, BETWEEN_TAGS_MS));
+      first = false;
+      if (await dbIsBusy()) return { refreshed, skipped: "database busy" };
+      if (!(await renewHeavyLease(holder, LEASE_TTL_MS))) break;
+      const { data, error } = await supabase.rpc("nurture_tag_overlap", { p_tag: tag, p_ignore_tags: churned });
+      if (error) { if (/function|schema cache/i.test(error.message)) return { refreshed, skipped: "nurture_tag_overlap not installed" }; continue; }
+      const row = await db.execute({ sql: "SELECT stats FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [tag.toUpperCase()] });
+      if (!row.rows[0]) continue;
+      const st = JSON.parse(String(row.rows[0].stats)) as Record<string, unknown>;
+      st.overlap = Number(data) || 0;
+      st.overlap_at = new Date().toISOString();
+      await db.execute({ sql: "UPDATE nurture_tag_stats_cache SET stats = ? WHERE client_tag = ?", args: [JSON.stringify(st), tag.toUpperCase()] });
+      refreshed.push(tag);
+    }
+  } finally {
+    await releaseHeavyLease(holder).catch(() => {});
+  }
+  return { refreshed };
 }
 
 /** Mark a tag's cached numbers as outdated (the next cron run refreshes it first). */
