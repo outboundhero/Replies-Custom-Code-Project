@@ -3,10 +3,11 @@
  *
  * Auto-expands nurture campaigns. For every client with a confirmed map
  * (non-churned), evaluates each instance-trio (the 3 ESP campaigns in one
- * workspace): when all 3 are >= 50% complete AND have > 5,000 combined leads,
- * it clones the trio (duplicate → re-attach senders → rename "… — Batch N" →
- * activate) and re-points the routing map to the clones so future leads flow
- * into the fresh campaigns. Also snapshots every routing's health each run for
+ * workspace): when >= 8,000 of the trio's leads are contacted AND >= 80% of
+ * them, it clones the trio (duplicate → re-attach senders → rename
+ * "[Nurture N]" → +4h offset → activate) and re-points the routing map to the
+ * clones so future leads flow into the fresh campaigns (see
+ * lib/nurture/campaign-expansion.ts). Also snapshots every routing's health each run for
  * the Campaigns monitoring tab.
  *
  * Schedule: daily (vercel.json). Auth: same CRON_SECRET pattern as other crons.

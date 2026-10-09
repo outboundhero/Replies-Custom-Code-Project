@@ -530,9 +530,9 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
               ))}
             </div>
             <div className="card cardpad">
-              <div className="card-h"><h3>Nurture batches</h3><span className="hint">capacity batches N1 / N2 / N3</span></div>
+              <div className="card-h"><h3>Nurture batches</h3><span className="hint">capacity batches N1, N2, N3…</span></div>
               {!data ? <Skel w={200} /> : data.batches.map((b) => {
-                const [txt, cls] = b.state === "on" ? ["Live", "p-ok"] : b.state === "wait" ? ["Waiting to activate", "p-warn"] : ["Not needed yet", "p-mute"];
+                const [txt, cls] = b.state === "on" ? ["Live", "p-ok"] : b.state === "wait" ? ["Waiting to activate", "p-warn"] : [b.batch === 1 ? "Not in use" : "Not needed yet", "p-mute"];
                 const leads = b.campaigns.reduce((t, x) => t + x.totalLeads, 0);
                 return (
                   <div key={b.batch} className="maprow" title={b.campaigns.map((x) => `${x.name} (${x.status}, ${pl(x.totalLeads, "lead")})`).join("\n") || undefined}>

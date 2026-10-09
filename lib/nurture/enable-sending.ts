@@ -4,13 +4,9 @@
  *
  * Inbox model: Bison's GET /api/campaigns/{id}/sender-emails returns the
  * client(tag)-scoped inbox POOL (every inbox carrying the client tag — all
- * ESPs mixed), NOT the inboxes attached to that one campaign. So to attach
- * "all the sender inboxes with the client tag" correctly, we read that pool
- * once per instance and SPLIT it by inbox ESP (Outlook inboxes → the Outlook
- * nurture campaign, Google → Google, smtp → SEGs). Attaching the whole mixed
- * pool to every campaign would send e.g. the Outlook campaign from Google
- * inboxes and defeat the per-ESP segmentation, so we attach only the matching
- * subset to each mapped campaign.
+ * ESPs mixed), NOT the inboxes attached to that one campaign. Every CONNECTED
+ * inbox in that pool is attached to each mapped campaign: ESP decides which
+ * campaign a LEAD goes to, not which inboxes send it (see attachInboxesForClient).
  */
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { getChurnedTags } from "@/lib/churn";
@@ -172,10 +168,10 @@ export async function autoActivateReadyCampaigns(clientTag: string): Promise<Aut
 
   if (!(await getMapConfirmedAt(TAG))) { out.error = "map not confirmed"; return out; }
   if ((await getChurnedTags()).has(TAG)) { out.error = "churned"; return out; }
-  // 80% activation gate: never auto-activate nurture before the client is fired.
-  // The gate itself calls this function right after firing (isFired → true), so
-  // activation still happens the moment a client crosses 80%.
-  if (!(await isFired(TAG))) { out.error = "not fired (below 80% main completion)"; return out; }
+  // Never auto-activate nurture before the client is fired (the activation gate
+  // fires a client once it's live — see lib/nurture/activation-gate.ts — and
+  // calls this function right after firing).
+  if (!(await isFired(TAG))) { out.error = "not fired yet (client not live, or the 2-hourly activation check hasn't run yet)"; return out; }
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { out.error = "no campaigns mapped"; return out; }
 

@@ -4,12 +4,14 @@
  * re-point the routing map to the clones so FUTURE leads flow into the fresh
  * campaigns. Existing leads stay in the old campaigns and keep sending.
  *
- * Trigger per instance-trio: every campaign at completion_percentage >= 50 AND
- * combined total_leads across the 3 > 5,000.
+ * Trigger per instance-trio: >= CONTACTED_LEADS_MIN (8,000) leads contacted
+ * across the 3 campaigns AND >= CONTACTED_MIN_PCT (80%) of their leads
+ * contacted; the client must be fired, mapped (all 3 ESPs) and not churned.
  *
  * Clone = Bison duplicate (carries schedule + sequence + settings) → re-attach
- * sender emails (duplicate drops them) → rename to canonical "… — Batch N" →
- * activate → switch nurture_campaign_map → record + snapshot.
+ * sender emails (duplicate drops them) → rename "[Nurture N]" → +4h schedule
+ * offset from the matching main → activate → switch nurture_campaign_map →
+ * record + snapshot.
  */
 import db from "@/lib/db";
 import { getCampaignMap, getMapConfirmedAt, type CampaignMapEntry } from "@/lib/nurture/campaign-map";

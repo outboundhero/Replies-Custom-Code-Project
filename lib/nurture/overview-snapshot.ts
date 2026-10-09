@@ -155,7 +155,7 @@ export function clientPayload(o: { data: Overview; builtAt: string }, tag: strin
   return {
     client,
     slots,
-    batches: batchCampaigns.map((b, i) => ({ batch: b.batch, state: t.batches[i], campaigns: b.campaigns })),
+    batches: batchCampaigns.map((b, i) => ({ batch: b.batch, state: b.state ?? t.batches[i] ?? "off", campaigns: b.campaigns })),
     builtAt: o.builtAt,
   };
 }

@@ -80,7 +80,7 @@ export interface OverviewTag {
   stoppedRecovered: number;          // stopped leads recovered straight into campaigns (never queued)
   errors: StatusBadge[];
   slots: MapSlot[];                  // target campaigns, lane × instance × ESP (client page)
-  batchCampaigns: Array<{ batch: number; campaigns: Array<NurtureCampaignRef & { instanceLabel: string }> }>;
+  batchCampaigns: Array<{ batch: number; state: BatchState; campaigns: Array<NurtureCampaignRef & { instanceLabel: string }> }>;
 }
 
 // ── Turso caches written by the cron ─────────────────────────────────────────
@@ -275,9 +275,11 @@ export async function buildOverview(): Promise<{
       const cells = ESPS.map((e) => espMap.get(e)).filter(Boolean) as { completion: number; total: number }[];
       if (trioReadyToExpand(cells).ready) readyToExpand = true;
     }
-    const maxBatch = relevant.reduce((m, c) => Math.max(m, c.batch), 0);
+    // Archived campaigns are retired: they never make a batch live or "set up".
+    const current = relevant.filter((c) => c.status !== "archived");
+    const maxBatch = current.reduce((m, c) => Math.max(m, c.batch), 0);
     const batchState = (k: number): BatchState => {
-      const inBatch = relevant.filter((c) => c.batch === k);
+      const inBatch = current.filter((c) => c.batch === k);
       if (inBatch.some((c) => ON.has(c.status))) return "on";
       if (inBatch.length) return "wait";                       // set up, not active yet
       if (k > 1 && k === maxBatch + 1 && readyToExpand) return "wait"; // threshold met — next expansion run creates it
@@ -312,9 +314,12 @@ export async function buildOverview(): Promise<{
         }
       }
     }
-    const batchCampaigns = [1, 2, 3].map((k) => ({
+    // Client page rows: N1–N3 always, plus every later batch with current campaigns.
+    const batchNums = [1, 2, 3, ...[...new Set(current.map((c) => c.batch).filter((b) => b > 3))].sort((a, b) => a - b)];
+    const batchCampaigns = batchNums.map((k) => ({
       batch: k,
-      campaigns: relevant.filter((c) => c.batch === k).map((c) => ({ ...c, instanceLabel: getInstanceLabel(c.instance) })),
+      state: batchState(k),
+      campaigns: current.filter((c) => c.batch === k).map((c) => ({ ...c, instanceLabel: getInstanceLabel(c.instance) })),
     }));
 
     // ── status badges (each with the hover "what + how to fix")

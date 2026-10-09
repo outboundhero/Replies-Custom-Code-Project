@@ -149,7 +149,7 @@ export function MappingPill({ mapping, issues }: { mapping: "ok" | "bad"; issues
     : <span className="pill p-bad">{content}</span>;
 }
 
-const BATCH_TITLE: Record<BatchState, string> = { on: "live", wait: "waiting to activate", off: "not needed yet" };
+const BATCH_TITLE: Record<BatchState, string> = { on: "live", wait: "waiting to activate", off: "not in use" };
 export function Batches({ b, extra = 0 }: { b: BatchState[]; extra?: number }) {
   return (
     <span className="batches">

@@ -336,7 +336,7 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
         </div>
 
         <div className="foot">
-          <b>Nurture batches</b> N1·N2·N3: <span className="batch b-on">live</span> <span className="batch b-wait">waiting</span> <span className="batch b-off">not needed</span>. &nbsp;<b>Mapping</b> auto-confirms — <span className="pill p-ok" style={{ fontSize: 10 }}>Mapped</span> / <span className="pill p-bad" style={{ fontSize: 10 }}>Needs attention</span>. &nbsp;<b>Last contact</b> is per tag. Hover a <b>Status</b> badge for the fix.
+          <b>Nurture batches</b> N1·N2·N3: <span className="batch b-on">live</span> <span className="batch b-wait">waiting</span> <span className="batch b-off">not in use</span>. &nbsp;<b>Mapping</b> auto-confirms — <span className="pill p-ok" style={{ fontSize: 10 }}>Mapped</span> / <span className="pill p-bad" style={{ fontSize: 10 }}>Needs attention</span>. &nbsp;<b>Last contact</b> is per tag. Hover a <b>Status</b> badge for the fix.
           {data && (
             <><br />Queue numbers are recomputed every few hours{oldestStats ? ` (oldest ${ago(oldestStats, now)})` : ""} · campaigns synced {ago(data.campaignsSyncedAt, now)}.</>
           )}
