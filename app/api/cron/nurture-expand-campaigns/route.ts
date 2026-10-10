@@ -13,6 +13,7 @@
  * Schedule: daily (vercel.json). Auth: same CRON_SECRET pattern as other crons.
  */
 import { NextRequest, NextResponse } from "next/server";
+import db from "@/lib/db";
 import { expandCampaignsForClient, listExpansionClients } from "@/lib/nurture/campaign-expansion";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -30,7 +31,13 @@ export async function GET(req: NextRequest) {
   }
 
   const startedAt = Date.now();
-  const tags = await listExpansionClients();
+  // Least-recently-checked first: the soft budget covers ~78 of ~86 clients, so a
+  // fixed order never reached the last few (SCAS…UJ went unchecked for weeks).
+  // Each evaluated client stamps nurture_routing_health.checked_at.
+  const allTags = await listExpansionClients();
+  const checked = await db.execute("SELECT UPPER(client_tag) AS t, MAX(checked_at) AS c FROM nurture_routing_health GROUP BY 1");
+  const lastChecked = new Map(checked.rows.map((r) => [String(r.t), String(r.c ?? "")]));
+  const tags = [...allTags].sort((a, b) => (lastChecked.get(a) ?? "").localeCompare(lastChecked.get(b) ?? "") || a.localeCompare(b));
   const summary: Array<{ tag: string; expandedInstances: number; clones: number; errors: number }> = [];
 
   for (const tag of tags) {
