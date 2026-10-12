@@ -16,6 +16,7 @@ import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache } from "@/lib/server-cache";
 import { fetchNewClientInfo, type NewClientInfoRow } from "@/lib/google-sheets";
 import { listCampaigns, getSequenceSteps, getCampaignSchedule } from "@/lib/outboundhero-api";
+import { previewOnboardingAllocation } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { localizeSteps, placeProblems, defaultArea, type CopyStep, type Place } from "@/lib/onboarding/campaign-copy";
 import {
@@ -326,9 +327,76 @@ const createCampaigns: Automation = {
   },
 };
 
+// ── 3. Attach client tags / redirects / add to campaigns / 3 per day ────────
+// LeadSync owns the domain reserve, so it decides which domains a new client
+// gets (lib/leadsync.ts). PREVIEW ONLY for now: it shows LeadSync's dry run.
+
+const ALLOCATION_NOT_SWITCHED_ON =
+  "Allocating domains isn't switched on yet — this shows what LeadSync would give the client. Do the step by hand for now.";
+
+/** "Tier 1 (Base)" → "1". Anything else is left to LeadSync (it reads the Client Tracker). */
+function tierOfPlan(plan: string | null): "0.5" | "1" | "2" | undefined {
+  const p = plan ?? "";
+  return /tier\s*0\.5/i.test(p) ? "0.5" : /tier\s*2/i.test(p) ? "2" : /tier\s*1/i.test(p) ? "1" : undefined;
+}
+
+const allocateDomains: Automation = {
+  async preview(ctx) {
+    const c = ctx.client;
+    const tag = c.client_tag.toUpperCase();
+    const blockers: string[] = [];
+    const asked = typeof ctx.params.tier === "string" && ["0.5", "1", "2"].includes(ctx.params.tier) ? (ctx.params.tier as "0.5" | "1" | "2") : tierOfPlan(c.plan_type);
+    const inputs: AutomationInput[] = [{
+      key: "tier", label: "Tier", type: "select", value: asked ?? "",
+      options: [{ value: "0.5", label: "Tier 0.5 — 20 B2B + 5 B2C domains" }, { value: "1", label: "Tier 1 — 20 B2B + 5 B2C domains" }, { value: "2", label: "Tier 2 — 40 B2B + 10 B2C domains" }],
+      hint: c.plan_type ? `The client's plan here: ${c.plan_type}` : "No plan on the client — left empty, LeadSync uses the Client Tracker's tier.",
+    }];
+
+    const rows: string[][] = [];
+    const notes: PreviewNote[] = [];
+    let summary = "Asks LeadSync which reserve domains this client would get.";
+    if (!c.group_num) {
+      blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+    } else {
+      const r = await previewOnboardingAllocation(tag, c.group_num, asked);
+      if (!r.ok) {
+        blockers.push(`Couldn't get the plan from LeadSync: ${r.error}`);
+      } else {
+        const p = r.plan;
+        summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
+        for (const s of p.instances) {
+          rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), String(s.reserveAvailable), s.short ? String(s.short) : "—"]);
+          if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve.`);
+          if (s.note) blockers.push(`${s.label}: LeadSync says “${s.note}”.`);
+          if (s.picking.length) notes.push({ title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give`, text: s.picking.join("\n") });
+        }
+      }
+    }
+    blockers.push(ALLOCATION_NOT_SWITCHED_ON);
+
+    return {
+      title: "Attach client tags / redirects / add to campaigns / set 3 per day",
+      lines: [
+        summary,
+        "LeadSync only gives domains that carry no client tag, are at least 21 days old, are not marked Burnt and are not blacklisted — the same rules as its own top-ups.",
+        "Running it will tag those domains for the client, point their redirect at the client's website, attach them to the client's campaigns and set every sender to 3 a day.",
+        "Marks this step Done.",
+      ],
+      inputs,
+      blockers,
+      tables: rows.length ? [{ title: "Domains by instance", columns: ["Instance", "Tier gets", "Already tagged", "To add", "Ready in reserve", "Short"], rows }] : [],
+      notes,
+    };
+  },
+  async run() {
+    return { ok: false, summary: ALLOCATION_NOT_SWITCHED_ON };
+  },
+};
+
 const AUTOMATIONS: Record<string, Automation> = {
   slack_outreachify: slackOutreachify,
   create_campaigns: createCampaigns,
+  allocate_domains: allocateDomains,
 };
 
 export function getAutomation(key: string | null | undefined): Automation | null {
