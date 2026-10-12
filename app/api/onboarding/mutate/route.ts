@@ -17,7 +17,9 @@ import {
   upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate, applyStandardTemplate,
   upsertOnboardingUser, deleteOnboardingUser, setSetting,
 } from "@/lib/onboarding/store";
-import { OUTREACHIFY_SLACK_SETTING } from "@/lib/onboarding/automations";
+import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING } from "@/lib/onboarding/automations";
+import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
+import { placeProblems } from "@/lib/onboarding/campaign-copy";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
@@ -27,7 +29,7 @@ const ADMIN_ACTIONS = new Set([
   "user-upsert", "user-delete", "setting-set",
 ]);
 // Settings the UI may change.
-const SETTING_KEYS = new Set([OUTREACHIFY_SLACK_SETTING]);
+const SETTING_KEYS = new Set([OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING]);
 const asGroup = (v: unknown): 1 | 2 | null => (Number(v) === 1 ? 1 : Number(v) === 2 ? 2 : null);
 
 export async function POST(req: NextRequest) {
@@ -172,6 +174,14 @@ export async function POST(req: NextRequest) {
       case "setting-set": {
         const key = String(body.key || "");
         if (!SETTING_KEYS.has(key)) return NextResponse.json({ error: "Unknown setting" }, { status: 400 });
+        if (key === CAMPAIGN_MASTERS_SETTING) {
+          // Stored normalised; a group with no master tag is simply left out.
+          const masters = parseMasterSettings(typeof body.value === "string" ? body.value : JSON.stringify(body.value ?? {}));
+          const issues = Object.values(masters).flatMap((m) => (m ? placeProblems(m.place, `Master ${m.tag}`) : []));
+          if (issues.length) return NextResponse.json({ error: issues.join(" ") }, { status: 400 });
+          await setSetting(key, JSON.stringify(masters));
+          return NextResponse.json({ ok: true });
+        }
         // Empty = back to the default destination.
         await setSetting(key, String(body.value ?? "").trim() || null);
         return NextResponse.json({ ok: true });

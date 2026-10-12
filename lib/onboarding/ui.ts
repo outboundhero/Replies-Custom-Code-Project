@@ -42,12 +42,13 @@ export function groupText(g: 1 | 2 | null | undefined): string {
 }
 
 /**
- * Automations a checklist task can carry. `built: false` = the automation isn't
- * built yet, so the task is completed by hand for now (the UI says so).
+ * Automations a checklist task can carry. `built: false` = the automation
+ * can't be run yet, so the task is completed by hand for now (the UI says so).
+ * `preview: true` = it can already show exactly what it would do.
  */
-export const AUTOMATION_META: Record<string, { label: string; built: boolean }> = {
+export const AUTOMATION_META: Record<string, { label: string; built: boolean; preview?: boolean }> = {
   slack_outreachify: { label: "Sends the client tag + group to Outreachify on Slack", built: true },
-  create_campaigns: { label: "Creates the 12 Email Bison campaigns", built: false },
+  create_campaigns: { label: "Creates the 12 Email Bison campaigns", built: false, preview: true },
   allocate_domains: { label: "Allocates reserve domains, tags + attaches them, sets 3/day", built: false },
   whitelist_email: { label: "Sends the whitelisting-domains email", built: false },
   go_live_email: { label: "Sends the client go-live email", built: false },

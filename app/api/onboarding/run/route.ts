@@ -28,7 +28,9 @@ export async function POST(req: NextRequest) {
     const task = await getTask(taskId);
     if (!task) return NextResponse.json({ error: "Task not found." }, { status: 404 });
     const automation = getAutomation(task.automation);
-    if (!automation || !AUTOMATION_META[task.automation || ""]?.built) {
+    const meta = AUTOMATION_META[task.automation || ""];
+    // Built automations preview and run; preview-only ones can show what they would do.
+    if (!automation || !(meta?.built || (meta?.preview && mode === "preview"))) {
       return NextResponse.json({ error: "This step has no automation yet — complete it by hand." }, { status: 400 });
     }
     const client = await getClient(task.client_tag);

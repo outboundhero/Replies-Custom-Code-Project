@@ -394,6 +394,10 @@ export interface NewClientInfoRow {
   contactEmails: string[];
   primaryContactEmail: string;
   clientType: string;
+  /** "Company area(s)" as typed, e.g. "All of Orange County, California". */
+  area: string;
+  /** "Company office address / Location", e.g. "Anaheim, California". */
+  office: string;
 }
 
 /** "10/15/2026" (the form's format) or "2026-10-15" → "2026-10-15"; "" otherwise. */
@@ -430,6 +434,8 @@ export async function fetchNewClientInfo(): Promise<NewClientInfoRow[]> {
   const emailsIdx = findColumnStartsWith(headers, "Email(s)");
   const primaryIdx = findColumnStartsWith(headers, "Primary point of contact person email");
   const typeIdx = findColumnStartsWith(headers, "Client type");
+  const areaIdx = findColumnStartsWith(headers, "Company area");
+  const officeIdx = findColumnStartsWith(headers, "Company office address");
   const cell = (row: string[], i: number) => (i === -1 ? "" : (row[i]?.toString() || "").trim());
 
   const out: NewClientInfoRow[] = [];
@@ -445,6 +451,8 @@ export async function fetchNewClientInfo(): Promise<NewClientInfoRow[]> {
       contactEmails: cell(rows[i], emailsIdx).match(/[^\s,;<>()]+@[^\s,;<>()]+\.[^\s,;<>()]+/g) || [],
       primaryContactEmail: cell(rows[i], primaryIdx),
       clientType: cell(rows[i], typeIdx),
+      area: cell(rows[i], areaIdx).replace(/\s+/g, " "),
+      office: cell(rows[i], officeIdx).replace(/\s+/g, " "),
     });
   }
   return out;

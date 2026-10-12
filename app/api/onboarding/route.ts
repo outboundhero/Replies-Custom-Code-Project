@@ -8,13 +8,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth";
 import { withCache, setCached, nsVersion } from "@/lib/server-cache";
 import { listClients, listTasks, listOnboardingUsers, getSetting } from "@/lib/onboarding/store";
-import { OUTREACHIFY_SLACK_SETTING, outreachifyDestinations } from "@/lib/onboarding/automations";
+import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING, outreachifyDestinations } from "@/lib/onboarding/automations";
+import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
 
 async function loadBoard() {
-  const [clients, tasks, users, slackSetting, slackDests] = await Promise.all([
+  const [clients, tasks, users, slackSetting, slackDests, masters] = await Promise.all([
     listClients(), listTasks(), listOnboardingUsers(), getSetting(OUTREACHIFY_SLACK_SETTING), outreachifyDestinations(),
+    getSetting(CAMPAIGN_MASTERS_SETTING),
   ]);
-  return { clients, tasks, users, outreachifySlack: { saved: slackSetting, sendsTo: slackDests.map((d) => d.label) } };
+  return {
+    clients, tasks, users,
+    outreachifySlack: { saved: slackSetting, sendsTo: slackDests.map((d) => d.label) },
+    campaignMasters: parseMasterSettings(masters),
+  };
 }
 
 export async function GET(req: NextRequest) {

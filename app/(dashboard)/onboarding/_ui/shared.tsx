@@ -5,7 +5,7 @@
  * the mutate helper, and the checklist itself (owner sections → task lines →
  * the Run dialog).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AlertTriangle, Check, Loader2, Lock, Pencil, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -38,9 +38,12 @@ export type OnbTask = {
   completed_at: string | null; completed_by: string | null; last_run: LastRun | null;
 };
 export type UserRow = { id: string; name: string; slack_member_id: string | null; email: string | null };
+export type MasterPlace = { area: string; city: string; state: string; abbr: string };
+export type CampaignMasters = Partial<Record<"1" | "2", { tag: string; place: MasterPlace }>>;
 export type BoardData = {
   clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[];
   outreachifySlack: { saved: string | null; sendsTo: string[] };
+  campaignMasters: CampaignMasters;
 };
 
 export const UNASSIGNED = "—";
@@ -181,19 +184,41 @@ export function TaskAction({ task, gate, isAdmin, busy, onRun, onComplete }: {
   task: OnbTask; gate: TaskGate; isAdmin: boolean; busy: boolean; onRun: () => void; onComplete: () => void;
 }) {
   if (task.status === "completed") return null;
+  const auto = task.automation ? AUTOMATION_META[task.automation] : null;
   if (gate.blocker) {
     return (
-      <span title={`Finish “${gate.blocker.title}” first — these steps run in order.`}
-        className="inline-flex h-8 items-center gap-1 rounded-md border border-dashed px-2.5 text-xs text-muted-foreground whitespace-nowrap">
-        <Lock className="h-3 w-3" /> After step {gate.blockerStep}
-      </span>
+      <div className="flex items-center gap-2">
+        {/* Looking at what a step would do changes nothing, so it's allowed ahead of its turn. */}
+        {auto?.preview && !auto.built && isAdmin && (
+          <Button size="sm" variant="ghost" className="h-8 gap-1.5 text-primary" onClick={onRun} disabled={busy}>
+            <Zap className="h-3.5 w-3.5" /> Preview
+          </Button>
+        )}
+        <span title={`Finish “${gate.blocker.title}” first — these steps run in order.`}
+          className="inline-flex h-8 items-center gap-1 rounded-md border border-dashed px-2.5 text-xs text-muted-foreground whitespace-nowrap">
+          <Lock className="h-3 w-3" /> After step {gate.blockerStep}
+        </span>
+      </div>
     );
   }
-  if (task.automation && AUTOMATION_META[task.automation]?.built && isAdmin) {
+  if (auto?.built && isAdmin) {
     return (
       <Button size="sm" className="h-8 gap-1.5" onClick={onRun} disabled={busy}>
         <Zap className="h-3.5 w-3.5" /> Run
       </Button>
+    );
+  }
+  // Not runnable yet, but it can show what it would do — done by hand meanwhile.
+  if (auto?.preview && isAdmin) {
+    return (
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="ghost" className="h-8 gap-1.5 text-primary" onClick={onRun} disabled={busy}>
+          <Zap className="h-3.5 w-3.5" /> Preview
+        </Button>
+        <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={onComplete} disabled={busy}>
+          <Check className="h-3.5 w-3.5" /> Complete
+        </Button>
+      </div>
     );
   }
   return (
@@ -212,7 +237,11 @@ export function TaskNotes({ task }: { task: OnbTask }) {
       {auto && !done && (
         <div className={cn("mt-1 flex items-start gap-1 text-xs", auto.built ? "text-primary" : "text-amber-700 dark:text-amber-400")}>
           <Zap className="mt-0.5 h-3 w-3 shrink-0" />
-          <span>{auto.built ? auto.label : `${auto.label} — automation coming, complete it by hand for now`}</span>
+          <span>
+            {auto.built ? auto.label
+              : auto.preview ? `${auto.label} — preview ready, creating isn't switched on yet; complete it by hand for now`
+              : `${auto.label} — automation coming, complete it by hand for now`}
+          </span>
         </div>
       )}
       {task.last_run && !task.last_run.ok && !done && (
@@ -326,8 +355,15 @@ export function ClientChecklist({ client, tasks, users, isAdmin, onChanged, edit
 }
 
 // ─────────────────────────── Run dialog ───────────────────────────
-type PreviewInput = { key: string; label: string; type: "group"; value: number | string | null; hint?: string };
-type Preview = { title: string; lines: string[]; message?: string; inputs: PreviewInput[]; blockers: string[] };
+type PreviewInput = {
+  key: string; label: string; type: "group" | "text" | "select"; value: number | string | null;
+  hint?: string; placeholder?: string; options?: { value: string; label: string }[];
+};
+type Preview = {
+  title: string; lines: string[]; message?: string; inputs: PreviewInput[]; blockers: string[];
+  tables?: { title: string; columns: string[]; rows: string[][] }[];
+  notes?: { title: string; text: string }[];
+};
 
 async function postRun(taskId: string, mode: "preview" | "run", params: Record<string, unknown>) {
   const res = await fetch("/api/onboarding/run", {
@@ -351,11 +387,20 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Text fields are typed locally and sent when the field is left (or on Enter).
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const focused = useRef<string | null>(null);
+  const canRun = !!(task.automation && AUTOMATION_META[task.automation]?.built);
 
   const showPreview = useCallback(({ status, data }: Awaited<ReturnType<typeof postRun>>) => {
     setLoading(false);
-    if (data.preview) { setPreview(data.preview); setError(null); }
-    else setError(data.error || `Couldn't load the preview (${status})`);
+    if (data.preview) {
+      const p = data.preview;
+      setPreview(p); setError(null);
+      // Take the server's values, except for the field being typed in right now.
+      setDrafts((prev) => Object.fromEntries(p.inputs.filter((i) => i.type === "text")
+        .map((i) => [i.key, focused.current === i.key && i.key in prev ? prev[i.key] : String(i.value ?? "")])));
+    } else setError(data.error || `Couldn't load the preview (${status})`);
   }, []);
   useEffect(() => {
     let alive = true;
@@ -381,13 +426,20 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   }
 
   const blocked = !preview || preview.blockers.length > 0;
+  const wide = !!preview?.tables?.length;
+  const fields = preview?.inputs.filter((i) => i.type !== "group") ?? [];
+  function commitText(key: string) {
+    focused.current = null;
+    const current = preview?.inputs.find((i) => i.key === key);
+    if (current && (drafts[key] ?? "") !== String(current.value ?? "")) setParam(key, drafts[key] ?? "");
+  }
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !running) onClose(); }}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className={cn("max-h-[90vh] overflow-y-auto", wide ? "sm:max-w-5xl" : "sm:max-w-xl")}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Zap className="h-4 w-4 text-primary" />{preview?.title ?? task.title}</DialogTitle>
-          <DialogDescription>{clientLabel} — review what will happen, then run it.</DialogDescription>
+          <DialogDescription>{clientLabel} — {canRun ? "review what will happen, then run it." : "a preview of what this step will do. Nothing is created."}</DialogDescription>
         </DialogHeader>
 
         {!preview && loading && (
@@ -422,6 +474,31 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
               </div>
             ))}
 
+            {fields.length > 0 && (
+              <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
+                {fields.map((inp) => (
+                  <div key={inp.key} className="space-y-1.5">
+                    <label className="text-xs font-medium text-muted-foreground">{inp.label}</label>
+                    {inp.type === "select" ? (
+                      <Select value={String(inp.value ?? "")} onValueChange={(v) => setParam(inp.key, v)} disabled={running}>
+                        <SelectTrigger className="h-9 w-full text-sm"><SelectValue placeholder="Choose…" /></SelectTrigger>
+                        <SelectContent>
+                          {(inp.options ?? []).map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input value={drafts[inp.key] ?? ""} placeholder={inp.placeholder} disabled={running} className="h-9"
+                        onFocus={() => { focused.current = inp.key; }}
+                        onChange={(e) => setDrafts((d) => ({ ...d, [inp.key]: e.target.value }))}
+                        onBlur={() => commitText(inp.key)}
+                        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+                    )}
+                    {inp.hint && <p className="text-[11px] leading-snug text-muted-foreground">{inp.hint}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <div className="text-xs font-medium text-muted-foreground">What happens when you run it</div>
               <ol className="space-y-1 text-sm">
@@ -441,6 +518,31 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
               </div>
             )}
 
+            {preview.tables?.map((t) => (
+              <div key={t.title} className="space-y-1.5">
+                <div className="text-xs font-medium text-muted-foreground">{t.title}</div>
+                <div className="overflow-x-auto rounded-lg border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/40 text-left text-muted-foreground">
+                      <tr>{t.columns.map((col) => <th key={col} className="px-2.5 py-1.5 font-medium whitespace-nowrap">{col}</th>)}</tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {t.rows.map((r, i) => (
+                        <tr key={i}>{r.map((cell, j) => <td key={j} className={cn("px-2.5 py-1.5 align-top whitespace-nowrap", j === 1 ? "font-medium" : "text-muted-foreground")}>{cell}</td>)}</tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+
+            {preview.notes?.map((n) => (
+              <div key={n.title} className="space-y-1.5">
+                <div className="text-xs font-medium text-muted-foreground">{n.title}</div>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-[11px] leading-relaxed">{n.text}</pre>
+              </div>
+            ))}
+
             {preview.blockers.length > 0 && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
                 <div className="flex items-center gap-1.5 font-medium"><AlertTriangle className="h-3.5 w-3.5" /> Can&apos;t run yet</div>
@@ -457,10 +559,12 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={running}>Cancel</Button>
-          <Button onClick={run} disabled={blocked || loading || running} className="gap-1.5">
-            {running ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</> : <><Zap className="h-3.5 w-3.5" /> Run &amp; mark done</>}
-          </Button>
+          <Button variant="outline" onClick={onClose} disabled={running}>{canRun ? "Cancel" : "Close"}</Button>
+          {canRun && (
+            <Button onClick={run} disabled={blocked || loading || running} className="gap-1.5">
+              {running ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</> : <><Zap className="h-3.5 w-3.5" /> Run &amp; mark done</>}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
