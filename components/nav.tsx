@@ -45,7 +45,7 @@ const items: NavItem[] = [
     defaultOpen: true,
     children: [
       { href: "/clients", label: "All Clients" },
-      { href: "/onboarding", label: "Onboarding" },
+      { href: "/onboarding", label: "Onboarding", adminOnly: true },
     ],
   },
   { href: "/sections", label: "Sections & Tags", adminOnly: true },

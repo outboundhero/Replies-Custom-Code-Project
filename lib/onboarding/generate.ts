@@ -1,13 +1,17 @@
 /**
  * Onboarding task generator (pure) — the timeline engine.
  *
- * Given an onboarding client (start date + role owners) and the standard task
- * template, produce the concrete task rows: each task's `due_date` is
- * `start_date + day_offset` CALENDAR days, and its `assignee_email` is resolved
- * from the task's role → the client's owner for that role.
+ * Given an onboarding client (start date) and the standard task template,
+ * produce the concrete task rows. Two kinds of template task:
+ *   • dated   — `due_date = start_date + day_offset` CALENDAR days (Day N; a
+ *               client starting on the 1st has Day 1 on the 2nd);
+ *   • ordered — no due date (`no_due`): they run in checklist order whenever
+ *               their owner clicks Run / Complete.
+ * Each task is assigned to the template's person (`assignee_id`); legacy
+ * templates without one fall back to the client's owner for the task's role.
  *
- * Kept dependency-free (no db, no network) so the Phase-2 automation engine can
- * drive it from a cron/event exactly the same way the Add-to-Onboarding form does.
+ * Kept dependency-free (no db, no network) so the API, the UI and tests all
+ * share the same rules.
  */
 
 export type OnboardingRole = "domains" | "inbox" | "ops";
@@ -27,6 +31,12 @@ export interface TemplateTask {
   day_offset: number;
   order_index: number;
   task_group: string | null;
+  /** Default assignee (an onboarding_user id). */
+  assignee_id?: string | null;
+  /** 1 = no due date; runs in checklist order. */
+  no_due?: number;
+  /** Automation behind the task's Run button (lib/onboarding/automations.ts); null = manual check-off. */
+  automation?: string | null;
 }
 
 export interface OnboardingClientInput {
@@ -44,9 +54,36 @@ export interface GeneratedTask {
   role: OnboardingRole;
   task_group: string | null;
   day_offset: number;
-  due_date: string; // YYYY-MM-DD
-  assignee_email: string | null;
+  due_date: string | null; // YYYY-MM-DD; null for ordered (no-due) tasks
+  assignee_email: string | null; // an onboarding_user id (legacy column name)
   order_index: number;
+  no_due: number;
+  automation: string | null;
+}
+
+/**
+ * Group rule: a client starting on the 1st goes to Group 2, on the 15th to
+ * Group 1. Any other start day has no automatic group (it must be chosen).
+ */
+export function groupForStartDate(startDate: string | null | undefined): 1 | 2 | null {
+  if (!isValidDate(startDate)) return null;
+  const day = Number(String(startDate).split("-")[2]);
+  return day === 1 ? 2 : day === 15 ? 1 : null;
+}
+
+/**
+ * Ordered tasks run in checklist order: the first ordered task of this client
+ * (by order_index) that isn't completed yet and comes BEFORE `task`, or null
+ * when `task` is free to start. Dated tasks are never blocked.
+ */
+export function blockingTask<T extends { id: string; client_tag: string; no_due: number; order_index: number; status: TaskStatus }>(
+  task: T, clientTasks: T[],
+): T | null {
+  if (!task.no_due) return null;
+  const earlier = clientTasks
+    .filter((t) => t.client_tag === task.client_tag && t.no_due && t.id !== task.id && t.order_index < task.order_index && t.status !== "completed")
+    .sort((a, b) => a.order_index - b.order_index);
+  return earlier[0] ?? null;
 }
 
 /** Add N calendar days to a YYYY-MM-DD date, returning YYYY-MM-DD. Timezone-
@@ -91,8 +128,10 @@ export function generateTasks(client: OnboardingClientInput, template: TemplateT
       role: t.role,
       task_group: t.task_group,
       day_offset: t.day_offset,
-      due_date: addDays(client.start_date, t.day_offset),
-      assignee_email: ownerForRole(client, t.role),
+      due_date: t.no_due ? null : addDays(client.start_date, t.day_offset),
+      assignee_email: (t.assignee_id || "").trim() || ownerForRole(client, t.role),
       order_index: t.order_index || i,
+      no_due: t.no_due ? 1 : 0,
+      automation: t.automation ?? null,
     }));
 }

@@ -1,29 +1,50 @@
 /**
- * The standard onboarding task template (from the "Client Onboarding System"
- * build doc). Seeded on first use; fully editable afterward in the Template tab.
- * `role` is the default owner bucket for each task and can be re-assigned in-UI.
+ * The standard onboarding checklist (OutboundHero × Outreachify engineering
+ * requirements, 2026-09-21, Part 2). Seeded on first use; editable afterward in
+ * the Template tab.
+ *
+ *   • Nick's tasks have no due day — they run in this order whenever he clicks
+ *     Run / Complete. `automation` names the automation behind the Run button
+ *     (lib/onboarding/automations.ts); tasks without one are manual check-offs.
+ *   • Madison's and Spencer's tasks are manual check-offs due on Day N
+ *     (client start date + N days).
  */
-import type { OnboardingRole } from "@/lib/onboarding/generate";
 
 export interface SeedTask {
   title: string;
-  role: OnboardingRole;
-  day_offset: number;
+  /** Owner's first name — matched to an onboarding user (created if missing). */
+  owner: "Nick" | "Madison" | "Spencer";
+  /** Day N, or null for an ordered (no due day) task. */
+  day: number | null;
   task_group: string;
+  automation?: string;
 }
 
-// order = array order. Day offsets and groups mirror the doc's template table.
+// order = array order.
 export const DEFAULT_TEMPLATE: SeedTask[] = [
-  { title: "Purchase domains on Porkbun",          role: "domains", day_offset: 1,  task_group: "Domain Setup" },
-  { title: "Create email accounts",               role: "inbox",   day_offset: 1,  task_group: "Inbox Setup" },
-  { title: "Message Cheap Inboxes",               role: "inbox",   day_offset: 1,  task_group: "Inbox Setup" },
-  { title: "Slack Outreachify",                   role: "ops",     day_offset: 1,  task_group: "Technical Setup" },
-  { title: "Email Client - Accounts Created",     role: "ops",     day_offset: 3,  task_group: "Technical Setup" },
-  { title: "Email Client - Whitelisting Domains", role: "ops",     day_offset: 3,  task_group: "Technical Setup" },
-  { title: "Create Clay Table",                   role: "ops",     day_offset: 6,  task_group: "Technical Setup" },
-  { title: "Create Campaigns",                    role: "ops",     day_offset: 8,  task_group: "Campaign Launch" },
-  { title: "Email Client - Campaigns Live",       role: "ops",     day_offset: 9,  task_group: "Campaign Launch" },
-  { title: "GO LIVE",                             role: "ops",     day_offset: 10, task_group: "Campaign Launch" },
-  { title: "Assign Outlook Accounts",            role: "inbox",   day_offset: 10, task_group: "Inbox Setup" },
-  { title: "Assign Google Accounts",             role: "inbox",   day_offset: 10, task_group: "Inbox Setup" },
+  // ── Nick — automated, in order ───────────────────────────────────────────
+  { title: "Slack Outreachify to onboard new clients", owner: "Nick", day: null, task_group: "Setup", automation: "slack_outreachify" },
+  { title: "Create email campaigns", owner: "Nick", day: null, task_group: "Setup", automation: "create_campaigns" },
+  { title: "Attach client tags / redirects / add to campaigns / set sender accounts to 3/day", owner: "Nick", day: null, task_group: "Setup", automation: "allocate_domains" },
+  { title: "Whitelisting domains email to clients", owner: "Nick", day: null, task_group: "Setup", automation: "whitelist_email" },
+  { title: "Push data into campaigns — AI Ark pull", owner: "Nick", day: null, task_group: "Data" },
+  { title: "Push data into campaigns — Database pull", owner: "Nick", day: null, task_group: "Data" },
+  { title: "Push data into campaigns — Clay people + company search", owner: "Nick", day: null, task_group: "Data" },
+  { title: "Send client go-live email", owner: "Nick", day: null, task_group: "Go live", automation: "go_live_email" },
+
+  // ── Madison — manual ─────────────────────────────────────────────────────
+  { title: "Create Client Lead Tracking Sheet & Connect To Sheet Link LeadSync For Client Tag", owner: "Madison", day: 2, task_group: "Lead tracking" },
+  { title: "Send Lead Tracking Sheet To All Client CCs, BCCs, & Primary Contact", owner: "Madison", day: 2, task_group: "Lead tracking" },
+  { title: "Setup Email Template in ReplyRouter for Client Tag After 1st Lead Arrival & Send First Lead Email To All Client CCs, BCCs, & Primary Contact", owner: "Madison", day: 8, task_group: "Lead tracking" },
+  { title: "Simple Check-In #1 (Launch Health Check)", owner: "Madison", day: 15, task_group: "Check-ins" },
+  { title: "Simple Check-In #2", owner: "Madison", day: 25, task_group: "Check-ins" },
+  { title: "Simple Check-In #3", owner: "Madison", day: 70, task_group: "Check-ins" },
+  { title: "Simple Check-In #4", owner: "Madison", day: 90, task_group: "Check-ins" },
+  { title: "Simple Check-In #5", owner: "Madison", day: 150, task_group: "Check-ins" },
+  { title: "Simple Check-In #6", owner: "Madison", day: 190, task_group: "Check-ins" },
+  { title: "Simple Check-In #7", owner: "Madison", day: 220, task_group: "Check-ins" },
+
+  // ── Spencer — manual ─────────────────────────────────────────────────────
+  { title: "Testimonial", owner: "Spencer", day: 40, task_group: "Testimonials" },
+  { title: "Update/Expand Testimonial", owner: "Spencer", day: 120, task_group: "Testimonials" },
 ];

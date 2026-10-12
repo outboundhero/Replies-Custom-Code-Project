@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ClipboardList, ArrowRight } from "lucide-react";
+import { ArrowRight, ChevronDown, ClipboardList, FileSpreadsheet, Loader2, Search, Zap } from "lucide-react";
 import { useSession } from "@/components/session-provider";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -20,67 +20,35 @@ import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from "@/components/ui/table";
 import {
-  STATUS_META, TASK_STATUS_ORDER, ROLE_META, fmtDate, todayStr,
+  STATUS_META, TASK_STATUS_ORDER, AUTOMATION_META, GROUP_META, fmtDate, todayStr,
 } from "@/lib/onboarding/ui";
-import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
+import { addDays, groupForStartDate, isValidDate, type TaskStatus } from "@/lib/onboarding/generate";
+import { DEFAULT_TEMPLATE } from "@/lib/onboarding/seed";
+import {
+  type BoardData, type OnbClient, type OnbTask, type UserRow,
+  UNASSIGNED, DUE_TONE, postMutate, taskGate, dueInfo, useStatusSetter,
+  TagPill, GroupBadge, Progress, StatusSelect, TaskAction, TaskNotes, ClientChecklist, RunDialog,
+} from "./_ui/shared";
 
-// ─────────────────────────── types ───────────────────────────
-type OnbClient = {
-  client_tag: string; client_name: string | null; plan_type: string | null; start_date: string;
-  domains_owner_email: string | null; inbox_owner_email: string | null; ops_owner_email: string | null;
-  status: string; tasks_total: number; tasks_done: number;
-};
-type OnbTask = {
-  id: string; client_tag: string; template_task_id: string | null; title: string;
-  role: OnboardingRole; task_group: string | null; day_offset: number; due_date: string | null;
-  assignee_email: string | null; status: TaskStatus; order_index: number; due_date_overridden: number;
-};
 type TemplateTask = {
-  id: string; title: string; role: OnboardingRole; day_offset: number; order_index: number; task_group: string | null;
+  id: string; title: string; day_offset: number; order_index: number; task_group: string | null;
+  assignee_id: string | null; no_due: number; automation: string | null;
 };
-type UserRow = { id: string; name: string; slack_member_id: string | null };
 
-const UNASSIGNED = "—";
 // Plan / package options (from the client tracker). Kept as a simple list so it's
 // easy to edit if the tiers change.
 const PLAN_OPTIONS = ["Tier 0.5 (Trial)", "Tier 1 (Base)", "Tier 2 (Scale)", "PPQM", "PPQL"];
-
-async function postMutate(body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string; [k: string]: unknown }> {
-  const res = await fetch("/api/onboarding/mutate", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  if (res.status === 401) { window.location.href = "/login"; return { error: "unauthorized" }; }
-  return res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+/** The sheet's plan text ("Tier 1 (Base) = 20 Outlook Azure Domains") → one of our options. */
+function matchPlan(raw: string): string {
+  const s = (raw || "").trim();
+  if (/tier\s*0\.5/i.test(s)) return PLAN_OPTIONS[0];
+  if (/tier\s*1/i.test(s)) return PLAN_OPTIONS[1];
+  if (/tier\s*2/i.test(s)) return PLAN_OPTIONS[2];
+  if (/ppqm/i.test(s)) return "PPQM";
+  if (/ppql/i.test(s)) return "PPQL";
+  return s;
 }
 
-// ─────────────────────────── small bits ───────────────────────────
-function StatusPill({ status }: { status: TaskStatus }) {
-  const m = STATUS_META[status];
-  return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium", m.pill)}>
-      <span className={cn("h-1.5 w-1.5 rounded-full", m.dot)} />{m.label}
-    </span>
-  );
-}
-function TagPill({ tag }: { tag: string }) {
-  return <span className="font-mono text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded">{tag}</span>;
-}
-function RolePill({ role }: { role: OnboardingRole }) {
-  const m = ROLE_META[role];
-  return <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium", m.pill)}>{m.short}</span>;
-}
-function Progress({ done, total, className }: { done: number; total: number; className?: string }) {
-  const pct = total ? Math.round((done / total) * 100) : 0;
-  const complete = total > 0 && done === total;
-  return (
-    <div className={cn("flex items-center gap-2", className)}>
-      <div className="h-1.5 flex-1 rounded-full bg-muted overflow-hidden">
-        <div className={cn("h-full rounded-full transition-all", complete ? "bg-green-500" : "bg-primary")} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-xs text-muted-foreground tabular-nums w-14 text-right">{done}/{total}</span>
-    </div>
-  );
-}
 function Stat({ label, value, accent }: { label: string; value: string | number; accent?: string }) {
   return (
     <div className="rounded-xl border bg-card px-4 py-3">
@@ -93,47 +61,55 @@ function Stat({ label, value, accent }: { label: string; value: string | number;
 // Stale-while-revalidate cache: keep the last board payload in module scope so
 // navigating back to Onboarding paints instantly (no skeleton) while a fresh copy
 // loads in the background. Lives for the browser session.
-type BoardData = { clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[] };
 let boardCache: BoardData | null = null;
+const EMPTY: BoardData = { clients: [], tasks: [], users: [], outreachifySlack: { saved: null, sendsTo: [] } };
 
 // ─────────────────────────── page ───────────────────────────
 export default function OnboardingPage() {
   const session = useSession();
   const isAdmin = session?.role === "admin";
 
-  const [clients, setClients] = useState<OnbClient[]>(boardCache?.clients ?? []);
-  const [tasks, setTasks] = useState<OnbTask[]>(boardCache?.tasks ?? []);
-  const [users, setUsers] = useState<UserRow[]>(boardCache?.users ?? []);
+  const [board, setBoard] = useState<BoardData>(boardCache ?? EMPTY);
   const [loading, setLoading] = useState(!boardCache); // instant paint if cached
   const [err, setErr] = useState<string | null>(null);
+  const { clients, tasks, users } = board;
 
-  // One request for everything the page needs (clients + tasks + users).
-  const load = useCallback(async () => {
+  // One request for everything the page needs (clients + tasks + team).
+  // `fresh` (after a write) skips the server's short cache.
+  const load = useCallback(async (fresh = false) => {
     try {
-      const b = await fetch("/api/onboarding");
+      const b = await fetch(fresh ? "/api/onboarding?fresh=1" : "/api/onboarding");
       if (b.status === 401) { window.location.href = "/login"; return; }
       if (!b.ok) { setErr(`Failed to load (${b.status})`); return; }
       const data = await b.json();
-      const next: BoardData = { clients: data.clients ?? [], tasks: data.tasks ?? [], users: data.users ?? [] };
+      const next: BoardData = {
+        clients: data.clients ?? [], tasks: data.tasks ?? [], users: data.users ?? [],
+        outreachifySlack: data.outreachifySlack ?? EMPTY.outreachifySlack,
+      };
       boardCache = next;
-      setClients(next.clients); setTasks(next.tasks); setUsers(next.users);
+      setBoard(next);
       setErr(null);
     } catch (e) { setErr((e as Error).message); }
     finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  const reload = useCallback(() => load(true), [load]);
 
-  const usersById = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
-
+  const today = todayStr();
   const stats = useMemo(() => {
-    const total = clients.length;
-    const completed = clients.filter((c) => c.status === "completed").length;
-    const active = total - completed;
-    const pcts = clients.map((c) => (c.tasks_total ? c.tasks_done / c.tasks_total : 0));
-    const avg = pcts.length ? Math.round((pcts.reduce((a, b) => a + b, 0) / pcts.length) * 100) : 0;
-    return { total, active, completed, avg };
-  }, [clients]);
+    const activeTags = new Set(clients.filter((c) => c.status !== "completed").map((c) => c.client_tag));
+    const open = tasks.filter((t) => activeTags.has(t.client_tag) && t.status !== "completed");
+    const week = addDays(today, 7);
+    return {
+      active: activeTags.size,
+      open: open.length,
+      overdue: open.filter((t) => t.due_date && t.due_date < today).length,
+      soon: open.filter((t) => t.due_date && t.due_date >= today && t.due_date <= week).length,
+    };
+  }, [clients, tasks, today]);
+
+  const existingTags = useMemo(() => clients.map((c) => c.client_tag), [clients]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto w-full">
@@ -141,48 +117,51 @@ export default function OnboardingPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Onboarding</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Add a client to auto-generate its onboarding timeline — tasks, due dates, and owners.
+            Every new client gets the same checklist — open a client to run or complete its steps.
           </p>
         </div>
-        {isAdmin && (
-          <AddClientDialog users={users} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
-        )}
+        {isAdmin && <AddClientDialog existingTags={existingTags} onAdded={reload} />}
       </div>
 
       {err && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">{err}</div>}
 
       {clients.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <Stat label="Clients" value={stats.total} />
-          <Stat label="Active" value={stats.active} accent="text-blue-600 dark:text-blue-400" />
-          <Stat label="Completed" value={stats.completed} accent="text-green-600 dark:text-green-400" />
-          <Stat label="Avg progress" value={`${stats.avg}%`} />
+          <Stat label="Clients in onboarding" value={stats.active} />
+          <Stat label="Open tasks" value={stats.open} accent="text-blue-600 dark:text-blue-400" />
+          <Stat label="Overdue" value={stats.overdue} accent={stats.overdue ? "text-destructive" : undefined} />
+          <Stat label="Due in the next 7 days" value={stats.soon} />
         </div>
       )}
 
       <Tabs defaultValue="clients">
         <TabsList>
-          <TabsTrigger value="clients">All Clients</TabsTrigger>
+          <TabsTrigger value="clients">Clients</TabsTrigger>
+          <TabsTrigger value="people">By person</TabsTrigger>
           <TabsTrigger value="board">Board</TabsTrigger>
           {isAdmin && <TabsTrigger value="template">Template</TabsTrigger>}
-          {isAdmin && <TabsTrigger value="users">Users</TabsTrigger>}
+          {isAdmin && <TabsTrigger value="team">Team</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="clients" className="mt-4">
-          <AllClients clients={clients} loading={loading} isAdmin={isAdmin} usersById={usersById}
-            users={users} existingTags={clients.map((c) => c.client_tag)} onAdded={load} />
+          <ClientsList clients={clients} tasks={tasks} users={users} loading={loading} isAdmin={isAdmin}
+            existingTags={existingTags} onChanged={reload} />
+        </TabsContent>
+        <TabsContent value="people" className="mt-4">
+          <PeopleView clients={clients} tasks={tasks} users={users} isAdmin={isAdmin}
+            myEmail={session?.email ?? null} onChanged={reload} />
         </TabsContent>
         <TabsContent value="board" className="mt-4">
-          <Board tasks={tasks} clients={clients} users={users} usersById={usersById} onChange={load} />
+          <Board tasks={tasks} clients={clients} users={users} onChange={reload} />
         </TabsContent>
         {isAdmin && (
           <TabsContent value="template" className="mt-4">
-            <TemplateEditor />
+            <TemplateEditor users={users} onUsersChanged={reload} />
           </TabsContent>
         )}
         {isAdmin && (
-          <TabsContent value="users" className="mt-4">
-            <UsersManager users={users} onChange={load} />
+          <TabsContent value="team" className="mt-4">
+            <TeamManager users={users} slack={board.outreachifySlack} onChange={reload} />
           </TabsContent>
         )}
       </Tabs>
@@ -190,7 +169,7 @@ export default function OnboardingPage() {
   );
 }
 
-// ─────────────────────────── All Clients ───────────────────────────
+// ─────────────────────────── Clients (expandable checklists) ───────────────────────────
 function StatusChip({ status }: { status: string }) {
   const done = status === "completed";
   return (
@@ -203,16 +182,45 @@ function StatusChip({ status }: { status: string }) {
   );
 }
 
-function AllClients({ clients, loading, isAdmin, users, usersById, existingTags, onAdded }: {
-  clients: OnbClient[]; loading: boolean; isAdmin: boolean;
-  users: UserRow[]; usersById: Map<string, string>; existingTags: string[]; onAdded: () => void;
+/** The step a client is waiting on: its next ordered step, else its next due task. */
+function nextUp(clientTasks: OnbTask[], usersById: Map<string, UserRow>): string {
+  const open = clientTasks.filter((t) => t.status !== "completed");
+  if (!open.length) return clientTasks.length ? "Everything is done" : "No tasks yet";
+  const step = open.filter((t) => t.no_due).sort((a, b) => a.order_index - b.order_index)[0];
+  const dated = open.filter((t) => !t.no_due && t.due_date).sort((a, b) => (a.due_date || "").localeCompare(b.due_date || ""))[0];
+  const t = step ?? dated ?? open[0];
+  const owner = t.assignee_email ? usersById.get(t.assignee_email)?.name : null;
+  return `Next: ${t.title}${owner ? ` — ${owner}` : ""}${!t.no_due && t.due_date ? `, due ${fmtDate(t.due_date)}` : ""}`;
+}
+
+function ClientsList({ clients, tasks, users, loading, isAdmin, existingTags, onChanged }: {
+  clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[]; loading: boolean; isAdmin: boolean;
+  existingTags: string[]; onChanged: () => void;
 }) {
+  const [openTags, setOpenTags] = useState<Set<string>>(new Set());
+  const [q, setQ] = useState("");
+  const [showCompleted, setShowCompleted] = useState(false);
+  const usersById = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
+  const tasksByClient = useMemo(() => {
+    const m = new Map<string, OnbTask[]>();
+    for (const t of tasks) { const arr = m.get(t.client_tag); if (arr) arr.push(t); else m.set(t.client_tag, [t]); }
+    return m;
+  }, [tasks]);
+
+  const completedCount = clients.filter((c) => c.status === "completed").length;
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return clients.filter((c) =>
+      (showCompleted || c.status !== "completed") &&
+      (!needle || c.client_tag.toLowerCase().includes(needle) || (c.client_name || "").toLowerCase().includes(needle)));
+  }, [clients, q, showCompleted]);
+
+  const toggle = (tag: string) => setOpenTags((prev) => {
+    const n = new Set(prev); if (n.has(tag)) n.delete(tag); else n.add(tag); return n;
+  });
+
   if (loading) {
-    return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {[0, 1, 2].map((i) => <div key={i} className="h-40 rounded-xl border bg-muted/30 animate-pulse" />)}
-      </div>
-    );
+    return <div className="space-y-3">{[0, 1, 2].map((i) => <div key={i} className="h-[4.5rem] rounded-xl border bg-muted/30 animate-pulse" />)}</div>;
   }
   if (!clients.length) {
     return (
@@ -223,92 +231,124 @@ function AllClients({ clients, loading, isAdmin, users, usersById, existingTags,
           </div>
           <div className="space-y-1 max-w-sm">
             <h3 className="text-base font-semibold">No clients in onboarding yet</h3>
-            <p className="text-sm text-muted-foreground">Add your first client and the system will auto-generate its onboarding timeline — tasks, due dates, and owners.</p>
+            <p className="text-sm text-muted-foreground">Add a client and it gets the standard checklist — the setup steps that run in order, plus the dated follow-ups.</p>
           </div>
-          {isAdmin && <div className="pt-1"><AddClientDialog users={users} existingTags={existingTags} onAdded={onAdded} /></div>}
+          {isAdmin && <div className="pt-1"><AddClientDialog existingTags={existingTags} onAdded={onChanged} /></div>}
         </CardContent>
       </Card>
     );
   }
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-      {clients.map((c) => (
-        <Link key={c.client_tag} href={`/onboarding/${encodeURIComponent(c.client_tag)}`} className="group block">
-          <Card className="p-4 h-full space-y-3 hover:border-primary/40 hover:shadow-sm transition-all">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0 space-y-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <TagPill tag={c.client_tag} />
-                  {c.plan_type && <span className="text-[10px] font-medium rounded-full border border-border bg-muted px-1.5 py-0.5 text-muted-foreground">{c.plan_type}</span>}
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative w-full sm:w-72">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a client tag or name" className="h-9 pl-8" />
+        </div>
+        {completedCount > 0 && (
+          <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+            <input type="checkbox" checked={showCompleted} onChange={(e) => setShowCompleted(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary" />
+            Show completed clients ({completedCount})
+          </label>
+        )}
+        <span className="ml-auto text-xs text-muted-foreground">{shown.length} client{shown.length === 1 ? "" : "s"}</span>
+      </div>
+
+      {!shown.length && (
+        <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">
+          {q.trim() ? <>No client matches “{q.trim()}”.</> : "Every client has finished onboarding — tick “Show completed clients” to see them."}
+        </CardContent></Card>
+      )}
+
+      {shown.map((c) => {
+        const open = openTags.has(c.client_tag);
+        const clientTasks = tasksByClient.get(c.client_tag) ?? [];
+        return (
+          <Card key={c.client_tag} className={cn("gap-0 overflow-hidden p-0 transition-shadow", open && "shadow-sm border-primary/30")}>
+            <div className="flex items-stretch">
+              <button type="button" onClick={() => toggle(c.client_tag)} aria-expanded={open}
+                className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3.5 text-left hover:bg-muted/30 transition-colors">
+                <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", !open && "-rotate-90")} />
+                <div className="min-w-0 flex-1 basis-64">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <TagPill tag={c.client_tag} />
+                    {c.client_name && <span className="truncate text-sm font-medium">{c.client_name}</span>}
+                    {c.plan_type && <span className="text-[10px] font-medium rounded-full border border-border bg-muted px-1.5 py-0.5 text-muted-foreground">{c.plan_type}</span>}
+                    <GroupBadge group={c.group_num} />
+                  </div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    Started {fmtDate(c.start_date)} · {nextUp(clientTasks, usersById)}
+                  </div>
                 </div>
-                {c.client_name && <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">{c.client_name}</div>}
+                <Progress done={c.tasks_done} total={c.tasks_total} className="w-full sm:w-52" />
+                <StatusChip status={c.status} />
+              </button>
+              <Link href={`/onboarding/${encodeURIComponent(c.client_tag)}`} title="Open the client page"
+                className="flex items-center border-l px-3 text-muted-foreground hover:bg-muted/40 hover:text-primary transition-colors">
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </div>
+            {open && (
+              <div className="border-t bg-muted/10 px-4 py-4">
+                <ClientChecklist client={c} tasks={clientTasks} users={users} isAdmin={isAdmin} onChanged={onChanged} />
               </div>
-              <StatusChip status={c.status} />
-            </div>
-            <Progress done={c.tasks_done} total={c.tasks_total} />
-            <div className="flex flex-wrap gap-x-3 gap-y-1 pt-0.5">
-              {(["domains", "inbox", "ops"] as OnboardingRole[]).map((r) => {
-                const oid = r === "domains" ? c.domains_owner_email : r === "inbox" ? c.inbox_owner_email : c.ops_owner_email;
-                return (
-                  <span key={r} className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                    <RolePill role={r} /><span className="truncate max-w-[90px]">{(oid && usersById.get(oid)) || "—"}</span>
-                  </span>
-                );
-              })}
-            </div>
-            <div className="flex items-center justify-between border-t pt-2 text-[11px] text-muted-foreground">
-              <span>Started {fmtDate(c.start_date)}</span>
-              <span className="inline-flex items-center gap-0.5 text-primary opacity-0 group-hover:opacity-100 transition-opacity">Open <ArrowRight className="h-3 w-3" /></span>
-            </div>
+            )}
           </Card>
-        </Link>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
 // ─────────────────────────── Add dialog ───────────────────────────
-function AddClientDialog({ users, existingTags, onAdded }: {
-  users: UserRow[]; existingTags: string[]; onAdded: () => void;
-}) {
+function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; onAdded: () => void }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [looking, setLooking] = useState(false);
+  const [sheetNote, setSheetNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [name, setName] = useState("");
   const [tag, setTag] = useState("");
   const [plan, setPlan] = useState("");
   const [start, setStart] = useState(todayStr());
-  const [domains, setDomains] = useState("");
-  const [inbox, setInbox] = useState("");
-  const [ops, setOps] = useState("");
+  const [groupSel, setGroupSel] = useState<"auto" | "1" | "2">("auto");
 
-  function reset() { setName(""); setTag(""); setPlan(""); setStart(todayStr()); setDomains(""); setInbox(""); setOps(""); }
+  function reset() { setName(""); setTag(""); setPlan(""); setStart(todayStr()); setGroupSel("auto"); setSheetNote(null); }
+
+  const ruleGroup = groupForStartDate(start);
+  const planOptions = !plan || PLAN_OPTIONS.includes(plan) ? PLAN_OPTIONS : [...PLAN_OPTIONS, plan];
+
+  async function fillFromSheet() {
+    const t = tag.trim().toUpperCase();
+    if (!t) { toast.error("Enter the client tag first"); return; }
+    setLooking(true);
+    try {
+      const res = await fetch(`/api/onboarding/lookup?tag=${encodeURIComponent(t)}`);
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setSheetNote({ ok: false, text: d.error || `Couldn't read the sheet (${res.status})` }); return; }
+      if (!d.found) { setSheetNote({ ok: false, text: `${t} isn't in the sheet's “New Client Information” tab yet — fill the details in by hand.` }); return; }
+      if (d.client_name) setName(d.client_name);
+      if (d.plan) setPlan(matchPlan(d.plan));
+      if (d.start_date) setStart(d.start_date);
+      setSheetNote({ ok: true, text: d.start_date ? "Filled in from the onboarding sheet — check it before adding." : "Filled in from the onboarding sheet. It has no start date for this client, so set that here." });
+    } finally { setLooking(false); }
+  }
 
   async function submit() {
     const t = tag.trim().toUpperCase();
     if (!t) { toast.error("Client tag is required"); return; }
     if (existingTags.includes(t)) { toast.error(`${t} is already in onboarding`); return; }
+    if (!isValidDate(start)) { toast.error("Pick a start date"); return; }
     setBusy(true);
     const r = await postMutate({
       action: "add-client", client_tag: t, client_name: name, plan_type: plan || null, start_date: start,
-      domains_owner_email: domains || null, inbox_owner_email: inbox || null, ops_owner_email: ops || null,
+      group_num: groupSel === "auto" ? null : Number(groupSel),
     });
     setBusy(false);
-    if (r.ok) { toast.success(`${t} onboarded — ${r.tasks ?? 0} tasks generated`); setOpen(false); reset(); onAdded(); }
+    if (r.ok) { toast.success(`${t} added — ${r.tasks ?? 0} tasks created`); setOpen(false); reset(); onAdded(); }
     else toast.error(r.error || "Failed to add client");
   }
-
-  const OwnerSelect = ({ role, value, set }: { role: OnboardingRole; value: string; set: (v: string) => void }) => (
-    <div className="space-y-1.5">
-      <label className="text-xs font-medium text-muted-foreground">{ROLE_META[role].label}</label>
-      <Select value={value || UNASSIGNED} onValueChange={(v) => set(v === UNASSIGNED ? "" : v)}>
-        <SelectTrigger className="w-full"><SelectValue placeholder="Unassigned" /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value={UNASSIGNED}>— Unassigned —</SelectItem>
-          {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
-        </SelectContent>
-      </Select>
-    </div>
-  );
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -316,18 +356,23 @@ function AddClientDialog({ users, existingTags, onAdded }: {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Add client to onboarding</DialogTitle>
-          <DialogDescription>Generates the standard task timeline from the start date and assigns tasks by role.</DialogDescription>
+          <DialogDescription>Creates the client&apos;s checklist from the template. Due dates count from the start date — Day 1 is the day after it.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-1">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Client Name</label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Cleaning Co." />
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">Client Tag</label>
+            <div className="flex gap-2">
+              <Input value={tag} onChange={(e) => { setTag(e.target.value.toUpperCase()); setSheetNote(null); }} placeholder="ACME" className="font-mono" />
+              <Button type="button" variant="outline" className="shrink-0 gap-1.5" onClick={fillFromSheet} disabled={looking || !tag.trim()}>
+                {looking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
+                Fill from sheet
+              </Button>
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Client Tag</label>
-              <Input value={tag} onChange={(e) => setTag(e.target.value.toUpperCase())} placeholder="ACME" className="font-mono" />
-            </div>
+            {sheetNote && <p className={cn("text-[11px]", sheetNote.ok ? "text-green-700 dark:text-green-400" : "text-amber-700 dark:text-amber-400")}>{sheetNote.text}</p>}
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">Client Name</label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Cleaning Co." />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -340,34 +385,209 @@ function AddClientDialog({ users, existingTags, onAdded }: {
                 <SelectTrigger className="w-full"><SelectValue placeholder="Select a plan" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value={UNASSIGNED}>— None —</SelectItem>
-                  {PLAN_OPTIONS.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                  {planOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
           </div>
-          <div className="grid grid-cols-1 gap-3">
-            <OwnerSelect role="domains" value={domains} set={setDomains} />
-            <OwnerSelect role="inbox" value={inbox} set={setInbox} />
-            <OwnerSelect role="ops" value={ops} set={setOps} />
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground">Group</label>
+            <Select value={groupSel} onValueChange={(v) => setGroupSel(v as "auto" | "1" | "2")}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">By start date{ruleGroup ? ` — Group ${ruleGroup}` : " — none yet"}</SelectItem>
+                {([1, 2] as const).map((g) => (
+                  <SelectItem key={g} value={String(g)}>{GROUP_META[g].label} — {GROUP_META[g].b2b} + {GROUP_META[g].b2c}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              {groupSel !== "auto"
+                ? "You can still change the group when you run the Slack step."
+                : ruleGroup
+                  ? `Clients starting on the ${ruleGroup === 2 ? "1st" : "15th"} go to Group ${ruleGroup}.`
+                  : "Clients starting on the 1st go to Group 2 and on the 15th to Group 1. This date is neither, so pick the group here or when you run the Slack step."}
+            </p>
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={submit} disabled={busy}>{busy ? "Adding…" : "Add & generate tasks"}</Button>
+          <Button onClick={submit} disabled={busy}>{busy ? "Adding…" : "Add & create checklist"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
+// ─────────────────────────── By person ───────────────────────────
+/** One person's tasks across every active client: client tag, task, due date, status. */
+function PeopleView({ clients, tasks, users, isAdmin, myEmail, onChanged }: {
+  clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[]; isAdmin: boolean; myEmail: string | null; onChanged: () => void;
+}) {
+  const today = todayStr();
+  const clientsByTag = useMemo(() => new Map(clients.map((c) => [c.client_tag, c])), [clients]);
+  const activeTags = useMemo(() => new Set(clients.filter((c) => c.status !== "completed").map((c) => c.client_tag)), [clients]);
+  const tasksByClient = useMemo(() => {
+    const m = new Map<string, OnbTask[]>();
+    for (const t of tasks) { const arr = m.get(t.client_tag); if (arr) arr.push(t); else m.set(t.client_tag, [t]); }
+    return m;
+  }, [tasks]);
+
+  // People who own tasks on an active client, in checklist order (Nick → Madison → Spencer).
+  const people = useMemo(() => {
+    const info = new Map<string, { open: number; first: number }>();
+    for (const t of tasks) {
+      if (!t.assignee_email || !activeTags.has(t.client_tag)) continue;
+      const cur = info.get(t.assignee_email) ?? { open: 0, first: Infinity };
+      if (t.status !== "completed") cur.open++;
+      cur.first = Math.min(cur.first, t.order_index);
+      info.set(t.assignee_email, cur);
+    }
+    return users.filter((u) => info.has(u.id))
+      .map((u) => ({ ...u, ...info.get(u.id)! }))
+      .sort((a, b) => a.first - b.first || a.name.localeCompare(b.name));
+  }, [tasks, users, activeTags]);
+
+  // Whose tasks open first: the person linked to this login (Team → login
+  // email), else the one whose first name starts the login's address.
+  const login = (myEmail || "").toLowerCase();
+  const mine = login
+    ? people.find((p) => p.email === login) ?? people.find((p) => login.split("@")[0].startsWith(p.name.trim().split(/\s+/)[0].toLowerCase()))
+    : undefined;
+  const [picked, setPicked] = useState<string | null>(null);
+  const personId = (picked && people.some((p) => p.id === picked) ? picked : null) ?? mine?.id ?? people[0]?.id ?? null;
+  const [showDone, setShowDone] = useState(false);
+  const { busyId, setStatus } = useStatusSetter(onChanged);
+  const [runTask, setRunTask] = useState<OnbTask | null>(null);
+
+  const rows = useMemo(() => {
+    if (!personId) return [];
+    return tasks
+      .filter((t) => t.assignee_email === personId && activeTags.has(t.client_tag) && (showDone || t.status !== "completed"))
+      .map((t) => ({ task: t, gate: taskGate(t, tasksByClient.get(t.client_tag) ?? []) }))
+      // Ready steps first, then by due date, then the steps still waiting their turn.
+      .sort((a, b) => {
+        const rank = (x: typeof a) => (x.task.status === "completed" ? 3 : !x.task.no_due ? 1 : x.gate.blocker ? 2 : 0);
+        return rank(a) - rank(b)
+          || (a.task.due_date || "9999").localeCompare(b.task.due_date || "9999")
+          || a.task.client_tag.localeCompare(b.task.client_tag)
+          || a.task.order_index - b.task.order_index;
+      });
+  }, [tasks, personId, activeTags, showDone, tasksByClient]);
+
+  if (!people.length) {
+    return (
+      <Card><CardContent className="py-16 text-center text-sm text-muted-foreground">
+        Nobody has onboarding tasks yet — add a client and each person&apos;s tasks show up here.
+      </CardContent></Card>
+    );
+  }
+
+  const person = people.find((p) => p.id === personId);
+  const overdue = rows.filter((r) => r.task.status !== "completed" && r.task.due_date && r.task.due_date < today).length;
+  const runClient = runTask ? clientsByTag.get(runTask.client_tag) : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {people.map((p) => (
+          <button key={p.id} type="button" onClick={() => setPicked(p.id)}
+            className={cn("flex items-center gap-2 rounded-full border py-1 pl-1 pr-3 text-sm transition-colors",
+              p.id === personId ? "border-primary bg-primary/5 text-foreground" : "text-muted-foreground hover:border-primary/40 hover:text-foreground")}>
+            <span className={cn("flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-semibold",
+              p.id === personId ? "bg-primary text-primary-foreground" : "bg-muted")}>{p.name.charAt(0).toUpperCase()}</span>
+            <span className="font-medium">{p.name}</span>
+            <span className="rounded-full bg-muted px-1.5 text-[11px] tabular-nums">{p.open}</span>
+          </button>
+        ))}
+        <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+          <input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary" />
+          Show done
+        </label>
+      </div>
+
+      <div className="text-xs text-muted-foreground">
+        {person?.name}: {person?.open ?? 0} open task{person?.open === 1 ? "" : "s"}
+        {overdue > 0 && <span className="text-destructive font-medium"> · {overdue} overdue</span>}
+      </div>
+
+      <Card className="overflow-hidden p-0">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-44">Client tag</TableHead>
+              <TableHead>Task</TableHead>
+              <TableHead className="w-40">Due date</TableHead>
+              <TableHead className="w-32">Status</TableHead>
+              <TableHead className="w-36 text-right" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!rows.length && (
+              <TableRow><TableCell colSpan={5} className="py-12 text-center text-sm text-muted-foreground">
+                {showDone ? "No tasks." : `Nothing open for ${person?.name ?? "this person"} — all caught up.`}
+              </TableCell></TableRow>
+            )}
+            {rows.map(({ task: t, gate }) => {
+              const due = dueInfo(t, gate, today);
+              const c = clientsByTag.get(t.client_tag);
+              const busy = busyId === t.id;
+              return (
+                <TableRow key={t.id} className={cn(gate.blocker && "bg-muted/20")}>
+                  <TableCell className="align-top">
+                    <Link href={`/onboarding/${encodeURIComponent(t.client_tag)}`} className="group inline-flex flex-col gap-0.5">
+                      <span><TagPill tag={t.client_tag} /></span>
+                      {c?.client_name && <span className="max-w-40 truncate text-[11px] text-muted-foreground group-hover:text-primary">{c.client_name}</span>}
+                    </Link>
+                  </TableCell>
+                  <TableCell className="align-top whitespace-normal">
+                    <div className={cn("text-sm font-medium leading-snug", t.status === "completed" && "text-muted-foreground line-through decoration-muted-foreground/40", gate.blocker && "text-muted-foreground")}>{t.title}</div>
+                    <TaskNotes task={t} />
+                  </TableCell>
+                  <TableCell className={cn("align-top text-xs tabular-nums", DUE_TONE[due.tone])}>
+                    {t.no_due ? "No due date" : due.text}
+                    {t.no_due
+                      ? <div className="font-normal text-muted-foreground">{due.text}</div>
+                      : t.template_task_id && <div className="font-normal text-muted-foreground">Day {t.day_offset}</div>}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    <StatusSelect task={t} gate={gate} busy={busy} onSet={(v) => setStatus(t.id, v)} />
+                  </TableCell>
+                  <TableCell className="align-top text-right">
+                    <div className="flex justify-end">
+                      <TaskAction task={t} gate={gate} isAdmin={isAdmin} busy={busy}
+                        onRun={() => setRunTask(t)} onComplete={() => setStatus(t.id, "completed")} />
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </Card>
+
+      {runTask && (
+        <RunDialog task={runTask} clientLabel={runClient?.client_name ? `${runTask.client_tag} · ${runClient.client_name}` : runTask.client_tag}
+          onClose={() => setRunTask(null)} onDone={onChanged} />
+      )}
+    </div>
+  );
+}
+
 // ─────────────────────────── Board ───────────────────────────
-function Board({ tasks, clients, users, usersById, onChange }: {
-  tasks: OnbTask[]; clients: OnbClient[]; users: UserRow[]; usersById: Map<string, string>; onChange: () => void;
+function Board({ tasks, clients, users, onChange }: {
+  tasks: OnbTask[]; clients: OnbClient[]; users: UserRow[]; onChange: () => void;
 }) {
   const [clientFilter, setClientFilter] = useState<string>("all");
   const [ownerFilter, setOwnerFilter] = useState<string>("all");
-  const [sortBy, setSortBy] = useState<"due" | "day">("due");
+  const usersById = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
   const activeTags = useMemo(() => new Set(clients.filter((c) => c.status !== "completed").map((c) => c.client_tag)), [clients]);
+  const tasksByClient = useMemo(() => {
+    const m = new Map<string, OnbTask[]>();
+    for (const t of tasks) { const arr = m.get(t.client_tag); if (arr) arr.push(t); else m.set(t.client_tag, [t]); }
+    return m;
+  }, [tasks]);
 
   const filtered = useMemo(() => {
     const rows = tasks.filter((t) => {
@@ -375,14 +595,18 @@ function Board({ tasks, clients, users, usersById, onChange }: {
       if (ownerFilter !== "all" && t.assignee_email !== ownerFilter) return false;
       return true;
     });
-    return rows.sort((a, b) => sortBy === "day"
-      ? a.day_offset - b.day_offset || a.order_index - b.order_index
-      : (a.due_date || "").localeCompare(b.due_date || "") || a.order_index - b.order_index);
-  }, [tasks, clientFilter, ownerFilter, activeTags, sortBy]);
+    // Ordered steps (no due date) first in checklist order, then by due date.
+    return rows.sort((a, b) =>
+      (a.no_due ? 0 : 1) - (b.no_due ? 0 : 1)
+      || (a.due_date || "").localeCompare(b.due_date || "")
+      || a.client_tag.localeCompare(b.client_tag)
+      || a.order_index - b.order_index);
+  }, [tasks, clientFilter, ownerFilter, activeTags]);
 
-  // Optimistic status: reflect a move instantly, cleared when fresh data lands.
-  const [localStatus, setLocalStatus] = useState<Record<string, TaskStatus>>({});
-  useEffect(() => { setLocalStatus({}); }, [tasks]);
+  // Optimistic status: reflect a move instantly; it only counts for the task
+  // list it was made against, so it drops away when fresh data lands.
+  const [local, setLocal] = useState<{ base: OnbTask[]; map: Record<string, TaskStatus> }>({ base: tasks, map: {} });
+  const localStatus = local.base === tasks ? local.map : {};
   const effStatus = (t: OnbTask): TaskStatus => localStatus[t.id] ?? t.status;
 
   // Native HTML5 drag-and-drop between columns.
@@ -390,10 +614,10 @@ function Board({ tasks, clients, users, usersById, onChange }: {
   const [overStatus, setOverStatus] = useState<TaskStatus | null>(null);
 
   async function setStatus(id: string, status: TaskStatus) {
-    setLocalStatus((prev) => ({ ...prev, [id]: status })); // optimistic
+    setLocal((prev) => ({ base: tasks, map: { ...(prev.base === tasks ? prev.map : {}), [id]: status } })); // optimistic
     const r = await postMutate({ action: "update-task-status", id, status });
     if (r.ok) { onChange(); }
-    else { toast.error(r.error || "Failed"); setLocalStatus((prev) => { const n = { ...prev }; delete n[id]; return n; }); }
+    else { toast.error(r.error || "Failed"); setLocal((prev) => { const map = { ...prev.map }; delete map[id]; return { ...prev, map }; }); }
   }
   function dropOnStatus(status: TaskStatus) {
     const id = dragId;
@@ -412,17 +636,13 @@ function Board({ tasks, clients, users, usersById, onChange }: {
           </SelectContent>
         </Select>
         <Select value={ownerFilter} onValueChange={setOwnerFilter}>
-          <SelectTrigger className="w-44"><SelectValue placeholder="All owners" /></SelectTrigger>
+          <SelectTrigger className="w-44"><SelectValue placeholder="Everyone" /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All owners</SelectItem>
+            <SelectItem value="all">Everyone</SelectItem>
             {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
           </SelectContent>
         </Select>
-        <div className="ml-auto flex items-center gap-1 text-xs">
-          <span className="text-muted-foreground">Sort:</span>
-          <Button variant={sortBy === "due" ? "default" : "outline"} size="sm" className="h-7 text-xs" onClick={() => setSortBy("due")}>Due date</Button>
-          <Button variant={sortBy === "day" ? "default" : "outline"} size="sm" className="h-7 text-xs" onClick={() => setSortBy("day")}>Day offset</Button>
-        </div>
+        <span className="ml-auto text-xs text-muted-foreground">Drag a card to change its status. Steps that run in order can&apos;t skip ahead.</span>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 h-[calc(100vh-16rem)] min-h-[340px]">
         {TASK_STATUS_ORDER.map((status) => {
@@ -441,27 +661,26 @@ function Board({ tasks, clients, users, usersById, onChange }: {
               </div>
               <div className="flex-1 overflow-y-auto p-2 space-y-2">
                 {col.length === 0 && <div className="text-xs text-muted-foreground/60 text-center py-10">{isOver ? "Drop here" : "Nothing here"}</div>}
-                {col.map((t) => (
-                  <div key={t.id} draggable
-                    onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t.id); setDragId(t.id); }}
-                    onDragEnd={() => { setDragId(null); setOverStatus(null); }}
-                    className={cn("rounded-lg border bg-card p-3 space-y-2 cursor-grab active:cursor-grabbing hover:shadow-sm transition-all", dragId === t.id && "opacity-40")}>
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-sm font-medium leading-snug">{t.title}</span>
-                      <TagPill tag={t.client_tag} />
+                {col.map((t) => {
+                  const gate = taskGate(t, tasksByClient.get(t.client_tag) ?? []);
+                  return (
+                    <div key={t.id} draggable
+                      onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", t.id); setDragId(t.id); }}
+                      onDragEnd={() => { setDragId(null); setOverStatus(null); }}
+                      className={cn("rounded-lg border bg-card p-3 space-y-2 cursor-grab active:cursor-grabbing hover:shadow-sm transition-all", dragId === t.id && "opacity-40")}>
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-sm font-medium leading-snug">{t.title}</span>
+                        <TagPill tag={t.client_tag} />
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <span className="truncate">{(t.assignee_email && usersById.get(t.assignee_email)) || "Unassigned"}</span>
+                        <span className="tabular-nums shrink-0">
+                          {t.no_due ? `Step ${gate.step ?? "–"} of ${gate.total}` : `${fmtDate(t.due_date)}${t.template_task_id ? ` · D${t.day_offset}` : ""}`}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1.5"><RolePill role={t.role} />{(t.assignee_email && usersById.get(t.assignee_email)) || "unassigned"}</span>
-                      <span className="tabular-nums">{fmtDate(t.due_date)}{t.template_task_id ? ` · D${t.day_offset}` : ""}</span>
-                    </div>
-                    <Select value={effStatus(t)} onValueChange={(v) => setStatus(t.id, v as TaskStatus)}>
-                      <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {TASK_STATUS_ORDER.map((s) => <SelectItem key={s} value={s}>{STATUS_META[s].label}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );
@@ -475,45 +694,72 @@ function Board({ tasks, clients, users, usersById, onChange }: {
 // Self-fetching: only mounts (and hits the API) when the Template tab is opened —
 // keeps it off the page's initial load. Cached in module scope for instant re-open.
 let templateCache: TemplateTask[] | null = null;
-function TemplateEditor() {
+function TemplateEditor({ users, onUsersChanged }: { users: UserRow[]; onUsersChanged: () => void }) {
   const [template, setTemplate] = useState<TemplateTask[]>(templateCache ?? []);
+  const [loaded, setLoaded] = useState(!!templateCache);
   const [busy, setBusy] = useState(false);
 
-  const loadTemplate = useCallback(async () => {
-    const r = await fetch("/api/onboarding/template");
-    if (r.ok) { const t = await r.json(); templateCache = t; setTemplate(t); }
+  const fetchTemplate = useCallback(async (fresh = false): Promise<TemplateTask[] | null> => {
+    const r = await fetch(fresh ? "/api/onboarding/template?fresh=1" : "/api/onboarding/template");
+    return r.ok ? ((await r.json()) as TemplateTask[]) : null;
   }, []);
-  useEffect(() => { loadTemplate(); }, [loadTemplate]);
+  const showTemplate = useCallback((t: TemplateTask[] | null) => {
+    if (t) { templateCache = t; setTemplate(t); setLoaded(true); }
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    fetchTemplate().then((t) => { if (alive) showTemplate(t); });
+    return () => { alive = false; };
+  }, [fetchTemplate, showTemplate]);
+  const loadTemplate = async () => showTemplate(await fetchTemplate(true)); // after a save
 
-  async function save(body: Record<string, unknown>) {
+  async function save(body: Record<string, unknown>): Promise<boolean> {
     setBusy(true);
     const r = await postMutate(body);
     setBusy(false);
-    if (r.ok) { loadTemplate(); } else toast.error(r.error || "Failed");
+    if (r.ok) { await loadTemplate(); return true; }
+    toast.error(r.error || "Failed");
+    return false;
   }
+
+  const isStandard = template.length === DEFAULT_TEMPLATE.length && DEFAULT_TEMPLATE.every((s, i) => template[i]?.title === s.title);
+  const owners = (name: string) => DEFAULT_TEMPLATE.filter((t) => t.owner === name).length;
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">The standard task timeline. Changes apply to clients added afterward.</p>
-        {!template.length && <Button size="sm" onClick={() => save({ action: "template-seed" }).then(() => toast.success("Seeded"))} disabled={busy}>Seed defaults</Button>}
-      </div>
-      <Card className="overflow-hidden">
+      <p className="text-sm text-muted-foreground">
+        The checklist every new client gets. Changes apply to clients added afterwards — clients already in onboarding keep their tasks.
+      </p>
+
+      {loaded && !isStandard && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3">
+          <div className="min-w-0 flex-1 basis-72">
+            <div className="text-sm font-medium">This isn&apos;t the standard checklist</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              The standard one has {DEFAULT_TEMPLATE.length} tasks — Nick {owners("Nick")} (in order, no due dates), Madison {owners("Madison")} and Spencer {owners("Spencer")} (due by day).
+            </div>
+          </div>
+          <ApplyStandardDialog current={template.length} onApplied={async () => { await loadTemplate(); onUsersChanged(); }} />
+        </div>
+      )}
+
+      <Card className="overflow-hidden p-0">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">#</TableHead>
               <TableHead>Task</TableHead>
-              <TableHead className="w-36">Role</TableHead>
-              <TableHead className="w-24">Day offset</TableHead>
-              <TableHead className="w-10" />
+              <TableHead className="w-40">Owner</TableHead>
+              <TableHead className="w-56">Due</TableHead>
+              <TableHead className="w-40">Type</TableHead>
+              <TableHead className="w-28" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {template.map((t, i) => (
-              <TemplateRow key={t.id} task={t} index={i} onSave={save} busy={busy} />
+              <TemplateRow key={`${t.id}:${t.title}:${t.assignee_id}:${t.no_due}:${t.day_offset}`} task={t} index={i} users={users} onSave={save} busy={busy} />
             ))}
-            <TemplateRow key="new" task={null} index={template.length} onSave={save} busy={busy} />
+            <TemplateRow key={`new:${template.length}`} task={null} index={template.length} users={users} onSave={save} busy={busy} />
           </TableBody>
         </Table>
       </Card>
@@ -521,38 +767,106 @@ function TemplateEditor() {
   );
 }
 
-function TemplateRow({ task, index, onSave, busy }: {
-  task: TemplateTask | null; index: number; onSave: (b: Record<string, unknown>) => Promise<void>; busy: boolean;
+function ApplyStandardDialog({ current, onApplied }: { current: number; onApplied: () => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  async function apply() {
+    setBusy(true);
+    const r = await postMutate({ action: "template-apply-standard" });
+    if (r.ok) {
+      await onApplied();
+      toast.success(`Standard checklist is now the template — ${r.inserted ?? DEFAULT_TEMPLATE.length} tasks`);
+      setOpen(false);
+    } else toast.error(r.error || "Couldn't replace the template");
+    setBusy(false);
+  }
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!busy) setOpen(o); }}>
+      <DialogTrigger asChild><Button size="sm">Use the standard checklist</Button></DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Replace the template with the standard checklist?</DialogTitle>
+          <DialogDescription>
+            The {current} task{current === 1 ? "" : "s"} in the template now {current === 1 ? "is" : "are"} replaced by the {DEFAULT_TEMPLATE.length} standard ones.
+          </DialogDescription>
+        </DialogHeader>
+        <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+          <li>Only clients added from now on get the new checklist.</li>
+          <li>Clients already in onboarding keep the tasks they have.</li>
+          <li>The template being replaced is saved as a backup, so it can be restored.</li>
+          <li>Nick, Madison and Spencer are added to the team if they aren&apos;t there yet.</li>
+        </ul>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
+          <Button onClick={apply} disabled={busy}>{busy ? "Replacing…" : "Replace template"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TemplateRow({ task, index, users, onSave, busy }: {
+  task: TemplateTask | null; index: number; users: UserRow[];
+  onSave: (b: Record<string, unknown>) => Promise<boolean>; busy: boolean;
 }) {
   const [title, setTitle] = useState(task?.title ?? "");
-  const [role, setRole] = useState<OnboardingRole>(task?.role ?? "ops");
-  const [day, setDay] = useState<string>(task ? String(task.day_offset) : "");
+  const [owner, setOwner] = useState(task?.assignee_id ?? "");
+  const [inOrder, setInOrder] = useState(!!task?.no_due);
+  const [day, setDay] = useState<string>(task && !task.no_due ? String(task.day_offset) : "");
   const isNew = !task;
-  const dirty = !isNew && (title !== task!.title || role !== task!.role || String(task!.day_offset) !== day);
+  const dirty = !isNew && (
+    title !== task.title || owner !== (task.assignee_id ?? "") || inOrder !== !!task.no_due
+    || (!inOrder && String(task.no_due ? "" : task.day_offset) !== day));
+  const auto = task?.automation ? AUTOMATION_META[task.automation] : null;
 
   async function commit() {
     if (!title.trim()) { if (isNew) return; toast.error("Title required"); return; }
-    await onSave({ action: "template-upsert", id: task?.id ?? null, title, role, day_offset: Number(day) || 0 });
-    if (isNew) { setTitle(""); setRole("ops"); setDay(""); toast.success("Task added"); }
-    else toast.success("Saved");
+    if (!inOrder && day.trim() === "") { toast.error("Enter the day it's due, or choose “In order”"); return; }
+    const ok = await onSave({
+      action: "template-upsert", id: task?.id ?? null, title, assignee_id: owner || null,
+      day_offset: inOrder ? null : Number(day) || 0,
+    });
+    if (ok) toast.success(isNew ? "Task added" : "Saved");
   }
 
   return (
     <TableRow className={cn(isNew && "bg-muted/20")}>
       <TableCell className="text-xs text-muted-foreground tabular-nums">{isNew ? "+" : index + 1}</TableCell>
       <TableCell>
-        <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={isNew ? "Add a task…" : ""} className="h-8" />
+        <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={isNew ? "Add a task…" : ""} title={title} className="h-8" />
       </TableCell>
       <TableCell>
-        <Select value={role} onValueChange={(v) => setRole(v as OnboardingRole)}>
-          <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+        <Select value={owner || UNASSIGNED} onValueChange={(v) => setOwner(v === UNASSIGNED ? "" : v)}>
+          <SelectTrigger className="h-8 w-full text-xs"><SelectValue /></SelectTrigger>
           <SelectContent>
-            {(["domains", "inbox", "ops"] as OnboardingRole[]).map((r) => <SelectItem key={r} value={r}>{ROLE_META[r].label}</SelectItem>)}
+            <SelectItem value={UNASSIGNED}>— Unassigned —</SelectItem>
+            {users.map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}
           </SelectContent>
         </Select>
       </TableCell>
       <TableCell>
-        <Input type="number" value={day} onChange={(e) => setDay(e.target.value)} className="h-8 w-20" placeholder="0" />
+        <div className="flex items-center gap-2">
+          <Select value={inOrder ? "order" : "day"} onValueChange={(v) => setInOrder(v === "order")}>
+            <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="day">On day</SelectItem>
+              <SelectItem value="order">In order</SelectItem>
+            </SelectContent>
+          </Select>
+          {inOrder
+            ? <span className="text-[11px] text-muted-foreground">no due date</span>
+            : <Input type="number" min={0} value={day} onChange={(e) => setDay(e.target.value)} className="h-8 w-20" placeholder="0" />}
+        </div>
+      </TableCell>
+      <TableCell>
+        {isNew ? null : auto ? (
+          <span title={auto.label} className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+            auto.built
+              ? "border-primary/30 bg-primary/5 text-primary"
+              : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300")}>
+            <Zap className="h-3 w-3" />{auto.built ? "Automated" : "Automation coming"}
+          </span>
+        ) : <span className="text-[11px] text-muted-foreground">Manual check-off</span>}
       </TableCell>
       <TableCell className="text-right">
         {isNew ? (
@@ -560,7 +874,8 @@ function TemplateRow({ task, index, onSave, busy }: {
         ) : (
           <div className="flex items-center gap-1 justify-end">
             {dirty && <Button size="sm" variant="ghost" onClick={commit} disabled={busy}>Save</Button>}
-            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => onSave({ action: "template-delete", id: task!.id }).then(() => toast.success("Deleted"))} disabled={busy}>✕</Button>
+            <Button size="sm" variant="ghost" className="text-destructive" title="Remove from the template"
+              onClick={async () => { if (await onSave({ action: "template-delete", id: task.id })) toast.success("Removed from the template"); }} disabled={busy}>✕</Button>
           </div>
         )}
       </TableCell>
@@ -568,54 +883,102 @@ function TemplateRow({ task, index, onSave, busy }: {
   );
 }
 
-// ─────────────────────────── Users manager ───────────────────────────
-function UsersManager({ users, onChange }: { users: UserRow[]; onChange: () => void }) {
+// ─────────────────────────── Team ───────────────────────────
+function TeamManager({ users, slack, onChange }: {
+  users: UserRow[]; slack: BoardData["outreachifySlack"]; onChange: () => void;
+}) {
   const [busy, setBusy] = useState(false);
-  async function save(body: Record<string, unknown>) {
+  async function save(body: Record<string, unknown>): Promise<boolean> {
     setBusy(true);
     const r = await postMutate(body);
     setBusy(false);
-    if (r.ok) { onChange(); } else toast.error(r.error || "Failed");
+    if (r.ok) { onChange(); return true; }
+    toast.error(r.error || "Failed");
+    return false;
   }
   return (
-    <div className="space-y-4 max-w-3xl">
-      <p className="text-sm text-muted-foreground">
-        Onboarding team members. Each person&apos;s <span className="font-medium text-foreground">Slack member ID</span> receives their task-assignment DMs and the daily digest.
-        Find an ID in Slack → click a profile → <span className="italic">More</span> → <span className="italic">Copy member ID</span> (looks like <span className="font-mono">U0123ABCD</span>).
-      </p>
-      <Card className="overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead className="w-56">Slack member ID</TableHead>
-              <TableHead className="w-10" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {users.map((u) => <UserEditRow key={u.id} user={u} onSave={save} busy={busy} />)}
-            <UserEditRow key="new" user={null} onSave={save} busy={busy} />
-          </TableBody>
-        </Table>
-      </Card>
-      {!users.length && <p className="text-xs text-muted-foreground">Add your team here first, then assign them as Domains / Inbox / Ops owners when onboarding a client.</p>}
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="space-y-3 lg:col-span-2">
+        <p className="text-sm text-muted-foreground">
+          The people who own checklist tasks. A <span className="font-medium text-foreground">Slack member ID</span> lets them get their task
+          messages and the daily digest (Slack → profile → <span className="italic">More</span> → <span className="italic">Copy member ID</span>).
+          A <span className="font-medium text-foreground">login email</span> opens “By person” on their own tasks.
+        </p>
+        <Card className="overflow-hidden p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead className="w-44">Slack member ID</TableHead>
+                <TableHead className="w-60">Login email</TableHead>
+                <TableHead className="w-28" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {users.map((u) => <UserEditRow key={`${u.id}:${u.name}:${u.slack_member_id}:${u.email}`} user={u} onSave={save} busy={busy} />)}
+              <UserEditRow key={`new:${users.length}`} user={null} onSave={save} busy={busy} />
+            </TableBody>
+          </Table>
+        </Card>
+      </div>
+      <SlackDestinationCard key={slack.saved ?? ""} slack={slack} onSave={save} busy={busy} />
     </div>
   );
 }
 
+/** Where step 1 ("Slack Outreachify to onboard new clients") posts. */
+function SlackDestinationCard({ slack, onSave, busy }: {
+  slack: BoardData["outreachifySlack"]; onSave: (b: Record<string, unknown>) => Promise<boolean>; busy: boolean;
+}) {
+  const [value, setValue] = useState(slack.saved ?? "");
+  const dirty = value.trim() !== (slack.saved ?? "");
+  return (
+    <Card className="h-fit gap-0 p-0">
+      <div className="border-b px-4 py-3">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Zap className="h-3.5 w-3.5 text-primary" /> Where “Slack Outreachify” posts</div>
+        <p className="mt-1 text-xs text-muted-foreground">Step 1 of every checklist sends the client tag and its group here.</p>
+      </div>
+      <div className="space-y-3 px-4 py-4">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Slack channel or member IDs</label>
+          <Input value={value} onChange={(e) => setValue(e.target.value)} placeholder="C0123ABCD, U0456EFGH" className="font-mono text-xs" />
+          <p className="text-[11px] text-muted-foreground">
+            Separate several with commas. A channel ID starts with C (the Reply Router bot has to be in that channel); a member ID starts with U and gets a direct message.
+          </p>
+        </div>
+        <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs">
+          <div className="font-medium text-muted-foreground">Sends to now</div>
+          <div className={cn("mt-0.5", !slack.sendsTo.length && "text-amber-700 dark:text-amber-400")}>
+            {slack.sendsTo.length ? slack.sendsTo.join(", ") : "Nobody yet — the step can't run until this is set."}
+          </div>
+          {slack.saved == null && (
+            <div className="mt-1 text-muted-foreground">Nothing saved here, so it goes to team members whose name includes “Outreachify” and who have a Slack member ID.</div>
+          )}
+        </div>
+        <div className="flex justify-end">
+          <Button size="sm" disabled={busy || !dirty}
+            onClick={async () => { if (await onSave({ action: "setting-set", key: "outreachify_slack", value })) toast.success("Slack destination saved"); }}>
+            Save
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function UserEditRow({ user, onSave, busy }: {
-  user: UserRow | null; onSave: (b: Record<string, unknown>) => Promise<void>; busy: boolean;
+  user: UserRow | null; onSave: (b: Record<string, unknown>) => Promise<boolean>; busy: boolean;
 }) {
   const [name, setName] = useState(user?.name ?? "");
   const [slack, setSlack] = useState(user?.slack_member_id ?? "");
+  const [email, setEmail] = useState(user?.email ?? "");
   const isNew = !user;
-  const dirty = !isNew && (name !== user!.name || (slack || "") !== (user!.slack_member_id || ""));
+  const dirty = !isNew && (name !== user.name || slack.trim() !== (user.slack_member_id ?? "") || email.trim().toLowerCase() !== (user.email ?? ""));
 
   async function commit() {
     if (!name.trim()) { if (isNew) return; toast.error("Name required"); return; }
-    await onSave({ action: "user-upsert", id: user?.id ?? null, name, slack_member_id: slack.trim() || null });
-    if (isNew) { setName(""); setSlack(""); toast.success("User added"); }
-    else toast.success("Saved");
+    const ok = await onSave({ action: "user-upsert", id: user?.id ?? null, name, slack_member_id: slack.trim() || null, email: email.trim() || null });
+    if (ok) toast.success(isNew ? "Team member added" : "Saved");
   }
 
   return (
@@ -626,13 +989,17 @@ function UserEditRow({ user, onSave, busy }: {
       <TableCell>
         <Input value={slack} onChange={(e) => setSlack(e.target.value)} placeholder="U0123ABCD" className="h-8 font-mono text-xs" />
       </TableCell>
+      <TableCell>
+        <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@outboundhero.co" className="h-8 text-xs" />
+      </TableCell>
       <TableCell className="text-right">
         {isNew ? (
           <Button size="sm" variant="ghost" onClick={commit} disabled={busy || !name.trim()}>Add</Button>
         ) : (
           <div className="flex items-center gap-1 justify-end">
             {dirty && <Button size="sm" variant="ghost" onClick={commit} disabled={busy}>Save</Button>}
-            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => onSave({ action: "user-delete", id: user!.id }).then(() => toast.success("Deleted"))} disabled={busy}>✕</Button>
+            <Button size="sm" variant="ghost" className="text-destructive" title="Remove from the team"
+              onClick={async () => { if (await onSave({ action: "user-delete", id: user.id })) toast.success("Removed"); }} disabled={busy}>✕</Button>
           </div>
         )}
       </TableCell>

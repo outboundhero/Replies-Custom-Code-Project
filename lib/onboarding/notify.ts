@@ -22,6 +22,9 @@ interface NotifiableTask {
   title: string;
   due_date: string | null;
   client_tag: string;
+  /** 1 = ordered task with no due date. */
+  no_due?: number;
+  order_index?: number;
 }
 
 function host(): string {
@@ -60,10 +63,14 @@ export async function notifyOwnersOnAdd(clientTag: string, clientName: string | 
     const label = clientName ? `${clientName} (${clientTag})` : clientTag;
     for (const [userId, ts] of byOwner) {
       const u = userMap.get(userId);
-      const first = ts.slice().sort((a, b) => (a.due_date || "").localeCompare(b.due_date || ""))[0];
+      // Ordered steps (no due date) come first, in checklist order; then by due date.
+      const first = ts.slice().sort((a, b) =>
+        (a.no_due ? 0 : 1) - (b.no_due ? 0 : 1) ||
+        (a.no_due ? (a.order_index ?? 0) - (b.order_index ?? 0) : (a.due_date || "9999").localeCompare(b.due_date || "9999")))[0];
+      const when = first?.no_due || !first?.due_date ? "no due date, runs in checklist order" : `due ${fmtDate(first.due_date)}`;
       const text =
         `:clipboard: You've been assigned *${ts.length} onboarding task${ts.length === 1 ? "" : "s"}* for *${label}*.\n` +
-        (first ? `First up: *${first.title}* — due ${fmtDate(first.due_date)}.\n` : "") +
+        (first ? `First up: *${first.title}* — ${when}.\n` : "") +
         `See them all: ${clientLink(clientTag)}`;
       await dmUser(userId, u?.slackId ?? null, text, clientTag, "notify-on-add");
     }

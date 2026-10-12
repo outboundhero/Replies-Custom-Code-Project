@@ -381,3 +381,71 @@ export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
 
   return results;
 }
+
+export interface NewClientInfoRow {
+  /** Every client tag on the row (a multi-market client lists several). */
+  tags: string[];
+  companyName: string;
+  /** "Plan chosen" as written in the form, e.g. "Tier 1 (Base) = 20 Outlook Azure Domains". */
+  plan: string;
+  /** Start date as YYYY-MM-DD, or "" when the cell isn't a date. */
+  startDate: string;
+  contactNames: string;
+  contactEmails: string[];
+  primaryContactEmail: string;
+  clientType: string;
+}
+
+/** "10/15/2026" (the form's format) or "2026-10-15" → "2026-10-15"; "" otherwise. */
+export function parseSheetDate(raw: string): string {
+  const s = (raw || "").trim();
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const [y, m, d] = iso ? [iso[1], iso[2], iso[3]] : us ? [us[3], us[1], us[2]] : ["", "", ""];
+  if (!y || Number(m) < 1 || Number(m) > 12 || Number(d) < 1 || Number(d) > 31) return "";
+  return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+}
+
+/**
+ * The "New Client Information" tab (the sales hand-off form): one row per new
+ * client with its tag(s), plan, start date and contacts. Columns are located by
+ * header so inserted columns don't break it.
+ */
+export async function fetchNewClientInfo(): Promise<NewClientInfoRow[]> {
+  const auth = getAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "'New Client Information'",
+  });
+  const rows = res.data.values || [];
+  if (rows.length < 2) return [];
+  const headers = rows[0].map((h: string) => h?.toString() || "");
+  const abbrIdx = findColumnStartsWith(headers, "Client company abbreviation");
+  if (abbrIdx === -1) throw new Error("New Client Information: missing the client abbreviation column");
+  const nameIdx = findColumnStartsWith(headers, "Company name");
+  const planIdx = findColumnStartsWith(headers, "Plan chosen");
+  const startIdx = findColumnStartsWith(headers, "Start date");
+  const namesIdx = findColumnStartsWith(headers, "Name(s)");
+  const emailsIdx = findColumnStartsWith(headers, "Email(s)");
+  const primaryIdx = findColumnStartsWith(headers, "Primary point of contact person email");
+  const typeIdx = findColumnStartsWith(headers, "Client type");
+  const cell = (row: string[], i: number) => (i === -1 ? "" : (row[i]?.toString() || "").trim());
+
+  const out: NewClientInfoRow[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const tags = cell(rows[i], abbrIdx).split(/[,&/;\n]+|\s+and\s+/i).map((t) => t.trim().toUpperCase()).filter(Boolean);
+    if (!tags.length) continue;
+    out.push({
+      tags,
+      companyName: cell(rows[i], nameIdx),
+      plan: cell(rows[i], planIdx),
+      startDate: parseSheetDate(cell(rows[i], startIdx)),
+      contactNames: cell(rows[i], namesIdx),
+      contactEmails: cell(rows[i], emailsIdx).match(/[^\s,;<>()]+@[^\s,;<>()]+\.[^\s,;<>()]+/g) || [],
+      primaryContactEmail: cell(rows[i], primaryIdx),
+      clientType: cell(rows[i], typeIdx),
+    });
+  }
+  return out;
+}

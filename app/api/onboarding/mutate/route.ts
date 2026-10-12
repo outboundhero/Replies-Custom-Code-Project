@@ -1,29 +1,34 @@
 /**
  * POST /api/onboarding/mutate — all onboarding writes via an { action } dispatch.
  *
- * Admin-only:  add-client, delete-client, template-* (they change the roster /
- *              the shared template). Auth (any team member): task + client-status
- *              edits. Mirrors app/api/users/mutate/route.ts (guard → dispatch →
- *              bumpVersion handled inside the store helpers).
+ * Admin-only:  add-client, delete-client, set-client-group, template-*, user-*,
+ *              setting-set (they change the roster, the shared template or
+ *              where automations post). Auth (any team member): task +
+ *              client-status edits. Mirrors app/api/users/mutate/route.ts
+ *              (guard → dispatch → bumpVersion handled inside the store helpers).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { requireAuth, requireAdmin, getSession } from "@/lib/auth";
 import {
-  addOnboardingClient, updateClientStartDate, setClientStatus, deleteOnboardingClient, regenerateTasks,
+  addOnboardingClient, updateClientStartDate, setClientStatus, setClientGroup, deleteOnboardingClient, regenerateTasks,
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
   bulkUpdateTaskStatus, listTasks, getTask,
-  upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate,
-  upsertOnboardingUser, deleteOnboardingUser,
+  upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate, applyStandardTemplate,
+  upsertOnboardingUser, deleteOnboardingUser, setSetting,
 } from "@/lib/onboarding/store";
+import { OUTREACHIFY_SLACK_SETTING } from "@/lib/onboarding/automations";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
 const ADMIN_ACTIONS = new Set([
-  "add-client", "delete-client",
-  "template-upsert", "template-delete", "template-reorder", "template-seed",
-  "user-upsert", "user-delete",
+  "add-client", "delete-client", "set-client-group",
+  "template-upsert", "template-delete", "template-reorder", "template-seed", "template-apply-standard",
+  "user-upsert", "user-delete", "setting-set",
 ]);
+// Settings the UI may change.
+const SETTING_KEYS = new Set([OUTREACHIFY_SLACK_SETTING]);
+const asGroup = (v: unknown): 1 | 2 | null => (Number(v) === 1 ? 1 : Number(v) === 2 ? 2 : null);
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
@@ -43,6 +48,7 @@ export async function POST(req: NextRequest) {
           client_tag: String(body.client_tag || ""),
           client_name: body.client_name ?? null,
           plan_type: body.plan_type ?? null,
+          group_num: asGroup(body.group_num),
           start_date: String(body.start_date || ""),
           domains_owner_email: body.domains_owner_email ?? null,
           inbox_owner_email: body.inbox_owner_email ?? null,
@@ -62,6 +68,9 @@ export async function POST(req: NextRequest) {
       case "update-start-date":
         await updateClientStartDate(String(body.client_tag || ""), String(body.start_date || ""));
         return NextResponse.json({ ok: true });
+      case "set-client-group":
+        await setClientGroup(String(body.client_tag || ""), asGroup(body.group_num));
+        return NextResponse.json({ ok: true });
       case "set-client-status":
         await setClientStatus(String(body.client_tag || ""), body.status === "completed" ? "completed" : "active");
         return NextResponse.json({ ok: true });
@@ -74,9 +83,11 @@ export async function POST(req: NextRequest) {
       }
 
       // ── tasks ────────────────────────────────────────────────
-      case "update-task-status":
-        await updateTaskStatus(String(body.id || ""), body.status as TaskStatus);
+      case "update-task-status": {
+        const session = await getSession();
+        await updateTaskStatus(String(body.id || ""), body.status as TaskStatus, session?.email ?? null);
         return NextResponse.json({ ok: true });
+      }
       case "update-task-assignee": {
         const email = body.assignee_email ?? null;
         await updateTaskAssignee(String(body.id || ""), email);
@@ -91,7 +102,8 @@ export async function POST(req: NextRequest) {
       }
       case "bulk-task-status": {
         const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-        const n = await bulkUpdateTaskStatus(ids, body.status as TaskStatus);
+        const session = await getSession();
+        const n = await bulkUpdateTaskStatus(ids, body.status as TaskStatus, session?.email ?? null);
         return NextResponse.json({ ok: true, updated: n });
       }
       case "update-task-due-date":
@@ -114,15 +126,22 @@ export async function POST(req: NextRequest) {
 
       // ── template ─────────────────────────────────────────────
       case "template-upsert": {
+        // day_offset null / "" = an ordered task with no due day.
+        const noDay = body.day_offset == null || body.day_offset === "";
         const id = await upsertTemplateTask({
           id: body.id ?? null,
           title: String(body.title || ""),
-          role: (body.role as OnboardingRole) || "ops",
-          day_offset: Number(body.day_offset) || 0,
+          day_offset: noDay ? null : Number(body.day_offset) || 0,
+          assignee_id: body.assignee_id ?? null,
           task_group: body.task_group ?? null,
           order_index: body.order_index != null ? Number(body.order_index) : null,
         });
         return NextResponse.json({ ok: true, id });
+      }
+      case "template-apply-standard": {
+        const session = await getSession();
+        const res = await applyStandardTemplate(session?.email ?? null);
+        return NextResponse.json({ ok: true, ...res });
       }
       case "template-delete":
         await deleteTemplateTask(String(body.id || ""));
@@ -141,12 +160,22 @@ export async function POST(req: NextRequest) {
           id: body.id ?? null,
           name: String(body.name || ""),
           slack_member_id: body.slack_member_id ?? null,
+          email: body.email ?? null,
         });
         return NextResponse.json({ ok: true, id });
       }
       case "user-delete":
         await deleteOnboardingUser(String(body.id || ""));
         return NextResponse.json({ ok: true });
+
+      // ── settings ─────────────────────────────────────────────
+      case "setting-set": {
+        const key = String(body.key || "");
+        if (!SETTING_KEYS.has(key)) return NextResponse.json({ error: "Unknown setting" }, { status: 400 });
+        // Empty = back to the default destination.
+        await setSetting(key, String(body.value ?? "").trim() || null);
+        return NextResponse.json({ ok: true });
+      }
 
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });

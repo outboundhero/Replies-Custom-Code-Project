@@ -1,13 +1,14 @@
 /**
  * Client Onboarding System — durable store (Turso).
  *
- * A client added to onboarding (start date + role owners) clones the standard
- * task template into concrete, dated, assigned tasks (`due_date = start_date +
- * day_offset`). The board/detail/my-tasks UI just reads and mutates these rows.
+ * A client added to onboarding (start date) clones the standard checklist
+ * template into concrete, assigned tasks: dated ones (`due_date = start_date +
+ * day_offset`) and ordered ones (no due date — they run in checklist order).
+ * The checklist / per-person / board UI just reads and mutates these rows.
  *
  * Mirrors the lazy `ensureTables()` + `let ready` idiom of lib/leads/move-jobs.ts.
- * Assignee emails are plain TEXT cross-store references to Supabase `app_users`
- * (like `move_job.created_by`).
+ * Owner/assignee columns are named `*_email` for legacy reasons but hold an
+ * onboarding_user id.
  */
 import db from "@/lib/db";
 import { randomUUID } from "crypto";
@@ -17,6 +18,8 @@ import {
   generateTasks,
   addDays,
   isValidDate,
+  groupForStartDate,
+  blockingTask,
   type OnboardingRole,
   type TaskStatus,
   type TemplateTask,
@@ -83,10 +86,51 @@ async function ensureTables(): Promise<void> {
   )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_tag ON onboarding_task(client_tag, status)`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_assignee ON onboarding_task(assignee_email)`);
-  // Added after first release — safe to run repeatedly (prod already has the
-  // table without plan_type).
-  try { await db.execute("ALTER TABLE onboarding_client ADD COLUMN plan_type TEXT"); } catch { /* already exists */ }
+  // Small key/value settings (e.g. where the "Slack Outreachify" task posts).
+  await db.execute(`CREATE TABLE IF NOT EXISTS onboarding_setting (
+    key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL
+  )`);
+  // One row per automation run (the Run button) — the audit trail.
+  await db.execute(`CREATE TABLE IF NOT EXISTS onboarding_task_run (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    client_tag TEXT NOT NULL,
+    automation TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    ok INTEGER,
+    run_by TEXT,
+    params TEXT,
+    result TEXT,
+    error TEXT
+  )`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_run_task ON onboarding_task_run(task_id, started_at)`);
+  await addMissingColumns();
   ready = true;
+}
+
+/** Columns added after the first release (prod already has the tables): read
+ *  the four table definitions once and ALTER only what's missing. */
+async function addMissingColumns(): Promise<void> {
+  const want: Record<string, string[]> = {
+    onboarding_template_task: ["assignee_id TEXT", "no_due INTEGER NOT NULL DEFAULT 0", "automation TEXT"],
+    onboarding_client: ["plan_type TEXT", "group_num INTEGER"],
+    onboarding_task: ["no_due INTEGER NOT NULL DEFAULT 0", "automation TEXT", "completed_at TEXT", "completed_by TEXT", "last_run TEXT"],
+    onboarding_user: ["email TEXT"],
+  };
+  const tables = Object.keys(want);
+  const r = await db.execute({
+    sql: `SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN (${tables.map(() => "?").join(",")})`,
+    args: tables,
+  });
+  const ddl = new Map(r.rows.map((row) => [String(row.name), String(row.sql || "")]));
+  for (const table of tables) {
+    for (const col of want[table]) {
+      const name = col.split(" ")[0];
+      if (new RegExp(`\\b${name}\\b`).test(ddl.get(table) || "")) continue;
+      try { await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col}`); } catch { /* added by another server */ }
+    }
+  }
 }
 
 // ────────────────────────────── Types ──────────────────────────────
@@ -99,6 +143,8 @@ export interface OnboardingClientRow {
   client_tag: string;
   client_name: string | null;
   plan_type: string | null;
+  /** 1 or 2 (→ Bison instances); null until chosen. */
+  group_num: 1 | 2 | null;
   start_date: string;
   domains_owner_email: string | null;
   inbox_owner_email: string | null;
@@ -123,9 +169,18 @@ export interface OnboardingTaskRow {
   status: TaskStatus;
   order_index: number;
   due_date_overridden: number;
+  /** 1 = ordered task (no due date; runs after the ordered tasks before it). */
+  no_due: number;
+  /** Automation behind the Run button, or null for a manual check-off. */
+  automation: string | null;
+  completed_at: string | null;
+  completed_by: string | null;
+  /** Summary of the latest automation run, if any. */
+  last_run: LastRun | null;
   created_at: string;
   updated_at: string;
 }
+export interface LastRun { at: string; by: string | null; ok: boolean; summary: string }
 
 const asTemplate = (r: Row): TemplateTaskRow => ({
   id: String(r.id),
@@ -134,8 +189,30 @@ const asTemplate = (r: Row): TemplateTaskRow => ({
   day_offset: Number(r.day_offset) || 0,
   order_index: Number(r.order_index) || 0,
   task_group: r.task_group ? String(r.task_group) : null,
+  assignee_id: r.assignee_id ? String(r.assignee_id) : null,
+  no_due: Number(r.no_due) ? 1 : 0,
+  automation: r.automation ? String(r.automation) : null,
   created_at: String(r.created_at),
   updated_at: String(r.updated_at),
+});
+function parseLastRun(v: unknown): LastRun | null {
+  if (!v) return null;
+  try { return JSON.parse(String(v)) as LastRun; } catch { return null; }
+}
+const asGroup = (v: unknown): 1 | 2 | null => (Number(v) === 1 ? 1 : Number(v) === 2 ? 2 : null);
+const asClient = (row: Row): OnboardingClientRow => ({
+  client_tag: String(row.client_tag),
+  client_name: row.client_name ? String(row.client_name) : null,
+  plan_type: row.plan_type ? String(row.plan_type) : null,
+  group_num: asGroup(row.group_num),
+  start_date: String(row.start_date),
+  domains_owner_email: row.domains_owner_email ? String(row.domains_owner_email) : null,
+  inbox_owner_email: row.inbox_owner_email ? String(row.inbox_owner_email) : null,
+  ops_owner_email: row.ops_owner_email ? String(row.ops_owner_email) : null,
+  status: String(row.status),
+  created_by: row.created_by ? String(row.created_by) : null,
+  created_at: String(row.created_at),
+  updated_at: String(row.updated_at),
 });
 const asTask = (r: Row): OnboardingTaskRow => ({
   id: String(r.id),
@@ -150,6 +227,11 @@ const asTask = (r: Row): OnboardingTaskRow => ({
   status: (String(r.status) as TaskStatus) || "not_started",
   order_index: Number(r.order_index) || 0,
   due_date_overridden: Number(r.due_date_overridden) || 0,
+  no_due: Number(r.no_due) ? 1 : 0,
+  automation: r.automation ? String(r.automation) : null,
+  completed_at: r.completed_at ? String(r.completed_at) : null,
+  completed_by: r.completed_by ? String(r.completed_by) : null,
+  last_run: parseLastRun(r.last_run),
   created_at: String(r.created_at),
   updated_at: String(r.updated_at),
 });
@@ -164,30 +246,70 @@ export async function listTemplate(): Promise<TemplateTaskRow[]> {
   return r.rows.map(asTemplate);
 }
 
+/** The standard checklist's owners (Nick / Madison / Spencer) as onboarding_user
+ *  ids — matched by first name, created when missing. */
+async function standardOwnerIds(): Promise<Map<string, string>> {
+  const users = await listOnboardingUsers();
+  const out = new Map<string, string>();
+  for (const owner of new Set(DEFAULT_TEMPLATE.map((t) => t.owner))) {
+    const hit = users.find((u) => u.name.trim().toLowerCase().split(/\s+/)[0] === owner.toLowerCase());
+    out.set(owner, hit ? hit.id : await upsertOnboardingUser({ name: owner }));
+  }
+  return out;
+}
+
+function standardTemplateInserts(owners: Map<string, string>, now: string) {
+  return DEFAULT_TEMPLATE.map((t, i) => ({
+    sql: `INSERT INTO onboarding_template_task
+            (id, title, role, day_offset, order_index, task_group, assignee_id, no_due, automation, created_at, updated_at)
+          VALUES (?, ?, 'ops', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [randomUUID(), t.title, t.day ?? 0, i, t.task_group, owners.get(t.owner) ?? null,
+           t.day == null ? 1 : 0, t.automation ?? null, now, now],
+  }));
+}
+
 /** Seed the standard template only when it's empty (idempotent). Returns count inserted. */
 export async function seedDefaultTemplate(): Promise<number> {
   await ensureTables();
   const existing = await db.execute("SELECT COUNT(*) AS c FROM onboarding_template_task");
   if (Number(existing.rows[0]?.c) > 0) return 0;
+  const owners = await standardOwnerIds();
+  await db.batch(standardTemplateInserts(owners, nowIso()), "write");
+  bumpVersion("onboarding");
+  return DEFAULT_TEMPLATE.length;
+}
+
+/**
+ * Replace the whole template with the standard checklist. The previous template
+ * is kept in onboarding_setting (`template_backup:<time>`) so nothing is lost.
+ * Only affects clients added afterward — existing clients keep their tasks.
+ */
+export async function applyStandardTemplate(by: string | null): Promise<{ replaced: number; inserted: number }> {
+  await ensureTables();
+  const previous = await listTemplate();
+  const owners = await standardOwnerIds();
   const now = nowIso();
   await db.batch(
-    DEFAULT_TEMPLATE.map((t, i) => ({
-      sql: `INSERT INTO onboarding_template_task
-              (id, title, role, day_offset, order_index, task_group, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [randomUUID(), t.title, t.role, t.day_offset, i, t.task_group, now, now],
-    })),
+    [
+      { sql: "INSERT OR REPLACE INTO onboarding_setting (key, value, updated_at) VALUES (?, ?, ?)",
+        args: [`template_backup:${now}`, JSON.stringify({ by, tasks: previous }), now] },
+      { sql: "DELETE FROM onboarding_template_task", args: [] },
+      ...standardTemplateInserts(owners, now),
+    ],
     "write",
   );
   bumpVersion("onboarding");
-  return DEFAULT_TEMPLATE.length;
+  await logActivity("onboarding", "template-replaced", { details: { by, replaced: previous.length, inserted: DEFAULT_TEMPLATE.length } });
+  return { replaced: previous.length, inserted: DEFAULT_TEMPLATE.length };
 }
 
 export async function upsertTemplateTask(input: {
   id?: string | null;
   title: string;
-  role: OnboardingRole;
-  day_offset: number;
+  role?: OnboardingRole;
+  /** Day N; null = ordered task with no due day. */
+  day_offset: number | null;
+  assignee_id?: string | null;
   task_group?: string | null;
   order_index?: number | null;
 }): Promise<string> {
@@ -195,13 +317,17 @@ export async function upsertTemplateTask(input: {
   const now = nowIso();
   const title = input.title.trim();
   if (!title) throw new Error("title required");
+  const noDue = input.day_offset == null ? 1 : 0;
+  const day = input.day_offset == null ? 0 : input.day_offset | 0;
+  const assignee = input.assignee_id?.trim() || null;
   if (input.id) {
+    // Position, group and automation are kept — the editor changes what a task
+    // says, who owns it and when it's due.
     await db.execute({
       sql: `UPDATE onboarding_template_task
-            SET title=?, role=?, day_offset=?, task_group=?, order_index=?, updated_at=?
+            SET title=?, day_offset=?, no_due=?, assignee_id=?, updated_at=?
             WHERE id=?`,
-      args: [title, input.role, input.day_offset | 0, input.task_group ?? null,
-             input.order_index ?? 0, now, input.id],
+      args: [title, day, noDue, assignee, now, input.id],
     });
     bumpVersion("onboarding");
     return input.id;
@@ -215,9 +341,9 @@ export async function upsertTemplateTask(input: {
   const id = randomUUID();
   await db.execute({
     sql: `INSERT INTO onboarding_template_task
-            (id, title, role, day_offset, order_index, task_group, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [id, title, input.role, input.day_offset | 0, order, input.task_group ?? null, now, now],
+            (id, title, role, day_offset, order_index, task_group, assignee_id, no_due, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, title, input.role || "ops", day, order, input.task_group ?? null, assignee, noDue, now, now],
   });
   bumpVersion("onboarding");
   return id;
@@ -249,15 +375,18 @@ export interface OnboardingUserRow {
   id: string;
   name: string;
   slack_member_id: string | null;
+  /** Their Reply Router login — opens their own task view by default. */
+  email: string | null;
 }
 
 export async function listOnboardingUsers(): Promise<OnboardingUserRow[]> {
   await ensureTables();
-  const r = await db.execute("SELECT id, name, slack_member_id FROM onboarding_user ORDER BY name COLLATE NOCASE ASC");
+  const r = await db.execute("SELECT id, name, slack_member_id, email FROM onboarding_user ORDER BY name COLLATE NOCASE ASC");
   return r.rows.map((row) => ({
     id: String(row.id),
     name: String(row.name),
     slack_member_id: row.slack_member_id ? String(row.slack_member_id) : null,
+    email: row.email ? String(row.email) : null,
   }));
 }
 
@@ -267,31 +396,45 @@ export async function onboardingUserMap(): Promise<Map<string, { name: string; s
   return new Map(users.map((u) => [u.id, { name: u.name, slackId: u.slack_member_id }]));
 }
 
-export async function upsertOnboardingUser(input: { id?: string | null; name: string; slack_member_id?: string | null }): Promise<string> {
+export async function upsertOnboardingUser(input: { id?: string | null; name: string; slack_member_id?: string | null; email?: string | null }): Promise<string> {
   await ensureTables();
   const name = input.name.trim();
   if (!name) throw new Error("name required");
   const slack = input.slack_member_id?.trim() || null;
+  const email = input.email?.trim().toLowerCase() || null;
   const now = nowIso();
   if (input.id) {
     await db.execute({
-      sql: "UPDATE onboarding_user SET name=?, slack_member_id=?, updated_at=? WHERE id=?",
-      args: [name, slack, now, input.id],
+      sql: "UPDATE onboarding_user SET name=?, slack_member_id=?, email=?, updated_at=? WHERE id=?",
+      args: [name, slack, email, now, input.id],
     });
     bumpVersion("onboarding");
     return input.id;
   }
   const id = randomUUID();
   await db.execute({
-    sql: "INSERT INTO onboarding_user (id, name, slack_member_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-    args: [id, name, slack, now, now],
+    sql: "INSERT INTO onboarding_user (id, name, slack_member_id, email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    args: [id, name, slack, email, now, now],
   });
   bumpVersion("onboarding");
   return id;
 }
 
+/** Remove a team member. Refused while they still own template tasks or open
+ *  tasks — those would be left pointing at nobody. */
 export async function deleteOnboardingUser(id: string): Promise<void> {
   await ensureTables();
+  const owns = await db.execute({
+    sql: `SELECT (SELECT COUNT(*) FROM onboarding_template_task WHERE assignee_id = ?) AS tpl,
+                 (SELECT COUNT(*) FROM onboarding_task WHERE assignee_email = ? AND status != 'completed') AS open`,
+    args: [id, id],
+  });
+  const tpl = Number(owns.rows[0]?.tpl) || 0;
+  const open = Number(owns.rows[0]?.open) || 0;
+  if (tpl || open) {
+    const parts = [tpl ? `${tpl} template task${tpl === 1 ? "" : "s"}` : "", open ? `${open} open task${open === 1 ? "" : "s"}` : ""].filter(Boolean);
+    throw new Error(`They still own ${parts.join(" and ")} — give those to someone else first.`);
+  }
   await db.execute({ sql: "DELETE FROM onboarding_user WHERE id=?", args: [id] });
   bumpVersion("onboarding");
 }
@@ -323,10 +466,10 @@ async function insertGeneratedTasks(tasks: GeneratedTask[]): Promise<void> {
     tasks.map((t) => ({
       sql: `INSERT INTO onboarding_task
               (id, client_tag, template_task_id, title, role, task_group, day_offset,
-               due_date, assignee_email, status, order_index, due_date_overridden, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, 0, ?, ?)`,
+               due_date, assignee_email, status, order_index, due_date_overridden, no_due, automation, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, 0, ?, ?, ?, ?)`,
       args: [randomUUID(), t.client_tag, t.template_task_id, t.title, t.role, t.task_group,
-             t.day_offset, t.due_date, t.assignee_email, t.order_index, now, now],
+             t.day_offset, t.due_date, t.assignee_email, t.order_index, t.no_due, t.automation, now, now],
     })),
     "write",
   );
@@ -336,6 +479,8 @@ export interface AddClientInput {
   client_tag: string;
   client_name?: string | null;
   plan_type?: string | null;
+  /** 1 or 2; when omitted it follows the start-date rule (1st → 2, 15th → 1). */
+  group_num?: 1 | 2 | null;
   start_date: string;
   domains_owner_email?: string | null;
   inbox_owner_email?: string | null;
@@ -355,20 +500,22 @@ export async function addOnboardingClient(input: AddClientInput): Promise<{ clie
   await seedDefaultTemplate(); // no-op if template already exists
 
   const now = nowIso();
+  const group = asGroup(input.group_num) ?? groupForStartDate(input.start_date);
   await db.execute({
     sql: `INSERT INTO onboarding_client
-            (client_tag, client_name, plan_type, start_date, domains_owner_email, inbox_owner_email,
+            (client_tag, client_name, plan_type, group_num, start_date, domains_owner_email, inbox_owner_email,
              ops_owner_email, status, created_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
           ON CONFLICT(client_tag) DO UPDATE SET
             client_name = excluded.client_name,
             plan_type = excluded.plan_type,
+            group_num = excluded.group_num,
             start_date = excluded.start_date,
             domains_owner_email = excluded.domains_owner_email,
             inbox_owner_email = excluded.inbox_owner_email,
             ops_owner_email = excluded.ops_owner_email,
             updated_at = excluded.updated_at`,
-    args: [tag, input.client_name?.trim() || null, input.plan_type?.trim() || null, input.start_date,
+    args: [tag, input.client_name?.trim() || null, input.plan_type?.trim() || null, group, input.start_date,
            input.domains_owner_email?.trim() || null, input.inbox_owner_email?.trim() || null,
            input.ops_owner_email?.trim() || null, input.created_by || null, now, now],
   });
@@ -404,18 +551,20 @@ export async function addOnboardingClient(input: AddClientInput): Promise<{ clie
 }
 
 /** (Re)generate any template tasks a client is missing, without duplicating
- *  existing ones — idempotent on (client_tag, template_task_id). */
+ *  existing ones — a template task counts as present when the client already
+ *  has it by id, or by title (replacing the template gives its tasks new ids). */
 export async function regenerateTasks(tag: string): Promise<number> {
   await ensureTables();
   const client = await getClient(tag);
   if (!client) throw new Error("client not onboarded");
   const template = await listTemplate();
   const existing = await db.execute({
-    sql: "SELECT template_task_id FROM onboarding_task WHERE client_tag=? AND template_task_id IS NOT NULL",
+    sql: "SELECT template_task_id, title FROM onboarding_task WHERE client_tag=?",
     args: [client.client_tag],
   });
-  const have = new Set(existing.rows.map((r) => String(r.template_task_id)));
-  const missing = template.filter((t) => !have.has(t.id));
+  const have = new Set(existing.rows.filter((r) => r.template_task_id).map((r) => String(r.template_task_id)));
+  const haveTitles = new Set(existing.rows.map((r) => String(r.title).trim().toLowerCase()));
+  const missing = template.filter((t) => !have.has(t.id) && !haveTitles.has(t.title.trim().toLowerCase()));
   if (!missing.length) return 0;
   const tasks = generateTasks(
     {
@@ -447,17 +596,7 @@ export async function listClients(): Promise<OnboardingClientRow[]> {
     ) t ON t.client_tag = c.client_tag
     ORDER BY c.status ASC, c.start_date DESC`);
   return r.rows.map((row) => ({
-    client_tag: String(row.client_tag),
-    client_name: row.client_name ? String(row.client_name) : null,
-    plan_type: row.plan_type ? String(row.plan_type) : null,
-    start_date: String(row.start_date),
-    domains_owner_email: row.domains_owner_email ? String(row.domains_owner_email) : null,
-    inbox_owner_email: row.inbox_owner_email ? String(row.inbox_owner_email) : null,
-    ops_owner_email: row.ops_owner_email ? String(row.ops_owner_email) : null,
-    status: String(row.status),
-    created_by: row.created_by ? String(row.created_by) : null,
-    created_at: String(row.created_at),
-    updated_at: String(row.updated_at),
+    ...asClient(row),
     tasks_total: Number(row.tasks_total) || 0,
     tasks_done: Number(row.tasks_done) || 0,
   }));
@@ -470,20 +609,7 @@ export async function getClient(tag: string): Promise<OnboardingClientRow | null
     args: [tag],
   });
   const row = r.rows[0];
-  if (!row) return null;
-  return {
-    client_tag: String(row.client_tag),
-    client_name: row.client_name ? String(row.client_name) : null,
-    plan_type: row.plan_type ? String(row.plan_type) : null,
-    start_date: String(row.start_date),
-    domains_owner_email: row.domains_owner_email ? String(row.domains_owner_email) : null,
-    inbox_owner_email: row.inbox_owner_email ? String(row.inbox_owner_email) : null,
-    ops_owner_email: row.ops_owner_email ? String(row.ops_owner_email) : null,
-    status: String(row.status),
-    created_by: row.created_by ? String(row.created_by) : null,
-    created_at: String(row.created_at),
-    updated_at: String(row.updated_at),
-  };
+  return row ? asClient(row) : null;
 }
 
 /** Move a client's start date; shift every non-overridden task's due_date to
@@ -498,8 +624,9 @@ export async function updateClientStartDate(tag: string, startDate: string): Pro
     sql: "UPDATE onboarding_client SET start_date=?, updated_at=? WHERE client_tag=?",
     args: [startDate, now, client.client_tag],
   });
+  // Ordered tasks have no due date — only dated, non-overridden ones move.
   const tasks = await db.execute({
-    sql: "SELECT id, day_offset FROM onboarding_task WHERE client_tag=? AND due_date_overridden=0",
+    sql: "SELECT id, day_offset FROM onboarding_task WHERE client_tag=? AND due_date_overridden=0 AND COALESCE(no_due, 0)=0",
     args: [client.client_tag],
   });
   if (tasks.rows.length) {
@@ -511,6 +638,16 @@ export async function updateClientStartDate(tag: string, startDate: string): Pro
       "write",
     );
   }
+  bumpVersion("onboarding");
+}
+
+/** Set the client's group (1 or 2 → which Bison instances it uses). */
+export async function setClientGroup(tag: string, group: 1 | 2 | null): Promise<void> {
+  await ensureTables();
+  await db.execute({
+    sql: "UPDATE onboarding_client SET group_num=?, updated_at=? WHERE UPPER(client_tag)=UPPER(?)",
+    args: [asGroup(group), nowIso(), tag],
+  });
   bumpVersion("onboarding");
 }
 
@@ -553,11 +690,26 @@ export async function getTask(id: string): Promise<OnboardingTaskRow | null> {
   return r.rows[0] ? asTask(r.rows[0]) : null;
 }
 
-export async function updateTaskStatus(id: string, status: TaskStatus): Promise<void> {
+/** Ordered tasks run in checklist order: throws (with the task to finish first)
+ *  when `task` can't be started or completed yet. Reopening is always allowed. */
+async function assertInOrder(task: OnboardingTaskRow, status: TaskStatus, treatAsDone: Set<string> = new Set()): Promise<void> {
+  if (status === "not_started" || !task.no_due) return;
+  const siblings = (await listTasks({ tag: task.client_tag }))
+    .map((t) => (treatAsDone.has(t.id) ? { ...t, status: "completed" as TaskStatus } : t));
+  const blocker = blockingTask(task, siblings);
+  if (blocker) throw new Error(`Finish "${blocker.title}" first — these steps run in order.`);
+}
+
+export async function updateTaskStatus(id: string, status: TaskStatus, by: string | null = null): Promise<void> {
   await ensureTables();
+  const task = await getTask(id);
+  if (!task) throw new Error("task not found");
+  await assertInOrder(task, status);
+  const now = nowIso();
+  const done = status === "completed";
   await db.execute({
-    sql: "UPDATE onboarding_task SET status=?, updated_at=? WHERE id=?",
-    args: [status, nowIso(), id],
+    sql: "UPDATE onboarding_task SET status=?, completed_at=?, completed_by=?, updated_at=? WHERE id=?",
+    args: [status, done ? (task.completed_at ?? now) : null, done ? (task.completed_by ?? by) : null, now, id],
   });
   bumpVersion("onboarding");
 }
@@ -620,19 +772,88 @@ export async function deleteTask(id: string): Promise<void> {
   bumpVersion("onboarding");
 }
 
-/** Set the same status on many tasks at once (bulk action from the UI). */
-export async function bulkUpdateTaskStatus(ids: string[], status: TaskStatus): Promise<number> {
+/** Set the same status on many tasks at once (bulk action from the UI). Ordered
+ *  tasks still have to be in order — selecting steps 1–3 together is fine,
+ *  selecting step 3 alone before 1–2 are done is refused. */
+export async function bulkUpdateTaskStatus(ids: string[], status: TaskStatus, by: string | null = null): Promise<number> {
   await ensureTables();
-  const clean = ids.filter(Boolean);
+  const clean = [...new Set(ids.filter(Boolean))];
   if (!clean.length) return 0;
+  const tasks = (await Promise.all(clean.map((id) => getTask(id)))).filter((t): t is OnboardingTaskRow => !!t);
+  if (status !== "not_started") {
+    const batch = new Set(tasks.map((t) => t.id));
+    for (const t of tasks) await assertInOrder(t, status, batch);
+  }
   const now = nowIso();
+  const done = status === "completed";
   await db.batch(
-    clean.map((id) => ({
-      sql: "UPDATE onboarding_task SET status=?, updated_at=? WHERE id=?",
-      args: [status, now, id],
+    tasks.map((t) => ({
+      sql: "UPDATE onboarding_task SET status=?, completed_at=?, completed_by=?, updated_at=? WHERE id=?",
+      args: [status, done ? (t.completed_at ?? now) : null, done ? (t.completed_by ?? by) : null, now, t.id],
     })),
     "write",
   );
   bumpVersion("onboarding");
-  return clean.length;
+  return tasks.length;
+}
+
+// ─────────────────────────── Settings ───────────────────────────
+
+export async function getSetting(key: string): Promise<string | null> {
+  await ensureTables();
+  const r = await db.execute({ sql: "SELECT value FROM onboarding_setting WHERE key=?", args: [key] });
+  return r.rows[0]?.value != null ? String(r.rows[0].value) : null;
+}
+
+export async function setSetting(key: string, value: string | null): Promise<void> {
+  await ensureTables();
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO onboarding_setting (key, value, updated_at) VALUES (?, ?, ?)",
+    args: [key, value, nowIso()],
+  });
+  bumpVersion("onboarding");
+}
+
+// ─────────────────────────── Automation runs ───────────────────────────
+
+/** Record the start of an automation run; returns its id. */
+export async function startRun(task: OnboardingTaskRow, by: string | null, params: unknown): Promise<string> {
+  await ensureTables();
+  const id = randomUUID();
+  await db.execute({
+    sql: `INSERT INTO onboarding_task_run (id, task_id, client_tag, automation, started_at, run_by, params)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, task.id, task.client_tag, task.automation || "", nowIso(), by, JSON.stringify(params ?? {})],
+  });
+  return id;
+}
+
+/**
+ * Record how a run ended. On success the task is marked Done (stamped with who
+ * ran it); either way the task keeps a one-line summary of its latest run.
+ */
+export async function finishRun(
+  runId: string, task: OnboardingTaskRow, by: string | null,
+  outcome: { ok: boolean; summary: string; result?: unknown },
+): Promise<void> {
+  const now = nowIso();
+  const last: LastRun = { at: now, by, ok: outcome.ok, summary: outcome.summary.slice(0, 500) };
+  await db.batch(
+    [
+      { sql: "UPDATE onboarding_task_run SET finished_at=?, ok=?, result=?, error=? WHERE id=?",
+        args: [now, outcome.ok ? 1 : 0, JSON.stringify(outcome.result ?? null), outcome.ok ? null : outcome.summary.slice(0, 1000), runId] },
+      outcome.ok
+        ? { sql: "UPDATE onboarding_task SET status='completed', completed_at=?, completed_by=?, last_run=?, updated_at=? WHERE id=?",
+            args: [now, by, JSON.stringify(last), now, task.id] }
+        : { sql: "UPDATE onboarding_task SET last_run=?, updated_at=? WHERE id=?",
+            args: [JSON.stringify(last), now, task.id] },
+    ],
+    "write",
+  );
+  bumpVersion("onboarding");
+}
+
+/** In-order check for the Run button (same rule as a manual status change). */
+export async function assertTaskCanRun(task: OnboardingTaskRow): Promise<void> {
+  await assertInOrder(task, "completed");
 }
