@@ -444,7 +444,7 @@ export default function InboxPage() {
   const initialClient = scopedTags && scopedTags.length === 1 ? scopedTags[0] : "";
   // Scoped users (their own client login) default to a view that surfaces their
   // leads. Preference order: an isScopedDefault curated view covering their whole
-  // scope (e.g. "LRL - OH Clients" for a UJ login — the generic "all" is hidden
+  // scope (e.g. "LRL - OH Clients" for a BAJFI login — the generic "all" is hidden
   // for them), then a dedicated master (e.g. "SBSPO Master Inbox"), else the
   // generic Master Inbox. Admins keep the curated Cherry default.
   const initialView = scopedTags
@@ -1356,7 +1356,7 @@ export default function InboxPage() {
                 if (!allowedClientTags || !allowedClientTags.length) return true;
                 // Hide the generic Master Inbox when a dedicated master (e.g.
                 // "SBSPO Master Inbox") OR an isScopedDefault curated view (e.g.
-                // "LRL - OH Clients" for a UJ login) already covers this user's
+                // "LRL - OH Clients" for a BAJFI login) already covers this user's
                 // whole scope — that view stands in for the generic inbox.
                 if (v.id === "all") return !hasDedicatedMasterView(allowedClientTags) && !scopedDefaultViewId(allowedClientTags);
                 if (v.clientTag) return allowedClientTags.includes(v.clientTag);
