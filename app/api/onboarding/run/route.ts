@@ -73,7 +73,9 @@ export async function POST(req: NextRequest) {
       await logError("onboarding", `run:${task.automation}`, `result not saved: ${outcome.summary}`, { client_tag: task.client_tag, by: ctx.by });
       return NextResponse.json({
         ok: false,
-        error: outcome.ok ? "It ran, but saving the result failed. Mark the step Done by hand — do not run it again." : outcome.summary,
+        error: !outcome.ok ? outcome.summary
+          : outcome.more ? "That part went through, but recording it failed. Open the preview before running again — it shows what is already done."
+          : "It ran, but saving the result failed. Mark the step Done by hand — do not run it again.",
       }, { status: 500 });
     }
     if (outcome.ok) {

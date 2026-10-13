@@ -8,21 +8,21 @@
  */
 import { dmBySlackIds, postToChannel } from "@/lib/slack";
 import {
-  getSetting, setClientGroup, listOnboardingUsers, lastFailedAttempt,
+  getSetting, setClientGroup, listOnboardingUsers, lastFailedAttempt, runResults, takeLock, releaseLock, lockHolder,
   type OnboardingClientRow, type OnboardingTaskRow,
 } from "@/lib/onboarding/store";
 import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache, nsVersion } from "@/lib/server-cache";
 import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
-import { listCampaigns, getSequenceSteps, getCampaignSchedule } from "@/lib/outboundhero-api";
+import { listCampaigns, getSequenceSteps, getCampaignSchedule, lookUpCampaign } from "@/lib/outboundhero-api";
 import {
   previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, previewOnboardingWhitelist, runOnboardingWhitelist,
   type AllocationSide, type AllocationPlan, type WhitelistPlan,
 } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
-import { createCampaignFromMaster, CHECK_PREFIX, type MasterStep, type TagCache } from "@/lib/onboarding/create-campaigns";
+import { createCampaignFromMaster, CHECK_PREFIX, BUILD_PREFIX, type MasterStep } from "@/lib/onboarding/create-campaigns";
 import {
   CAMPAIGN_SLOTS, GROUP_INSTANCES, TIMEZONE_OPTIONS, campaignName, slotKey, slotOfName, parseMasterSettings,
   parsePlace, regionByAny, timezoneForState, type CampaignSlot,
@@ -192,11 +192,16 @@ export const campaignCreationEnabled = () => process.env.ONBOARDING_CREATE_CAMPA
 const NOT_SWITCHED_ON =
   "Creating the campaigns isn't switched on yet — it waits for the master campaigns to be confirmed and one test in Email Bison. This is a preview; complete the step by hand for now.";
 
-interface MasterCampaign { id: number; name: string; status: string; slot: CampaignSlot; steps: MasterStep[]; schedule: Record<string, unknown> | null }
+interface MasterCampaign { id: number; name: string; status: string; slot: CampaignSlot; sequenceId: number | null; steps: MasterStep[]; schedule: Record<string, unknown> | null }
 const gone = (status: string) => /archiv|delet/i.test(status);
 
-/** The master client's live campaigns in one instance, by slot (a slot can hold none, one or several). */
-function loadMasterCampaigns(instance: BisonInstanceKey, tag: string, fresh: boolean): Promise<Map<string, MasterCampaign[]>> {
+/**
+ * The master client's live campaigns in one instance, by slot (a slot can hold
+ * none, one or several). Kept for a few minutes, for the run as well: a master
+ * that changed in between can't produce a wrong campaign, because every copy
+ * is compared with what was read here and thrown away if it differs.
+ */
+function loadMasterCampaigns(instance: BisonInstanceKey, tag: string): Promise<Map<string, MasterCampaign[]>> {
   const read = async () => {
     const out = new Map<string, MasterCampaign[]>();
     for (const c of await listCampaigns(instance, { search: tag, strict: true })) {
@@ -205,14 +210,14 @@ function loadMasterCampaigns(instance: BisonInstanceKey, tag: string, fresh: boo
       const [steps, schedule] = await Promise.all([getSequenceSteps(instance, c.id), getCampaignSchedule(instance, c.id)]);
       // A failed read throws, so it is reported now and never cached as "no emails".
       if (!steps) throw new Error(`couldn't read the emails of #${c.id} “${c.name}”`);
-      const list = ((steps as { sequence_steps?: MasterStep[] } | null)?.sequence_steps ?? []).slice().sort((a, b) => a.order - b.order);
+      const raw = steps as { sequence_id?: unknown; sequence_steps?: MasterStep[] } | null;
+      const list = (raw?.sequence_steps ?? []).slice().sort((a, b) => a.order - b.order);
       const key = slotKey(slot);
-      out.set(key, [...(out.get(key) ?? []), { id: c.id, name: c.name, status: c.status, slot, steps: list, schedule }]);
+      out.set(key, [...(out.get(key) ?? []), { id: c.id, name: c.name, status: c.status, slot, sequenceId: typeof raw?.sequence_id === "number" ? raw.sequence_id : null, steps: list, schedule }]);
     }
     return out;
   };
-  // A run always reads now; a preview may reuse a read from the last few minutes.
-  return fresh ? read() : withCache(`onboarding:masters:${instance}:${tag}`, 5 * 60_000, read);
+  return withCache(`onboarding:masters:${instance}:${tag}`, 5 * 60_000, read);
 }
 
 const DAYS: [string, string][] = [["monday", "Mon"], ["tuesday", "Tue"], ["wednesday", "Wed"], ["thursday", "Thu"], ["friday", "Fri"], ["saturday", "Sat"], ["sunday", "Sun"]];
@@ -238,8 +243,9 @@ interface CampaignPlan {
 
 /**
  * Everything the preview shows and the run acts on — built the same way for
- * both. `fresh` (the run) reads Email Bison now instead of reusing a recent
- * read: acting on a stale list of what already exists would create duplicates.
+ * both. `fresh` (the run) searches Email Bison now for what already exists
+ * instead of reusing a recent search: acting on a stale list would create
+ * duplicates.
  */
 async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<CampaignPlan> {
   const search = (instance: BisonInstanceKey, q: string) =>
@@ -308,17 +314,21 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
       let fromMaster: { id: number; name: string; status: string }[];
       try {
         [masters, mine, fromMaster] = await Promise.all([
-          loadMasterCampaigns(instance, master.tag, fresh), search(instance, tag), search(instance, master.tag),
+          loadMasterCampaigns(instance, master.tag), search(instance, tag), search(instance, master.tag),
         ]);
       } catch (e) {
         blockers.push(`Couldn't read ${label} in Email Bison: ${(e as Error).message}`);
         continue;
       }
       // A copy that was made but never finished (an interrupted run) must be dealt with by a person first.
-      const strays = [...mine, ...fromMaster].filter((x) => !gone(x.status) && (
-        x.name.startsWith(`${CHECK_PREFIX}${tag}:`) || (x.name.startsWith("Copy of ") && x.name.includes(`${master.tag}:`))));
-      for (const x of new Map(strays.map((y) => [y.id, y])).values()) {
-        blockers.push(`${label}: an unfinished copy is still there — #${x.id} “${x.name}”. Look at it and delete it in Email Bison, then try again.`);
+      const live = [...new Map([...mine, ...fromMaster].filter((x) => !gone(x.status)).map((y) => [y.id, y])).values()];
+      for (const x of live) {
+        if (x.name.startsWith(`${CHECK_PREFIX}${tag}:`) || x.name.startsWith(`${BUILD_PREFIX}${tag}:`)) {
+          blockers.push(`${label}: an unfinished copy is still there — #${x.id} “${x.name}”. Look at it and delete it in Email Bison, then try again.`);
+        } else if (x.name.startsWith("Copy of ") && x.name.includes(`${master.tag}:`)) {
+          // Not necessarily ours: a nurture copy of the master looks the same while it is being made.
+          blockers.push(`${label}: #${x.id} “${x.name}” is a copy of the master that hasn't been finished. If nobody is making a nurture copy of ${master.tag} right now, it is a leftover — delete it in Email Bison, then try again.`);
+        }
       }
       const copies: string[] = [];
       let shown = false;
@@ -334,7 +344,12 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
           continue;
         }
         const m = candidates[0];
+        if (already.length > 1) blockers.push(`${label}: ${already.length} campaigns are named “${name}” (${already.map((x) => `#${x.id}`).join(", ")}) — there should be one. Delete the extra in Email Bison.`);
         if (!m.steps.length) copyIssues.add(`${label}: couldn't read the emails of #${m.id} “${m.name}”.`);
+        // A/B variants share a position, so a copy's emails can't be matched to the master's one for one.
+        if (m.steps.some((x) => x.variant) || new Set(m.steps.map((x) => x.order)).size !== m.steps.length) {
+          copyIssues.add(`${label}: the master #${m.id} “${m.name}” has A/B variants — those can't be copied automatically, so create this client's campaigns by hand.`);
+        }
         if (!m.schedule) copyIssues.add(`${label}: the master #${m.id} “${m.name}” has no schedule.`);
         copies.push(JSON.stringify(m.steps.map((s) => [s.email_subject, s.email_body, s.wait_in_days, s.thread_reply])));
         if (!placeIssues.length && m.steps.length) {
@@ -380,7 +395,7 @@ const createCampaigns: Automation = {
           : "Copies the master client's 6 campaigns in each of the group's two instances — 12 new campaigns, created as drafts.",
         `Renames them for ${p.tag} and swaps the master's place names for ${p.target.city || "this client's city"}${p.target.state ? `, ${p.target.state}` : ""} in the email bodies. Subjects and variables ({CITY}, {QUESTION}, …) are not touched.`,
         `Sets every schedule to ${p.timezone || "the chosen timezone"}; days and hours stay as on the master.`,
-        "Reads every campaign back after writing it. One that doesn't match is not left under the client's name, and the run stops there.",
+        "Works one campaign at a time and reads each back after writing it. A campaign gets the client's name only once everything in it has checked out; one that doesn't is kept aside under a “CHECK COPY” name, and the run stops there.",
         ...(exists ? [`${exists} of the 12 already exist and are left as they are.`] : []),
         "Marks this step Done once all 12 are there.",
       ],
@@ -391,41 +406,57 @@ const createCampaigns: Automation = {
     };
   },
 
+  /** ONE campaign per request. `more` tells the caller to run again; the step is Done when all 12 are there. */
   async run(ctx) {
     if (!campaignCreationEnabled()) return { ok: false, summary: NOT_SWITCHED_ON };
-    // Rebuilt now, on fresh reads — never trusted from the preview.
+    // Rebuilt now, on a fresh search — never trusted from the preview.
     const p = await planCampaigns(ctx, true);
     if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
     if (!p.master || p.items.length !== 2 * CAMPAIGN_SLOTS.length) return { ok: false, summary: "The plan isn't complete — open the preview to see why." };
+    const total = p.items.length;
+    const allThere = `All ${total} campaigns are there for ${p.tag} — drafts, copied from ${p.master.tag}.`;
 
-    const tags: TagCache = new Map();
-    const results: { instance: string; name: string; state: "created" | "exists" | "failed"; campaignId: number | null; note?: string }[] = [];
-    for (const item of p.items) {
-      if (item.existingIds.length) { results.push({ instance: item.instance, name: item.name, state: "exists", campaignId: item.existingIds[0] }); continue; }
-      const r = await createCampaignFromMaster({
-        instance: item.instance, name: item.name, nurture: item.slot.nurture, clientTag: p.tag,
-        master: { id: item.master.id, name: item.master.name, steps: item.master.steps },
-        masterPlace: p.master.place, target: p.target, timezone: p.timezone,
-      }, tags);
-      results.push(r);
-      // Something unexpected from Email Bison: stop rather than make more copies the same way.
-      if (r.state === "failed") break;
+    // What earlier requests of this step made. Email Bison's search can lag
+    // behind a campaign made a moment ago, so those are asked for by id — a
+    // campaign must never be made twice because the search hadn't caught up.
+    const made = new Map<string, number>();
+    for (const res of await runResults(ctx.task.id)) {
+      for (const x of (Array.isArray(res.results) ? res.results : []) as { instance?: unknown; name?: unknown; state?: unknown; campaignId?: unknown }[]) {
+        const key = `${x.instance}|${x.name}`;
+        if (x.state === "created" && typeof x.campaignId === "number" && !made.has(key)) made.set(key, x.campaignId);
+      }
     }
-    const created = results.filter((r) => r.state === "created").length;
-    const existed = results.filter((r) => r.state === "exists").length;
-    const bad = results.find((r) => r.state === "failed");
-    if (bad) {
-      const left = p.items.length - results.length;
+    let there = 0;
+    let next: PlannedCampaign | null = null;
+    for (const item of p.items) {
+      if (item.existingIds.length) { there++; continue; }
+      const id = made.get(`${item.instance}|${item.name}`);
+      if (id != null) {
+        const c = await lookUpCampaign(item.instance, id);
+        if (c === null) return { ok: false, summary: `Couldn't confirm whether “${item.name}” (#${id}, made a moment ago) is in Email Bison — nothing was created. Try again.` };
+        if (c !== "gone" && !gone(c.status) && c.name === item.name) { there++; continue; }
+      }
+      next ??= item;
+    }
+    if (!next) return { ok: true, summary: allThere };
+
+    const r = await createCampaignFromMaster({
+      instance: next.instance, name: next.name, nurture: next.slot.nurture, clientTag: p.tag,
+      master: { id: next.master.id, name: next.master.name, sequenceId: next.master.sequenceId, steps: next.master.steps },
+      masterPlace: p.master.place, target: p.target, timezone: p.timezone,
+    }, new Map());
+    if (r.state === "failed") {
       return {
         ok: false,
-        summary: `Stopped at “${bad.name}” (${bad.instance}): ${bad.note} ${created} created before it${left ? `, ${left} not attempted` : ""}. Fix that, then run again — the ones already made are kept.`,
-        result: { results },
+        summary: `Stopped at “${r.name}” (${next.label}): ${r.note} ${there} of ${total} are there. Fix that, then run again — the ones already made are kept.`,
+        result: { results: [r] },
       };
     }
+    const more = there + 1 < total;
     return {
-      ok: true,
-      summary: `${created} campaign${created === 1 ? "" : "s"} created for ${p.tag}${existed ? `, ${existed} already there` : ""} — all drafts, copied from ${p.master.tag}.`,
-      result: { results },
+      ok: true, more,
+      summary: more ? `Created “${r.name}” — ${there + 1} of ${total}.` : allThere,
+      result: { results: [r] },
     };
   },
 };
@@ -445,6 +476,11 @@ const ALLOCATION_NOT_SWITCHED_ON =
   "Allocating domains isn't switched on yet — this shows what LeadSync would give the client. Do the step by hand for now.";
 const ALLOCATION_BATCH = 5;
 const DAILY_LIMIT = 3;
+/** How long a client's hold on its group's reserve lasts after its last batch. */
+const ALLOCATION_LOCK_MS = 10 * 60_000;
+const allocationLock = (group: 1 | 2) => `allocate:group:${group}`;
+const groupBusy = (group: 1 | 2, holder: string) =>
+  `Group ${group}'s domains are being allocated for ${holder} right now — two clients of a group can't take from the same reserve at once. Run this when that has finished (the hold lapses ${ALLOCATION_LOCK_MS / 60_000} minutes after its last batch).`;
 
 /** "Tier 1 (Base)" → "1". Anything else is left to LeadSync (it reads the Client Tracker). */
 function tierOfPlan(plan: string | null): "0.5" | "1" | "2" | undefined {
@@ -452,13 +488,19 @@ function tierOfPlan(plan: string | null): "0.5" | "1" | "2" | undefined {
   return /tier\s*0\.5/i.test(p) ? "0.5" : /tier\s*2/i.test(p) ? "2" : /tier\s*1/i.test(p) ? "1" : undefined;
 }
 
-/** "jan-pro.com/socal" → "https://jan-pro.com/socal"; "" when it isn't a usable address. */
+/**
+ * "jan-pro.com/socal" → "https://jan-pro.com/socal"; "" when it isn't a plain
+ * website address. Every sender domain will redirect there, so anything odd is
+ * refused: an email address, a login in the address, a port, a bare IP, two
+ * addresses in one field, or a host that isn't name.tld.
+ */
 function asHttpsUrl(raw: string): string {
   const t = raw.trim().replace(/^http:\/\//i, "https://");
-  if (!t) return "";
+  if (!t || /[\s,;@]/.test(t)) return "";
   try {
     const u = new URL(/^https:\/\//i.test(t) ? t : `https://${t}`);
-    return u.hostname.includes(".") ? u.toString() : "";
+    if (u.protocol !== "https:" || u.username || u.password || u.port) return "";
+    return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(u.hostname) ? u.toString() : "";
   } catch { return ""; }
 }
 
@@ -498,8 +540,14 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   const sides: AllocationSidePlan[] = [];
   let plan: AllocationPlan | null = null;
   let summary = "Asks LeadSync which reserve domains this client would get.";
+  const busyFor = c.group_num ? await lockHolder(allocationLock(c.group_num), ALLOCATION_LOCK_MS) : null;
   if (!c.group_num) {
     blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+  } else if (busyFor && busyFor !== tag) {
+    // Another client of the group is taking domains from the same reserve. LeadSync isn't asked
+    // for a plan now: whatever it offered would be out of date by the time this client's turn comes.
+    blockers.push(groupBusy(c.group_num, busyFor));
+    summary = `Group ${c.group_num}'s reserve is in use for ${busyFor} — this client's plan is drawn up once that has finished.`;
   } else {
     const r = await previewOnboardingAllocation(tag, c.group_num, tier, fresh);
     if (!r.ok) {
@@ -532,7 +580,9 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
         sides.push({ ...s, campaignIds });
         rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), String(s.reserveAvailable), s.short ? String(s.short) : "—", campaignIds.length ? `${campaignIds.length} campaigns` : "—"]);
         if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve.`);
-        if (s.note) blockers.push(`${s.label}: LeadSync says “${s.note}”.`);
+        // LeadSync's note is why its OWN automatic top-up leaves this client alone (it does that for
+        // every client that isn't sending yet) — true of any new client, so it is shown, not a stop.
+        if (s.note) notes.push({ title: `${s.label} — LeadSync's automatic top-up skips ${tag} for now`, text: `Its reason: “${s.note}”. That is about its own top-ups; this step allocates the first domains regardless.` });
         if (s.setAside) notes.push({ title: `${s.label} — ${s.setAside} reserve domain${s.setAside === 1 ? " was" : "s were"} left out`, text: "They already carry a client's tag, so they are not offered." });
         if (s.picking.length) notes.push({ title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give`, text: s.picking.join("\n") });
       }
@@ -573,7 +623,20 @@ const allocateDomains: Automation = {
     if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — open the preview to see why." };
     const total = (s: AllocationSidePlan) => `${s.label} ${s.cap}`;
     const side = p.sides.find((s) => s.need > 0);
-    if (!side) return { ok: true, summary: `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.` };
+    if (!side) {
+      await releaseLock(allocationLock(group), p.tag);
+      return { ok: true, summary: `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.` };
+    }
+
+    // One client per group at a time: two clients of a group draw on the same
+    // reserve, and LeadSync would offer both the same domains. The lock is kept
+    // from this client's first batch to its last (renewed by each batch).
+    const heldBy = await takeLock(allocationLock(group), p.tag, ALLOCATION_LOCK_MS);
+    if (heldBy) {
+      // The plan in hand will be out of date by the time the other client is done.
+      rememberAllocationPlan(p.tag, group, p.tier, null);
+      return { ok: false, summary: groupBusy(group, heldBy) };
+    }
 
     const domains = side.picking.slice(0, ALLOCATION_BATCH);
     const r = await runOnboardingAllocation({
@@ -581,15 +644,33 @@ const allocateDomains: Automation = {
       domains, redirectUrl: p.redirect, campaignIds: side.campaignIds, dailyLimit: DAILY_LIMIT,
     });
     // Whatever went wrong, the kept plan is no longer trusted — the next try asks again.
-    if (!r.ok || !r.result.ok) rememberAllocationPlan(p.tag, group, p.tier, null);
-    if (!r.ok) return { ok: false, summary: `LeadSync didn't take the batch for ${side.label}: ${r.error}`, result: { instance: side.instance, domains } };
-    const res = r.result;
-    if (!res.ok) {
-      const bad = res.steps.filter((x) => x.state === "failed" || x.state === "degraded").map((x) => `${x.label}${x.note ? ` (${x.note})` : ""}`);
-      const limit = res.limit.error ? `daily limit: ${res.limit.error}` : res.limit.failed ? `daily limit not set on ${res.limit.failed} sender(s)` : "";
+    if (!r.ok) {
+      rememberAllocationPlan(p.tag, group, p.tier, null);
+      // A plain refusal means nothing was touched, so the group needn't wait for this
+      // client. No answer at all is different: the batch may be under way — keep the hold.
+      if (r.status !== 0) await releaseLock(allocationLock(group), p.tag);
       return {
         ok: false,
-        summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${[...bad, limit].filter(Boolean).join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
+        summary: r.status === 0
+          // No answer is not a "no": LeadSync may still be working through the batch.
+          ? `LeadSync didn't answer for ${side.label} (${r.error}) — it may still be working on this batch. Wait a few minutes, then open the preview: it shows what was added.`
+          : `LeadSync didn't take the batch for ${side.label}: ${r.error}${r.status === 409 ? " Nothing was changed — run it again for a fresh plan." : ""}`,
+        result: { instance: side.instance, domains },
+      };
+    }
+    const res = r.result;
+    // "ok" from LeadSync is not enough: a step can be marked degraded, or a
+    // limit call can "succeed" on zero senders. Everything must have happened.
+    const bad = res.steps.filter((x) => x.state !== "done").map((x) => `${x.label}${x.note ? ` (${x.note})` : ""}${x.state === "done" ? "" : ` — ${x.state}`}`);
+    const limit = res.limit.error ? `daily limit: ${res.limit.error}`
+      : res.limit.failed ? `daily limit not set on ${res.limit.failed} sender(s)`
+      : !res.limit.updated ? "daily limit: no sender was updated" : "";
+    const count = res.added === domains.length ? "" : `${res.added} of ${domains.length} domains were added`;
+    if (!res.ok || bad.length || limit || count) {
+      rememberAllocationPlan(p.tag, group, p.tier, null);
+      return {
+        ok: false,
+        summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${[count, ...bad, limit].filter(Boolean).join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
         result: { instance: side.instance, domains, leadsync: res },
       };
     }
@@ -603,6 +684,7 @@ const allocateDomains: Automation = {
         picking: s.picking.filter((d) => !domains.includes(d)),
       }),
     });
+    if (!more) await releaseLock(allocationLock(group), p.tag);
     return {
       ok: true, more,
       summary: more

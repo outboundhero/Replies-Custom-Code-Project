@@ -122,6 +122,11 @@ async function createTables(): Promise<void> {
     args: [nowIso(), new Date(Date.now() - RUN_STALE_MS).toISOString()],
   });
   await db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_task_run_active ON onboarding_task_run(task_id) WHERE finished_at IS NULL`);
+  // Named locks for work that must not overlap ACROSS clients (e.g. two clients
+  // of one group taking domains from the same reserve). One row per lock.
+  await db.execute(`CREATE TABLE IF NOT EXISTS onboarding_lock (
+    name TEXT PRIMARY KEY, holder TEXT NOT NULL, taken_at TEXT NOT NULL
+  )`);
   await addMissingColumns();
 }
 
@@ -891,6 +896,61 @@ export async function lastFailedAttempt(taskId: string): Promise<Record<string, 
     const v = JSON.parse(String(row.result));
     return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
   } catch { return null; }
+}
+
+/**
+ * Take (or keep) a named lock. Returns null when it is ours, otherwise who
+ * holds it. The same holder taking it again just renews it; a lock nobody has
+ * renewed for `staleMs` is free again, so one that was never released can't
+ * block for good. The claim is one statement — two holders can't both win.
+ */
+export async function takeLock(name: string, holder: string, staleMs: number): Promise<string | null> {
+  await ensureTables();
+  const now = nowIso();
+  await db.execute({ sql: "DELETE FROM onboarding_lock WHERE name = ? AND taken_at < ?", args: [name, new Date(Date.now() - staleMs).toISOString()] });
+  await db.execute({
+    sql: `INSERT INTO onboarding_lock (name, holder, taken_at) VALUES (?, ?, ?)
+          ON CONFLICT(name) DO UPDATE SET taken_at = excluded.taken_at WHERE onboarding_lock.holder = excluded.holder`,
+    args: [name, holder, now],
+  });
+  const r = await db.execute({ sql: "SELECT holder FROM onboarding_lock WHERE name = ?", args: [name] });
+  const current = r.rows[0] ? String(r.rows[0].holder) : null;
+  // No row at all right after our insert means something is badly off — treat it as not ours.
+  return current === holder ? null : (current ?? "someone else");
+}
+
+/** Who holds a lock right now (null = nobody, or the hold has lapsed). Reads only. */
+export async function lockHolder(name: string, staleMs: number): Promise<string | null> {
+  await ensureTables();
+  const r = await db.execute({ sql: "SELECT holder FROM onboarding_lock WHERE name = ? AND taken_at >= ?", args: [name, new Date(Date.now() - staleMs).toISOString()] });
+  return r.rows[0] ? String(r.rows[0].holder) : null;
+}
+
+/** Give a lock back (only if it is still ours). */
+export async function releaseLock(name: string, holder: string): Promise<void> {
+  await ensureTables();
+  await db.execute({ sql: "DELETE FROM onboarding_lock WHERE name = ? AND holder = ?", args: [name, holder] });
+}
+
+/**
+ * The results recorded by this task's finished runs, newest first — for a step
+ * that works over several requests and must know what earlier ones did, even
+ * before the other system's search shows it.
+ */
+export async function runResults(taskId: string, limit = 60): Promise<Record<string, unknown>[]> {
+  await ensureTables();
+  const r = await db.execute({
+    sql: "SELECT result FROM onboarding_task_run WHERE task_id = ? AND finished_at IS NOT NULL AND result IS NOT NULL ORDER BY started_at DESC LIMIT ?",
+    args: [taskId, limit],
+  });
+  const out: Record<string, unknown>[] = [];
+  for (const row of r.rows) {
+    try {
+      const v = JSON.parse(String(row.result));
+      if (v && typeof v === "object") out.push(v as Record<string, unknown>);
+    } catch { /* an unreadable record is skipped */ }
+  }
+  return out;
 }
 
 /**

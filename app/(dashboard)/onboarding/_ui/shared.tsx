@@ -433,19 +433,27 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   async function run() {
     setRunning(true); setError(null);
     stop.current = false;
-    for (let round = 0; round < 40; round++) {
-      const { status, data } = await postRun(task.id, "run", shown);
-      onDone(); // the task shows the batch, or keeps a note of the failed run
-      if (!data.ok) {
-        setError(data.error || `The run failed (${status})`);
-        if (data.preview) setPreview(data.preview);
-        break;
+    try {
+      for (let round = 0; round < 40; round++) {
+        const { status, data } = await postRun(task.id, "run", shown);
+        onDone(); // the task shows the batch, or keeps a note of the failed run
+        if (!data.ok) {
+          setError(data.error || `The run failed (${status})`);
+          if (data.preview) setPreview(data.preview);
+          break;
+        }
+        if (!data.more) { toast.success(data.summary || "Done"); onClose(); return; }
+        setProgress((p) => [...p, data.summary || "A batch went through."]);
+        if (stop.current) break;
       }
-      if (!data.more) { toast.success(data.summary || "Done"); setRunning(false); onClose(); return; }
-      setProgress((p) => [...p, data.summary || "A batch went through."]);
-      if (stop.current) break;
+    } catch (e) {
+      // The request itself never came back (connection, timeout) — what it did is unknown.
+      setError(`The request didn't come back (${(e as Error).message}). It may still have gone through — close this, look at the step, and open its preview before running it again.`);
+      onDone();
+    } finally {
+      // Always release the dialog, or it could never be closed.
+      setRunning(false);
     }
-    setRunning(false);
   }
 
   const blocked = !preview || preview.blockers.length > 0;

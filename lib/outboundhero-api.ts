@@ -1723,6 +1723,22 @@ export async function getCampaignWithTags(instanceKey: string, campaignId: numbe
   };
 }
 
+/**
+ * Look a campaign up by id: its name and status, "gone" when Email Bison says
+ * there is no such campaign, or null when it couldn't say (so a failed read is
+ * never taken for "it isn't there").
+ */
+export async function lookUpCampaign(instanceKey: string, campaignId: number): Promise<{ name: string; status: string } | "gone" | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  try {
+    const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}`, { headers: buildHeaders(token), timeoutMs: 30_000 });
+    if (res.status === 404) return "gone";
+    if (!res.ok) return null;
+    const d = ((await res.json().catch(() => null)) as { data?: { id?: unknown; name?: unknown; status?: unknown } } | null)?.data;
+    return d && typeof d.id === "number" ? { name: String(d.name ?? ""), status: String(d.status ?? "") } : null;
+  } catch { return null; }
+}
+
 /** Duplicate a campaign with ONE attempt — a retried duplicate could leave two copies. */
 export async function duplicateCampaignOnce(instanceKey: string, campaignId: number): Promise<CampaignDetails | null> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
