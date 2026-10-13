@@ -13,12 +13,13 @@ import {
 } from "@/lib/onboarding/store";
 import { GROUP_META, groupText, fmtDate } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
-import { withCache } from "@/lib/server-cache";
+import { withCache, nsVersion } from "@/lib/server-cache";
 import { fetchNewClientInfo, type NewClientInfoRow } from "@/lib/google-sheets";
 import { listCampaigns, getSequenceSteps, getCampaignSchedule } from "@/lib/outboundhero-api";
 import { previewOnboardingAllocation } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
-import { localizeSteps, placeProblems, defaultArea, type CopyStep, type Place } from "@/lib/onboarding/campaign-copy";
+import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
+import { createCampaignFromMaster, CHECK_PREFIX, type MasterStep, type TagCache } from "@/lib/onboarding/create-campaigns";
 import {
   CAMPAIGN_SLOTS, GROUP_INSTANCES, TIMEZONE_OPTIONS, campaignName, slotKey, slotOfName, parseMasterSettings,
   parsePlace, regionByAny, timezoneForState, type CampaignSlot,
@@ -173,20 +174,23 @@ const slackOutreachify: Automation = {
 // ── 2. Create email campaigns ───────────────────────────────────────────────
 // Each new campaign is a copy of the master client's campaign in the same slot
 // and instance, with the master's place names swapped for this client's
-// (lib/onboarding/campaign-copy.ts). PREVIEW ONLY for now: creating is switched
-// on once the masters are confirmed and one test has been run in Email Bison.
+// (lib/onboarding/campaign-copy.ts, lib/onboarding/create-campaigns.ts).
+// Creating is OFF unless ONBOARDING_CREATE_CAMPAIGNS=1 is set on the server —
+// it is switched on once the masters are confirmed and one test has been run
+// in Email Bison. Until then this is a preview.
 
 export const CAMPAIGN_MASTERS_SETTING = "campaign_masters";
+/** Server-side switch for actually creating campaigns (the preview always works). */
+export const campaignCreationEnabled = () => process.env.ONBOARDING_CREATE_CAMPAIGNS === "1";
 const NOT_SWITCHED_ON =
   "Creating the campaigns isn't switched on yet — it waits for the master campaigns to be confirmed and one test in Email Bison. This is a preview; complete the step by hand for now.";
 
-type MasterStep = CopyStep & { wait_in_days: number; thread_reply: boolean };
 interface MasterCampaign { id: number; name: string; status: string; slot: CampaignSlot; steps: MasterStep[]; schedule: Record<string, unknown> | null }
 const gone = (status: string) => /archiv|delet/i.test(status);
 
 /** The master client's live campaigns in one instance, by slot (a slot can hold none, one or several). */
-function loadMasterCampaigns(instance: BisonInstanceKey, tag: string): Promise<Map<string, MasterCampaign[]>> {
-  return withCache(`onboarding:masters:${instance}:${tag}`, 5 * 60_000, async () => {
+function loadMasterCampaigns(instance: BisonInstanceKey, tag: string, fresh: boolean): Promise<Map<string, MasterCampaign[]>> {
+  const read = async () => {
     const out = new Map<string, MasterCampaign[]>();
     for (const c of await listCampaigns(instance, { search: tag, strict: true })) {
       const slot = slotOfName(c.name, tag);
@@ -199,7 +203,9 @@ function loadMasterCampaigns(instance: BisonInstanceKey, tag: string): Promise<M
       out.set(key, [...(out.get(key) ?? []), { id: c.id, name: c.name, status: c.status, slot, steps: list, schedule }]);
     }
     return out;
-  });
+  };
+  // A run always reads now; a preview may reuse a read from the last few minutes.
+  return fresh ? read() : withCache(`onboarding:masters:${instance}:${tag}`, 5 * 60_000, read);
 }
 
 const DAYS: [string, string][] = [["monday", "Mon"], ["tuesday", "Tue"], ["wednesday", "Wed"], ["thursday", "Thu"], ["friday", "Fri"], ["saturday", "Sat"], ["sunday", "Sun"]];
@@ -213,141 +219,207 @@ function scheduleText(s: Record<string, unknown> | null, timezone: string): stri
   return `${days} ${hm(s.start_time)}–${hm(s.end_time)}${from && from !== timezone ? ` (master is on ${from})` : ""}`;
 }
 
-const createCampaigns: Automation = {
-  async preview(ctx) {
-    const c = ctx.client;
-    const tag = c.client_tag.toUpperCase();
-    const blockers: string[] = [];
-    const param = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string).trim() : undefined);
+/** One campaign the step would make: where, under what name, copied from what. */
+interface PlannedCampaign { instance: BisonInstanceKey; label: string; slot: CampaignSlot; name: string; master: MasterCampaign; existingIds: number[] }
+interface CampaignPlan {
+  tag: string; group: 1 | 2 | null; master: { tag: string; place: Place } | undefined;
+  target: Place; timezone: string;
+  inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[];
+  /** Slots that can be created (one clear master each). All 12 are here when nothing blocks. */
+  items: PlannedCampaign[];
+}
 
-    // The sheet only pre-fills — whatever is typed in the dialog wins.
-    let sheet: NewClientInfoRow | undefined;
-    try {
-      sheet = [...(await withCache("onboarding:new-client-info", 60_000, fetchNewClientInfo))].reverse().find((r) => r.tags.includes(tag));
-    } catch { /* no pre-fill */ }
-    const guess = parsePlace(sheet?.office) ?? parsePlace(sheet?.area);
-    const city = param("city") ?? guess?.city ?? "";
-    // Whatever is typed wins; a field left alone follows the other one, then the sheet —
-    // so changing the state to Texas doesn't keep the sheet's "CA".
-    const typedState = param("state"), typedAbbr = param("abbr");
-    let state = typedState ?? (typedAbbr ? regionByAny(typedAbbr)?.name : undefined) ?? guess?.state ?? "";
-    let abbr = (typedAbbr ?? (typedState ? regionByAny(typedState)?.abbr : undefined) ?? guess?.abbr ?? "").toUpperCase();
-    if (!state && abbr) state = regionByAny(abbr)?.name ?? "";
-    if (!abbr && state) abbr = regionByAny(state)?.abbr ?? "";
-    const area = param("area") ?? "";
-    const target: Place = { area: area || defaultArea(city), city, state, abbr };
-    const timezone = param("timezone") ?? timezoneForState(state) ?? timezoneForState(abbr) ?? "";
-    const clientType = param("client_type") ?? (sheet?.clientType && !/clean|janitor/i.test(sheet.clientType) ? "other" : "cleaning");
+/**
+ * Everything the preview shows and the run acts on — built the same way for
+ * both. `fresh` (the run) reads Email Bison now instead of reusing a recent
+ * read: acting on a stale list of what already exists would create duplicates.
+ */
+async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<CampaignPlan> {
+  const search = (instance: BisonInstanceKey, q: string) =>
+    fresh ? listCampaigns(instance, { search: q, strict: true })
+      : withCache(`onboarding:existing:${instance}:${q}:v${nsVersion("onboarding")}`, 30_000, () => listCampaigns(instance, { search: q, strict: true }));
+  const c = ctx.client;
+  const tag = c.client_tag.toUpperCase();
+  const blockers: string[] = [];
+  const param = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string).trim() : undefined);
 
-    const fromSheet = sheet?.office ? `The sheet's office location: ${sheet.office}` : sheet ? "The sheet has no office location for this client." : `${tag} isn't in the sheet's New Client Information tab.`;
-    const inputs: AutomationInput[] = [
-      { key: "city", label: "City", type: "text", value: city, placeholder: "Anaheim", hint: guess && !guess.sure && param("city") === undefined ? `Guessed from a street address — check it. ${fromSheet}` : fromSheet },
-      { key: "state", label: "State", type: "text", value: state, placeholder: "California" },
-      { key: "abbr", label: "State abbreviation", type: "text", value: abbr, placeholder: "CA" },
-      { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "Orange County",
-        hint: `How the area is named in the emails. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
-      { key: "timezone", label: "Timezone the campaigns send in", type: "select", value: timezone, options: TIMEZONE_OPTIONS.map((z) => ({ value: z, label: z.replace(/^.*\//, "").replace(/_/g, " ") + ` (${z})` })) },
-      { key: "client_type", label: "Client type", type: "select", value: clientType,
-        options: [{ value: "cleaning", label: "Cleaning client" }, { value: "other", label: "Other services (not covered yet)" }],
-        hint: sheet?.clientType ? `The sheet says: ${sheet.clientType}` : undefined },
-    ];
+  // The sheet only pre-fills — whatever is typed in the dialog wins.
+  let sheet: NewClientInfoRow | undefined;
+  try {
+    sheet = [...(await withCache("onboarding:new-client-info", 60_000, fetchNewClientInfo))].reverse().find((r) => r.tags.includes(tag));
+  } catch { /* no pre-fill */ }
+  const guess = parsePlace(sheet?.office) ?? parsePlace(sheet?.area);
+  const city = param("city") ?? guess?.city ?? "";
+  // Whatever is typed wins; a field left alone follows the other one, then the sheet —
+  // so changing the state to Texas doesn't keep the sheet's "CA".
+  const typedState = param("state"), typedAbbr = param("abbr");
+  let state = typedState ?? (typedAbbr ? regionByAny(typedAbbr)?.name : undefined) ?? guess?.state ?? "";
+  let abbr = (typedAbbr ?? (typedState ? regionByAny(typedState)?.abbr : undefined) ?? guess?.abbr ?? "").toUpperCase();
+  if (!state && abbr) state = regionByAny(abbr)?.name ?? "";
+  if (!abbr && state) abbr = regionByAny(state)?.abbr ?? "";
+  const area = param("area") ?? "";
+  const target: Place = { area: area || defaultArea(city), city, state, abbr };
+  const timezone = param("timezone") ?? timezoneForState(state) ?? timezoneForState(abbr) ?? "";
+  const clientType = param("client_type") ?? (sheet?.clientType && !/clean|janitor/i.test(sheet.clientType) ? "other" : "cleaning");
 
-    const group = c.group_num;
-    const master = group ? parseMasterSettings(await getSetting(CAMPAIGN_MASTERS_SETTING))[String(group) as "1" | "2"] : undefined;
-    if (!group) blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
-    else if (!master) blockers.push(`No master client is set for Group ${group} — an admin sets it under Onboarding → Team.`);
-    if (clientType !== "cleaning") blockers.push("Only cleaning clients are covered — other clients' copy is written differently, so create these campaigns by hand.");
-    const placeIssues = [...placeProblems(target, "This client"), ...(master ? placeProblems(master.place, `Master ${master.tag}`) : [])];
-    blockers.push(...placeIssues);
-    const known = regionByAny(state);
-    if (known && state && known.name.toLowerCase() !== state.toLowerCase()) blockers.push(`State: write the full name — “${known.name}”, not “${state}”.`);
-    else if (known && abbr && known.abbr !== abbr) blockers.push(`The state and its abbreviation don't match — ${known.name} is ${known.abbr}, not ${abbr}.`);
-    if (!timezone) blockers.push("Choose the timezone the campaigns send in.");
-    else if (!TIMEZONE_OPTIONS.includes(timezone)) blockers.push(`“${timezone}” isn't one of the timezones on the list.`);
+  const fromSheet = sheet?.office ? `The sheet's office location: ${sheet.office}` : sheet ? "The sheet has no office location for this client." : `${tag} isn't in the sheet's New Client Information tab.`;
+  const inputs: AutomationInput[] = [
+    { key: "city", label: "City", type: "text", value: city, placeholder: "Anaheim", hint: guess && !guess.sure && param("city") === undefined ? `Guessed from the sheet — check it. ${fromSheet}` : fromSheet },
+    { key: "state", label: "State", type: "text", value: state, placeholder: "California" },
+    { key: "abbr", label: "State abbreviation", type: "text", value: abbr, placeholder: "CA" },
+    { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "Orange County",
+      hint: `How the area is named in the emails. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
+    { key: "timezone", label: "Timezone the campaigns send in", type: "select", value: timezone, options: TIMEZONE_OPTIONS.map((z) => ({ value: z, label: z.replace(/^.*\//, "").replace(/_/g, " ") + ` (${z})` })) },
+    { key: "client_type", label: "Client type", type: "select", value: clientType,
+      options: [{ value: "cleaning", label: "Cleaning client" }, { value: "other", label: "Other services (not covered yet)" }],
+      hint: sheet?.clientType ? `The sheet says: ${sheet.clientType}` : undefined },
+  ];
 
-    const rows: string[][] = [];
-    const notes: PreviewNote[] = [];
-    const copyIssues = new Set<string>();
-    let exists = 0;
-    if (group && master) {
-      for (const kind of ["b2b", "b2c"] as const) {
-        const instance = GROUP_INSTANCES[group][kind];
-        const label = `${kind === "b2b" ? "B2B" : "B2C"} #${group} ${GROUP_META[group][kind]}`;
-        let masters: Map<string, MasterCampaign[]>;
-        let mine: { id: number; name: string; status: string }[];
-        try {
-          [masters, mine] = await Promise.all([
-            loadMasterCampaigns(instance, master.tag),
-            withCache(`onboarding:existing:${instance}:${tag}`, 30_000, () => listCampaigns(instance, { search: tag, strict: true })),
-          ]);
-        } catch (e) {
-          blockers.push(`Couldn't read ${label} in Email Bison: ${(e as Error).message}`);
+  const group = c.group_num;
+  const master = group ? parseMasterSettings(await getSetting(CAMPAIGN_MASTERS_SETTING))[String(group) as "1" | "2"] : undefined;
+  if (!group) blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+  else if (!master) blockers.push(`No master client is set for Group ${group} — an admin sets it under Onboarding → Team.`);
+  if (clientType !== "cleaning") blockers.push("Only cleaning clients are covered — other clients' copy is written differently, so create these campaigns by hand.");
+  const placeIssues = [...placeProblems(target, "This client"), ...(master ? placeProblems(master.place, `Master ${master.tag}`) : [])];
+  blockers.push(...placeIssues);
+  const known = regionByAny(state);
+  if (known && state && known.name.toLowerCase() !== state.toLowerCase()) blockers.push(`State: write the full name — “${known.name}”, not “${state}”.`);
+  else if (known && abbr && known.abbr !== abbr) blockers.push(`The state and its abbreviation don't match — ${known.name} is ${known.abbr}, not ${abbr}.`);
+  if (!timezone) blockers.push("Choose the timezone the campaigns send in.");
+  else if (!TIMEZONE_OPTIONS.includes(timezone)) blockers.push(`“${timezone}” isn't one of the timezones on the list.`);
+
+  const rows: string[][] = [];
+  const notes: PreviewNote[] = [];
+  const items: PlannedCampaign[] = [];
+  const copyIssues = new Set<string>();
+  if (group && master) {
+    for (const kind of ["b2b", "b2c"] as const) {
+      const instance = GROUP_INSTANCES[group][kind];
+      const label = `${kind === "b2b" ? "B2B" : "B2C"} #${group} ${GROUP_META[group][kind]}`;
+      let masters: Map<string, MasterCampaign[]>;
+      let mine: { id: number; name: string; status: string }[];
+      let fromMaster: { id: number; name: string; status: string }[];
+      try {
+        [masters, mine, fromMaster] = await Promise.all([
+          loadMasterCampaigns(instance, master.tag, fresh), search(instance, tag), search(instance, master.tag),
+        ]);
+      } catch (e) {
+        blockers.push(`Couldn't read ${label} in Email Bison: ${(e as Error).message}`);
+        continue;
+      }
+      // A copy that was made but never finished (an interrupted run) must be dealt with by a person first.
+      const strays = [...mine, ...fromMaster].filter((x) => !gone(x.status) && (
+        x.name.startsWith(`${CHECK_PREFIX}${tag}:`) || (x.name.startsWith("Copy of ") && x.name.includes(`${master.tag}:`))));
+      for (const x of new Map(strays.map((y) => [y.id, y])).values()) {
+        blockers.push(`${label}: an unfinished copy is still there — #${x.id} “${x.name}”. Look at it and delete it in Email Bison, then try again.`);
+      }
+      const copies: string[] = [];
+      let shown = false;
+      for (const slot of CAMPAIGN_SLOTS) {
+        const name = campaignName(tag, slot);
+        const already = mine.filter((x) => x.name.trim().toLowerCase() === name.toLowerCase() && !gone(x.status));
+        const candidates = masters.get(slotKey(slot)) ?? [];
+        if (candidates.length !== 1) {
+          blockers.push(candidates.length
+            ? `${label}: ${candidates.length} campaigns are named “${campaignName(master.tag, slot)}” (${candidates.map((m) => `#${m.id} ${m.status}`).join(", ")}) — only one can be the master.`
+            : `${label}: the master ${master.tag} has no “${campaignName(master.tag, slot)}” campaign.`);
+          rows.push([label, name, "—", "", "", ""]);
           continue;
         }
-        const copies: string[] = [];
-        let shown = false;
-        for (const slot of CAMPAIGN_SLOTS) {
-          const name = campaignName(tag, slot);
-          const already = mine.filter((x) => x.name.trim().toLowerCase() === name.toLowerCase() && !gone(x.status));
-          if (already.length) exists++;
-          const candidates = masters.get(slotKey(slot)) ?? [];
-          if (candidates.length !== 1) {
-            blockers.push(candidates.length
-              ? `${label}: ${candidates.length} campaigns are named “${campaignName(master.tag, slot)}” (${candidates.map((m) => `#${m.id} ${m.status}`).join(", ")}) — only one can be the master.`
-              : `${label}: the master ${master.tag} has no “${campaignName(master.tag, slot)}” campaign.`);
-            rows.push([label, name, "—", "", "", ""]);
-            continue;
+        const m = candidates[0];
+        if (!m.steps.length) copyIssues.add(`${label}: couldn't read the emails of #${m.id} “${m.name}”.`);
+        if (!m.schedule) copyIssues.add(`${label}: the master #${m.id} “${m.name}” has no schedule.`);
+        copies.push(JSON.stringify(m.steps.map((s) => [s.email_subject, s.email_body, s.wait_in_days, s.thread_reply])));
+        if (!placeIssues.length && m.steps.length) {
+          const loc = localizeSteps(m.steps, master.place, target);
+          for (const p of loc.problems) copyIssues.add(`${label} · ${slotKey(slot)}: ${p}`);
+          if (!shown && !loc.problems.length) {
+            shown = true;
+            const seen = new Map<string, number[]>();
+            for (const ch of loc.changes) { const k = `    was: ${ch.before}\n    now: ${ch.after}`; seen.set(k, [...(seen.get(k) ?? []), ch.order]); }
+            notes.push({
+              title: `Lines that change in the ${kind === "b2b" ? "B2B" : "B2C"} emails (everything else is copied as it is)`,
+              text: [...seen.entries()].map(([k, orders]) => `Email${orders.length > 1 ? "s" : ""} ${[...new Set(orders)].join(", ")}\n${k}`).join("\n\n"),
+            });
           }
-          const m = candidates[0];
-          if (!m.steps.length) copyIssues.add(`${label}: couldn't read the emails of #${m.id} “${m.name}”.`);
-          copies.push(JSON.stringify(m.steps.map((s) => [s.email_subject, s.email_body, s.wait_in_days, s.thread_reply])));
-          if (!placeIssues.length && m.steps.length) {
-            const loc = localizeSteps(m.steps, master.place, target);
-            for (const p of loc.problems) copyIssues.add(`${label} · ${slotKey(slot)}: ${p}`);
-            if (!shown && !loc.problems.length) {
-              shown = true;
-              const seen = new Map<string, number[]>();
-              for (const ch of loc.changes) { const k = `    was: ${ch.before}\n    now: ${ch.after}`; seen.set(k, [...(seen.get(k) ?? []), ch.order]); }
-              notes.push({
-                title: `Lines that change in the ${kind === "b2b" ? "B2B" : "B2C"} emails (everything else is copied as it is)`,
-                text: [...seen.entries()].map(([k, orders]) => `Email${orders.length > 1 ? "s" : ""} ${[...new Set(orders)].join(", ")}\n${k}`).join("\n\n"),
-              });
-            }
-          }
-          rows.push([
-            label,
-            already.length ? `${name} — already exists (${already.map((x) => `#${x.id}`).join(", ")}), left as it is` : name,
-            `#${m.id} ${m.status}`,
-            String(m.steps.length),
-            m.steps.slice(0, -1).map((s) => s.wait_in_days).join(" → "),
-            scheduleText(m.schedule, timezone),
-          ]);
         }
-        if (new Set(copies).size > 1) notes.push({ title: `${label}: the master's six campaigns don't all carry the same emails`, text: "Each new campaign copies the master campaign in its own slot, so those differences carry over." });
+        items.push({ instance, label, slot, name, master: m, existingIds: already.map((x) => x.id) });
+        rows.push([
+          label,
+          already.length ? `${name} — already exists (${already.map((x) => `#${x.id}`).join(", ")}), left as it is` : name,
+          `#${m.id} ${m.status}`,
+          String(m.steps.length),
+          m.steps.slice(0, -1).map((s) => s.wait_in_days).join(" → "),
+          scheduleText(m.schedule, timezone),
+        ]);
       }
+      if (new Set(copies).size > 1) notes.push({ title: `${label}: the master's six campaigns don't all carry the same emails`, text: "Each new campaign copies the master campaign in its own slot, so those differences carry over." });
     }
-    blockers.push(...copyIssues);
-    blockers.push(NOT_SWITCHED_ON);
+  }
+  blockers.push(...copyIssues);
+  return { tag, group, master, target, timezone, inputs, blockers, rows, notes, items };
+}
 
+const createCampaigns: Automation = {
+  async preview(ctx) {
+    const p = await planCampaigns(ctx);
+    const exists = p.items.filter((i) => i.existingIds.length).length;
+    if (!campaignCreationEnabled()) p.blockers.push(NOT_SWITCHED_ON);
     return {
       title: "Create email campaigns",
       lines: [
-        master && group
-          ? `Copies ${master.tag}'s 6 campaigns in each of Group ${group}'s two instances — 12 new campaigns for ${tag}, created as drafts. Nothing is launched.`
+        p.master && p.group
+          ? `Copies ${p.master.tag}'s 6 campaigns in each of Group ${p.group}'s two instances — 12 new campaigns for ${p.tag}, created as drafts. Nothing is launched.`
           : "Copies the master client's 6 campaigns in each of the group's two instances — 12 new campaigns, created as drafts.",
-        `Renames them for ${tag} and swaps the master's place names for ${target.city || "this client's city"}${target.state ? `, ${target.state}` : ""} in the email bodies. Subjects and variables ({CITY}, {QUESTION}, …) are not touched.`,
-        `Sets every schedule to ${timezone || "the chosen timezone"}; days and hours stay as on the master.`,
+        `Renames them for ${p.tag} and swaps the master's place names for ${p.target.city || "this client's city"}${p.target.state ? `, ${p.target.state}` : ""} in the email bodies. Subjects and variables ({CITY}, {QUESTION}, …) are not touched.`,
+        `Sets every schedule to ${p.timezone || "the chosen timezone"}; days and hours stay as on the master.`,
+        "Reads every campaign back after writing it. One that doesn't match is not left under the client's name, and the run stops there.",
         ...(exists ? [`${exists} of the 12 already exist and are left as they are.`] : []),
-        "Marks this step Done.",
+        "Marks this step Done once all 12 are there.",
       ],
-      inputs,
-      blockers,
-      tables: rows.length ? [{ title: "The 12 campaigns", columns: ["Instance", "New campaign", "Copied from", "Emails", "Days between", "Schedule"], rows }] : [],
-      notes,
+      inputs: p.inputs,
+      blockers: p.blockers,
+      tables: p.rows.length ? [{ title: "The 12 campaigns", columns: ["Instance", "New campaign", "Copied from", "Emails", "Days between", "Schedule"], rows: p.rows }] : [],
+      notes: p.notes,
     };
   },
-  async run() {
-    return { ok: false, summary: NOT_SWITCHED_ON };
+
+  async run(ctx) {
+    if (!campaignCreationEnabled()) return { ok: false, summary: NOT_SWITCHED_ON };
+    // Rebuilt now, on fresh reads — never trusted from the preview.
+    const p = await planCampaigns(ctx, true);
+    if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
+    if (!p.master || p.items.length !== 2 * CAMPAIGN_SLOTS.length) return { ok: false, summary: "The plan isn't complete — open the preview to see why." };
+
+    const tags: TagCache = new Map();
+    const results: { instance: string; name: string; state: "created" | "exists" | "failed"; campaignId: number | null; note?: string }[] = [];
+    for (const item of p.items) {
+      if (item.existingIds.length) { results.push({ instance: item.instance, name: item.name, state: "exists", campaignId: item.existingIds[0] }); continue; }
+      const r = await createCampaignFromMaster({
+        instance: item.instance, name: item.name, nurture: item.slot.nurture, clientTag: p.tag,
+        master: { id: item.master.id, name: item.master.name, steps: item.master.steps },
+        masterPlace: p.master.place, target: p.target, timezone: p.timezone,
+      }, tags);
+      results.push(r);
+      // Something unexpected from Email Bison: stop rather than make more copies the same way.
+      if (r.state === "failed") break;
+    }
+    const created = results.filter((r) => r.state === "created").length;
+    const existed = results.filter((r) => r.state === "exists").length;
+    const bad = results.find((r) => r.state === "failed");
+    if (bad) {
+      const left = p.items.length - results.length;
+      return {
+        ok: false,
+        summary: `Stopped at “${bad.name}” (${bad.instance}): ${bad.note} ${created} created before it${left ? `, ${left} not attempted` : ""}. Fix that, then run again — the ones already made are kept.`,
+        result: { results },
+      };
+    }
+    return {
+      ok: true,
+      summary: `${created} campaign${created === 1 ? "" : "s"} created for ${p.tag}${existed ? `, ${existed} already there` : ""} — all drafts, copied from ${p.master.tag}.`,
+      result: { results },
+    };
   },
 };
 

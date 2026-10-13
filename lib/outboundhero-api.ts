@@ -1647,3 +1647,86 @@ export async function getSequenceSteps(instanceKey: string, campaignId: number):
   const body = await res.json().catch(() => null);
   return body?.data ?? body ?? null;
 }
+
+// ── Writes used by the onboarding "Create email campaigns" step ─────────────
+// Each is ONE attempt (no automatic retry): a repeated create could make a
+// second tag, and the caller verifies every write by reading it back anyway.
+
+export interface WriteResult { ok: boolean; status: number; message?: string }
+
+async function writeOnce(url: string, method: string, token: string, body: unknown, timeoutMs = 45_000): Promise<{ res: WriteResult; json: unknown }> {
+  try {
+    const r = await fetchOnce(url, { method, headers: buildHeaders(token), body: JSON.stringify(body), timeoutMs });
+    const json = await r.json().catch(() => null);
+    const d = (json as { data?: { success?: unknown; message?: unknown }; message?: unknown } | null);
+    // Bison answers some refused writes with HTTP 200 + { data: { success: false } }.
+    const refused = d?.data?.success === false || d?.data?.success === "false";
+    const message = typeof d?.data?.message === "string" ? d.data.message : typeof d?.message === "string" ? d.message : undefined;
+    return { res: { ok: r.ok && !refused, status: r.status, message }, json };
+  } catch (e) {
+    return { res: { ok: false, status: 0, message: (e as Error).message }, json: null };
+  }
+}
+
+/**
+ * Replace a sequence's steps (PUT /api/campaigns/v1.1/sequence-steps/{sequence_id}).
+ * `sequenceId` and each step's `id` come from getSequenceSteps on the same campaign.
+ */
+export async function updateSequenceSteps(
+  instanceKey: string, sequenceId: number, title: string, steps: Record<string, unknown>[],
+): Promise<WriteResult> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  return (await writeOnce(`${baseUrl}/api/campaigns/v1.1/sequence-steps/${sequenceId}`, "PUT", token, { title, sequence_steps: steps })).res;
+}
+
+export interface BisonTag { id: number; name: string }
+
+/** Every tag in the instance (GET /api/tags). Throws when it can't be read. */
+export async function listTags(instanceKey: string): Promise<BisonTag[]> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/tags`, { headers: buildHeaders(token), timeoutMs: 30_000 });
+  if (!res.ok) throw new Error(`tags read failed (${res.status})`);
+  const body = (await res.json().catch(() => null)) as { data?: { id?: unknown; name?: unknown }[] } | null;
+  return (body?.data ?? [])
+    .filter((t): t is { id: number; name: string } => typeof t.id === "number" && typeof t.name === "string")
+    .map((t) => ({ id: t.id, name: t.name }));
+}
+
+/** Create a tag (POST /api/tags). Returns it, or null when Bison refused. */
+export async function createTag(instanceKey: string, name: string): Promise<BisonTag | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const { res, json } = await writeOnce(`${baseUrl}/api/tags`, "POST", token, { name });
+  const d = (json as { data?: { id?: unknown; name?: unknown } } | null)?.data;
+  return res.ok && typeof d?.id === "number" ? { id: d.id, name: typeof d.name === "string" ? d.name : name } : null;
+}
+
+/** Attach tags to / remove tags from campaigns (POST /api/tags/{attach-to|remove-from}-campaigns). */
+export async function setCampaignTags(
+  instanceKey: string, action: "attach" | "remove", tagIds: number[], campaignIds: number[],
+): Promise<WriteResult> {
+  if (!tagIds.length || !campaignIds.length) return { ok: true, status: 200 };
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const path = action === "attach" ? "attach-to-campaigns" : "remove-from-campaigns";
+  return (await writeOnce(`${baseUrl}/api/tags/${path}`, "POST", token, { tag_ids: tagIds, campaign_ids: campaignIds, skip_webhooks: true })).res;
+}
+
+/** A campaign's name, status and tags (GET /api/campaigns/{id}); null when it can't be read. */
+export async function getCampaignWithTags(instanceKey: string, campaignId: number): Promise<{ id: number; name: string; status: string; tags: BisonTag[] } | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}`, { headers: buildHeaders(token), timeoutMs: 30_000 });
+  if (!res.ok) return null;
+  const d = ((await res.json().catch(() => null)) as { data?: { id?: unknown; name?: unknown; status?: unknown; tags?: { id?: unknown; name?: unknown }[] } } | null)?.data;
+  if (!d || typeof d.id !== "number") return null;
+  return {
+    id: d.id, name: String(d.name ?? ""), status: String(d.status ?? ""),
+    tags: (d.tags ?? []).filter((t): t is { id: number; name: string } => typeof t.id === "number" && typeof t.name === "string").map((t) => ({ id: t.id, name: t.name })),
+  };
+}
+
+/** Duplicate a campaign with ONE attempt — a retried duplicate could leave two copies. */
+export async function duplicateCampaignOnce(instanceKey: string, campaignId: number): Promise<CampaignDetails | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const { res, json } = await writeOnce(`${baseUrl}/api/campaigns/${campaignId}/duplicate`, "POST", token, {});
+  const d = ((json as { data?: CampaignDetails } | null)?.data ?? json) as CampaignDetails | null;
+  return res.ok && d && typeof d.id === "number" ? d : null;
+}

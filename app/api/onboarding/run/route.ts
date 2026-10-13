@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
 import { getTask, getClient, startRun, finishRun, releaseRun, assertTaskCanRun } from "@/lib/onboarding/store";
-import { getAutomation, type RunOutcome } from "@/lib/onboarding/automations";
+import { getAutomation, campaignCreationEnabled, type RunOutcome } from "@/lib/onboarding/automations";
 import { AUTOMATION_META } from "@/lib/onboarding/ui";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -28,8 +28,10 @@ export async function POST(req: NextRequest) {
     if (!task) return NextResponse.json({ error: "Task not found." }, { status: 404 });
     const automation = getAutomation(task.automation);
     const meta = AUTOMATION_META[task.automation || ""];
-    // Built automations preview and run; preview-only ones can show what they would do.
-    if (!automation || !(meta?.built || (meta?.preview && mode === "preview"))) {
+    // Built automations preview and run; preview-only ones can show what they
+    // would do. Creating campaigns runs only where the server switch is on.
+    const runnable = !!meta?.built || (task.automation === "create_campaigns" && campaignCreationEnabled());
+    if (!automation || !(runnable || (meta?.preview && mode === "preview"))) {
       return NextResponse.json({ error: "This step has no automation yet — complete it by hand." }, { status: 400 });
     }
     const client = await getClient(task.client_tag);
@@ -40,7 +42,7 @@ export async function POST(req: NextRequest) {
     const preview = await automation.preview(ctx);
     if (task.status === "completed") preview.blockers.unshift("This step is already Done. Reopen it first to run it again.");
     try { await assertTaskCanRun(task); } catch (e) { preview.blockers.unshift((e as Error).message); }
-    if (mode === "preview") return NextResponse.json({ ok: true, preview });
+    if (mode === "preview") return NextResponse.json({ ok: true, preview, runnable });
 
     if (preview.blockers.length) return NextResponse.json({ error: preview.blockers.join(" "), preview }, { status: 409 });
     // One run at a time per task — the claim is atomic (a unique index), so a

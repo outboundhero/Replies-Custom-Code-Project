@@ -370,7 +370,7 @@ async function postRun(taskId: string, mode: "preview" | "run", params: Record<s
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ taskId, mode, params }),
   });
   if (res.status === 401) { window.location.href = "/login"; }
-  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; preview?: Preview; summary?: string; error?: string };
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; preview?: Preview; runnable?: boolean; summary?: string; error?: string };
   return { status: res.status, data };
 }
 
@@ -394,13 +394,15 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   // Run sends the choices that produced what is on screen — never anything else.
   const latest = useRef(0);
   const [shown, setShown] = useState<Record<string, unknown>>({});
-  const canRun = !!(task.automation && AUTOMATION_META[task.automation]?.built);
+  // Whether this step can be run is the server's call (some are preview-only until switched on).
+  const [canRun, setCanRun] = useState(!!(task.automation && AUTOMATION_META[task.automation]?.built));
 
   const showPreview = useCallback(({ status, data }: Awaited<ReturnType<typeof postRun>>, forParams: Record<string, unknown>) => {
     setLoading(false);
     if (data.preview) {
       const p = data.preview;
       setPreview(p); setError(null); setShown(forParams);
+      if (typeof data.runnable === "boolean") setCanRun(data.runnable);
       // Take the server's values, except for the field being typed in right now.
       setDrafts((prev) => Object.fromEntries(p.inputs.filter((i) => i.type === "text")
         .map((i) => [i.key, focused.current === i.key && i.key in prev ? prev[i.key] : String(i.value ?? "")])));
