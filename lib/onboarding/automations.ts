@@ -18,7 +18,7 @@ import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } fr
 import { listCampaigns, getSequenceSteps, getCampaignSchedule, lookUpCampaign } from "@/lib/outboundhero-api";
 import {
   previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, previewOnboardingWhitelist, runOnboardingWhitelist,
-  type AllocationSide, type AllocationPlan, type WhitelistPlan,
+  leadsyncRunSecretSet, type AllocationSide, type AllocationPlan, type WhitelistPlan,
 } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
@@ -471,7 +471,7 @@ const createCampaigns: Automation = {
 // has its own switch too). Until then this is a preview.
 
 /** Server-side switch for actually allocating domains (the preview always works). */
-export const domainAllocationEnabled = () => process.env.ONBOARDING_ALLOCATE_DOMAINS === "1";
+export const domainAllocationEnabled = () => process.env.ONBOARDING_ALLOCATE_DOMAINS === "1" && leadsyncRunSecretSet();
 const ALLOCATION_NOT_SWITCHED_ON =
   "Allocating domains isn't switched on yet — this shows what LeadSync would give the client. Do the step by hand for now.";
 const ALLOCATION_BATCH = 5;
@@ -504,6 +504,13 @@ function asHttpsUrl(raw: string): string {
   } catch { return ""; }
 }
 
+/** Two addresses for the same site? Compared without the scheme, "www." or a trailing slash. */
+function sameSite(a: string, b: string): boolean {
+  const key = (x: string) => { try { const u = new URL(/^https?:\/\//i.test(x.trim()) ? x.trim() : `https://${x.trim()}`); return `${u.hostname.toLowerCase().replace(/^www\./, "")}${u.pathname.replace(/\/+$/, "")}`; } catch { return null; } };
+  const ka = key(a), kb = key(b);
+  return ka !== null && ka === kb;
+}
+
 interface AllocationSidePlan extends AllocationSide { campaignIds: number[] }
 interface AllocationPlanView {
   tag: string; tier: "0.5" | "1" | "2" | undefined; redirect: string;
@@ -524,16 +531,19 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   let fromSheet = "";
   try { fromSheet = (await withCache("onboarding:websites", 60_000, fetchOnboardingWebsites)).get(tag) ?? ""; } catch { /* no pre-fill */ }
   const typed = typeof ctx.params.redirect === "string" ? ctx.params.redirect.trim() : undefined;
-  const redirectRaw = typed ?? fromSheet;
-  const redirect = asHttpsUrl(redirectRaw);
+  // Settled further down, once LeadSync has said which website IT has for the client.
+  let redirectRaw = typed ?? fromSheet;
+  let redirect = asHttpsUrl(redirectRaw);
+  const redirectInput: AutomationInput = {
+    key: "redirect", label: "Redirect the domains to", type: "text", value: redirectRaw, placeholder: "https://client-website.com",
+    hint: fromSheet ? `The onboarding form's Company Website: ${fromSheet}` : `${tag} has no Company Website on the onboarding form — type the address.`,
+  };
   const inputs: AutomationInput[] = [
     { key: "tier", label: "Tier", type: "select", value: tier ?? "",
       options: [{ value: "0.5", label: "Tier 0.5 — 20 B2B + 5 B2C domains" }, { value: "1", label: "Tier 1 — 20 B2B + 5 B2C domains" }, { value: "2", label: "Tier 2 — 40 B2B + 10 B2C domains" }],
       hint: c.plan_type ? `The client's plan here: ${c.plan_type}` : "No plan on the client — left empty, LeadSync uses the Client Tracker's tier." },
-    { key: "redirect", label: "Redirect the domains to", type: "text", value: redirectRaw, placeholder: "https://client-website.com",
-      hint: fromSheet ? `The onboarding form's Company Website: ${fromSheet}` : `${tag} has no Company Website on the onboarding form — type the address.` },
+    redirectInput,
   ];
-  if (!redirect) blockers.push(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
 
   const rows: string[][] = [];
   const notes: PreviewNote[] = [];
@@ -556,6 +566,18 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
       const p = r.plan;
       plan = p;
       if (p.groupMismatch) blockers.push(`LeadSync's allocation sheet has ${tag} in Group ${p.allocationGroup}, not Group ${c.group_num} — sort out which is right before allocating.`);
+      // What LeadSync itself needs in place before it will run (the group is already said above).
+      for (const why of p.runBlockers ?? []) if (!/allocation sheet has/.test(why)) blockers.push(`LeadSync isn't ready for ${tag}: ${why}.`);
+      // LeadSync redirects a client's domains to the website IT has (the Client Tracker's) and
+      // re-points any that drift every day — so that is the address used, and the one here must agree.
+      const known = typeof p.knownRedirect === "string" ? p.knownRedirect.trim() : "";
+      if (known) {
+        if (!redirectRaw) { redirectRaw = known; redirect = asHttpsUrl(known); redirectInput.value = known; }
+        redirectInput.hint = `LeadSync (Client Tracker) has ${known}. ${fromSheet ? `The onboarding form's Company Website: ${fromSheet}` : "The onboarding form has no Company Website."}`;
+        if (redirect && !sameSite(redirect, known)) {
+          blockers.push(`The website here (${redirectRaw}) isn't the one LeadSync has for ${tag} (${known}). LeadSync keeps a client's domains pointed at its own, so make the Client Tracker and this agree first.`);
+        }
+      }
       summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
       for (const s of p.instances) {
         // The client's own campaigns here — the ones step 2 made — are what the domains attach to.
@@ -588,6 +610,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
       }
     }
   }
+  if (!redirect) blockers.unshift(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
   return { tag, tier, redirect, plan, inputs, blockers, rows, notes, summary, sides };
 }
 
@@ -668,9 +691,11 @@ const allocateDomains: Automation = {
     const count = res.added === domains.length ? "" : `${res.added} of ${domains.length} domains were added`;
     if (!res.ok || bad.length || limit || count) {
       rememberAllocationPlan(p.tag, group, p.tier, null);
+      // LeadSync's own list (when it checks the batch itself) says more than the step states do.
+      const found = res.problems?.length ? res.problems : [count, ...bad, limit].filter(Boolean);
       return {
         ok: false,
-        summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${[count, ...bad, limit].filter(Boolean).join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
+        summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${found.join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
         result: { instance: side.instance, domains, leadsync: res },
       };
     }
@@ -704,7 +729,7 @@ const allocateDomains: Automation = {
 // its own switch too). Until then this is a preview.
 
 /** Server-side switch for actually sending the whitelist email (the preview always works). */
-export const whitelistSendEnabled = () => process.env.ONBOARDING_SEND_WHITELIST === "1";
+export const whitelistSendEnabled = () => process.env.ONBOARDING_SEND_WHITELIST === "1" && leadsyncRunSecretSet();
 const WHITELIST_NOT_SWITCHED_ON =
   "Sending the whitelist email from here isn't switched on yet — this shows the email LeadSync would send. LeadSync still sends it on its own at 6:30 AM PT for the domains waiting in its queue.";
 

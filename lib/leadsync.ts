@@ -12,6 +12,16 @@ import { getCached, setCached } from "@/lib/server-cache";
 
 const BASE = (process.env.LEADSYNC_BASE_URL || "https://google-sheets-dashboard-nine.vercel.app").replace(/\/+$/, "");
 const TOKEN = process.env.GOOGLE_SHEETS_REGISTRY_TOKEN || "outboundhero2024";
+// Anything that makes LeadSync WRITE (allocate a batch, send an email) needs a
+// second secret that only the two apps hold. No fallback: without it LeadSync
+// refuses, and the steps here stay previews.
+const RUN_SECRET = (process.env.LEADSYNC_RUN_SECRET || "").trim();
+/** Whether this server can ask LeadSync to run anything at all. */
+export const leadsyncRunSecretSet = () => RUN_SECRET.length >= 24;
+const runHeaders = () => ({
+  Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json",
+  ...(RUN_SECRET ? { "X-Onboarding-Run-Secret": RUN_SECRET } : {}),
+});
 
 export interface AllocationSide {
   instance: string;
@@ -39,6 +49,10 @@ export interface AllocationPlan {
   /** The group LeadSync's allocation sheet has this tag in (null = not there yet). */
   allocationGroup?: 1 | 2 | null;
   groupMismatch?: boolean;
+  /** The website LeadSync has for the client (Client Tracker) — the redirect it will use. null = it has none. */
+  knownRedirect?: string | null;
+  /** Why LeadSync would refuse a run right now (not in the tracker, no website, no sheet, group…). */
+  runBlockers?: string[];
   instances: AllocationSide[];
 }
 export type AllocationPreview = { ok: true; plan: AllocationPlan } | { ok: false; status: number; error: string };
@@ -53,8 +67,11 @@ export type AllocationPreview = { ok: true; plan: AllocationPlan } | { ok: false
  */
 export async function previewOnboardingAllocation(clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2", fresh = false): Promise<AllocationPreview> {
   const key = planKey(clientTag, group, tier);
-  // `fresh` skips a plan kept from the last few minutes.
-  const kept = fresh ? null : getCached<AllocationPlan>(key, 5 * 60_000);
+  // `fresh` skips a plan kept from the last few minutes. A plan LeadSync says it
+  // wouldn't run is only kept briefly: whoever is fixing the reason (a missing
+  // website, a missing sheet) should see it clear without a five-minute wait.
+  let kept = fresh ? null : getCached<AllocationPlan>(key, 5 * 60_000);
+  if (kept?.runBlockers?.length) kept = getCached<AllocationPlan>(key, 45_000);
   if (kept) return { ok: true, plan: kept };
   try {
     const res = await fetch(`${BASE}/api/external/onboarding-allocate`, {
@@ -94,7 +111,9 @@ export interface AllocationRunResult {
   instance: string;
   added: number;
   steps: { label: string; state: string; note?: string }[];
-  limit: { updated?: number; failed?: number; error?: string };
+  limit: { updated?: number; failed?: number; total?: number; error?: string };
+  /** What LeadSync itself found wrong after the batch, when it checks (newer LeadSync). */
+  problems?: string[];
 }
 export type AllocationRun = { ok: true; result: AllocationRunResult } | { ok: false; status: number; error: string };
 
@@ -111,7 +130,7 @@ export async function runOnboardingAllocation(input: {
   try {
     const res = await fetch(`${BASE}/api/external/onboarding-allocate`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" },
+      headers: runHeaders(),
       body: JSON.stringify({ ...input, dryRun: false }),
       cache: "no-store",
       signal: AbortSignal.timeout(285_000),
@@ -198,7 +217,7 @@ export async function runOnboardingWhitelist(clientTag: string, domains: string[
   try {
     const res = await fetch(`${BASE}/api/external/onboarding-whitelist`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" },
+      headers: runHeaders(),
       body: JSON.stringify({ clientTag, domains, dryRun: false }),
       cache: "no-store",
       signal: AbortSignal.timeout(55_000),
