@@ -8,6 +8,8 @@
  * Same token as the other LeadSync feeds (tracked-sheets, domain-client-tag,
  * inboxing-upload). Only /api/external/* is callable from here.
  */
+import { getCached, setCached } from "@/lib/server-cache";
+
 const BASE = (process.env.LEADSYNC_BASE_URL || "https://google-sheets-dashboard-nine.vercel.app").replace(/\/+$/, "");
 const TOKEN = process.env.GOOGLE_SHEETS_REGISTRY_TOKEN || "outboundhero2024";
 
@@ -39,8 +41,15 @@ export type AllocationPreview = { ok: true; plan: AllocationPlan } | { ok: false
 /**
  * What LeadSync WOULD allocate to a new client — a dry run, nothing changes.
  * `tier` is optional: left out, LeadSync uses the Client Tracker's tier.
+ *
+ * The plan is a heavy read on LeadSync's side (it walks every domain, ~10s),
+ * so a good answer is kept for 5 minutes — reopening the preview doesn't ask
+ * again. Failures are never kept.
  */
 export async function previewOnboardingAllocation(clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2"): Promise<AllocationPreview> {
+  const key = `leadsync:allocation:${clientTag}:${group}:${tier ?? "tracker"}`;
+  const kept = getCached<AllocationPlan>(key, 5 * 60_000);
+  if (kept) return { ok: true, plan: kept };
   try {
     const res = await fetch(`${BASE}/api/external/onboarding-allocate`, {
       method: "POST",
@@ -51,8 +60,12 @@ export async function previewOnboardingAllocation(clientTag: string, group: 1 | 
     });
     const j = (await res.json().catch(() => null)) as (AllocationPlan & { error?: string }) | null;
     if (!res.ok || !j || !Array.isArray(j.instances)) {
-      return { ok: false, status: res.status, error: j?.error || (res.status === 404 ? "LeadSync doesn't have the onboarding endpoint yet." : `LeadSync answered ${res.status}`) };
+      const raw = j?.error || (res.status === 404 ? "LeadSync doesn't have the onboarding endpoint yet." : `LeadSync answered ${res.status}`);
+      // Its database cancels a read that runs too long while it is busy.
+      const error = /statement timeout/i.test(raw) ? "LeadSync's database was busy and gave up on the read — try again in a minute." : raw;
+      return { ok: false, status: res.status, error };
     }
+    setCached(key, j);
     return { ok: true, plan: j };
   } catch (e) {
     return { ok: false, status: 0, error: (e as Error).message };
