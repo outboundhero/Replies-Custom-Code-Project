@@ -1,15 +1,14 @@
 /**
- * GET /api/onboarding/users — lightweight app-user list (email + role) for the
- * owner/assignee pickers. Auth-only (unlike GET /api/users which is admin-only),
- * because any team member needs the list to reassign a task.
+ * GET /api/onboarding/users — lightweight app-user list (email + role).
+ * Admin-only, like the rest of onboarding.
  */
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import supabase from "@/lib/supabase";
 import { withCache, nsVersion } from "@/lib/server-cache";
 
 export async function GET() {
-  const denied = await requireAuth();
+  const denied = await requireAdmin();
   if (denied) return denied;
   try {
     const data = await withCache(`onboarding:users:v${nsVersion("users")}`, 60_000, async () => {

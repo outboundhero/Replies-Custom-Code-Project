@@ -8,8 +8,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
-import db from "@/lib/db";
-import { getTask, getClient, startRun, finishRun, assertTaskCanRun } from "@/lib/onboarding/store";
+import { getTask, getClient, startRun, finishRun, releaseRun, assertTaskCanRun } from "@/lib/onboarding/store";
 import { getAutomation, type RunOutcome } from "@/lib/onboarding/automations";
 import { AUTOMATION_META } from "@/lib/onboarding/ui";
 import { logActivity, logError } from "@/lib/errors";
@@ -44,18 +43,37 @@ export async function POST(req: NextRequest) {
     if (mode === "preview") return NextResponse.json({ ok: true, preview });
 
     if (preview.blockers.length) return NextResponse.json({ error: preview.blockers.join(" "), preview }, { status: 409 });
-    // One run at a time per task (a double-click must not send twice).
-    const running = await db.execute({
-      sql: "SELECT 1 FROM onboarding_task_run WHERE task_id = ? AND finished_at IS NULL AND started_at > ? LIMIT 1",
-      args: [task.id, new Date(Date.now() - 5 * 60_000).toISOString()],
-    });
-    if (running.rows.length) return NextResponse.json({ error: "This step is already running." }, { status: 409 });
-
+    // One run at a time per task — the claim is atomic (a unique index), so a
+    // double-click or two people can't both get past this line.
     const runId = await startRun(task, ctx.by, params);
+    if (!runId) return NextResponse.json({ error: "This step is already running." }, { status: 409 });
+    // Checked again now that the task is ours: a run that finished a moment
+    // ago (between our first read and the claim) must not be repeated.
+    const current = await getTask(task.id);
+    if (!current || current.status === "completed") {
+      await releaseRun(runId, "nothing to do — the step was already Done");
+      return NextResponse.json({ error: "This step is already Done." }, { status: 409 });
+    }
+
     let outcome: RunOutcome;
     try { outcome = await automation.run(ctx); }
     catch (e) { outcome = { ok: false, summary: (e as Error).message }; }
-    await finishRun(runId, task, ctx.by, outcome);
+    // The automation has acted — recording that must not be lost to a blip.
+    let saved = false;
+    for (let attempt = 0; attempt < 3 && !saved; attempt++) {
+      try { await finishRun(runId, task, ctx.by, outcome); saved = true; }
+      catch (e) {
+        console.error("[api/onboarding/run] saving the result failed", e);
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+    }
+    if (!saved) {
+      await logError("onboarding", `run:${task.automation}`, `result not saved: ${outcome.summary}`, { client_tag: task.client_tag, by: ctx.by });
+      return NextResponse.json({
+        ok: false,
+        error: outcome.ok ? "It ran, but saving the result failed. Mark the step Done by hand — do not run it again." : outcome.summary,
+      }, { status: 500 });
+    }
     if (outcome.ok) {
       await logActivity("onboarding", `run:${task.automation}`, { client_tag: task.client_tag, details: { by: ctx.by, task: task.title, summary: outcome.summary, result: outcome.result } });
     } else {

@@ -390,13 +390,17 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   // Text fields are typed locally and sent when the field is left (or on Enter).
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const focused = useRef<string | null>(null);
+  // Previews are numbered: only the answer to the LATEST request is shown, and
+  // Run sends the choices that produced what is on screen — never anything else.
+  const latest = useRef(0);
+  const [shown, setShown] = useState<Record<string, unknown>>({});
   const canRun = !!(task.automation && AUTOMATION_META[task.automation]?.built);
 
-  const showPreview = useCallback(({ status, data }: Awaited<ReturnType<typeof postRun>>) => {
+  const showPreview = useCallback(({ status, data }: Awaited<ReturnType<typeof postRun>>, forParams: Record<string, unknown>) => {
     setLoading(false);
     if (data.preview) {
       const p = data.preview;
-      setPreview(p); setError(null);
+      setPreview(p); setError(null); setShown(forParams);
       // Take the server's values, except for the field being typed in right now.
       setDrafts((prev) => Object.fromEntries(p.inputs.filter((i) => i.type === "text")
         .map((i) => [i.key, focused.current === i.key && i.key in prev ? prev[i.key] : String(i.value ?? "")])));
@@ -404,7 +408,8 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   }, []);
   useEffect(() => {
     let alive = true;
-    postRun(task.id, "preview", {}).then((r) => { if (alive) showPreview(r); });
+    const mine = ++latest.current;
+    postRun(task.id, "preview", {}).then((r) => { if (alive && mine === latest.current) showPreview(r, {}); });
     return () => { alive = false; };
   }, [task.id, showPreview]);
 
@@ -412,12 +417,15 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
     const next = { ...params, [key]: value };
     setParams(next);
     setLoading(true);
-    showPreview(await postRun(task.id, "preview", next));
+    const mine = ++latest.current;
+    const r = await postRun(task.id, "preview", next);
+    // An older answer arriving late must not replace a newer one (stays "loading" until the latest lands).
+    if (mine === latest.current) showPreview(r, next);
   }
 
   async function run() {
     setRunning(true); setError(null);
-    const { status, data } = await postRun(task.id, "run", params);
+    const { status, data } = await postRun(task.id, "run", shown);
     setRunning(false);
     if (data.ok) { toast.success(data.summary || "Done"); onDone(); onClose(); return; }
     setError(data.error || `The run failed (${status})`);

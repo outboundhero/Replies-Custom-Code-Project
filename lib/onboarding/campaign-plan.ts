@@ -80,6 +80,8 @@ const REGIONS: [string, string, string][] = [
   // Canada — the live campaigns use the matching US zone (Winnipeg sends on America/Chicago).
   ["AB", "Alberta", "America/Denver"], ["BC", "British Columbia", "America/Los_Angeles"], ["MB", "Manitoba", "America/Chicago"],
   ["ON", "Ontario", "America/New_York"], ["QC", "Quebec", "America/New_York"], ["SK", "Saskatchewan", "America/Regina"],
+  ["NB", "New Brunswick", "America/Halifax"], ["NS", "Nova Scotia", "America/Halifax"],
+  ["PE", "Prince Edward Island", "America/Halifax"], ["NL", "Newfoundland and Labrador", "America/Halifax"],
 ];
 
 export const REGION_OPTIONS = REGIONS.map(([abbr, name]) => ({ abbr, name }));
@@ -101,11 +103,21 @@ export const timezoneForState = (stateOrAbbr: string): string | null => regionBy
  */
 export function parsePlace(text: string | null | undefined): { city: string; state: string; abbr: string; sure: boolean } | null {
   const parts = (text ?? "").replace(/\s+/g, " ").split(",").map((p) => p.trim()).filter(Boolean);
+  // In an address an abbreviation is written in capitals — "Co" is not Colorado.
+  const regionIn = (part: string) => {
+    const t = part.replace(/\b\d{5}(-\d{4})?\b|\b[A-Z]\d[A-Z] ?\d[A-Z]\d\b/g, "").trim(); // drop ZIP / postal code
+    const hit = REGIONS.find(([abbr, name]) => abbr === t || name.toLowerCase() === t.toLowerCase());
+    return hit ? { abbr: hit[0], name: hit[1] } : null;
+  };
   for (let i = parts.length - 1; i >= 1; i--) {
-    const region = regionByAny(parts[i].replace(/\b\d{5}(-\d{4})?\b|\b[A-Z]\d[A-Z] ?\d[A-Z]\d\b/g, "").trim()); // drop ZIP / postal code
+    let region = regionIn(parts[i]);
     if (!region) continue;
+    // "Winnipeg, MB, CA": when the part before is itself a state, the last part is a country.
+    const earlier = i >= 2 ? regionIn(parts[i - 1]) : null;
+    if (earlier) { region = earlier; i -= 1; }
     const before = parts[i - 1];
-    const sure = !/\d/.test(before);
+    // A street address or two places in one cell ("Dallas, TX and Houston, TX") is a guess to check.
+    const sure = !/\d/.test(before) && !/\band\b|&/i.test(before);
     // "315 University Ave Los Gatos" → keep what follows the street words; if a
     // number is still in there ("… RdSuite B1 Baltimore"), what follows the last one.
     let city = sure ? before : before.replace(/^.*\b(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Hwy|Highway|Ste|Suite|Pkwy|Ct|Pl)\b\.?\s*(?:[#A-Z]?\d+\w*\s*)?/i, "").trim();

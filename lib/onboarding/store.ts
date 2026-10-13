@@ -31,9 +31,18 @@ const nowIso = () => new Date().toISOString();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 
+/** A run can't outlive the function that started it (5 min) — past this it never finished. */
+const RUN_STALE_MS = 6 * 60_000;
+
 let ready = false;
-async function ensureTables(): Promise<void> {
-  if (ready) return;
+let initializing: Promise<void> | null = null;
+/** Create / upgrade the tables once per instance; concurrent callers share the one attempt. */
+function ensureTables(): Promise<void> {
+  if (ready) return Promise.resolve();
+  initializing ??= createTables().then(() => { ready = true; }).finally(() => { initializing = null; });
+  return initializing;
+}
+async function createTables(): Promise<void> {
   await db.execute(`CREATE TABLE IF NOT EXISTS onboarding_template_task (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -105,8 +114,15 @@ async function ensureTables(): Promise<void> {
     error TEXT
   )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_onboarding_task_run_task ON onboarding_task_run(task_id, started_at)`);
+  // At most ONE unfinished run per task: the database itself refuses a second,
+  // so two clicks (or two people) can never both run a step. Runs that never
+  // finished are closed out first so they can't block it.
+  await db.execute({
+    sql: "UPDATE onboarding_task_run SET finished_at = ?, ok = 0, error = 'abandoned — never finished' WHERE finished_at IS NULL AND started_at < ?",
+    args: [nowIso(), new Date(Date.now() - RUN_STALE_MS).toISOString()],
+  });
+  await db.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_task_run_active ON onboarding_task_run(task_id) WHERE finished_at IS NULL`);
   await addMissingColumns();
-  ready = true;
 }
 
 /** Columns added after the first release (prod already has the tables): read
@@ -128,7 +144,12 @@ async function addMissingColumns(): Promise<void> {
     for (const col of want[table]) {
       const name = col.split(" ")[0];
       if (new RegExp(`\\b${name}\\b`).test(ddl.get(table) || "")) continue;
-      try { await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col}`); } catch { /* added by another server */ }
+      try { await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col}`); }
+      catch (e) {
+        // Another instance adding the same column first is fine; anything else
+        // must fail the setup so it is retried, not papered over.
+        if (!/duplicate column/i.test((e as Error).message)) throw e;
+      }
     }
   }
 }
@@ -781,7 +802,9 @@ export async function bulkUpdateTaskStatus(ids: string[], status: TaskStatus, by
   if (!clean.length) return 0;
   const tasks = (await Promise.all(clean.map((id) => getTask(id)))).filter((t): t is OnboardingTaskRow => !!t);
   if (status !== "not_started") {
-    const batch = new Set(tasks.map((t) => t.id));
+    // Completing steps 1–3 together is fine; STARTING several at once is not —
+    // only a batch that completes its earlier steps satisfies the later ones.
+    const batch = status === "completed" ? new Set(tasks.map((t) => t.id)) : new Set<string>();
     for (const t of tasks) await assertInOrder(t, status, batch);
   }
   const now = nowIso();
@@ -816,16 +839,58 @@ export async function setSetting(key: string, value: string | null): Promise<voi
 
 // ─────────────────────────── Automation runs ───────────────────────────
 
-/** Record the start of an automation run; returns its id. */
-export async function startRun(task: OnboardingTaskRow, by: string | null, params: unknown): Promise<string> {
+/**
+ * Claim the task for one automation run. Returns the run's id, or null when
+ * another run of this task is still in progress — the unique index on
+ * unfinished runs makes that atomic, so two requests can never both get one.
+ */
+export async function startRun(task: OnboardingTaskRow, by: string | null, params: unknown): Promise<string | null> {
   await ensureTables();
-  const id = randomUUID();
+  const now = nowIso();
+  // A run that never finished (crash / timeout) must not block the step forever.
   await db.execute({
-    sql: `INSERT INTO onboarding_task_run (id, task_id, client_tag, automation, started_at, run_by, params)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [id, task.id, task.client_tag, task.automation || "", nowIso(), by, JSON.stringify(params ?? {})],
+    sql: "UPDATE onboarding_task_run SET finished_at = ?, ok = 0, error = 'abandoned — never finished' WHERE task_id = ? AND finished_at IS NULL AND started_at < ?",
+    args: [now, task.id, new Date(Date.now() - RUN_STALE_MS).toISOString()],
   });
+  const id = randomUUID();
+  try {
+    await db.execute({
+      sql: `INSERT INTO onboarding_task_run (id, task_id, client_tag, automation, started_at, run_by, params)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, task.id, task.client_tag, task.automation || "", now, by, JSON.stringify(params ?? {})],
+    });
+  } catch (e) {
+    if (/unique|constraint/i.test((e as Error).message)) return null;
+    throw e;
+  }
   return id;
+}
+
+/** Give a claimed run back without it having done anything (the task is left alone). */
+export async function releaseRun(runId: string, note: string): Promise<void> {
+  await db.execute({
+    sql: "UPDATE onboarding_task_run SET finished_at = ?, ok = 0, error = ? WHERE id = ?",
+    args: [nowIso(), note.slice(0, 500), runId],
+  });
+}
+
+/**
+ * What the task's last attempt managed before it failed — so a retry only does
+ * what is still missing. Null when the last finished run succeeded (a re-run
+ * after reopening starts from scratch) or left nothing behind.
+ */
+export async function lastFailedAttempt(taskId: string): Promise<Record<string, unknown> | null> {
+  await ensureTables();
+  const r = await db.execute({
+    sql: "SELECT ok, result FROM onboarding_task_run WHERE task_id = ? AND finished_at IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+    args: [taskId],
+  });
+  const row = r.rows[0];
+  if (!row || Number(row.ok) === 1 || !row.result) return null;
+  try {
+    const v = JSON.parse(String(row.result));
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+  } catch { return null; }
 }
 
 /**

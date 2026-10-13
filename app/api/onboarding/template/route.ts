@@ -4,12 +4,12 @@
  * default template on first read so the editor is never empty.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import { withCache, setCached, nsVersion } from "@/lib/server-cache";
 import { listTemplate, seedDefaultTemplate } from "@/lib/onboarding/store";
 
 export async function GET(req: NextRequest) {
-  const denied = await requireAuth();
+  const denied = await requireAdmin();
   if (denied) return denied;
   try {
     const key = `onboarding:template:v${nsVersion("onboarding")}`;

@@ -8,7 +8,7 @@
  */
 import { dmBySlackIds, postToChannel } from "@/lib/slack";
 import {
-  getSetting, setClientGroup, listOnboardingUsers,
+  getSetting, setClientGroup, listOnboardingUsers, lastFailedAttempt,
   type OnboardingClientRow, type OnboardingTaskRow,
 } from "@/lib/onboarding/store";
 import { GROUP_META, groupText, fmtDate } from "@/lib/onboarding/ui";
@@ -108,17 +108,28 @@ function groupRuleHint(startDate: string): string {
     : `Starts ${fmtDate(startDate)} — not the 1st or the 15th, so there's no default group. Choose one.`;
 }
 
+/** The destinations this exact message hasn't reached yet (all of them, unless the last attempt got part-way). */
+async function stillToSend(taskId: string, dests: SlackDest[], text: string): Promise<SlackDest[]> {
+  const last = await lastFailedAttempt(taskId);
+  const done = last && last.text === text && Array.isArray(last.sentIds) ? new Set(last.sentIds.map(String)) : new Set<string>();
+  return dests.filter((d) => !done.has(d.id));
+}
+
 const slackOutreachify: Automation = {
   async preview(ctx) {
     const group = chosenGroup(ctx);
     const dests = await outreachifyDestinations();
     const blockers: string[] = [];
     if (!group) blockers.push("Choose Group 1 or Group 2.");
-    if (!dests.length) blockers.push("No Slack destination is set for Outreachify — an admin can add it under Onboarding → Users.");
+    if (!dests.length) blockers.push("No Slack destination is set for Outreachify — an admin can add it under Onboarding → Team.");
+    // A retry only sends to the places the last attempt didn't reach.
+    const pending = group ? await stillToSend(ctx.task.id, dests, outreachifyMessage(ctx, group)) : dests;
+    const reached = dests.filter((d) => !pending.includes(d));
     return {
       title: "Slack Outreachify to onboard new clients",
       lines: [
-        `Sends this message to: ${dests.length ? dests.map((d) => d.label).join(", ") : "—"}`,
+        `Sends this message to: ${pending.length ? pending.map((d) => d.label).join(", ") : "—"}`,
+        ...(reached.length ? [`Already delivered to ${reached.map((d) => d.label).join(", ")} on the last attempt — it isn't sent there again.`] : []),
         `Saves the group on ${ctx.client.client_tag}: ${group ? groupText(group) : "not chosen yet"}`,
         "Marks this step Done.",
       ],
@@ -133,23 +144,29 @@ const slackOutreachify: Automation = {
     const dests = await outreachifyDestinations();
     if (!dests.length) return { ok: false, summary: "No Slack destination is set for Outreachify." };
     const text = outreachifyMessage(ctx, group);
+    // Saved before anything is sent: if this were to fail after Slack accepted
+    // the message, the step would look failed and be run — and sent — again.
+    await setClientGroup(ctx.client.client_tag, group);
+    const pending = await stillToSend(ctx.task.id, dests, text);
     const failed: string[] = [];
     const sent: string[] = [];
-    for (const d of dests) {
+    // Everything this message has reached, across attempts — a retry skips these.
+    const sentIds = dests.filter((d) => !pending.includes(d)).map((d) => d.id);
+    for (const d of pending) {
       if (d.kind === "person") {
         const r = await dmBySlackIds([d.id], text);
-        if (r.ok) sent.push(d.label); else failed.push(`${d.label}: ${r.failed.map((f) => f.error).join("; ")}`);
+        if (r.ok) { sent.push(d.label); sentIds.push(d.id); } else failed.push(`${d.label}: ${r.failed.map((f) => f.error).join("; ")}`);
       } else {
         const r = await postToChannel(d.id, text);
-        if (r.ok) sent.push(d.label); else failed.push(`${d.label}: ${r.error}`);
+        if (r.ok) { sent.push(d.label); sentIds.push(d.id); } else failed.push(`${d.label}: ${r.error}`);
       }
     }
     // The step counts only when every destination got the message.
     if (failed.length) {
-      return { ok: false, summary: `Slack didn't accept the message for ${failed.join(" | ")}${sent.length ? ` (delivered to ${sent.join(", ")})` : ""}`, result: { sent, failed } };
+      return { ok: false, summary: `Slack didn't accept the message for ${failed.join(" | ")}${sent.length ? ` (delivered to ${sent.join(", ")})` : ""}`, result: { group, text, sentIds, sent, failed } };
     }
-    await setClientGroup(ctx.client.client_tag, group);
-    return { ok: true, summary: `Sent ${ctx.client.client_tag} → ${GROUP_META[group].label} to ${sent.join(", ")}`, result: { group, sent } };
+    const all = dests.map((d) => d.label).join(", ");
+    return { ok: true, summary: `Sent ${ctx.client.client_tag} → ${GROUP_META[group].label} to ${all}`, result: { group, text, sentIds, sent } };
   },
 };
 
@@ -175,6 +192,8 @@ function loadMasterCampaigns(instance: BisonInstanceKey, tag: string): Promise<M
       const slot = slotOfName(c.name, tag);
       if (!slot || gone(c.status)) continue;
       const [steps, schedule] = await Promise.all([getSequenceSteps(instance, c.id), getCampaignSchedule(instance, c.id)]);
+      // A failed read throws, so it is reported now and never cached as "no emails".
+      if (!steps) throw new Error(`couldn't read the emails of #${c.id} “${c.name}”`);
       const list = ((steps as { sequence_steps?: MasterStep[] } | null)?.sequence_steps ?? []).slice().sort((a, b) => a.order - b.order);
       const key = slotKey(slot);
       out.set(key, [...(out.get(key) ?? []), { id: c.id, name: c.name, status: c.status, slot, steps: list, schedule }]);
@@ -208,11 +227,13 @@ const createCampaigns: Automation = {
     } catch { /* no pre-fill */ }
     const guess = parsePlace(sheet?.office) ?? parsePlace(sheet?.area);
     const city = param("city") ?? guess?.city ?? "";
-    let state = param("state") ?? guess?.state ?? "";
-    let abbr = (param("abbr") ?? guess?.abbr ?? "").toUpperCase();
-    const region = regionByAny(state) ?? regionByAny(abbr);
-    if (!state && region) state = region.name;
-    if (!abbr && region) abbr = region.abbr;
+    // Whatever is typed wins; a field left alone follows the other one, then the sheet —
+    // so changing the state to Texas doesn't keep the sheet's "CA".
+    const typedState = param("state"), typedAbbr = param("abbr");
+    let state = typedState ?? (typedAbbr ? regionByAny(typedAbbr)?.name : undefined) ?? guess?.state ?? "";
+    let abbr = (typedAbbr ?? (typedState ? regionByAny(typedState)?.abbr : undefined) ?? guess?.abbr ?? "").toUpperCase();
+    if (!state && abbr) state = regionByAny(abbr)?.name ?? "";
+    if (!abbr && state) abbr = regionByAny(state)?.abbr ?? "";
     const area = param("area") ?? "";
     const target: Place = { area: area || defaultArea(city), city, state, abbr };
     const timezone = param("timezone") ?? timezoneForState(state) ?? timezoneForState(abbr) ?? "";
@@ -238,6 +259,9 @@ const createCampaigns: Automation = {
     if (clientType !== "cleaning") blockers.push("Only cleaning clients are covered — other clients' copy is written differently, so create these campaigns by hand.");
     const placeIssues = [...placeProblems(target, "This client"), ...(master ? placeProblems(master.place, `Master ${master.tag}`) : [])];
     blockers.push(...placeIssues);
+    const known = regionByAny(state);
+    if (known && state && known.name.toLowerCase() !== state.toLowerCase()) blockers.push(`State: write the full name — “${known.name}”, not “${state}”.`);
+    else if (known && abbr && known.abbr !== abbr) blockers.push(`The state and its abbreviation don't match — ${known.name} is ${known.abbr}, not ${abbr}.`);
     if (!timezone) blockers.push("Choose the timezone the campaigns send in.");
     else if (!TIMEZONE_OPTIONS.includes(timezone)) blockers.push(`“${timezone}” isn't one of the timezones on the list.`);
 

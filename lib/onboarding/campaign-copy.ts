@@ -3,16 +3,24 @@
  *
  * A new client's campaigns are copies of a MASTER client's campaigns with one
  * kind of change: the master's place names (area name, city, state, state
- * abbreviation) become the new client's.
- * Everything else is carried over character for character:
+ * abbreviation) become the new client's. Everything else is carried over
+ * character for character:
  *   • spintax          {Hey|Hi}, nested as deep as it goes
  *   • variables        {CITY} {QUESTION} {FIRST_NAME} {SENDER_FULL_NAME} …
  *                      (a {CAPS_NAME} with no "|" inside — never touched)
  *   • subjects         they only ever carry {CITY}, never a place name, so
  *                      they are not edited at all
- * After the swap the result is checked against the master (same braces and
- * pipes, same variables, no master place name left, no street address carried
- * over). Any failed check is a problem that blocks creating the campaigns.
+ *
+ * The swap is deliberately narrow and the check after it deliberately wide:
+ *   swap   exact spelling, whole words; the state abbreviation only where it
+ *          sits beside the city or the state name ("Winnipeg, MB",
+ *          "{MB|Manitoba}") — never a stray "OK" or "IN" in a sentence.
+ *   check  nothing of the master may be left in ANY spelling (other case,
+ *          "St Louis" for "St. Louis", inside a tag or an entity), the
+ *          spintax and variables must be unchanged, and nothing that looks
+ *          like the master's address, phone or website may ride along.
+ * Any failed check is a problem that blocks creating the campaigns — a master
+ * the rules can't handle is refused rather than guessed at.
  */
 
 export interface Place {
@@ -43,11 +51,26 @@ export interface LocalizeResult<T extends CopyStep> {
 }
 
 const VARIABLE = /\{[A-Z][A-Z0-9_]*\}/g;
+const W = "[A-Za-z0-9]";
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-/** HTML body → the text a person reads in the editor (for previews and checks). */
+
+/** HTML body → the text a person reads in the editor (for previews). */
 export const bodyText = (html: string) =>
   html.replace(/<br\s*\/?>/gi, "\n").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
+/** Everything a body says, however it is encoded: tags opened up, entities and odd spaces resolved. */
+function plain(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+    .replace(/[  -​ ]/g, " ");
+}
+/** Lower-case words only — "St. Louis", "ST LOUIS" and "St&nbsp;Louis" all read the same. */
+const wordsOf = (text: string) => plain(text).toLowerCase().match(/[a-z0-9]+/g) ?? [];
 
 /** The variables a text uses, in order (duplicates kept). */
 export function variablesIn(text: string): string[] {
@@ -77,41 +100,88 @@ export function placeProblems(p: Place, who: string): string[] {
   return out;
 }
 
-interface Token { find: string; replace: string }
+const same = (a: string, b: string) => wordsOf(a).join(" ") === wordsOf(b).join(" ");
 
-/** Master → new-client replacements, longest first so "Winnipeg Area" wins over "Winnipeg". */
-function tokens(master: Place, target: Place): Token[] {
-  const area = target.area.trim() || defaultArea(target.city);
-  const list: Token[] = [
-    { find: master.city.trim(), replace: target.city.trim() },
-    { find: master.state.trim(), replace: target.state.trim() },
-    { find: master.abbr.trim(), replace: target.abbr.trim() },
+/** A master whose own names can't be told apart can't be swapped safely. */
+function masterProblems(m: Place): string[] {
+  const out: string[] = [];
+  if (same(m.city, m.state)) out.push(`Master: its city and state are the same name (“${m.city}”) — they can't be told apart in the copy. Use another master.`);
+  if (m.area.trim() && same(m.area, m.state)) out.push(`Master: its area name and state are the same (“${m.state}”) — they can't be told apart in the copy. Use another master.`);
+  return out;
+}
+
+type Kind = "area" | "city" | "state" | "abbr";
+
+/**
+ * One pass over the master's exact spellings. Names match as whole words; the
+ * abbreviation only beside the city ("Winnipeg, MB", "Winnipeg, {MB") or
+ * paired with the state in a choice ("MB|Manitoba", "Manitoba|MB").
+ */
+function swapRegex(m: Place): { re: RegExp; kindOf: (hit: string) => Kind } {
+  const area = m.area.trim() && !same(m.area, m.city) ? escapeHtml(m.area.trim()) : "";
+  const city = escapeHtml(m.city.trim());
+  const state = escapeHtml(m.state.trim());
+  const abbr = m.abbr.trim();
+  const names = [area, city, state].filter(Boolean).sort((a, b) => b.length - a.length)
+    .map((n) => `(?<!${W})${escapeRegExp(n)}(?!${W})`);
+  const c = escapeRegExp(city), s = escapeRegExp(state), a = escapeRegExp(abbr);
+  const beside = [
+    `(?<=${c},\\s{0,2}\\{?)${a}(?!${W})`,
+    `(?<!${W})${a}(?=\\|${s}(?!${W}))`,
+    `(?<=(?<!${W})${s}\\|)${a}(?!${W})`,
   ];
-  if (master.area.trim() && master.area.trim() !== master.city.trim()) list.push({ find: master.area.trim(), replace: area });
-  return list.filter((t) => t.find).sort((a, b) => b.find.length - a.find.length);
+  return {
+    re: new RegExp([...names, ...beside].join("|"), "g"),
+    kindOf: (hit) => (area && hit === area ? "area" : hit === city ? "city" : hit === state ? "state" : "abbr"),
+  };
 }
 
-/** Whole-word, case-sensitive matcher for a list of names (HTML-escaped like the body). */
-function matcher(names: string[], flags = ""): RegExp | null {
-  const alt = names.filter(Boolean).sort((a, b) => b.length - a.length).map((n) => escapeRegExp(escapeHtml(n))).join("|");
-  return alt ? new RegExp(`(?<![A-Za-z0-9])(?:${alt})(?![A-Za-z0-9])`, flags) : null;
+/** Does `needle` (a word sequence) occur in `hay` at a spot that isn't masked? */
+function hasSequence(hay: string[], needle: string[], masked: boolean[]): boolean {
+  if (!needle.length) return false;
+  outer: for (let i = 0; i + needle.length <= hay.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j] || masked[i + j]) continue outer;
+    return true;
+  }
+  return false;
 }
-/** A body's free text: everything except {VARIABLES} and <tags>. */
-const freeText = (body: string) => body.split(/\{[A-Z][A-Z0-9_]*\}|<[^>]+>/g).join(" ");
+function maskSequence(hay: string[], needle: string[], masked: boolean[]): void {
+  if (!needle.length) return;
+  outer: for (let i = 0; i + needle.length <= hay.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+    for (let j = 0; j < needle.length; j++) masked[i + j] = true;
+  }
+}
 
-/** Swap place names in one HTML body. Variables and tags are never touched. */
-function swap(body: string, list: Token[]): { text: string; count: number } {
-  const re = matcher(list.map((t) => t.find), "g");
-  if (!re) return { text: body, count: 0 };
-  const byFind = new Map(list.map((t) => [escapeHtml(t.find), escapeHtml(t.replace)]));
-  let count = 0;
-  // Split into protected pieces ({VARIABLES} and <tags>) and free text.
-  const text = body.split(/(\{[A-Z][A-Z0-9_]*\}|<[^>]+>)/g).map((piece, i) => {
-    if (i % 2 === 1) return piece; // a variable or a tag — verbatim
-    return piece.replace(re, (m) => { count++; return byFind.get(m) ?? m; });
-  }).join("");
-  return { text, count };
+/** Which of the master's names are still in `text`, in any spelling — once the new client's own names are set aside. */
+function mastersLeft(text: string, master: Place, target: Place | null): string[] {
+  const hay = wordsOf(text);
+  const masked = new Array<boolean>(hay.length).fill(false);
+  const mine = target ? [target.area, target.city, target.state] : [];
+  for (const n of mine) maskSequence(hay, wordsOf(n), masked);
+  const left: string[] = [];
+  for (const n of [master.area, master.city, master.state]) {
+    if (!n.trim() || mine.some((t) => same(t, n))) continue;
+    if (hasSequence(hay, wordsOf(n), masked)) left.push(n.trim());
+  }
+  // The abbreviation is judged as written (capitals, whole word) — "in" is not "IN".
+  const abbr = master.abbr.trim();
+  if (abbr && abbr !== target?.abbr.trim()) {
+    // The new client's names may contain those letters ("LA Metro") — set them aside first.
+    let rest = plain(text);
+    for (const n of mine) if (n.trim()) rest = rest.split(n.trim()).join(" ");
+    if (new RegExp(`(?<!${W})${escapeRegExp(abbr)}(?!${W})`).test(rest)) left.push(abbr);
+  }
+  return left;
 }
+
+// Things that belong to the master and would ride along into the new client's emails.
+const RIDE_ALONG: [RegExp, string][] = [
+  [/\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/, "a phone number"],
+  [/\b\d{5}(?:-\d{4})?\b|\b[A-Z]\d[A-Z]\s?\d[A-Z]\d\b/, "a ZIP / postal code"],
+  [/\b\d{2,6}\s+[A-Z][a-z]+/, "a street address"],
+  [/https?:\/\/|\bwww\.|[\w.-]+@[\w-]+\.[a-z]{2,}|\b[a-z0-9-]+\.(?:com|net|org|co|io|info|us|ca|biz)\b/i, "a web or email address"],
+];
 
 /**
  * The master's steps rewritten for a new client. Subjects are returned exactly
@@ -119,26 +189,56 @@ function swap(body: string, list: Token[]): { text: string; count: number } {
  */
 export function localizeSteps<T extends CopyStep>(steps: T[], master: Place, target: Place): LocalizeResult<T> {
   const problems = [...placeProblems(master, "Master"), ...placeProblems(target, "New client")];
-  const list = tokens(master, target);
-  const masterNames = tokens(master, master).map((t) => t.find);
-  const inSubject = matcher(masterNames);
+  if (!problems.length) problems.push(...masterProblems(master));
+  const ordered = [...steps].sort((a, b) => a.order - b.order);
+  if (problems.length) return { steps: ordered, changes: [], replacements: 0, problems };
+
+  const area = target.area.trim() || defaultArea(target.city);
+  const to: Record<Kind, string> = {
+    area: escapeHtml(area), city: escapeHtml(target.city.trim()), state: escapeHtml(target.state.trim()), abbr: target.abbr.trim(),
+  };
+  const { re, kindOf } = swapRegex(master);
+  const counts: Record<Kind, number> = { area: 0, city: 0, state: 0, abbr: 0 };
   const out: T[] = [];
   const changes: CopyChange[] = [];
-  let replacements = 0;
+  const note = (p: string) => { if (!problems.includes(p)) problems.push(p); };
 
-  for (const step of [...steps].sort((a, b) => a.order - b.order)) {
-    const { text, count } = problems.length ? { text: step.email_body, count: 0 } : swap(step.email_body, list);
-    replacements += count;
+  for (const step of ordered) {
+    // Subjects are never edited, so a place name in one can't be localised.
+    if (mastersLeft(step.email_subject, master, null).length) {
+      note(`Email ${step.order}: the subject contains one of the master's place names — subjects aren't edited, so this master can't be used as it is.`);
+    }
+
+    // Split into protected pieces ({VARIABLES} and <tags>) and free text; only free text is swapped.
+    const text = step.email_body.split(/(\{[A-Z][A-Z0-9_]*\}|<[^>]+>)/g).map((piece, i) => {
+      if (i % 2 === 1) return piece;
+      return piece.replace(re, (hit: string, offset: number, whole: string) => {
+        const kind = kindOf(hit);
+        if (kind === "state") {
+          // "Kansas City", "West Virginia": the state's name inside a longer name is not the state.
+          const before = whole.slice(0, offset), after = whole.slice(offset + hit.length);
+          if (/[A-Z][A-Za-z.'’-]*\s+$/.test(before) || /^\s+[A-Z]/.test(after)) {
+            note(`Email ${step.order}: “${master.state}” appears inside a longer name (“${(before.match(/\S+\s+$/)?.[0] ?? "") + hit + (after.match(/^\s+\S+/)?.[0] ?? "")}”) — can't tell if it means the state.`);
+            return hit;
+          }
+        }
+        counts[kind]++;
+        return to[kind];
+      });
+    }).join("");
     out.push({ ...step, email_body: text });
 
-    // Subjects are never edited, so a place name in one can't be localised.
-    if (inSubject?.test(escapeHtml(step.email_subject))) {
-      problems.push(`Email ${step.order}: the subject contains one of the master's place names — subjects aren't edited, so this master can't be used as it is.`);
-    }
-    if (problems.length) continue;
+    if (skeleton(text) !== skeleton(step.email_body)) note(`Email ${step.order}: the spintax structure changed — refusing to use it.`);
+    if (variablesIn(text).join() !== variablesIn(step.email_body).join()) note(`Email ${step.order}: a variable changed — refusing to use it.`);
 
-    if (skeleton(text) !== skeleton(step.email_body)) problems.push(`Email ${step.order}: the spintax structure changed — refusing to use it.`);
-    if (variablesIn(text).join() !== variablesIn(step.email_body).join()) problems.push(`Email ${step.order}: a variable changed — refusing to use it.`);
+    const left = mastersLeft(text, master, { ...target, area });
+    if (left.length) note(`Email ${step.order}: the master's ${left.map((n) => `“${n}”`).join(", ")} ${left.length === 1 ? "is" : "are"} still in the copy in a form that can't be swapped safely.`);
+
+    const said = plain(text);
+    for (const [pattern, what] of RIDE_ALONG) {
+      const hit = said.match(pattern);
+      if (hit) note(`Email ${step.order}: the master's copy contains ${what} (“${hit[0].trim().slice(0, 60)}”) — it would be copied to the new client. Use a master without one.`);
+    }
 
     const before = bodyText(step.email_body).split("\n");
     const after = bodyText(text).split("\n");
@@ -147,21 +247,16 @@ export function localizeSteps<T extends CopyStep>(steps: T[], master: Place, tar
       changes.push({ order: step.order, before: before[i] ?? "", after: after[i] ?? "" });
       // A number on a place line is a street address / ZIP / phone that belongs to the master.
       if (/\d/.test(after[i] ?? "")) {
-        problems.push(`Email ${step.order}: a line with place names also contains a number — a street address or ZIP of the master would be copied to the new client: “${(after[i] ?? "").slice(0, 120)}”. Use a master without one.`);
+        note(`Email ${step.order}: a line with place names also contains a number — a street address or ZIP of the master would be copied to the new client: “${(after[i] ?? "").slice(0, 120)}”. Use a master without one.`);
       }
     }
   }
 
-  if (!problems.length) {
-    // Nothing of the master may remain. The new client's own names are taken
-    // out first, so "York" → "New York" (or a shared state) isn't a false alarm.
-    const mine = matcher(list.map((t) => t.replace), "g");
-    const stale = matcher(masterNames);
-    for (const s of out) {
-      const rest = mine ? freeText(s.email_body).replace(mine, " ") : freeText(s.email_body);
-      if (stale?.test(rest)) problems.push(`Email ${s.order}: one of the master's place names is still in the copy.`);
-    }
-    if (!replacements) problems.push("None of the master's place names were found in its copy — check the master's area, city, state and abbreviation.");
+  const replacements = counts.area + counts.city + counts.state + counts.abbr;
+  if (!replacements) note("None of the master's place names were found in its copy — check the master's area, city, state and abbreviation.");
+  // An area name the master's emails never use would silently not appear.
+  if (replacements && !counts.area && target.area.trim() && !same(target.area, defaultArea(target.city))) {
+    note(`This master's emails don't use an area name, so “${target.area.trim()}” would not appear anywhere — clear the area name, or set the master's area name.`);
   }
   return { steps: out, changes, replacements, problems };
 }

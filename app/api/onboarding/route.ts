@@ -5,7 +5,7 @@
  * step posts. Cached briefly; every write bumps the "onboarding" version.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 import { withCache, setCached, nsVersion } from "@/lib/server-cache";
 import { listClients, listTasks, listOnboardingUsers, getSetting } from "@/lib/onboarding/store";
 import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING, outreachifyDestinations } from "@/lib/onboarding/automations";
@@ -24,7 +24,8 @@ async function loadBoard() {
 }
 
 export async function GET(req: NextRequest) {
-  const denied = await requireAuth();
+  // Admin-only, like the page (middleware keeps everyone else off /onboarding).
+  const denied = await requireAdmin();
   if (denied) return denied;
   try {
     const key = `onboarding:board:v${nsVersion("onboarding")}`;

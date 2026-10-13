@@ -11,7 +11,7 @@
  * All fire-and-forget — never block or break the store operation.
  */
 import { dmBySlackIds } from "@/lib/slack";
-import { listTasks, onboardingUserMap } from "@/lib/onboarding/store";
+import { listTasks, listClients, onboardingUserMap } from "@/lib/onboarding/store";
 import { fmtDate, todayStr } from "@/lib/onboarding/ui";
 import { logError } from "@/lib/errors";
 
@@ -97,10 +97,12 @@ export async function notifyAssignee(userId: string | null, clientTag: string, t
  *  people were notified. Called by the onboarding-digest cron. */
 export async function sendDailyDigest(): Promise<{ notified: number }> {
   const today = todayStr();
-  const [tasks, userMap] = await Promise.all([listTasks(), onboardingUserMap()]);
+  const [tasks, userMap, clients] = await Promise.all([listTasks(), onboardingUserMap(), listClients()]);
+  // Same scope as the By person / Board views: a client marked Completed is out.
+  const finished = new Set(clients.filter((c) => c.status === "completed").map((c) => c.client_tag));
   const byOwner = new Map<string, { overdue: typeof tasks; today: typeof tasks }>();
   for (const t of tasks) {
-    if (t.status === "completed" || !t.assignee_email || !t.due_date) continue;
+    if (t.status === "completed" || !t.assignee_email || !t.due_date || finished.has(t.client_tag)) continue;
     if (t.due_date > today) continue; // only overdue + today
     const bucket = byOwner.get(t.assignee_email) || { overdue: [], today: [] };
     (t.due_date < today ? bucket.overdue : bucket.today).push(t);

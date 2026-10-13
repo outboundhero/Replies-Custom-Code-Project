@@ -31,18 +31,20 @@ export default function ClientDetailPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
 
   const load = useCallback(async (fresh = false) => {
     try {
       // One request — includes the team. `fresh` (after a write) skips the server's short cache.
       const b = await fetch(fresh ? "/api/onboarding?fresh=1" : "/api/onboarding");
       if (b.status === 401) { window.location.href = "/login"; return; }
+      if (!b.ok) { setFailed(b.status === 403 ? "Onboarding is for admins." : `Couldn't load onboarding (${b.status}). Reload to try again.`); return; }
       const data = await b.json();
       const c = (data.clients as OnbClient[]).find((x) => x.client_tag.toUpperCase() === tag) || null;
-      setClient(c); setNotFound(!c);
+      setClient(c); setNotFound(!c); setFailed(null);
       setTasks((data.tasks as OnbTask[]).filter((t) => t.client_tag.toUpperCase() === tag));
       setUsers((data.users as UserRow[]) ?? []);
-    } catch { /* ignore */ }
+    } catch (e) { setFailed(`Couldn't load onboarding (${(e as Error).message}). Reload to try again.`); }
     finally { setLoading(false); }
   }, [tag]);
 
@@ -58,6 +60,15 @@ export default function ClientDetailPage() {
   }
 
   if (loading) return <div className="text-sm text-muted-foreground py-12 text-center">Loading…</div>;
+  // A load that failed says so — it must never read as "this client isn't in onboarding".
+  if (failed && !client) {
+    return (
+      <div className="space-y-4 max-w-2xl mx-auto w-full">
+        <Link href="/onboarding" className="text-sm text-muted-foreground hover:underline">← Onboarding</Link>
+        <Card><CardContent className="py-12 text-center text-sm text-destructive">{failed}</CardContent></Card>
+      </div>
+    );
+  }
   if (notFound || !client) {
     return (
       <div className="space-y-4 max-w-2xl mx-auto w-full">

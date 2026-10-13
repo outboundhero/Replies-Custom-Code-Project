@@ -66,11 +66,60 @@ assert.equal(localizeSteps(step(CVJCIN_LINE), CINCINNATI, BIRMINGHAM).steps[0].e
   blocked(localizeSteps(step("Office: Winnipeg, {MB|Manitoba}", "Winnipeg cleaning"), WINNIPEG, ANAHEIM), /subject contains/);
 }
 
-// The abbreviation only matches as a whole capitalised word; variables are never touched.
+// The abbreviation is only swapped beside the city or the state; variables are never touched.
 {
-  const r = localizeSteps(step("Based in Indianapolis, {IN|Indiana}<br>MAIN office — in, In, WIN, INN.<br>{FIRST_NAME} {CITY}"),
-    { area: "", city: "Indianapolis", state: "Indiana", abbr: "IN" }, { area: "", city: "Dallas", state: "Texas", abbr: "TX" });
-  assert.equal(r.steps[0].email_body, "Based in Dallas, {TX|Texas}<br>MAIN office — in, In, WIN, INN.<br>{FIRST_NAME} {CITY}");
+  const INDY: Place = { area: "", city: "Indianapolis", state: "Indiana", abbr: "IN" };
+  const DALLAS: Place = { area: "", city: "Dallas", state: "Texas", abbr: "TX" };
+  const r = localizeSteps(step("Based in Indianapolis, {IN|Indiana}<br>MAIN office — in, In, WIN, INN.<br>Office: Indianapolis, IN<br>{Indiana|IN}<br>{FIRST_NAME} {CITY}"), INDY, DALLAS);
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.steps[0].email_body, "Based in Dallas, {TX|Texas}<br>MAIN office — in, In, WIN, INN.<br>Office: Dallas, TX<br>{Texas|TX}<br>{FIRST_NAME} {CITY}");
+}
+
+// A stray word that happens to be the master's abbreviation is left alone — and the master is refused.
+{
+  const blocked = (body: string, master: Place, re: RegExp, kept: string) => {
+    const r = localizeSteps(step(body), master, ANAHEIM);
+    assert.ok(r.problems.some((p) => re.test(p)), `${body} → ${r.problems.join(" | ") || "no problem reported"}`);
+    assert.ok(r.steps[0].email_body.includes(kept), `"${kept}" should be untouched in: ${r.steps[0].email_body}`);
+  };
+  blocked("Is it OK if I send a quote?<br>Tulsa, {OK|Oklahoma}", { area: "", city: "Tulsa", state: "Oklahoma", abbr: "OK" }, /“OK”/, "Is it OK if I send");
+  blocked("Our IN-HOUSE team<br>Gary, {IN|Indiana}", { area: "", city: "Gary", state: "Indiana", abbr: "IN" }, /“IN”/, "IN-HOUSE");
+  blocked("MD and dental offices<br>Baltimore, {MD|Maryland}", { area: "", city: "Baltimore", state: "Maryland", abbr: "MD" }, /“MD”/, "MD and dental");
+  // the state's name inside a longer name is not the state
+  blocked("Serving the Kansas City metro<br>Wichita, {KS|Kansas}", { area: "", city: "Wichita", state: "Kansas", abbr: "KS" }, /inside a longer name/, "Kansas City metro");
+  blocked("Not West Virginia<br>Richmond, {VA|Virginia}", { area: "", city: "Richmond", state: "Virginia", abbr: "VA" }, /inside a longer name/, "West Virginia");
+}
+
+// Nothing of the master may be left in ANY spelling.
+{
+  const left = (body: string, master: Place = WINNIPEG) => {
+    const r = localizeSteps(step(`Office: ${master.city}, {${master.abbr}|${master.state}}<br>${body}`), master, ANAHEIM);
+    assert.ok(r.problems.some((p) => /still in the copy|web or email address/.test(p)), `${body} → ${r.problems.join(" | ") || "no problem reported"}`);
+  };
+  left("Proudly serving WINNIPEG");
+  left("the winnipeg team");
+  left("based in {MB}");
+  left('<a href="https://winnipeg-cleaners.com">site</a>');
+  left("near Los&nbsp;Gatos", { area: "", city: "Los Gatos", state: "California", abbr: "CA" });
+  left("the St Louis office", { area: "", city: "St. Louis", state: "Missouri", abbr: "MO" });
+  left("Coeur d&#39;Alene crews", { area: "", city: "Coeur d’Alene", state: "Idaho", abbr: "ID" });
+}
+
+// The master's address, phone or website must not ride along — even on lines the swap never touched.
+{
+  const r = localizeSteps(step("Shine Cleaning Co<br>123 Main St<br>Winnipeg, {MB|Manitoba}<br>204-555-0101<br>shinecleaning.com"), WINNIPEG, ANAHEIM);
+  for (const what of [/street address/, /phone number/, /web or email address/]) assert.ok(r.problems.some((p) => what.test(p)), r.problems.join(" | "));
+}
+
+// A master whose names can't be told apart, and an area name its emails never use.
+{
+  const NYC: Place = { area: "", city: "New York", state: "New York", abbr: "NY" };
+  assert.ok(localizeSteps(step("Office: New York, {NY|New York}"), NYC, ANAHEIM).problems.some((p) => /same name/.test(p)));
+  assert.ok(localizeSteps(step("{AL|Alabama}"), { area: "Alabama", city: "Mobile", state: "Alabama", abbr: "AL" }, ANAHEIM).problems.some((p) => /area name and state are the same/.test(p)));
+  assert.ok(localizeSteps(step("Office: Winnipeg, {MB|Manitoba}"), { ...WINNIPEG, area: "" }, ANAHEIM).problems.some((p) => /don't use an area name/.test(p)));
+  assert.deepEqual(localizeSteps(step("Office: Winnipeg, {MB|Manitoba}"), { ...WINNIPEG, area: "" }, { ...ANAHEIM, area: "" }).problems, []);
+  // …including when the master's area is there but split by an entity, so only its city part was swapped
+  assert.ok(localizeSteps(step("Office: Winnipeg, {MB|Manitoba}<br>Winnipeg&nbsp;Area cleaners"), WINNIPEG, ANAHEIM).problems.some((p) => /don't use an area name/.test(p)));
 }
 // "&" is written as HTML; no area name means "<City> Area"; a new name containing the old one is fine.
 assert.ok(localizeSteps(step(CGCWP_BODY), WINNIPEG, { ...ANAHEIM, area: "Dallas & Fort Worth" }).steps[0].email_body.includes("{Dallas &amp; Fort Worth|Anaheim} Commercial"));
@@ -87,6 +136,11 @@ assert.equal(slotOfName("CGCWP: Outlook [Nurture] (Cleaning Client)", "CGCWP")?.
 assert.equal(slotOfName("PJR: Outlook (OS Client)", "PJR"), null);
 assert.deepEqual(parsePlace("Anaheim, California"), { city: "Anaheim", state: "California", abbr: "CA", sure: true });
 assert.deepEqual(parsePlace("2255 Sheridan Blvd. Ste. C #275, Edgewater, CO 80214"), { city: "Edgewater", state: "Colorado", abbr: "CO", sure: true });
+assert.deepEqual(parsePlace("Winnipeg, MB, CA"), { city: "Winnipeg", state: "Manitoba", abbr: "MB", sure: true });
+assert.deepEqual(parsePlace("Lancaster, PA, Co"), { city: "Lancaster", state: "Pennsylvania", abbr: "PA", sure: true });
+assert.deepEqual(parsePlace("Austin, TX, USA"), { city: "Austin", state: "Texas", abbr: "TX", sure: true });
+assert.equal(parsePlace("Dallas, TX and Houston, TX")?.sure, false);
+assert.equal(parsePlace("Halifax, Nova Scotia")?.abbr, "NS");
 assert.equal(parsePlace("315 University Ave Los Gatos, CA 95030")?.sure, false);
 assert.equal(parsePlace("United States"), null);
 

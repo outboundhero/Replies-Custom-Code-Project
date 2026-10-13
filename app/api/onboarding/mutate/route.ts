@@ -1,15 +1,15 @@
 /**
  * POST /api/onboarding/mutate — all onboarding writes via an { action } dispatch.
  *
- * Admin-only:  add-client, delete-client, set-client-group, template-*, user-*,
- *              setting-set (they change the roster, the shared template or
- *              where automations post). Auth (any team member): task +
- *              client-status edits. Mirrors app/api/users/mutate/route.ts
- *              (guard → dispatch → bumpVersion handled inside the store helpers).
+ * Admin-only, every action: the onboarding pages are admin-only (middleware),
+ * so nothing here is for other roles — a client-scoped inbox login must not be
+ * able to read or change another client's checklist through the API.
+ * Mirrors app/api/users/mutate/route.ts (guard → dispatch → bumpVersion
+ * handled inside the store helpers).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
-import { requireAuth, requireAdmin, getSession } from "@/lib/auth";
+import { requireAdmin, getSession } from "@/lib/auth";
 import {
   addOnboardingClient, updateClientStartDate, setClientStatus, setClientGroup, deleteOnboardingClient, regenerateTasks,
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
@@ -23,11 +23,8 @@ import { placeProblems } from "@/lib/onboarding/campaign-copy";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
-const ADMIN_ACTIONS = new Set([
-  "add-client", "delete-client", "set-client-group",
-  "template-upsert", "template-delete", "template-reorder", "template-seed", "template-apply-standard",
-  "user-upsert", "user-delete", "setting-set",
-]);
+const STATUSES = new Set<TaskStatus>(["not_started", "in_progress", "completed"]);
+const asStatus = (v: unknown): TaskStatus | null => (STATUSES.has(v as TaskStatus) ? (v as TaskStatus) : null);
 // Settings the UI may change.
 const SETTING_KEYS = new Set([OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING]);
 const asGroup = (v: unknown): 1 | 2 | null => (Number(v) === 1 ? 1 : Number(v) === 2 ? 2 : null);
@@ -37,8 +34,7 @@ export async function POST(req: NextRequest) {
   const { action } = body as { action?: string };
   if (!action) return NextResponse.json({ error: "action required" }, { status: 400 });
 
-  // Guard: admin for roster/template changes, auth for the rest.
-  const denied = ADMIN_ACTIONS.has(action) ? await requireAdmin() : await requireAuth();
+  const denied = await requireAdmin();
   if (denied) return denied;
 
   try {
@@ -86,8 +82,10 @@ export async function POST(req: NextRequest) {
 
       // ── tasks ────────────────────────────────────────────────
       case "update-task-status": {
+        const status = asStatus(body.status);
+        if (!status) return NextResponse.json({ error: "Unknown status" }, { status: 400 });
         const session = await getSession();
-        await updateTaskStatus(String(body.id || ""), body.status as TaskStatus, session?.email ?? null);
+        await updateTaskStatus(String(body.id || ""), status, session?.email ?? null);
         return NextResponse.json({ ok: true });
       }
       case "update-task-assignee": {
@@ -104,8 +102,10 @@ export async function POST(req: NextRequest) {
       }
       case "bulk-task-status": {
         const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        const status = asStatus(body.status);
+        if (!status) return NextResponse.json({ error: "Unknown status" }, { status: 400 });
         const session = await getSession();
-        const n = await bulkUpdateTaskStatus(ids, body.status as TaskStatus, session?.email ?? null);
+        const n = await bulkUpdateTaskStatus(ids, status, session?.email ?? null);
         return NextResponse.json({ ok: true, updated: n });
       }
       case "update-task-due-date":

@@ -969,7 +969,11 @@ function CampaignMastersCard({ masters, onSave, busy }: {
         </p>
         <div className="flex justify-end">
           <Button size="sm" disabled={busy || !dirty}
-            onClick={async () => { if (await onSave({ action: "setting-set", key: "campaign_masters", value: JSON.stringify(value) })) toast.success("Master campaigns saved"); }}>
+            onClick={async () => {
+              const orphan = (["1", "2"] as const).find((g) => !form[g].tag.trim() && [form[g].area, form[g].city, form[g].state, form[g].abbr].some((v) => v.trim()));
+              if (orphan) { toast.error(`Group ${orphan} has place names but no master client tag — add the tag, or clear the fields.`); return; }
+              if (await onSave({ action: "setting-set", key: "campaign_masters", value: JSON.stringify(value) })) toast.success("Master campaigns saved");
+            }}>
             Save
           </Button>
         </div>
