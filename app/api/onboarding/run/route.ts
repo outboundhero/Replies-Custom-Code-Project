@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
 import { getTask, getClient, startRun, finishRun, releaseRun, assertTaskCanRun } from "@/lib/onboarding/store";
-import { getAutomation, campaignCreationEnabled, type RunOutcome } from "@/lib/onboarding/automations";
+import { getAutomation, automationRunnable, type RunOutcome } from "@/lib/onboarding/automations";
 import { AUTOMATION_META } from "@/lib/onboarding/ui";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -29,8 +29,8 @@ export async function POST(req: NextRequest) {
     const automation = getAutomation(task.automation);
     const meta = AUTOMATION_META[task.automation || ""];
     // Built automations preview and run; preview-only ones can show what they
-    // would do. Creating campaigns runs only where the server switch is on.
-    const runnable = !!meta?.built || (task.automation === "create_campaigns" && campaignCreationEnabled());
+    // would do, and run only where their server switch is on.
+    const runnable = automationRunnable(task.automation);
     if (!automation || !(runnable || (meta?.preview && mode === "preview"))) {
       return NextResponse.json({ error: "This step has no automation yet — complete it by hand." }, { status: 400 });
     }
@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
     } else {
       await logError("onboarding", `run:${task.automation}`, outcome.summary, { client_tag: task.client_tag, by: ctx.by });
     }
-    return NextResponse.json({ ok: outcome.ok, summary: outcome.summary, error: outcome.ok ? undefined : outcome.summary });
+    return NextResponse.json({ ok: outcome.ok, more: outcome.ok && !!outcome.more, summary: outcome.summary, error: outcome.ok ? undefined : outcome.summary });
   } catch (e) {
     console.error("[api/onboarding/run]", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

@@ -370,7 +370,7 @@ async function postRun(taskId: string, mode: "preview" | "run", params: Record<s
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ taskId, mode, params }),
   });
   if (res.status === 401) { window.location.href = "/login"; }
-  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; preview?: Preview; runnable?: boolean; summary?: string; error?: string };
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; more?: boolean; preview?: Preview; runnable?: boolean; summary?: string; error?: string };
   return { status: res.status, data };
 }
 
@@ -425,14 +425,25 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
     if (mine === latest.current) showPreview(r, next);
   }
 
+  // A step done in batches reports each one here and is sent again until nothing is left.
+  const [progress, setProgress] = useState<string[]>([]);
+  const stop = useRef(false);
   async function run() {
     setRunning(true); setError(null);
-    const { status, data } = await postRun(task.id, "run", shown);
+    stop.current = false;
+    for (let round = 0; round < 40; round++) {
+      const { status, data } = await postRun(task.id, "run", shown);
+      onDone(); // the task shows the batch, or keeps a note of the failed run
+      if (!data.ok) {
+        setError(data.error || `The run failed (${status})`);
+        if (data.preview) setPreview(data.preview);
+        break;
+      }
+      if (!data.more) { toast.success(data.summary || "Done"); setRunning(false); onClose(); return; }
+      setProgress((p) => [...p, data.summary || "A batch went through."]);
+      if (stop.current) break;
+    }
     setRunning(false);
-    if (data.ok) { toast.success(data.summary || "Done"); onDone(); onClose(); return; }
-    setError(data.error || `The run failed (${status})`);
-    if (data.preview) setPreview(data.preview);
-    onDone(); // the task keeps a note of the failed run
   }
 
   const blocked = !preview || preview.blockers.length > 0;
@@ -564,11 +575,23 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
           </div>
         )}
 
+        {progress.length > 0 && (
+          <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
+            <div className="text-xs font-medium text-muted-foreground">Done so far{running ? " — working on the next batch…" : ""}</div>
+            <ul className="mt-1 space-y-0.5">
+              {progress.map((line, i) => <li key={i} className="flex gap-1.5"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />{line}</li>)}
+            </ul>
+          </div>
+        )}
+
         {error && (
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">{error}</div>
         )}
 
         <DialogFooter>
+          {running && progress.length > 0 && (
+            <Button variant="ghost" onClick={() => { stop.current = true; }} className="sm:mr-auto text-muted-foreground">Stop after this batch</Button>
+          )}
           <Button variant="outline" onClick={onClose} disabled={running}>{canRun ? "Cancel" : "Close"}</Button>
           {canRun && (
             <Button onClick={run} disabled={blocked || loading || running} className="gap-1.5">

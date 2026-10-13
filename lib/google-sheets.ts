@@ -457,3 +457,26 @@ export async function fetchNewClientInfo(): Promise<NewClientInfoRow[]> {
   }
   return out;
 }
+
+/**
+ * Client tag → the "Company Website" answer on the Onboarding Form Responses
+ * tab — where a new client's sending domains redirect. The newest row wins.
+ */
+export async function fetchOnboardingWebsites(): Promise<Map<string, string>> {
+  const auth = getAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "'Onboarding Form Responses'" });
+  const rows = res.data.values || [];
+  const out = new Map<string, string>();
+  if (rows.length < 2) return out;
+  const headers = rows[0].map((h: string) => h?.toString() || "");
+  const abbrIdx = findColumnIndex(headers, "Client Abbreviation", "Client Abbrevation");
+  const siteIdx = findColumnStartsWith(headers, "Company Website");
+  if (abbrIdx === -1 || siteIdx === -1) throw new Error("Onboarding Form: missing the Client Abbreviation or Company Website column");
+  for (let i = 1; i < rows.length; i++) {
+    const tag = rows[i][abbrIdx]?.toString()?.trim().toUpperCase();
+    const site = rows[i][siteIdx]?.toString()?.trim();
+    if (tag && site) out.set(tag, site);
+  }
+  return out;
+}

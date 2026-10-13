@@ -11,12 +11,12 @@ import {
   getSetting, setClientGroup, listOnboardingUsers, lastFailedAttempt,
   type OnboardingClientRow, type OnboardingTaskRow,
 } from "@/lib/onboarding/store";
-import { GROUP_META, groupText, fmtDate } from "@/lib/onboarding/ui";
+import { GROUP_META, AUTOMATION_META, groupText, fmtDate } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache, nsVersion } from "@/lib/server-cache";
-import { fetchNewClientInfo, type NewClientInfoRow } from "@/lib/google-sheets";
+import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
 import { listCampaigns, getSequenceSteps, getCampaignSchedule } from "@/lib/outboundhero-api";
-import { previewOnboardingAllocation } from "@/lib/leadsync";
+import { previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, type AllocationSide, type AllocationPlan } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
 import { createCampaignFromMaster, CHECK_PREFIX, type MasterStep, type TagCache } from "@/lib/onboarding/create-campaigns";
@@ -46,7 +46,11 @@ export interface AutomationPreview {
   /** Longer text shown as written (e.g. the copy lines that change). */
   notes?: PreviewNote[];
 }
-export interface RunOutcome { ok: boolean; summary: string; result?: unknown }
+export interface RunOutcome {
+  ok: boolean; summary: string; result?: unknown;
+  /** A batch went through and there is more to do — the caller runs again; the step isn't Done yet. */
+  more?: boolean;
+}
 export interface AutomationContext {
   client: OnboardingClientRow;
   task: OnboardingTaskRow;
@@ -425,10 +429,19 @@ const createCampaigns: Automation = {
 
 // ── 3. Attach client tags / redirects / add to campaigns / 3 per day ────────
 // LeadSync owns the domain reserve, so it decides which domains a new client
-// gets (lib/leadsync.ts). PREVIEW ONLY for now: it shows LeadSync's dry run.
+// gets and does the work (lib/leadsync.ts): tag → redirect → attach to the
+// client's campaigns → client sheet → whitelist queue → 3 a day.
+// One request allocates ONE batch (5 domains, ~245 inboxes) — the dialog keeps
+// sending batches until LeadSync's plan has nothing left to add.
+// Running is OFF unless ONBOARDING_ALLOCATE_DOMAINS=1 is set here (LeadSync
+// has its own switch too). Until then this is a preview.
 
+/** Server-side switch for actually allocating domains (the preview always works). */
+export const domainAllocationEnabled = () => process.env.ONBOARDING_ALLOCATE_DOMAINS === "1";
 const ALLOCATION_NOT_SWITCHED_ON =
   "Allocating domains isn't switched on yet — this shows what LeadSync would give the client. Do the step by hand for now.";
+const ALLOCATION_BATCH = 5;
+const DAILY_LIMIT = 3;
 
 /** "Tier 1 (Base)" → "1". Anything else is left to LeadSync (it reads the Client Tracker). */
 function tierOfPlan(plan: string | null): "0.5" | "1" | "2" | undefined {
@@ -436,60 +449,174 @@ function tierOfPlan(plan: string | null): "0.5" | "1" | "2" | undefined {
   return /tier\s*0\.5/i.test(p) ? "0.5" : /tier\s*2/i.test(p) ? "2" : /tier\s*1/i.test(p) ? "1" : undefined;
 }
 
-const allocateDomains: Automation = {
-  async preview(ctx) {
-    const c = ctx.client;
-    const tag = c.client_tag.toUpperCase();
-    const blockers: string[] = [];
-    const asked = typeof ctx.params.tier === "string" && ["0.5", "1", "2"].includes(ctx.params.tier) ? (ctx.params.tier as "0.5" | "1" | "2") : tierOfPlan(c.plan_type);
-    const inputs: AutomationInput[] = [{
-      key: "tier", label: "Tier", type: "select", value: asked ?? "",
-      options: [{ value: "0.5", label: "Tier 0.5 — 20 B2B + 5 B2C domains" }, { value: "1", label: "Tier 1 — 20 B2B + 5 B2C domains" }, { value: "2", label: "Tier 2 — 40 B2B + 10 B2C domains" }],
-      hint: c.plan_type ? `The client's plan here: ${c.plan_type}` : "No plan on the client — left empty, LeadSync uses the Client Tracker's tier.",
-    }];
+/** "jan-pro.com/socal" → "https://jan-pro.com/socal"; "" when it isn't a usable address. */
+function asHttpsUrl(raw: string): string {
+  const t = raw.trim().replace(/^http:\/\//i, "https://");
+  if (!t) return "";
+  try {
+    const u = new URL(/^https:\/\//i.test(t) ? t : `https://${t}`);
+    return u.hostname.includes(".") ? u.toString() : "";
+  } catch { return ""; }
+}
 
-    const rows: string[][] = [];
-    const notes: PreviewNote[] = [];
-    let summary = "Asks LeadSync which reserve domains this client would get.";
-    if (!c.group_num) {
-      blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+interface AllocationSidePlan extends AllocationSide { campaignIds: number[] }
+interface AllocationPlanView {
+  tag: string; tier: "0.5" | "1" | "2" | undefined; redirect: string;
+  /** LeadSync's plan as received (null when it couldn't be had). */
+  plan: AllocationPlan | null;
+  inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[];
+  summary: string; sides: AllocationSidePlan[];
+}
+
+/** What the preview shows and one batch acts on. `fresh` (the run) asks LeadSync and Email Bison again. */
+async function planAllocation(ctx: AutomationContext, fresh = false): Promise<AllocationPlanView> {
+  const c = ctx.client;
+  const tag = c.client_tag.toUpperCase();
+  const blockers: string[] = [];
+  const tier = typeof ctx.params.tier === "string" && ["0.5", "1", "2"].includes(ctx.params.tier) ? (ctx.params.tier as "0.5" | "1" | "2") : tierOfPlan(c.plan_type);
+
+  // Redirect = the client's website on the onboarding form; what is typed here wins.
+  let fromSheet = "";
+  try { fromSheet = (await withCache("onboarding:websites", 60_000, fetchOnboardingWebsites)).get(tag) ?? ""; } catch { /* no pre-fill */ }
+  const typed = typeof ctx.params.redirect === "string" ? ctx.params.redirect.trim() : undefined;
+  const redirectRaw = typed ?? fromSheet;
+  const redirect = asHttpsUrl(redirectRaw);
+  const inputs: AutomationInput[] = [
+    { key: "tier", label: "Tier", type: "select", value: tier ?? "",
+      options: [{ value: "0.5", label: "Tier 0.5 — 20 B2B + 5 B2C domains" }, { value: "1", label: "Tier 1 — 20 B2B + 5 B2C domains" }, { value: "2", label: "Tier 2 — 40 B2B + 10 B2C domains" }],
+      hint: c.plan_type ? `The client's plan here: ${c.plan_type}` : "No plan on the client — left empty, LeadSync uses the Client Tracker's tier." },
+    { key: "redirect", label: "Redirect the domains to", type: "text", value: redirectRaw, placeholder: "https://client-website.com",
+      hint: fromSheet ? `The onboarding form's Company Website: ${fromSheet}` : `${tag} has no Company Website on the onboarding form — type the address.` },
+  ];
+  if (!redirect) blockers.push(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
+
+  const rows: string[][] = [];
+  const notes: PreviewNote[] = [];
+  const sides: AllocationSidePlan[] = [];
+  let plan: AllocationPlan | null = null;
+  let summary = "Asks LeadSync which reserve domains this client would get.";
+  if (!c.group_num) {
+    blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+  } else {
+    const r = await previewOnboardingAllocation(tag, c.group_num, tier, fresh);
+    if (!r.ok) {
+      blockers.push(`Couldn't get the plan from LeadSync: ${r.error}`);
     } else {
-      const r = await previewOnboardingAllocation(tag, c.group_num, asked);
-      if (!r.ok) {
-        blockers.push(`Couldn't get the plan from LeadSync: ${r.error}`);
-      } else {
-        const p = r.plan;
-        if (p.groupMismatch) blockers.push(`LeadSync's allocation sheet has ${tag} in Group ${p.allocationGroup}, not Group ${c.group_num} — sort out which is right before allocating.`);
-        summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
-        for (const s of p.instances) {
-          rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), String(s.reserveAvailable), s.short ? String(s.short) : "—"]);
-          if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve.`);
-          if (s.note) blockers.push(`${s.label}: LeadSync says “${s.note}”.`);
-          if (s.setAside) notes.push({ title: `${s.label} — ${s.setAside} reserve domain${s.setAside === 1 ? " was" : "s were"} left out`, text: "They already carry another client's tag, so they are not offered." });
-          if (s.picking.length) notes.push({ title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give`, text: s.picking.join("\n") });
+      const p = r.plan;
+      plan = p;
+      if (p.groupMismatch) blockers.push(`LeadSync's allocation sheet has ${tag} in Group ${p.allocationGroup}, not Group ${c.group_num} — sort out which is right before allocating.`);
+      summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
+      for (const s of p.instances) {
+        // The client's own campaigns here — the ones step 2 made — are what the domains attach to.
+        let campaignIds: number[] = [];
+        try {
+          const found = (await (fresh
+            ? listCampaigns(s.instance, { search: tag, strict: true })
+            : withCache(`onboarding:existing:${s.instance}:${tag}:v${nsVersion("onboarding")}`, 30_000, () => listCampaigns(s.instance, { search: tag, strict: true }))))
+            .filter((x) => !gone(x.status));
+          const missing: string[] = [];
+          for (const slot of CAMPAIGN_SLOTS) {
+            const name = campaignName(tag, slot);
+            const hits = found.filter((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+            if (hits.length === 1) campaignIds.push(hits[0].id);
+            else if (hits.length > 1) blockers.push(`${s.label}: ${hits.length} campaigns are named “${name}” — there should be one.`);
+            else missing.push(slotKey(slot));
+          }
+          if (missing.length) { blockers.push(`${s.label}: ${tag} has no ${missing.join(", ")} campaign${missing.length === 1 ? "" : "s"} yet — step 2 creates them.`); campaignIds = []; }
+        } catch (e) {
+          blockers.push(`Couldn't read ${tag}'s campaigns on ${s.label}: ${(e as Error).message}`);
         }
+        sides.push({ ...s, campaignIds });
+        rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), String(s.reserveAvailable), s.short ? String(s.short) : "—", campaignIds.length ? `${campaignIds.length} campaigns` : "—"]);
+        if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve.`);
+        if (s.note) blockers.push(`${s.label}: LeadSync says “${s.note}”.`);
+        if (s.setAside) notes.push({ title: `${s.label} — ${s.setAside} reserve domain${s.setAside === 1 ? " was" : "s were"} left out`, text: "They already carry a client's tag, so they are not offered." });
+        if (s.picking.length) notes.push({ title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give`, text: s.picking.join("\n") });
       }
     }
-    blockers.push(ALLOCATION_NOT_SWITCHED_ON);
+  }
+  return { tag, tier, redirect, plan, inputs, blockers, rows, notes, summary, sides };
+}
 
+const allocateDomains: Automation = {
+  async preview(ctx) {
+    const p = await planAllocation(ctx);
+    if (!domainAllocationEnabled()) p.blockers.push(ALLOCATION_NOT_SWITCHED_ON);
+    const left = p.sides.reduce((n, s) => n + s.need, 0);
     return {
       title: "Attach client tags / redirects / add to campaigns / set 3 per day",
       lines: [
-        summary,
+        p.summary,
         "LeadSync only gives domains that no client it knows is using, that are at least 21 days old, not marked Burnt and not blacklisted — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.",
-        "Running it will tag those domains for the client, point their redirect at the client's website, attach them to the client's campaigns and set every sender to 3 a day.",
-        "Marks this step Done.",
+        `Running it has LeadSync tag those domains for ${p.tag}, point their redirect at ${p.redirect || "the client's website"}, attach them to ${p.tag}'s campaigns, add them to the client's sheet, queue the whitelist email (6:30 AM PT) and set every sender to ${DAILY_LIMIT} a day.`,
+        `It works in batches of ${ALLOCATION_BATCH} domains${left ? ` — ${Math.ceil(left / ALLOCATION_BATCH)} to go here` : ""} — and marks this step Done when nothing is left to add.`,
       ],
-      inputs,
-      blockers,
-      tables: rows.length ? [{ title: "Domains by instance", columns: ["Instance", "Tier gets", "Already tagged", "To add", "Ready in reserve", "Short"], rows }] : [],
-      notes,
+      inputs: p.inputs,
+      blockers: p.blockers,
+      tables: p.rows.length ? [{ title: "Domains by instance", columns: ["Instance", "Tier gets", "Already tagged", "To add", "Ready in reserve", "Short", "Attaches to"], rows: p.rows }] : [],
+      notes: p.notes,
     };
   },
-  async run() {
-    return { ok: false, summary: ALLOCATION_NOT_SWITCHED_ON };
+
+  /** ONE batch. `more` tells the caller to run again; the step is Done when nothing is left. */
+  async run(ctx) {
+    if (!domainAllocationEnabled()) return { ok: false, summary: ALLOCATION_NOT_SWITCHED_ON };
+    // The plan may be the one kept from a few minutes ago (each new plan is a
+    // heavy read for LeadSync). That is safe: LeadSync rebuilds its own plan
+    // for every batch and refuses anything that no longer holds.
+    const p = await planAllocation(ctx);
+    const group = ctx.client.group_num;
+    if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
+    if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — open the preview to see why." };
+    const total = (s: AllocationSidePlan) => `${s.label} ${s.cap}`;
+    const side = p.sides.find((s) => s.need > 0);
+    if (!side) return { ok: true, summary: `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.` };
+
+    const domains = side.picking.slice(0, ALLOCATION_BATCH);
+    const r = await runOnboardingAllocation({
+      clientTag: p.tag, group, tier: p.tier, instance: side.instance,
+      domains, redirectUrl: p.redirect, campaignIds: side.campaignIds, dailyLimit: DAILY_LIMIT,
+    });
+    // Whatever went wrong, the kept plan is no longer trusted — the next try asks again.
+    if (!r.ok || !r.result.ok) rememberAllocationPlan(p.tag, group, p.tier, null);
+    if (!r.ok) return { ok: false, summary: `LeadSync didn't take the batch for ${side.label}: ${r.error}`, result: { instance: side.instance, domains } };
+    const res = r.result;
+    if (!res.ok) {
+      const bad = res.steps.filter((x) => x.state === "failed" || x.state === "degraded").map((x) => `${x.label}${x.note ? ` (${x.note})` : ""}`);
+      const limit = res.limit.error ? `daily limit: ${res.limit.error}` : res.limit.failed ? `daily limit not set on ${res.limit.failed} sender(s)` : "";
+      return {
+        ok: false,
+        summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${[...bad, limit].filter(Boolean).join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
+        result: { instance: side.instance, domains, leadsync: res },
+      };
+    }
+    const done = side.alreadyTagged + domains.length;
+    const more = p.sides.some((s) => (s === side ? s.need - domains.length : s.need) > 0);
+    // The plan, as it stands now: these domains are the client's, the rest are still to come.
+    rememberAllocationPlan(p.tag, group, p.tier, {
+      ...p.plan,
+      instances: p.plan.instances.map((s) => s.instance !== side.instance ? s : {
+        ...s, alreadyTagged: done, need: s.need - domains.length, reserveAvailable: s.reserveAvailable - domains.length,
+        picking: s.picking.filter((d) => !domains.includes(d)),
+      }),
+    });
+    return {
+      ok: true, more,
+      summary: more
+        ? `${side.label}: ${domains.length} more domains added — ${done} of ${side.cap}.`
+        : `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.`,
+      result: { instance: side.instance, domains, leadsync: res },
+    };
   },
 };
+
+/** Whether a task's automation may be RUN on this server right now (previews are separate). */
+export function automationRunnable(key: string | null | undefined): boolean {
+  if (!key) return false;
+  if (key === "create_campaigns") return campaignCreationEnabled();
+  if (key === "allocate_domains") return domainAllocationEnabled();
+  return !!AUTOMATION_META[key]?.built;
+}
 
 const AUTOMATIONS: Record<string, Automation> = {
   slack_outreachify: slackOutreachify,
