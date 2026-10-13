@@ -21,6 +21,7 @@ import {
   leadsyncRunSecretSet, type AllocationSide, type AllocationPlan, type WhitelistPlan,
 } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
+import { clientContacts } from "@/lib/onboarding/contacts";
 import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
 import { createCampaignFromMaster, CHECK_PREFIX, BUILD_PREFIX, type MasterStep } from "@/lib/onboarding/create-campaigns";
 import {
@@ -855,6 +856,68 @@ const whitelistEmail: Automation = {
   },
 };
 
+// ── 6. Send client go-live email ────────────────────────────────────────────
+// The email is fixed (requirements of 2026-09-21): to the client's contacts —
+// the same people the whitelist email goes to — with Spencer and Madison in CC.
+// This shows it. Sending from here is NOT built: which mailbox it goes out
+// from is still to be decided, so the step is sent by hand and ticked off.
+
+const GO_LIVE_SUBJECT = "OutboundHero Update";
+const GO_LIVE_BODY = [
+  "Hi Team,",
+  "",
+  "Just wanted to let you know we are going live with your campaigns tomorrow morning. You should start to see your first leads come your way in the next couple of days. Spencer will follow up with lead instructions. Let me know if you have any questions.",
+  "",
+  "Cheers,",
+  "Nick Mekeel",
+  "OutboundHero",
+].join("\n");
+const goLiveCc = () =>
+  (process.env.ONBOARDING_GO_LIVE_CC || "spencer@outboundhero.co,madison@outboundhero.co").split(",").map((e) => e.trim()).filter(Boolean);
+const GO_LIVE_NOT_BUILT =
+  "Sending this from the checklist isn't built yet — it waits for the decision on which mailbox it goes out from. Send it by hand for now, then complete the step.";
+
+const goLiveEmail: Automation = {
+  async preview(ctx) {
+    const tag = ctx.client.client_tag.toUpperCase();
+    const blockers: string[] = [];
+    let to: string[] = [], bcc: string[] = [];
+    try {
+      const c = await clientContacts(tag);
+      to = c.to; bcc = c.bcc;
+      if (!c.known) blockers.push(`${tag} isn't set up under Clients yet — its contact emails come from there.`);
+      else if (to.length === 0 && bcc.length === 0) blockers.push(`${tag} has no contact emails under Clients (CC / BCC) — there is nobody to send this to.`);
+    } catch (e) {
+      blockers.push(`Couldn't read ${tag}'s contact emails: ${(e as Error).message}`);
+    }
+    const cc = goLiveCc().filter((e) => !to.some((t) => t.toLowerCase() === e.toLowerCase()));
+    blockers.push(GO_LIVE_NOT_BUILT);
+    return {
+      title: "Send client go-live email",
+      lines: [
+        `The go-live email for ${tag}: to its contacts — the same people LeadSync's whitelist email goes to — with Spencer and Madison in CC.`,
+        "It says the campaigns go live “tomorrow morning”, so it goes out the day before go-live.",
+      ],
+      message: `Subject: ${GO_LIVE_SUBJECT}\n\n${GO_LIVE_BODY}`,
+      inputs: [],
+      blockers,
+      tables: [{
+        title: "Who gets it",
+        columns: ["", "Address"],
+        rows: [
+          ["From", "Not decided yet"],
+          ["To", to.join(", ") || "—"],
+          ["CC", cc.join(", ") || "—"],
+          ...(bcc.length ? [["BCC", bcc.join(", ")]] : []),
+        ],
+      }],
+    };
+  },
+  async run() {
+    return { ok: false, summary: GO_LIVE_NOT_BUILT };
+  },
+};
+
 /** Whether a task's automation may be RUN on this server right now (previews are separate). */
 export function automationRunnable(key: string | null | undefined): boolean {
   if (!key) return false;
@@ -869,6 +932,7 @@ const AUTOMATIONS: Record<string, Automation> = {
   create_campaigns: createCampaigns,
   allocate_domains: allocateDomains,
   whitelist_email: whitelistEmail,
+  go_live_email: goLiveEmail,
 };
 
 export function getAutomation(key: string | null | undefined): Automation | null {

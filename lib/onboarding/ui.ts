@@ -51,7 +51,7 @@ export const AUTOMATION_META: Record<string, { label: string; built: boolean; pr
   create_campaigns: { label: "Creates the 12 Email Bison campaigns", built: false, preview: true },
   allocate_domains: { label: "Allocates reserve domains, tags + attaches them, sets 3/day", built: false, preview: true },
   whitelist_email: { label: "Sends the whitelisting-domains email", built: false, preview: true },
-  go_live_email: { label: "Sends the client go-live email", built: false },
+  go_live_email: { label: "Sends the client go-live email", built: false, preview: true },
 };
 
 /** "you@x.com" → "you" for compact display. */

@@ -241,7 +241,7 @@ export function TaskNotes({ task }: { task: OnbTask }) {
           <Zap className="mt-0.5 h-3 w-3 shrink-0" />
           <span>
             {auto.built || task.runnable ? auto.label
-              : auto.preview ? `${auto.label} — preview ready; running it isn't switched on yet, complete it by hand for now`
+              : auto.preview ? `${auto.label} — preview ready; it can't be run from here yet, complete it by hand for now`
               : `${auto.label} — automation coming, complete it by hand for now`}
           </span>
         </div>
