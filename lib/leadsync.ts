@@ -123,3 +123,94 @@ export async function runOnboardingAllocation(input: {
     return { ok: false, status: 0, error: (e as Error).message };
   }
 }
+
+// ── The whitelisting-domains email ──────────────────────────────────────────
+// LeadSync writes and sends it (its 6:30 AM batch, its "send now"); the
+// checklist asks it for the same email and, when switched on, to send it now.
+
+export interface WhitelistPlan {
+  clientTag: string;
+  /** On LeadSync's no-whitelist-email list (e.g. an outside agency works the leads). */
+  exempt: boolean;
+  /** Whether LeadSync's email sender is set up at all. */
+  webhookConfigured: boolean;
+  from: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  /** Why the client can't be emailed (not in ReplyRouter, no contacts), or null. */
+  recipientProblem: string | null;
+  subject: string;
+  /** The email body as it would be sent, listing `domains.toSend`. */
+  text: string;
+  domains: {
+    assigned: number;
+    /** Assigned domains this client hasn't been emailed about yet. */
+    toSend: string[];
+    /** The part of toSend already waiting for the 6:30 AM batch. */
+    queued: string[];
+    alreadySent: { domain: string; sentAt: string | null }[];
+    burnt: string[];
+    leaving: string[];
+    noInboxes: string[];
+  };
+  queuedUnder: string[];
+}
+export type WhitelistPreview = { ok: true; plan: WhitelistPlan } | { ok: false; status: number; error: string };
+
+/** The whitelist email LeadSync WOULD send this client — a dry run, nothing is sent. Always asked fresh (a light read). */
+export async function previewOnboardingWhitelist(clientTag: string): Promise<WhitelistPreview> {
+  try {
+    const res = await fetch(`${BASE}/api/external/onboarding-whitelist`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ clientTag, dryRun: true }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(55_000),
+    });
+    const j = (await res.json().catch(() => null)) as (WhitelistPlan & { error?: string }) | null;
+    if (!res.ok || !j || !j.domains || !Array.isArray(j.domains.toSend)) {
+      const raw = j?.error || (res.status === 404 ? "LeadSync doesn't have the whitelist endpoint yet." : `LeadSync answered ${res.status}`);
+      const error = /statement timeout/i.test(raw) ? "LeadSync's database was busy and gave up on the read — try again in a minute." : raw;
+      return { ok: false, status: res.status, error };
+    }
+    return { ok: true, plan: j };
+  } catch (e) {
+    return { ok: false, status: 0, error: (e as Error).message };
+  }
+}
+
+export interface WhitelistRunResult {
+  ok: boolean;
+  sentEmails: number;
+  sentDomains: number;
+  failures: { step: string; subTag: string; reason: string; domains: string[] }[];
+}
+export type WhitelistRun = { ok: true; result: WhitelistRunResult } | { ok: false; status: number; error: string };
+
+/**
+ * Have LeadSync send the whitelist email NOW for exactly these domains. It
+ * re-checks on its side (each domain must still be the client's and not yet
+ * sent) and refuses unless its own switch is on. One attempt — never retried
+ * here, because a repeat could email the client twice.
+ */
+export async function runOnboardingWhitelist(clientTag: string, domains: string[]): Promise<WhitelistRun> {
+  try {
+    const res = await fetch(`${BASE}/api/external/onboarding-whitelist`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ clientTag, domains, dryRun: false }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(55_000),
+    });
+    const j = (await res.json().catch(() => null)) as (WhitelistRunResult & { error?: string }) | null;
+    if (!j || typeof j.sentDomains !== "number" || !Array.isArray(j.failures)) {
+      return { ok: false, status: res.status, error: j?.error || `LeadSync answered ${res.status}` };
+    }
+    // An answer that carries a result is kept even when the status isn't 200 —
+    // the caller needs to see what went out.
+    return { ok: true, result: res.ok ? j : { ...j, ok: false } };
+  } catch (e) {
+    return { ok: false, status: 0, error: (e as Error).message };
+  }
+}

@@ -11,12 +11,15 @@ import {
   getSetting, setClientGroup, listOnboardingUsers, lastFailedAttempt,
   type OnboardingClientRow, type OnboardingTaskRow,
 } from "@/lib/onboarding/store";
-import { GROUP_META, AUTOMATION_META, groupText, fmtDate } from "@/lib/onboarding/ui";
+import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache, nsVersion } from "@/lib/server-cache";
 import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
 import { listCampaigns, getSequenceSteps, getCampaignSchedule } from "@/lib/outboundhero-api";
-import { previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, type AllocationSide, type AllocationPlan } from "@/lib/leadsync";
+import {
+  previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, previewOnboardingWhitelist, runOnboardingWhitelist,
+  type AllocationSide, type AllocationPlan, type WhitelistPlan,
+} from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
 import { createCampaignFromMaster, CHECK_PREFIX, type MasterStep, type TagCache } from "@/lib/onboarding/create-campaigns";
@@ -610,11 +613,147 @@ const allocateDomains: Automation = {
   },
 };
 
+// ── 4. Whitelisting domains email to clients ────────────────────────────────
+// LeadSync already writes and sends this email: its 6:30 AM PT batch picks up
+// every domain step 3 allocated. This step shows that email and — when
+// switched on — has LeadSync send it now instead of the next morning.
+//
+// Sending is OFF unless ONBOARDING_SEND_WHITELIST=1 is set here (LeadSync has
+// its own switch too). Until then this is a preview.
+
+/** Server-side switch for actually sending the whitelist email (the preview always works). */
+export const whitelistSendEnabled = () => process.env.ONBOARDING_SEND_WHITELIST === "1";
+const WHITELIST_NOT_SWITCHED_ON =
+  "Sending the whitelist email from here isn't switched on yet — this shows the email LeadSync would send. LeadSync still sends it on its own at 6:30 AM PT for the domains waiting in its queue.";
+
+const domainCount = (k: number) => `${k} domain${k === 1 ? "" : "s"}`;
+
+interface WhitelistView {
+  tag: string;
+  /** LeadSync's answer as received (null when it couldn't be had). */
+  plan: WhitelistPlan | null;
+  blockers: string[]; lines: string[]; tables: PreviewTable[]; notes: PreviewNote[]; message?: string;
+}
+
+/** What the preview shows and the run acts on. Always asked fresh — LeadSync's read for this is light. */
+async function planWhitelist(ctx: AutomationContext): Promise<WhitelistView> {
+  const tag = ctx.client.client_tag.toUpperCase();
+  const r = await previewOnboardingWhitelist(tag);
+  if (!r.ok) {
+    return { tag, plan: null, blockers: [`Couldn't get the email from LeadSync: ${r.error}`], lines: ["Asks LeadSync for the whitelist email it would send this client."], tables: [], notes: [] };
+  }
+  const p = r.plan, d = p.domains;
+  const blockers: string[] = [];
+  if (p.exempt) {
+    blockers.push(`${tag} is on LeadSync's no-whitelist-email list, so there is no email to send — complete the step by hand.`);
+  } else {
+    if (d.assigned === 0) blockers.push(`${tag} has no sending domains in LeadSync yet — step 3 allocates them.`);
+    if (p.recipientProblem) blockers.push(`${p.recipientProblem} — the email has nobody to go to.`);
+    if (d.toSend.length > 0 && !p.webhookConfigured) blockers.push("LeadSync's email sender isn't set up, so it can't send.");
+  }
+
+  const lastSent = d.alreadySent.map((x) => x.sentAt || "").sort().pop() || null;
+  const lines: string[] = [];
+  if (d.toSend.length > 0) {
+    lines.push(`LeadSync's whitelist email for ${tag}: ${domainCount(d.toSend.length)} to list, sent from ${p.from}.`);
+    lines.push("It is the same email, to the same people, as LeadSync's own 6:30 AM PT batch. Sending it now marks those domains as sent, so the morning batch doesn't send it again.");
+    if (d.queued.length) lines.push(`${d.queued.length === d.toSend.length ? "All of them are" : `${d.queued.length} of them are`} already waiting for that batch.`);
+    if (d.alreadySent.length) lines.push(`${tag} was already emailed about ${domainCount(d.alreadySent.length)}${lastSent ? ` (last on ${fmtStamp(lastSent)})` : ""} — those are not repeated.`);
+  } else if (d.assigned > 0) {
+    lines.push(`LeadSync has already sent ${tag} the whitelist email for all ${domainCount(d.assigned)}${lastSent ? ` (last on ${fmtStamp(lastSent)})` : ""}.`);
+    lines.push("Running this sends nothing and marks the step Done.");
+  } else {
+    lines.push(`LeadSync has no domains for ${tag} to put in a whitelist email.`);
+  }
+
+  const tables: PreviewTable[] = [];
+  if (!p.exempt) {
+    tables.push({
+      title: "Who gets it",
+      columns: ["", "Address"],
+      rows: [
+        ["From", p.from],
+        ["To", p.to.join(", ") || "—"],
+        ["CC", p.cc.join(", ") || "—"],
+        ...(p.bcc.length ? [["BCC", p.bcc.join(", ")]] : []),
+      ],
+    });
+  }
+  if (d.assigned > 0) {
+    const waiting = new Set(d.queued);
+    tables.push({
+      title: `${tag}'s domains`,
+      columns: ["Domain", "Whitelist email"],
+      rows: [
+        ...d.toSend.map((x) => [x, waiting.has(x) ? "To send — waiting for the 6:30 AM PT batch" : "To send — not queued yet"]),
+        ...d.alreadySent.map((x) => [x.domain, x.sentAt ? `Sent ${fmtStamp(x.sentAt)}` : "Sent"]),
+      ],
+    });
+  }
+  const notes: PreviewNote[] = [];
+  const leftOut = (list: string[], why: string) => { if (list.length) notes.push({ title: `${domainCount(list.length)} left out — ${why}`, text: list.join("\n") }); };
+  leftOut(d.burnt, "marked Burnt");
+  leftOut(d.leaving, "being removed or replaced");
+  leftOut(d.noInboxes, "no inboxes on them yet");
+
+  return {
+    tag, plan: p, blockers, lines, tables, notes,
+    message: !p.exempt && d.toSend.length > 0 ? `Subject: ${p.subject}\n\n${p.text}` : undefined,
+  };
+}
+
+const whitelistEmail: Automation = {
+  async preview(ctx) {
+    const v = await planWhitelist(ctx);
+    if (!whitelistSendEnabled()) v.blockers.push(WHITELIST_NOT_SWITCHED_ON);
+    return { title: "Whitelisting domains email to clients", lines: v.lines, message: v.message, inputs: [], blockers: v.blockers, tables: v.tables, notes: v.notes };
+  },
+
+  /** One email. LeadSync re-checks every domain and sends only what this client hasn't been sent. */
+  async run(ctx) {
+    if (!whitelistSendEnabled()) return { ok: false, summary: WHITELIST_NOT_SWITCHED_ON };
+    const v = await planWhitelist(ctx);
+    if (v.blockers.length) return { ok: false, summary: v.blockers.join(" ") };
+    const p = v.plan;
+    if (!p) return { ok: false, summary: "LeadSync returned no email — open the preview to see why." };
+    const d = p.domains;
+    if (d.toSend.length === 0) {
+      return { ok: true, summary: `LeadSync had already sent ${v.tag} the whitelist email for all ${domainCount(d.assigned)} — nothing was sent now.`, result: { sent: 0, alreadySent: d.alreadySent.length } };
+    }
+    const r = await runOnboardingWhitelist(v.tag, d.toSend);
+    if (!r.ok) {
+      return {
+        ok: false,
+        summary: r.status === 0
+          ? `No answer from LeadSync (${r.error}), so the email may or may not have gone out. Open the preview before running again — domains it went out for show as Sent.`
+          : `LeadSync didn't send the email: ${r.error}`,
+        result: { domains: d.toSend },
+      };
+    }
+    const res = r.result;
+    if (!res.ok || res.failures.length) {
+      const why = res.failures.map((f) => `${f.reason} (${domainCount(f.domains.length)})`).join("; ");
+      return {
+        ok: false,
+        summary: `The whitelist email didn't fully go out — it covered ${res.sentDomains} of ${domainCount(d.toSend.length)}${why ? `: ${why}` : ""}. Open the preview before running again; it only sends what hasn't gone.`,
+        result: { domains: d.toSend, leadsync: res },
+      };
+    }
+    const who = [...p.to, ...p.bcc];
+    return {
+      ok: true,
+      summary: `Whitelist email sent to ${who.join(", ")} for ${domainCount(res.sentDomains)}.`,
+      result: { domains: d.toSend, to: p.to, cc: p.cc, bcc: p.bcc, leadsync: res },
+    };
+  },
+};
+
 /** Whether a task's automation may be RUN on this server right now (previews are separate). */
 export function automationRunnable(key: string | null | undefined): boolean {
   if (!key) return false;
   if (key === "create_campaigns") return campaignCreationEnabled();
   if (key === "allocate_domains") return domainAllocationEnabled();
+  if (key === "whitelist_email") return whitelistSendEnabled();
   return !!AUTOMATION_META[key]?.built;
 }
 
@@ -622,6 +761,7 @@ const AUTOMATIONS: Record<string, Automation> = {
   slack_outreachify: slackOutreachify,
   create_campaigns: createCampaigns,
   allocate_domains: allocateDomains,
+  whitelist_email: whitelistEmail,
 };
 
 export function getAutomation(key: string | null | undefined): Automation | null {

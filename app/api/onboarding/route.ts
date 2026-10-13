@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { withCache, setCached, nsVersion } from "@/lib/server-cache";
 import { listClients, listTasks, listOnboardingUsers, getSetting } from "@/lib/onboarding/store";
-import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING, outreachifyDestinations } from "@/lib/onboarding/automations";
+import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING, outreachifyDestinations, automationRunnable } from "@/lib/onboarding/automations";
 import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
 
 async function loadBoard() {
@@ -17,7 +17,10 @@ async function loadBoard() {
     getSetting(CAMPAIGN_MASTERS_SETTING),
   ]);
   return {
-    clients, tasks, users,
+    clients, users,
+    // Whether each step's automation can be run on this server right now, so
+    // the row offers Run (not just Preview) where its switch is on.
+    tasks: tasks.map((task) => (task.automation ? { ...task, runnable: automationRunnable(task.automation) } : task)),
     outreachifySlack: { saved: slackSetting, sendsTo: slackDests.map((d) => d.label) },
     campaignMasters: parseMasterSettings(masters),
   };

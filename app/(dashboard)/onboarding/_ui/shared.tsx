@@ -35,6 +35,8 @@ export type OnbTask = {
   /** 1 = ordered step: no due date, runs after the ordered steps before it. */
   no_due: number;
   automation: string | null;
+  /** The server's word on whether this step's automation can be RUN right now (its switch is on). */
+  runnable?: boolean;
   completed_at: string | null; completed_by: string | null; last_run: LastRun | null;
 };
 export type UserRow = { id: string; name: string; slack_member_id: string | null; email: string | null };
@@ -201,7 +203,7 @@ export function TaskAction({ task, gate, isAdmin, busy, onRun, onComplete }: {
       </div>
     );
   }
-  if (auto?.built && isAdmin) {
+  if ((auto?.built || task.runnable) && isAdmin) {
     return (
       <Button size="sm" className="h-8 gap-1.5" onClick={onRun} disabled={busy}>
         <Zap className="h-3.5 w-3.5" /> Run
@@ -235,11 +237,11 @@ export function TaskNotes({ task }: { task: OnbTask }) {
   return (
     <>
       {auto && !done && (
-        <div className={cn("mt-1 flex items-start gap-1 text-xs", auto.built ? "text-primary" : "text-amber-700 dark:text-amber-400")}>
+        <div className={cn("mt-1 flex items-start gap-1 text-xs", auto.built || task.runnable ? "text-primary" : "text-amber-700 dark:text-amber-400")}>
           <Zap className="mt-0.5 h-3 w-3 shrink-0" />
           <span>
-            {auto.built ? auto.label
-              : auto.preview ? `${auto.label} — preview ready, creating isn't switched on yet; complete it by hand for now`
+            {auto.built || task.runnable ? auto.label
+              : auto.preview ? `${auto.label} — preview ready; running it isn't switched on yet, complete it by hand for now`
               : `${auto.label} — automation coming, complete it by hand for now`}
           </span>
         </div>
@@ -534,7 +536,11 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
 
             {preview.message && (
               <div className="space-y-1.5">
-                <div className="text-xs font-medium text-muted-foreground">The message, exactly as it will be sent <span className="font-normal">(Slack shows *text* in bold)</span></div>
+                <div className="text-xs font-medium text-muted-foreground">
+                  {task.automation === "slack_outreachify"
+                    ? <>The message, exactly as it will be sent <span className="font-normal">(Slack shows *text* in bold)</span></>
+                    : "The email, exactly as it will be sent"}
+                </div>
                 <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/40 px-3 py-2.5 font-sans text-[13px] leading-relaxed">{preview.message}</pre>
               </div>
             )}
