@@ -387,11 +387,13 @@ const allocateDomains: Automation = {
         blockers.push(`Couldn't get the plan from LeadSync: ${r.error}`);
       } else {
         const p = r.plan;
+        if (p.groupMismatch) blockers.push(`LeadSync's allocation sheet has ${tag} in Group ${p.allocationGroup}, not Group ${c.group_num} — sort out which is right before allocating.`);
         summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
         for (const s of p.instances) {
           rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), String(s.reserveAvailable), s.short ? String(s.short) : "—"]);
           if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve.`);
           if (s.note) blockers.push(`${s.label}: LeadSync says “${s.note}”.`);
+          if (s.setAside) notes.push({ title: `${s.label} — ${s.setAside} reserve domain${s.setAside === 1 ? " was" : "s were"} left out`, text: "They already carry another client's tag, so they are not offered." });
           if (s.picking.length) notes.push({ title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give`, text: s.picking.join("\n") });
         }
       }
@@ -402,7 +404,7 @@ const allocateDomains: Automation = {
       title: "Attach client tags / redirects / add to campaigns / set 3 per day",
       lines: [
         summary,
-        "LeadSync only gives domains that carry no client tag, are at least 21 days old, are not marked Burnt and are not blacklisted — the same rules as its own top-ups.",
+        "LeadSync only gives domains that no client it knows is using, that are at least 21 days old, not marked Burnt and not blacklisted — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.",
         "Running it will tag those domains for the client, point their redirect at the client's website, attach them to the client's campaigns and set every sender to 3 a day.",
         "Marks this step Done.",
       ],

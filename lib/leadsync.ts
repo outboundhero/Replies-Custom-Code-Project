@@ -23,6 +23,8 @@ export interface AllocationSide {
   need: number;
   /** Ready reserve domains on this instance (LeadSync's rules). */
   reserveAvailable: number;
+  /** Candidates left out because they already carry another client's tag. */
+  setAside?: number;
   /** The domains that would be given, in order. */
   picking: string[];
   short: number;
@@ -34,6 +36,9 @@ export interface AllocationPlan {
   tier: "0.5" | "1" | "2";
   tierSource: string;
   generatedFor: string;
+  /** The group LeadSync's allocation sheet has this tag in (null = not there yet). */
+  allocationGroup?: 1 | 2 | null;
+  groupMismatch?: boolean;
   instances: AllocationSide[];
 }
 export type AllocationPreview = { ok: true; plan: AllocationPlan } | { ok: false; status: number; error: string };
