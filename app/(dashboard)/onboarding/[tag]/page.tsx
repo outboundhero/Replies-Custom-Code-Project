@@ -13,12 +13,14 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger, DialogDescription,
 } from "@/components/ui/dialog";
 import { GROUP_META, fmtDate, groupText } from "@/lib/onboarding/ui";
+import { CAMPAIGN_TIMEZONES, timezoneLabel } from "@/lib/onboarding/campaign-plan";
 import {
   type OnbClient, type OnbTask, type UserRow,
   UNASSIGNED, postMutate, TagPill, ClientChecklist,
 } from "../_ui/shared";
 
 const NO_GROUP = "none";
+const NO_TZ = "none";
 
 export default function ClientDetailPage() {
   const params = useParams();
@@ -50,6 +52,18 @@ export default function ClientDetailPage() {
 
   useEffect(() => { load(); }, [load]);
   const reload = useCallback(() => load(true), [load]);
+
+  // A time-zone suggestion from the office on the onboarding sheet (admins only; best effort).
+  const [suggestion, setSuggestion] = useState<{ tz: string | null; from: string | null } | null>(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let live = true;
+    fetch(`/api/onboarding/lookup?tag=${encodeURIComponent(tag)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (live && d?.found) setSuggestion({ tz: d.suggested_timezone ?? null, from: d.suggested_from ?? null }); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [tag, isAdmin]);
 
   const done = tasks.filter((t) => t.status === "completed").length;
   const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
@@ -137,6 +151,30 @@ export default function ClientDetailPage() {
             <span className="text-sm text-muted-foreground">
               {client.group_num ? groupText(client.group_num).replace(/^Group \d — /, "") : "Not chosen yet — it's picked when the Slack step runs."}
             </span>
+          </div>
+
+          {/* Time zone — every campaign of this client sends in it (Clay's "Time Zone" column) */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span className="text-xs font-medium text-muted-foreground">Time zone</span>
+            {isAdmin ? (
+              <Select value={client.campaign_timezone ?? NO_TZ}
+                onValueChange={(v) => refresh({ action: "set-client-timezone", client_tag: client.client_tag, timezone: v === NO_TZ ? null : v }, "Time zone updated")}>
+                <SelectTrigger className="h-8 w-56 text-xs" aria-label="Campaign time zone"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_TZ}>Not chosen yet</SelectItem>
+                  {CAMPAIGN_TIMEZONES.map((z) => <SelectItem key={z} value={z}>{timezoneLabel(z)} <span className="text-muted-foreground">· {z}</span></SelectItem>)}
+                </SelectContent>
+              </Select>
+            ) : null}
+            <span className="text-sm text-muted-foreground">
+              {client.campaign_timezone ? "All of this client's campaigns send in this time zone." : "Pick the time zone of the client's service area."}
+            </span>
+            {isAdmin && suggestion?.tz && suggestion.tz !== client.campaign_timezone && (
+              <button type="button" className="text-xs font-medium text-primary underline-offset-4 hover:underline"
+                onClick={() => refresh({ action: "set-client-timezone", client_tag: client.client_tag, timezone: suggestion.tz }, "Time zone updated")}>
+                Use {timezoneLabel(suggestion.tz)}{suggestion.from ? ` — office in ${suggestion.from}` : ""}
+              </button>
+            )}
           </div>
         </CardContent>
       </Card>

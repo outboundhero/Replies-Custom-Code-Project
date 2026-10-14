@@ -29,6 +29,7 @@ import {
   UNASSIGNED, DUE_TONE, postMutate, taskGate, dueInfo, useStatusSetter,
   TagPill, GroupBadge, Progress, StatusSelect, TaskAction, TaskNotes, ClientChecklist, RunDialog,
 } from "./_ui/shared";
+import { EmailCopyEditor } from "./_ui/email-copy";
 
 type TemplateTask = {
   id: string; title: string; day_offset: number; order_index: number; task_group: string | null;
@@ -111,6 +112,7 @@ export default function OnboardingPage() {
   }, [clients, tasks, today]);
 
   const existingTags = useMemo(() => clients.map((c) => c.client_tag), [clients]);
+  const [tab, setTab] = useState("clients");
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto w-full">
@@ -135,12 +137,13 @@ export default function OnboardingPage() {
         </div>
       )}
 
-      <Tabs defaultValue="clients">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="clients">Clients</TabsTrigger>
           <TabsTrigger value="people">By person</TabsTrigger>
           <TabsTrigger value="board">Board</TabsTrigger>
           {isAdmin && <TabsTrigger value="template">Template</TabsTrigger>}
+          {isAdmin && <TabsTrigger value="copy">Email copy</TabsTrigger>}
           {isAdmin && <TabsTrigger value="team">Team</TabsTrigger>}
         </TabsList>
 
@@ -158,6 +161,12 @@ export default function OnboardingPage() {
         {isAdmin && (
           <TabsContent value="template" className="mt-4">
             <TemplateEditor users={users} onUsersChanged={reload} />
+          </TabsContent>
+        )}
+        {isAdmin && (
+          // Kept mounted (just hidden) so unsaved copy edits survive switching tabs.
+          <TabsContent value="copy" forceMount className="mt-4 data-[state=inactive]:hidden">
+            <EmailCopyEditor active={tab === "copy"} />
           </TabsContent>
         )}
         {isAdmin && (

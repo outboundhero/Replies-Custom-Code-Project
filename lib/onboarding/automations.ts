@@ -8,7 +8,7 @@
  */
 import { dmBySlackIds, postToChannel } from "@/lib/slack";
 import {
-  getSetting, setClientGroup, listOnboardingUsers, lastFailedAttempt, runResults, takeLock, releaseLock, lockHolder,
+  getSetting, setClientGroup, setClientTimezone, listOnboardingUsers, lastFailedAttempt, runResults, takeLock, releaseLock, lockHolder,
   type OnboardingClientRow, type OnboardingTaskRow,
 } from "@/lib/onboarding/store";
 import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
@@ -25,8 +25,8 @@ import { clientContacts } from "@/lib/onboarding/contacts";
 import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
 import { createCampaignFromMaster, CHECK_PREFIX, BUILD_PREFIX, type MasterStep } from "@/lib/onboarding/create-campaigns";
 import {
-  CAMPAIGN_SLOTS, GROUP_INSTANCES, TIMEZONE_OPTIONS, campaignName, slotKey, slotOfName, parseMasterSettings,
-  parsePlace, regionByAny, timezoneForState, type CampaignSlot,
+  CAMPAIGN_SLOTS, GROUP_INSTANCES, CAMPAIGN_TIMEZONES, isCampaignTimezone, timezoneLabel, suggestTimezone, campaignName, slotKey, slotOfName, parseMasterSettings,
+  parsePlace, regionByAny, type CampaignSlot,
 } from "@/lib/onboarding/campaign-plan";
 
 export interface AutomationInput {
@@ -273,7 +273,8 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   if (!abbr && state) abbr = regionByAny(state)?.abbr ?? "";
   const area = param("area") ?? "";
   const target: Place = { area: area || defaultArea(city), city, state, abbr };
-  const timezone = param("timezone") ?? timezoneForState(state) ?? timezoneForState(abbr) ?? "";
+  // The client's time zone (set on its page — Clay's "Time Zone" column); a choice here wins, then a suggestion from the state.
+  const timezone = param("timezone") ?? c.campaign_timezone ?? suggestTimezone(state) ?? suggestTimezone(abbr) ?? "";
   const clientType = param("client_type") ?? (sheet?.clientType && !/clean|janitor/i.test(sheet.clientType) ? "other" : "cleaning");
 
   const fromSheet = sheet?.office ? `The sheet's office location: ${sheet.office}` : sheet ? "The sheet has no office location for this client." : `${tag} isn't in the sheet's New Client Information tab.`;
@@ -283,7 +284,8 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
     { key: "abbr", label: "State abbreviation", type: "text", value: abbr, placeholder: "CA" },
     { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "Orange County",
       hint: `How the area is named in the emails. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
-    { key: "timezone", label: "Timezone the campaigns send in", type: "select", value: timezone, options: TIMEZONE_OPTIONS.map((z) => ({ value: z, label: z.replace(/^.*\//, "").replace(/_/g, " ") + ` (${z})` })) },
+    { key: "timezone", label: "Timezone the campaigns send in", type: "select", value: timezone, options: CAMPAIGN_TIMEZONES.map((z) => ({ value: z, label: `${timezoneLabel(z)} · ${z}` })),
+      hint: c.campaign_timezone ? `The client's time zone (set on its page): ${c.campaign_timezone}` : "Not set on the client's page yet — suggested from the office's state." },
     { key: "client_type", label: "Client type", type: "select", value: clientType,
       options: [{ value: "cleaning", label: "Cleaning client" }, { value: "other", label: "Other services (not covered yet)" }],
       hint: sheet?.clientType ? `The sheet says: ${sheet.clientType}` : undefined },
@@ -300,7 +302,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   if (known && state && known.name.toLowerCase() !== state.toLowerCase()) blockers.push(`State: write the full name — “${known.name}”, not “${state}”.`);
   else if (known && abbr && known.abbr !== abbr) blockers.push(`The state and its abbreviation don't match — ${known.name} is ${known.abbr}, not ${abbr}.`);
   if (!timezone) blockers.push("Choose the timezone the campaigns send in.");
-  else if (!TIMEZONE_OPTIONS.includes(timezone)) blockers.push(`“${timezone}” isn't one of the timezones on the list.`);
+  else if (!isCampaignTimezone(timezone)) blockers.push(`“${timezone}” isn't one of the campaign time zones.`);
 
   const rows: string[][] = [];
   const notes: PreviewNote[] = [];
@@ -440,6 +442,9 @@ const createCampaigns: Automation = {
       next ??= item;
     }
     if (!next) return { ok: true, summary: allThere };
+
+    // The campaigns send in this zone, so it becomes the client's — the client page shows what they use.
+    if (ctx.client.campaign_timezone !== p.timezone) await setClientTimezone(ctx.client.client_tag, p.timezone);
 
     const r = await createCampaignFromMaster({
       instance: next.instance, name: next.name, nurture: next.slot.nurture, clientTag: p.tag,

@@ -23,6 +23,8 @@ import { blockingTask, type TaskStatus } from "@/lib/onboarding/generate";
 // ─────────────────────────── types ───────────────────────────
 export type OnbClient = {
   client_tag: string; client_name: string | null; plan_type: string | null; group_num: 1 | 2 | null;
+  /** The time zone all of this client's campaigns send in (Clay's choices); null until chosen. */
+  campaign_timezone?: string | null;
   start_date: string; status: string; tasks_total: number; tasks_done: number;
 };
 export type LastRun = { at: string; by: string | null; ok: boolean; summary: string };

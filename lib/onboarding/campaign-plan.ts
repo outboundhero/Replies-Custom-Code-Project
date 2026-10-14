@@ -88,6 +88,33 @@ export const REGION_OPTIONS = REGIONS.map(([abbr, name]) => ({ abbr, name }));
 /** The zones offered in the Run dialog. */
 export const TIMEZONE_OPTIONS = [...new Set(REGIONS.map((r) => r[2]))];
 
+/**
+ * The time zones a client's campaigns can send in — exactly the choices of
+ * Clay's "Time Zone" column (a hand-picked dropdown on every client row of the
+ * "Clay –> EmailBison" tables; the schedule columns read it), in Clay's order.
+ */
+export const CAMPAIGN_TIMEZONES = [
+  "Pacific/Honolulu", "America/Anchorage", "America/Los_Angeles", "America/Phoenix", "America/Denver",
+  "America/Chicago", "America/New_York", "America/Halifax", "Europe/London", "Australia/Sydney", "Pacific/Auckland",
+] as const;
+export const isCampaignTimezone = (v: unknown): v is (typeof CAMPAIGN_TIMEZONES)[number] =>
+  typeof v === "string" && (CAMPAIGN_TIMEZONES as readonly string[]).includes(v);
+const TIMEZONE_NAMES: Record<string, string> = {
+  "Pacific/Honolulu": "Hawaii", "America/Anchorage": "Alaska", "America/Los_Angeles": "Pacific", "America/Phoenix": "Arizona",
+  "America/Denver": "Mountain", "America/Chicago": "Central", "America/New_York": "Eastern", "America/Halifax": "Atlantic",
+  "Europe/London": "UK", "Australia/Sydney": "Australia East", "Pacific/Auckland": "New Zealand",
+};
+/** "America/Los_Angeles" → "Pacific (Los Angeles)". */
+export const timezoneLabel = (tz: string) => {
+  const city = tz.replace(/^.*\//, "").replace(/_/g, " ");
+  return TIMEZONE_NAMES[tz] ? `${TIMEZONE_NAMES[tz]} (${city})` : city;
+};
+/** A suggestion from a state or province — only when it is one of Clay's choices (Saskatchewan isn't). */
+export function suggestTimezone(stateOrAbbr: string | null | undefined): string | null {
+  const tz = stateOrAbbr ? timezoneForState(stateOrAbbr) : null;
+  return tz && isCampaignTimezone(tz) ? tz : null;
+}
+
 export function regionByAny(text: string): { abbr: string; name: string; timezone: string } | null {
   const t = text.trim().toLowerCase();
   const hit = REGIONS.find(([abbr, name]) => abbr.toLowerCase() === t || name.toLowerCase() === t);

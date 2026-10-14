@@ -12,6 +12,7 @@
  */
 import db from "@/lib/db";
 import { randomUUID } from "crypto";
+import { isCampaignTimezone } from "@/lib/onboarding/campaign-plan";
 import { logActivity } from "@/lib/errors";
 import { bumpVersion } from "@/lib/server-cache";
 import {
@@ -135,7 +136,7 @@ async function createTables(): Promise<void> {
 async function addMissingColumns(): Promise<void> {
   const want: Record<string, string[]> = {
     onboarding_template_task: ["assignee_id TEXT", "no_due INTEGER NOT NULL DEFAULT 0", "automation TEXT"],
-    onboarding_client: ["plan_type TEXT", "group_num INTEGER"],
+    onboarding_client: ["plan_type TEXT", "group_num INTEGER", "campaign_timezone TEXT"],
     onboarding_task: ["no_due INTEGER NOT NULL DEFAULT 0", "automation TEXT", "completed_at TEXT", "completed_by TEXT", "last_run TEXT"],
     onboarding_user: ["email TEXT"],
   };
@@ -171,6 +172,8 @@ export interface OnboardingClientRow {
   plan_type: string | null;
   /** 1 or 2 (→ Bison instances); null until chosen. */
   group_num: 1 | 2 | null;
+  /** The time zone every campaign of this client sends in (one of CAMPAIGN_TIMEZONES); null until chosen. */
+  campaign_timezone: string | null;
   start_date: string;
   domains_owner_email: string | null;
   inbox_owner_email: string | null;
@@ -231,6 +234,7 @@ const asClient = (row: Row): OnboardingClientRow => ({
   client_name: row.client_name ? String(row.client_name) : null,
   plan_type: row.plan_type ? String(row.plan_type) : null,
   group_num: asGroup(row.group_num),
+  campaign_timezone: row.campaign_timezone ? String(row.campaign_timezone) : null,
   start_date: String(row.start_date),
   domains_owner_email: row.domains_owner_email ? String(row.domains_owner_email) : null,
   inbox_owner_email: row.inbox_owner_email ? String(row.inbox_owner_email) : null,
@@ -673,6 +677,17 @@ export async function setClientGroup(tag: string, group: 1 | 2 | null): Promise<
   await db.execute({
     sql: "UPDATE onboarding_client SET group_num=?, updated_at=? WHERE UPPER(client_tag)=UPPER(?)",
     args: [asGroup(group), nowIso(), tag],
+  });
+  bumpVersion("onboarding");
+}
+
+/** The client's campaign time zone — one of Clay's choices, or null to clear it. */
+export async function setClientTimezone(tag: string, timezone: string | null): Promise<void> {
+  if (timezone !== null && !isCampaignTimezone(timezone)) throw new Error(`“${timezone}” isn't one of the campaign time zones.`);
+  await ensureTables();
+  await db.execute({
+    sql: "UPDATE onboarding_client SET campaign_timezone=?, updated_at=? WHERE UPPER(client_tag)=UPPER(?)",
+    args: [timezone, nowIso(), tag],
   });
   bumpVersion("onboarding");
 }

@@ -4,6 +4,7 @@
  * Add-to-Onboarding form. The newest row wins when a tag appears more than once.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { parsePlace, suggestTimezone } from "@/lib/onboarding/campaign-plan";
 import { requireAdmin } from "@/lib/auth";
 import { fetchNewClientInfo } from "@/lib/google-sheets";
 import { withCache } from "@/lib/server-cache";
@@ -24,6 +25,11 @@ export async function GET(req: NextRequest) {
       start_date: hit.startDate,
       contact_emails: hit.contactEmails,
       primary_contact_email: hit.primaryContactEmail,
+      office: hit.office || null,
+      area: hit.area || null,
+      // A time-zone suggestion from the office's state or province (one of Clay's choices, or null).
+      suggested_timezone: ((pl) => (pl ? suggestTimezone(pl.state) ?? suggestTimezone(pl.abbr) : null))(parsePlace(hit.office) ?? parsePlace(hit.area)),
+      suggested_from: (parsePlace(hit.office) ?? parsePlace(hit.area))?.state ?? null,
     });
   } catch (e) {
     return NextResponse.json({ error: `Couldn't read the sheet: ${(e as Error).message}` }, { status: 502 });

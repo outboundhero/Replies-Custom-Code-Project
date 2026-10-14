@@ -11,13 +11,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
 import {
-  addOnboardingClient, updateClientStartDate, setClientStatus, setClientGroup, deleteOnboardingClient, regenerateTasks,
+  addOnboardingClient, updateClientStartDate, setClientStatus, setClientGroup, setClientTimezone, deleteOnboardingClient, regenerateTasks,
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
   bulkUpdateTaskStatus, listTasks, getTask,
   upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate, applyStandardTemplate,
   upsertOnboardingUser, deleteOnboardingUser, setSetting,
 } from "@/lib/onboarding/store";
 import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING } from "@/lib/onboarding/automations";
+import { isCampaignTimezone } from "@/lib/onboarding/campaign-plan";
 import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
 import { placeProblems } from "@/lib/onboarding/campaign-copy";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
@@ -69,6 +70,12 @@ export async function POST(req: NextRequest) {
       case "set-client-group":
         await setClientGroup(String(body.client_tag || ""), asGroup(body.group_num));
         return NextResponse.json({ ok: true });
+      case "set-client-timezone": {
+        const tz = body.timezone == null || body.timezone === "" ? null : String(body.timezone);
+        if (tz !== null && !isCampaignTimezone(tz)) return NextResponse.json({ error: "That isn't one of the campaign time zones." }, { status: 400 });
+        await setClientTimezone(String(body.client_tag || ""), tz);
+        return NextResponse.json({ ok: true });
+      }
       case "set-client-status":
         await setClientStatus(String(body.client_tag || ""), body.status === "completed" ? "completed" : "active");
         return NextResponse.json({ ok: true });
