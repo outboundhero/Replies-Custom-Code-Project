@@ -76,7 +76,8 @@ function fmtVariants(n: number): string {
   if (n >= 1e12) return "1T+";
   return n < 1000 ? String(n) : compact.format(n);
 }
-const whoSaved = (by: string | null) => (by ? by.split("@")[0] : "Clay import");
+const whoSaved = (by: string | null) => (by ? by.split("@")[0] : "imported from Clay");
+const savedLine = (by: string | null, at: string) => (by ? `saved by ${whoSaved(by)}, ${fmtWhen(at)}` : `imported from Clay, ${fmtWhen(at)}`);
 
 // ── Moving emails around. The waits stay with their place in the schedule;
 // the text (and how it's threaded) moves. Email 1 always starts a thread and
@@ -648,18 +649,18 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
         <>
           {/* Toolbar: what's in use, and the actions */}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0 text-sm text-muted-foreground">
+            <div className="min-w-0 flex-1 truncate text-sm text-muted-foreground" title={current?.note ?? undefined}>
               {current ? (
                 <span>
                   <span className="font-medium text-foreground">Version {current.version}</span> in use
-                  <span className="mx-1.5 text-muted-foreground/50">·</span>saved by {whoSaved(current.savedBy)}, {fmtWhen(current.savedAt)}
+                  <span className="mx-1.5 text-muted-foreground/50">·</span>{savedLine(current.savedBy, current.savedAt)}
                   {current.note && <><span className="mx-1.5 text-muted-foreground/50">·</span><span className="italic">“{current.note}”</span></>}
                 </span>
               ) : (
                 <span><span className="font-medium text-foreground">New copy</span> — not saved yet, so no campaign uses it.</span>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {entry && entry.versions.length > 0 && (
                 <Button size="sm" variant="outline" onClick={() => setHistoryOpen(true)}><History /> History <span className="tabular-nums text-muted-foreground">{entry.versions.length}</span></Button>
               )}
@@ -1216,7 +1217,7 @@ function HistoryDialog({ open, onOpenChange, entry, dirty, onRestored }: {
                     <span className="text-sm font-medium">Version {v.version}</span>
                     {v.version === currentVersion && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">In use</span>}
                   </div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">{whoSaved(v.savedBy)} · {fmtWhen(v.savedAt)}</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">{v.savedBy ? whoSaved(v.savedBy) : "Imported from Clay"} · {fmtWhen(v.savedAt)}</div>
                   {v.note && <div className="mt-1 line-clamp-2 text-xs italic text-muted-foreground">“{v.note}”</div>}
                 </button>
               </li>
