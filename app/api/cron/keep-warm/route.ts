@@ -29,6 +29,12 @@ const ROUTES = [
   "/api/data-view?sort=created_at.desc&limit=100&offset=0&category=Open%20Response",
   "/api/sheet-pushes",
 ];
+// POST-only routes, warmed with a request that does nothing. The inbox's
+// mutate route carries Send Reply and every category change — a cold start
+// there was part of the 10–20 s the team waited on Send (2026-10-15).
+const POST_ROUTES: { path: string; body: unknown }[] = [
+  { path: "/api/inbox/mutate", body: { action: "ping" } },
+];
 
 function baseUrl(): string {
   const host = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || "replies-custom-code-project.vercel.app";
@@ -56,19 +62,22 @@ export async function GET(req: NextRequest) {
   // several per route (concurrent requests force Vercel to spin up / keep warm
   // multiple instances) — otherwise a user can still land on a cold one.
   const FANOUT = 3;
-  const hit = async (path: string) => {
+  const hit = async (path: string, body?: unknown) => {
     const t0 = Date.now();
     try {
-      const r = await fetch(base + path, { headers: { cookie }, signal: AbortSignal.timeout(25000) });
+      const r = await fetch(base + path, body === undefined
+        ? { headers: { cookie }, signal: AbortSignal.timeout(25000) }
+        : { method: "POST", headers: { cookie, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(25000) });
       await r.text().catch(() => "");
       return { path, ms: Date.now() - t0, status: r.status };
     } catch (e) {
       return { path, ms: Date.now() - t0, error: (e as Error).message };
     }
   };
-  const results = await Promise.all(
-    ROUTES.flatMap((path) => Array.from({ length: FANOUT }, () => hit(path))),
-  );
+  const results = await Promise.all([
+    ...ROUTES.flatMap((path) => Array.from({ length: FANOUT }, () => hit(path))),
+    ...POST_ROUTES.flatMap((r) => Array.from({ length: FANOUT }, () => hit(r.path, r.body))),
+  ]);
 
   return NextResponse.json({ ok: true, base, fanout: FANOUT, warmed: results.length });
 }

@@ -15,6 +15,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
+import { waitForSend } from "@/lib/send-watch";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -1602,15 +1603,32 @@ function RecordPanel({ row, detail, onClose, onSetCategory, onSetAiCategory, onF
     if (!detail || !msg.trim()) return;
     if (!confirmSend) { setConfirmSend(true); return; }
     setSending(true);
+    const to = String(recipients?.to.email || detail.lead_email || "");
+    const sentBody = msg;
     const r = await mutate({
       action: "send-reply", id: row.id, replyId: detail.reply_id, senderEmailId: detail.sender_id,
       message: msg, toEmail: recipients?.to.email || detail.lead_email, toName: recipients?.to.name || detail.lead_name,
       ccEmails: recipients?.cc.length ? recipients.cc.map((x) => ({ name: x.name, email_address: x.email })) : undefined,
       bccEmails: recipients?.bcc.length ? recipients.bcc.map((x) => ({ name: x.name, email_address: x.email })) : undefined,
       clearAutoReply: true,
+      background: true,
     });
+    if (r.queued && r.jobId) {
+      // Taken — the send finishes in the background (Email Bison takes a few seconds).
+      setConfirmSend(false); setShowCompose(false);
+      toast.loading(`Sending reply to ${to}…`, { id: r.jobId });
+      const o = await waitForSend(r.jobId);
+      setSending(false);
+      if (o.status === "sent") toast.success(`Reply sent to ${to}`, { id: r.jobId });
+      else if (o.status === "failed") {
+        // The draft comes back in the composer if this panel is still open.
+        setMsg(sentBody); setShowCompose(true);
+        toast.error(`Reply to ${to} failed: ${o.error}`, { id: r.jobId, duration: 30_000 });
+      } else toast.warning(`Couldn't confirm the reply to ${to} went out (${o.error}). Check the lead's email history before sending again.`, { id: r.jobId, duration: 30_000 });
+      return;
+    }
     setSending(false);
-    if (r.ok) { toast.success(`Reply sent to ${recipients?.to.email || detail.lead_email}`); setConfirmSend(false); setShowCompose(false); }
+    if (r.ok) { toast.success(`Reply sent to ${to}`); setConfirmSend(false); setShowCompose(false); }
     else { toast.error(r.error || "Send failed"); setConfirmSend(false); }
   }
 

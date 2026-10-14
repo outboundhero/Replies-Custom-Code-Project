@@ -25,12 +25,19 @@ import { handleDm4pmSubsequenceAction } from "@/lib/dm4pm/inbox-actions";
 import * as dm4pmSub from "@/lib/dm4pm/subsequence-store";
 import { isSubsequenceTag } from "@/lib/subsequence/config";
 import { notifyLeadRush, recordCategoryChange } from "@/lib/leadrush";
+import { claimSendJob, finishSendJob, sendJobStatuses } from "@/lib/send-jobs";
 
 // Category change + send-reply now do extra best-effort work (phone waterfall:
 // reply AI + optional website scrape for the sheet; the handoff-email sheet
 // write on send). Give the route ample headroom over the platform default so a
 // slow website fetch can never time the request out.
-export const maxDuration = 60;
+// A background send (Send Reply in the inbox) keeps running after the answer,
+// within this same budget, so leave room for a slow Email Bison.
+export const maxDuration = 120;
+
+// The first request an instance serves pays its start-up time; recorded with
+// each background send so slow clicks can be told apart from slow sends.
+let instanceWarm = false;
 
 // Default OOO requeue delay when the reply gives no clear return date (§21).
 const DEFAULT_OOO_DELAY_DAYS = 7;
@@ -47,6 +54,9 @@ const SUBSEQ_GATE_CATEGORIES = new Set([
 ]);
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
+  const cold = !instanceWarm;
+  instanceWarm = true;
   // Single session read (was requireAuth() + a second getSession() below).
   // A null session = the login cookie is missing/expired. Return an actionable
   // message (not a bare "Unauthorized"): the operator should re-auth in a NEW
@@ -102,6 +112,16 @@ export async function POST(req: NextRequest) {
     }
 
     switch (action) {
+      // Keep-warm ping (cron): nothing to do — booting the function is the point.
+      case "ping":
+        return NextResponse.json({ ok: true });
+
+      // Where background sends stand (the inbox asks every second or so).
+      case "send-status": {
+        const jobs = await sendJobStatuses(Array.isArray(body.jobIds) ? body.jobIds : [], session.email ?? null);
+        return NextResponse.json({ ok: true, jobs });
+      }
+
       // ── DM4PM interested-reply subsequence (§4/§14/§15/§16/§19) ──────────
       // Enrollment + manual controls, delegated to the subsequence handler.
       // All are DM4PM-only (enforced inside) and keyed on the reply row id.
@@ -535,7 +555,7 @@ export async function POST(req: NextRequest) {
       }
 
       case "send-reply": {
-        const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply, notIfSentSince } = body;
+        const { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, clearAutoReply, notIfSentSince, background } = body;
         // Retry guard (Data View "Retry failed"): if ANY reply reached this lead
         // after the original attempt — the 5–10 min automatic reply, a queued
         // server retry, or someone sending by hand — don't send a second one.
@@ -546,89 +566,130 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ ok: true, skipped: "already-sent", lastSentAt: cur.last_sent_at });
           }
         }
-        let result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
-        // "The selected sender email id is invalid": the stored inbox id is stale
-        // (the inbox was removed or re-added under a NEW id). If the inbox is still
-        // in the instance under a new id, re-resolve it by email and resend
-        // immediately — no wait. If it's gone, fall through to reconnect + the
-        // queued retry (below), which re-resolves once the inbox is back.
-        if (!result.ok && /sender email id is invalid/i.test(result.error || "") && rowSenderEmail) {
-          const live = await findSenderEmailByAddress(rowInstance, rowSenderEmail).catch(() => null);
-          if (live && live.id !== senderEmailId) {
-            result = await sendReply(rowInstance, { replyId, senderEmailId: live.id, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined });
-          }
-        }
-        const nowIso = new Date().toISOString();
-        // History row (success OR failure) so the inbox can show the full
-        // outbound history + retry failures. Best-effort — never break the send.
-        const recordSend = async (status: "sent" | "failed", error?: string) => {
-          try {
-            await supabase.from("reply_sends").insert({
-              reply_row_id: id, client_tag: rowClientTag, lead_email: toEmail || null,
-              message: message ?? null, to_json: toEmail ? [{ name: toName || "", email: toEmail }] : null,
-              cc_json: ccEmails ?? null, bcc_json: bccEmails ?? null, status, error: error ?? null,
-            });
-          } catch { /* table may not exist pre-migration */ }
-        };
-        if (result.ok) {
-          const update: Record<string, unknown> = {
-            sent_reply: message, last_sent_at: nowIso, send_error: null, send_error_at: null, updated_at: nowIso,
-          };
-          // Approving a Send-Reply preview sends NOW — cancel any pending
-          // scheduled auto-reply (e.g. the 5–10 min Not-Interested cron) so
-          // the lead doesn't also get the delayed one (spec §15).
-          if (clearAutoReply) { update.auto_reply_due_at = null; update.auto_reply_sent_at = nowIso; }
-          await supabase.from("replies").update(update).eq("id", id);
-          // Everything below is bookkeeping/side-effects that the user doesn't
-          // need to wait on — run it AFTER the response so Send Reply feels
-          // instant. The ~1s Google-Sheet handoff write was the main drag on the
-          // critical path. Reliable on Vercel (after() keeps the function alive);
-          // both writes are best-effort and never affect the send result.
-          after(async () => {
-            await recordSend("sent");
-            // NOTE: the "Lead handoff email" sheet write was intentionally removed
-            // (per client request 2026-08-06) — the sent email must NOT be written
-            // into the client's lead-tracking sheet. Leads still push to the sheet
-            // as normal via the categorize/push flow (pushReplyToSheet); only this
-            // handoff-email column write is disabled. recordSend above still keeps
-            // our own outbound history.
 
-            // §12: our team responding to a DM4PM subsequence reply that the
-            // prospect paused starts the 5-business-day inactivity continuation
-            // timer — silence after that fires the next unsent step immediately.
-            try {
-              if (isSubsequenceTag(rowClientTag) && toEmail) {
-                const sub = await dm4pmSub.getByEmail(toEmail);
-                if (sub && sub.status === "paused" && sub.paused_reason === "prospect_reply") {
-                  const { scheduleFrom } = await import("@/lib/business-days");
-                  await dm4pmSub.setContinuation(sub.id, scheduleFrom(new Date(), { businessDays: 5 }).toISOString());
-                }
-              }
-            } catch { /* best-effort — never affects the send */ }
-          });
-        } else {
-          // Persist the failure so it stays visible on the lead + in the error
-          // log until the next successful send clears it. Draft is NOT touched.
-          await logError("inbox", "send-reply", result.error || "send failed", {
-            row_id: id, client_tag: rowClientTag, lead_email: toEmail, instance: rowInstance,
-          });
-          try {
-            await supabase.from("replies").update({ send_error: result.error || "Send failed", send_error_at: nowIso, updated_at: nowIso }).eq("id", id);
-          } catch { /* columns may not exist pre-migration */ }
-          await recordSend("failed", result.error);
-          // SMTP-auth failure ("re-connect this email account"): auto-reconnect
-          // the inbox now, and queue the SAME reply to auto-retry at +1h, then
-          // +2h (lib/send-retry.ts). No operator action needed.
-          if (isReconnectableSendError(result.error)) {
-            if (rowSenderEmail) reconnectInbox(rowSenderEmail, rowInstance).catch(() => {});
-            await enqueueSendRetry({
-              replyRowId: id, bisonInstance: rowInstance, replyId, senderEmailId,
-              senderEmail: rowSenderEmail, message, toEmail, toName, ccEmails, bccEmails,
-              subject: rowSubject, leadId: rowLeadId, clientTag: rowClientTag,
-              lastError: result.error || "send failed",
-            }).catch((e) => logError("inbox", "send-reply-enqueue-retry", (e as Error).message, { row_id: id }));
+        // The send and everything it records. `later` runs the bookkeeping the
+        // user needn't wait for: after the response for a normal send, straight
+        // away for a background send (which is itself already after the response).
+        const performSend = async (later: (fn: () => Promise<void>) => void | Promise<void>, onBisonDone?: (ms: number) => void) => {
+          const bisonStart = Date.now();
+          let result = await sendReply(rowInstance, { replyId, senderEmailId, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined, noNetworkRetry: !!background });
+          // "The selected sender email id is invalid": the stored inbox id is stale
+          // (the inbox was removed or re-added under a NEW id). If the inbox is still
+          // in the instance under a new id, re-resolve it by email and resend
+          // immediately — no wait. If it's gone, fall through to reconnect + the
+          // queued retry (below), which re-resolves once the inbox is back.
+          if (!result.ok && /sender email id is invalid/i.test(result.error || "") && rowSenderEmail) {
+            const live = await findSenderEmailByAddress(rowInstance, rowSenderEmail).catch(() => null);
+            if (live && live.id !== senderEmailId) {
+              result = await sendReply(rowInstance, { replyId, senderEmailId: live.id, message, toEmail, toName, ccEmails, bccEmails, subject: rowSubject ?? undefined, leadId: rowLeadId ?? undefined, noNetworkRetry: !!background });
+            }
           }
+          onBisonDone?.(Date.now() - bisonStart);
+          const nowIso = new Date().toISOString();
+          // History row (success OR failure) so the inbox can show the full
+          // outbound history + retry failures. Best-effort — never break the send.
+          const recordSend = async (status: "sent" | "failed", error?: string) => {
+            try {
+              await supabase.from("reply_sends").insert({
+                reply_row_id: id, client_tag: rowClientTag, lead_email: toEmail || null,
+                message: message ?? null, to_json: toEmail ? [{ name: toName || "", email: toEmail }] : null,
+                cc_json: ccEmails ?? null, bcc_json: bccEmails ?? null, status, error: error ?? null,
+              });
+            } catch { /* table may not exist pre-migration */ }
+          };
+          if (result.ok) {
+            const update: Record<string, unknown> = {
+              sent_reply: message, last_sent_at: nowIso, send_error: null, send_error_at: null, updated_at: nowIso,
+            };
+            // Approving a Send-Reply preview sends NOW — cancel any pending
+            // scheduled auto-reply (e.g. the 5–10 min Not-Interested cron) so
+            // the lead doesn't also get the delayed one (spec §15).
+            if (clearAutoReply) { update.auto_reply_due_at = null; update.auto_reply_sent_at = nowIso; }
+            await supabase.from("replies").update(update).eq("id", id);
+            // Everything below is bookkeeping/side-effects that the user doesn't
+            // need to wait on. The ~1s Google-Sheet handoff write was the main
+            // drag on the critical path. Both writes are best-effort and never
+            // affect the send result.
+            await later(async () => {
+              await recordSend("sent");
+              // NOTE: the "Lead handoff email" sheet write was intentionally removed
+              // (per client request 2026-08-06) — the sent email must NOT be written
+              // into the client's lead-tracking sheet. Leads still push to the sheet
+              // as normal via the categorize/push flow (pushReplyToSheet); only this
+              // handoff-email column write is disabled. recordSend above still keeps
+              // our own outbound history.
+
+              // §12: our team responding to a DM4PM subsequence reply that the
+              // prospect paused starts the 5-business-day inactivity continuation
+              // timer — silence after that fires the next unsent step immediately.
+              try {
+                if (isSubsequenceTag(rowClientTag) && toEmail) {
+                  const sub = await dm4pmSub.getByEmail(toEmail);
+                  if (sub && sub.status === "paused" && sub.paused_reason === "prospect_reply") {
+                    const { scheduleFrom } = await import("@/lib/business-days");
+                    await dm4pmSub.setContinuation(sub.id, scheduleFrom(new Date(), { businessDays: 5 }).toISOString());
+                  }
+                }
+              } catch { /* best-effort — never affects the send */ }
+            });
+          } else {
+            // Persist the failure so it stays visible on the lead + in the error
+            // log until the next successful send clears it. Draft is NOT touched.
+            await logError("inbox", "send-reply", result.error || "send failed", {
+              row_id: id, client_tag: rowClientTag, lead_email: toEmail, instance: rowInstance,
+            });
+            try {
+              await supabase.from("replies").update({ send_error: result.error || "Send failed", send_error_at: nowIso, updated_at: nowIso }).eq("id", id);
+            } catch { /* columns may not exist pre-migration */ }
+            await recordSend("failed", result.error);
+            // SMTP-auth failure ("re-connect this email account"): auto-reconnect
+            // the inbox now, and queue the SAME reply to auto-retry at +1h, then
+            // +2h (lib/send-retry.ts). No operator action needed.
+            if (isReconnectableSendError(result.error)) {
+              if (rowSenderEmail) reconnectInbox(rowSenderEmail, rowInstance).catch(() => {});
+              await enqueueSendRetry({
+                replyRowId: id, bisonInstance: rowInstance, replyId, senderEmailId,
+                senderEmail: rowSenderEmail, message, toEmail, toName, ccEmails, bccEmails,
+                subject: rowSubject, leadId: rowLeadId, clientTag: rowClientTag,
+                lastError: result.error || "send failed",
+              }).catch((e) => logError("inbox", "send-reply-enqueue-retry", (e as Error).message, { row_id: id }));
+            }
+          }
+          return result;
+        };
+
+        // Background (the inbox's Send buttons): answer now, send right after.
+        // Email Bison sends before it answers, so waiting for it is what made
+        // the team wait. The browser asks "send-status" for the outcome.
+        if (background && typeof id !== "number") return NextResponse.json({ ok: false, error: "Missing the lead to reply to." }, { status: 400 });
+        // If the send can't be recorded (job store unreachable), send the old way — waiting — rather than not at all.
+        const claim = background
+          ? await claimSendJob({ replyRowId: id, clientTag: rowClientTag, leadEmail: toEmail || rowLeadEmail, by: session.email ?? null, cold })
+            .catch(async (e) => { await logError("inbox", "send-reply-job", `claim failed, sending in the foreground: ${(e as Error).message}`, { row_id: id }).catch(() => {}); return null; })
+          : null;
+        if (claim) {
+          if ("busy" in claim) {
+            const who = claim.busy.by && claim.busy.by !== session.email ? ` by ${claim.busy.by}` : "";
+            return NextResponse.json({ ok: false, busy: true, error: `A reply to this lead is being sent right now${who} — wait a few seconds for it to finish.` }, { status: 409 });
+          }
+          const jobId = claim.id;
+          const acceptMs = Date.now() - startedAt;
+          after(async () => {
+            let outcome: { ok: boolean; error?: string };
+            let bisonMs: number | null = null;
+            try {
+              outcome = await performSend(async (fn) => { await fn(); }, (ms) => { bisonMs = ms; });
+            } catch (e) {
+              outcome = { ok: false, error: (e as Error).message || "Send failed" };
+              await logError("inbox", "send-reply", outcome.error || "send failed", { row_id: id, client_tag: rowClientTag, lead_email: toEmail, instance: rowInstance }).catch(() => {});
+            }
+            await finishSendJob(jobId, outcome, { acceptMs, bisonMs, totalMs: Date.now() - startedAt })
+              .catch((e) => logError("inbox", "send-reply-job", (e as Error).message, { row_id: id, job: jobId }));
+          });
+          return NextResponse.json({ ok: true, queued: true, jobId });
         }
+
+        const result = await performSend((fn) => { after(fn); });
         return NextResponse.json(result);
       }
 

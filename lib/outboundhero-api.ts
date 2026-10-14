@@ -45,16 +45,19 @@ async function fetchOnce(url: string, init: RequestInit & { timeoutMs?: number }
  * rate-limits aggressively under concurrency; without this, paginated pulls
  * silently drop pages and undercount. Up to 6 attempts: ~1s,2s,4s,8s,16s.
  */
-async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number; networkRetries?: number } = {}): Promise<Response> {
   const MAX_RETRIES = 6;
+  const { networkRetries = 2, ...rest } = init;
+  init = rest;
   let attempt = 0;
   for (;;) {
     let res: Response;
     try {
       res = await fetchOnce(url, init);
     } catch (e) {
-      // Network/abort errors are also worth a couple of retries.
-      if (attempt >= 2) throw e;
+      // Network/abort errors are also worth a couple of retries — unless the
+      // caller says a repeat could do the thing twice (e.g. send an email).
+      if (attempt >= networkRetries) throw e;
       await sleep(backoffMs(attempt));
       attempt++;
       continue;
@@ -212,6 +215,10 @@ export async function sendReply(
     subject?: string;
     /** Bison lead id — needed to set the missing variable on the lead. */
     leadId?: number;
+    /** Don't repeat the send after a network error or timeout: Bison may already
+     *  have sent it, and a repeat would email the lead twice. Rate-limit (429/503)
+     *  answers are still retried — those were not sent. */
+    noNetworkRetry?: boolean;
   },
 ): Promise<{ ok: boolean; error?: string }> {
   // Pre-send guard: a leftover custom variable in the thread subject (e.g.
@@ -248,6 +255,7 @@ export async function sendReply(
     method: "POST",
     headers: buildHeaders(token),
     body: JSON.stringify(payload),
+    ...(params.noNetworkRetry ? { networkRetries: 0 } : {}),
   });
 
   if (res.ok) return { ok: true };

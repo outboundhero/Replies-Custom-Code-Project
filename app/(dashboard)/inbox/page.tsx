@@ -8,6 +8,7 @@ import { SearchableCombobox } from "@/components/ui/searchable-combobox";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
+import { waitForSend } from "@/lib/send-watch";
 import { createClient } from "@supabase/supabase-js";
 import { INBOX_VIEWS, getView, replyMatchesView, hasDedicatedMasterView, dedicatedMasterViewId, scopedDefaultViewId, POSITIVE_AI_CATEGORIES } from "@/lib/inbox-views";
 import { isReconnectableSendError } from "@/lib/inboxing-upload";
@@ -481,6 +482,9 @@ export default function InboxPage() {
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ReplyDetail | null>(null);
+  // Which lead is open right now — read by background-send callbacks that finish later.
+  const detailIdRef = useRef<number | null>(null);
+  useEffect(() => { detailIdRef.current = detail?.id ?? null; }, [detail?.id]);
   // Client Qualification Rules card — same pattern: minimized by default,
   // toggled open; reset to collapsed whenever a different lead opens.
   const [qualOpen, setQualOpen] = useState(false);
@@ -524,6 +528,8 @@ export default function InboxPage() {
   const [cotPreview, setCotPreview] = useState<CotState | null>(null);
   // Send-Reply preview (spec §15): staged draft awaiting review + approval.
   const [sendPreview, setSendPreview] = useState<SendPrevState | null>(null);
+  const sendPreviewRef = useRef<SendPrevState | null>(null);
+  useEffect(() => { sendPreviewRef.current = sendPreview; }, [sendPreview]);
 
   // Subsequence gate: when a paused-by-reply lead is re-categorized, prompt for
   // End vs Continue (+ business-day delay) before the category change is applied.
@@ -538,6 +544,8 @@ export default function InboxPage() {
 
   // Reply form (Recipient type is defined at module scope)
   const [replyMsg, setReplyMsg] = useState("");
+  const replyMsgRef = useRef("");
+  useEffect(() => { replyMsgRef.current = replyMsg; }, [replyMsg]);
   const [replyCc, setReplyCc] = useState<Recipient[]>([]);
   const [replyBcc, setReplyBcc] = useState<Recipient[]>([]);
   // Optional freeform instructions for Generate Reply (empty = adapt normally).
@@ -575,6 +583,9 @@ export default function InboxPage() {
   const [zipReallocFor, setZipReallocFor] = useState<unknown>(openLeadId);
   if (zipReallocFor !== openLeadId) { setZipReallocFor(openLeadId); setZipReallocTag(""); } // new lead → recommended tag again
   const [sending, setSending] = useState<string | null>(null);
+  // Leads whose reply is being sent in the background (Send Reply returns at
+  // once; the outcome arrives a few seconds later). Their Send button waits.
+  const [sendingRows, setSendingRows] = useState<Set<number>>(() => new Set());
   // Change-AI-category + client-tag/sheet-override editors (below the lead details).
   const [aiSaving, setAiSaving] = useState(false);
   const [tsTag, setTsTag] = useState("");
@@ -934,18 +945,60 @@ export default function InboxPage() {
     if (!sendPreview) return;
     if (!sendPreview.confirm) { sendPatch({ confirm: true }); return; } // require an explicit second click (§29)
     if (!sendPreview.message.trim()) { toast.error("The draft is empty."); return; }
+    const snapshot = sendPreview;
     sendPatch({ sending: true });
     const d = await mutate({
-      action: "send-reply", id: sendPreview.replyId, replyId: sendPreview.bisonReplyId,
-      senderEmailId: sendPreview.senderEmailId, message: sendPreview.message,
-      toEmail: sendPreview.toEmail, toName: sendPreview.toName,
-      ccEmails: sendPreview.cc.length ? recipientsToApi(sendPreview.cc) : undefined,
-      bccEmails: sendPreview.bcc.length ? recipientsToApi(sendPreview.bcc) : undefined,
+      action: "send-reply", id: snapshot.replyId, replyId: snapshot.bisonReplyId,
+      senderEmailId: snapshot.senderEmailId, message: snapshot.message,
+      toEmail: snapshot.toEmail, toName: snapshot.toName,
+      ccEmails: snapshot.cc.length ? recipientsToApi(snapshot.cc) : undefined,
+      bccEmails: snapshot.bcc.length ? recipientsToApi(snapshot.bcc) : undefined,
       clearAutoReply: true,
+      background: true,
     });
-    if (d.ok) { toast.success(`Reply sent to ${sendPreview.toEmail}`); setSendPreview(null); if (selectedId === sendPreview.replyId) loadDetail(sendPreview.replyId); }
+    if (d.queued && d.jobId) {
+      // Taken — the send finishes in the background; the team can move on.
+      setSendPreview(null);
+      trackBackgroundSend(d.jobId, snapshot.replyId, snapshot.toEmail, {
+        onSent: () => { if (detailIdRef.current === snapshot.replyId) loadDetail(snapshot.replyId); },
+        // Failed: the preview comes back with the draft, unless another one is open.
+        restore: () => {
+          if (sendPreviewRef.current) return false;
+          setSendPreview({ ...snapshot, sending: false, confirm: false });
+          return true;
+        },
+      });
+      return;
+    }
+    if (d.ok) { toast.success(`Reply sent to ${snapshot.toEmail}`); setSendPreview(null); if (selectedId === snapshot.replyId) loadDetail(snapshot.replyId); }
     else { toast.error(d.error || "Send failed"); sendPatch({ sending: false, confirm: false }); }
   }
+
+  /**
+   * Follow a background send to its end: "Sending…" until the server reports,
+   * then "Sent" — or the error, with the draft put back where it came from.
+   */
+  function trackBackgroundSend(jobId: string, rowId: number, toEmail: string, h: { onSent: () => void; restore: () => boolean }) {
+    setSendingRows((prev) => new Set(prev).add(rowId));
+    toast.loading(`Sending reply to ${toEmail}…`, { id: jobId });
+    void waitForSend(jobId).then((o) => {
+      setSendingRows((prev) => { const n = new Set(prev); n.delete(rowId); return n; });
+      const nowIso = new Date().toISOString();
+      if (o.status === "sent") {
+        toast.success(`Reply sent to ${toEmail}`, { id: jobId });
+        h.onSent();
+        return;
+      }
+      if (o.status === "failed") {
+        setDetail((prev) => (prev && prev.id === rowId ? { ...prev, send_error: o.error, send_error_at: nowIso } : prev));
+        const back = h.restore();
+        toast.error(`Reply to ${toEmail} failed: ${o.error}${back ? " — your text is back in the reply box." : " — open the lead to send it again."}`, { id: jobId, duration: 30_000 });
+        return;
+      }
+      toast.warning(`Couldn't confirm the reply to ${toEmail} went out (${o.error}). Check the lead's email history before sending again.`, { id: jobId, duration: 30_000 });
+    });
+  }
+
   async function declineSend() {
     if (!sendPreview) return;
     const rid = sendPreview.replyId;
@@ -1106,14 +1159,35 @@ export default function InboxPage() {
     setSending("reply");
     const detailId = detail.id;
     const sentBody = replyMsg;
+    const sentCc = replyCc;
+    const sentBcc = replyBcc;
+    const toEmail = String(detail.lead_email || "");
     const d = await mutate({
       action: "send-reply", id: detail.id, replyId: detail.reply_id,
       senderEmailId: detail.sender_id, message: replyMsg,
       toEmail: detail.lead_email, toName: detail.lead_name,
       ccEmails: replyCc.length ? recipientsToApi(replyCc) : undefined,
       bccEmails: replyBcc.length ? recipientsToApi(replyBcc) : undefined,
+      background: true,
     });
     setSending(null);
+    if (d.queued && d.jobId) {
+      // Taken — the send finishes in the background; the team can move on.
+      setReplyMsg(""); setReplyCc([]); setReplyBcc([]);
+      trackBackgroundSend(d.jobId, detailId, toEmail, {
+        onSent: () => {
+          setDetail((prev) => (prev && prev.id === detailId ? { ...prev, send_error: null, send_error_at: null, last_sent_at: new Date().toISOString(), sent_reply: sentBody } : prev));
+          if (detailIdRef.current === detailId) loadSendHistory(detailId);
+        },
+        // Failed: the draft goes back in the reply box — if that lead is still open and the box is empty.
+        restore: () => {
+          if (detailIdRef.current !== detailId || replyMsgRef.current.trim()) return false;
+          setReplyMsg(sentBody); setReplyCc(sentCc); setReplyBcc(sentBcc);
+          return true;
+        },
+      });
+      return;
+    }
     const now = new Date().toISOString();
     if (d.ok) {
       // Success: clear the composer + show a persistent "sent" confirmation on
@@ -1122,6 +1196,9 @@ export default function InboxPage() {
       setDetail((prev) => (prev && prev.id === detailId ? { ...prev, send_error: null, send_error_at: null, last_sent_at: now, sent_reply: sentBody } : prev));
       toast.success("Reply sent");
       loadSendHistory(detailId);
+    } else if (d.busy) {
+      // Another send to this lead is still going — nothing was sent now, the draft stays.
+      toast.warning(d.error || "A reply to this lead is being sent right now.");
     } else {
       // Failure: KEEP the draft (don't reload) and surface the error
       // persistently on the lead until the next successful send.
@@ -2111,7 +2188,8 @@ export default function InboxPage() {
                 <RecipientList label="BCC Recipients" value={replyBcc} onChange={setReplyBcc} max={2} addLabel="Add BCC" />
               </div>
               <div className="flex items-center gap-2">
-                <Button size="sm" className="h-8 text-xs" onClick={handleSend} disabled={sending === "reply" || !replyMsg}>{sending === "reply" ? "Sending..." : confirmInline === "reply" ? "Confirm & Send" : "Send Reply"}</Button>
+                <Button size="sm" className="h-8 text-xs" onClick={handleSend} disabled={sending === "reply" || sendingRows.has(detail.id) || !replyMsg}>{sending === "reply" || sendingRows.has(detail.id) ? "Sending..." : confirmInline === "reply" ? "Confirm & Send" : "Send Reply"}</Button>
+                {sendingRows.has(detail.id) && <span className="text-[11px] text-muted-foreground">Going out now — you can move on; you&apos;ll see when it&apos;s sent.</span>}
                 {confirmInline === "reply" && <button onClick={() => setConfirmInline(null)} className="text-[11px] text-muted-foreground hover:text-foreground">Cancel</button>}
                 {confirmInline === "reply" && <span className="text-[11px] text-amber-700">Sends to {detail.lead_email} — confirm?</span>}
               </div>
