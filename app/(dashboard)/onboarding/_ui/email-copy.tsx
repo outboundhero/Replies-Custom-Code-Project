@@ -2,10 +2,12 @@
 
 /**
  * Onboarding › Email copy — the master copy each client type's campaigns are
- * built from. Edit the emails, the days between them and how each one goes
- * out (a new thread, or a reply in the same thread); add, remove and reorder
- * emails; see a live preview; save as a new version with a note; look at or
- * restore any earlier version.
+ * built from, and the clients that have their own copy instead (e.g. extra
+ * lines for Canada). Edit the emails, the days between them and how each one
+ * goes out (a new thread, or a reply in the same thread); add, remove and
+ * reorder emails; see a live preview; save as a new version with a note; look
+ * at or restore any earlier version. A client's own copy can be compared with
+ * the shared one, and the page says when the shared copy has moved on.
  *
  * Text is Email Bison's own syntax (lib/onboarding/copy-model.ts), shown with
  * highlighting: {VARIABLES} blue, [[client fields]] violet, {spin|options}
@@ -14,9 +16,10 @@
  */
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
 import { toast } from "sonner";
+import { Popover as PopoverPrimitive } from "radix-ui";
 import {
-  AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Braces, Check, ChevronDown, CornerDownRight, FileText,
-  History, Loader2, Mail, Plus, RotateCcw, Save, Shuffle, SlidersHorizontal, Trash2, Undo2,
+  AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Braces, Check, ChevronDown, CircleCheck, CornerDownRight, FileText, GitCompareArrows,
+  History, Loader2, Mail, Plus, RotateCcw, Save, Search, Shuffle, SlidersHorizontal, Sparkles, Trash2, Undo2, UserRound, Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/components/session-provider";
@@ -24,28 +27,85 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
-  CLIENT_FIELDS, CLIENT_TYPES, KNOWN_VARIABLES, LIMITS, checkSequence, cleanSequence, countVariants, defaultStructure,
+  CLIENT_FIELDS, CLIENT_TYPES, KNOWN_VARIABLES, LIMITS, checkSequence, cleanSequence, countVariants, defaultStructure, isClientType, normClientTag,
   renderSpin, seeded, sendDays, subjectOf, threadStart, tokenize,
   type ClientTypeKey, type CopyStep, type StepIssue, type ThreadMode,
 } from "@/lib/onboarding/copy-model";
 
 // ─────────────────────────── types & helpers ───────────────────────────
 
-type VersionMeta = { id: string; clientType: ClientTypeKey; version: number; savedBy: string | null; savedAt: string; note: string | null };
-type Version = VersionMeta & { sequence: { steps: CopyStep[] } };
-type LibraryEntry = { type: ClientTypeKey; current: Version | null; versions: VersionMeta[] };
+type Mode = "custom" | "shared";
+/** One saved version — of a client type's shared copy, or of one client's own copy. */
+type Version = {
+  id: string; version: number; savedBy: string | null; savedAt: string; note: string | null;
+  clientType: ClientTypeKey;
+  /** A client's version can say "use the shared copy" (no emails). A type's is always "custom". */
+  mode: Mode;
+  /** A client's copy: the shared version it was made from or last checked against. */
+  basedOn: number | null;
+  sequence: { steps: CopyStep[] } | null;
+};
+type VersionMeta = Omit<Version, "sequence">;
+type Target = { kind: "type"; type: ClientTypeKey } | { kind: "client"; tag: string };
+/** Something the editor can open: a type's shared copy, or one client's own copy. */
+type Entry = {
+  key: string;
+  target: Target;
+  /** The emails in use (null: none yet, or a client that uses the shared copy). */
+  current: Version | null;
+  /** The newest version number — what a save must be based on. */
+  latest: number | null;
+  versions: VersionMeta[];
+  basedOn: number | null;
+  /** A type: itself. A client: the shared copy it follows / was made from. */
+  clientType: ClientTypeKey;
+};
 type EditStep = CopyStep & { uid: string };
-type Draft = { steps: EditStep[]; base: number | null };
-type Drafts = Partial<Record<ClientTypeKey, Draft>>;
+type Draft = { steps: EditStep[]; base: number | null; clientType: ClientTypeKey; basedOn: number | null };
+type Drafts = Record<string, Draft>;
+type PickClient = { tag: string; name: string | null };
 
 const API = "/api/onboarding/email-copy";
-const STORAGE_KEY = "onboarding-email-copy-drafts-v1";
+const STORAGE_KEY = "onboarding-email-copy-drafts-v2";
 
 let uidCounter = 0;
 const newUid = () => `e${++uidCounter}`;
 const toEdit = (steps: CopyStep[]): EditStep[] => steps.map((s) => ({ ...s, uid: newUid() }));
 const toPlain = (steps: EditStep[]): CopyStep[] => steps.map((s) => ({ waitDays: s.waitDays, thread: s.thread, subject: s.subject, body: s.body }));
-const fromVersion = (v: Version): Draft => ({ steps: toEdit(v.sequence.steps), base: v.version });
+const fromVersion = (v: Version, latest: number | null): Draft => ({ steps: toEdit(v.sequence?.steps ?? []), base: latest ?? v.version, clientType: v.clientType, basedOn: v.basedOn });
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- shapes straight from our own API */
+const asTypeVersion = (v: any): Version => ({
+  id: String(v.id), version: Number(v.version), savedBy: v.savedBy ?? null, savedAt: String(v.savedAt), note: v.note ?? null,
+  clientType: v.clientType, mode: "custom", basedOn: null, sequence: v.sequence ?? null,
+});
+const asClientVersion = (v: any): Version => ({
+  id: String(v.id), version: Number(v.version), savedBy: v.savedBy ?? null, savedAt: String(v.savedAt), note: v.note ?? null,
+  clientType: v.clientType, mode: v.mode === "shared" ? "shared" : "custom", basedOn: v.basedOn ?? null, sequence: v.sequence ?? null,
+});
+const metaOf = (v: Version): VersionMeta => ({ id: v.id, version: v.version, savedBy: v.savedBy, savedAt: v.savedAt, note: v.note, clientType: v.clientType, mode: v.mode, basedOn: v.basedOn });
+const emptyClientEntry = (tag: string): Entry => ({ key: `client:${tag}`, target: { kind: "client", tag }, current: null, latest: null, versions: [], basedOn: null, clientType: "cleaning" });
+
+/** The API's answer as editor entries: the four types, every client with a copy, and any client picked here. */
+function buildEntries(lib: any[], clients: any[], picked: string[]): Entry[] {
+  const types: Entry[] = lib.map((e) => {
+    const cur = e.current ? asTypeVersion(e.current) : null;
+    return {
+      key: `type:${e.type}`, target: { kind: "type", type: e.type }, current: cur, latest: cur?.version ?? null,
+      versions: (e.versions ?? []).map((v: any) => metaOf(asTypeVersion(v))), basedOn: null, clientType: e.type,
+    };
+  });
+  const own: Entry[] = clients.map((c) => {
+    const l = asClientVersion(c.latest);
+    return {
+      key: `client:${c.tag}`, target: { kind: "client", tag: c.tag }, current: l.mode === "custom" && l.sequence ? l : null, latest: l.version,
+      versions: (c.versions ?? []).map((v: any) => metaOf(asClientVersion(v))), basedOn: l.basedOn, clientType: l.clientType,
+    };
+  });
+  const have = new Set(own.map((e) => e.key));
+  return [...types, ...own, ...picked.filter((t) => !have.has(`client:${t}`)).map(emptyClientEntry)];
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /** The steps as the server will store them (mirrors cleanSequence), for "is anything changed?". */
 function canon(steps: CopyStep[]): string {
@@ -58,7 +118,7 @@ function canon(steps: CopyStep[]): string {
 }
 function isDirty(draft: Draft | null | undefined, current: Version | null): boolean {
   if (!draft) return false;
-  if (!current) return true;
+  if (!current?.sequence) return true;
   return canon(toPlain(draft.steps)) !== canon(current.sequence.steps);
 }
 
@@ -302,20 +362,20 @@ function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 }
 
 /** A button that asks once more ("Sure?") before doing something you can't undo. */
-function ConfirmButton({ onConfirm, children, confirmLabel, className, icon, size = "sm", title }: {
+function ConfirmButton({ onConfirm, children, confirmLabel, className, icon, size = "sm", title, disabled }: {
   onConfirm: () => void; children?: ReactNode; confirmLabel: string; className?: string; icon?: ReactNode;
-  size?: "sm" | "icon-sm"; title?: string;
+  size?: "sm" | "icon-sm"; title?: string; disabled?: boolean;
 }) {
   const [armed, setArmed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  return armed ? (
+  return armed && !disabled ? (
     <Button type="button" size="sm" variant="destructive" className={cn("h-8", className)}
       onClick={() => { if (timer.current) clearTimeout(timer.current); setArmed(false); onConfirm(); }}>
       {confirmLabel}
     </Button>
   ) : (
-    <Button type="button" size={size} variant="ghost" title={title} aria-label={title} className={className}
+    <Button type="button" size={size} variant="ghost" title={title} aria-label={title} className={className} disabled={disabled}
       onClick={() => { setArmed(true); timer.current = setTimeout(() => setArmed(false), 3500); }}>
       {icon}{children}
     </Button>
@@ -377,127 +437,162 @@ function useFollowScroll(col: RefObject<HTMLDivElement | null>, bound: RefObject
 
 // ─────────────────────────── the editor ───────────────────────────
 
-export function EmailCopyEditor({ active }: { active: boolean }) {
+const labelOf = (t: Target) => (t.kind === "type" ? typeShort(t.type) : t.tag);
+
+export function EmailCopyEditor({ active, clients: pickable, openClient }: {
+  active: boolean;
+  /** Onboarding clients — the ones that can be given their own copy. */
+  clients: PickClient[];
+  /** Open this client's copy first (from its page). */
+  openClient?: string | null;
+}) {
   const session = useSession();
   // Unsaved edits are kept per person in this browser.
   const storageKey = `${STORAGE_KEY}:${session?.email ?? "anon"}`;
-  const [library, setLibrary] = useState<LibraryEntry[] | null>(null);
+  const [entries, setEntries] = useState<Entry[] | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const [type, setType] = useState<ClientTypeKey>("cleaning");
+  const [targetKey, setTargetKey] = useState("type:cleaning");
   const [drafts, setDrafts] = useState<Drafts>({});
   const [selected, setSelected] = useState(0);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [saveOpen, setSaveOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const libraryRef = useRef<LibraryEntry[] | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [busy, setBusy] = useState<"use-shared" | "checked" | null>(null);
+  const entriesRef = useRef<Entry[] | null>(null);
+  // Clients opened here that have nothing saved yet (they still get a chip).
+  const pickedRef = useRef<string[]>([]);
   const restoredRef = useRef(false);
-  const loadingRef = useRef(false);
-  // Types this tab has changed — only these are written to (or cleared from) storage,
-  // so another tab's kept edits for other types are left alone.
-  const touchedRef = useRef(new Set<ClientTypeKey>());
+  // Each load (and each save applied here) takes a number; an answer that isn't the newest is ignored.
+  const seqRef = useRef(0);
+  const openClientRef = useRef(normClientTag(openClient));
+  // What this tab has changed — only these are written to (or cleared from) storage,
+  // so another tab's kept edits are left alone.
+  const touchedRef = useRef(new Set<string>());
   const rootRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async (reset?: ClientTypeKey) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
+  const putEntries = useCallback((list: Entry[]) => { entriesRef.current = list; setEntries(list); }, []);
+  const addPicked = useCallback((tag: string) => { if (!pickedRef.current.includes(tag)) pickedRef.current = [...pickedRef.current, tag]; }, []);
+
+  const load = useCallback(async (reset?: string) => {
+    const seq = ++seqRef.current;
     try {
       const r = await fetch(API, { cache: "no-store" });
       if (r.status === 401) { window.location.href = "/login"; return; }
       const j = await r.json().catch(() => null);
+      if (seq !== seqRef.current) return; // a newer load or a save happened meanwhile
       if (!r.ok || !j?.ok) { setLoadErr(j?.error ?? `Couldn't load the email copy (${r.status}).`); return; }
-      const lib = j.library as LibraryEntry[];
-      const prev = libraryRef.current;
-      libraryRef.current = lib;
-      setLoadErr(null);
-      setLibrary(lib);
+      const prev = entriesRef.current;
 
       if (!restoredRef.current) {
-        // First load: start from the saved copy, then put back any edits this
+        // First load: start from what's saved, then put back any edits this
         // browser kept. Edits made on an older version come back too, still
         // based on it — saving them then asks whether to replace the newer one.
         restoredRef.current = true;
-        let stored: Record<string, { base?: unknown; steps?: unknown }> = {};
+        let stored: Record<string, { base?: unknown; steps?: unknown; clientType?: unknown; basedOn?: unknown }> = {};
         try { const raw = JSON.parse(localStorage.getItem(storageKey) || "{}"); if (raw && typeof raw === "object") stored = raw; } catch { /* no storage */ }
+        for (const k of Object.keys(stored)) { const t = k.startsWith("client:") ? normClientTag(k.slice(7)) : null; if (t) addPicked(t); }
+        const want = openClientRef.current;
+        if (want) addPicked(want);
+        const list = buildEntries(j.library ?? [], j.clients ?? [], pickedRef.current);
+        putEntries(list);
+        setLoadErr(null);
         const next: Drafts = {};
         const restored: string[] = [], stale: string[] = [];
-        for (const e of lib) {
-          if (e.current) next[e.type] = fromVersion(e.current);
-          const s = stored[e.type];
+        for (const e of list) {
+          if (e.current) next[e.key] = fromVersion(e.current, e.latest);
+          const s = stored[e.key];
           const seq = s ? cleanSequence({ steps: s.steps }) : null;
           if (!s || !seq?.steps.length || seq.steps.length > LIMITS.maxSteps) continue;
-          if (e.current && canon(seq.steps) === canon(e.current.sequence.steps)) continue; // nothing left to save
+          if (e.current?.sequence && canon(seq.steps) === canon(e.current.sequence.steps)) continue; // nothing left to save
           const base = Number.isInteger(s.base) ? Number(s.base) : null;
-          next[e.type] = { steps: toEdit(seq.steps), base };
-          (base === (e.current?.version ?? null) ? restored : stale).push(typeShort(e.type));
+          next[e.key] = {
+            steps: toEdit(seq.steps), base,
+            clientType: e.target.kind === "type" ? e.target.type : isClientType(s.clientType) ? s.clientType : e.clientType,
+            basedOn: e.target.kind === "type" ? null : Number.isInteger(s.basedOn) ? Number(s.basedOn) : e.basedOn,
+          };
+          (base === e.latest ? restored : stale).push(labelOf(e.target));
         }
         setDrafts(next);
+        if (want) setTargetKey(`client:${want}`);
         if (restored.length) toast.info(`Your unsaved edits to the ${restored.join(" and ")} copy are back.`);
         if (stale.length) toast.warning(`Your unsaved edits to the ${stale.join(" and ")} copy are back, but someone saved a newer version since. Saving will ask whether to replace it.`, { duration: 10000 });
         return;
       }
 
+      const list = buildEntries(j.library ?? [], j.clients ?? [], pickedRef.current);
+      putEntries(list);
+      setLoadErr(null);
       setDrafts((d) => {
         const next = { ...d };
-        for (const e of lib) {
-          const mine = next[e.type];
-          const before = prev?.find((p) => p.type === e.type)?.current ?? null;
-          if (mine && e.type !== reset && isDirty(mine, before)) continue; // keep unsaved edits
-          if (e.current) next[e.type] = fromVersion(e.current); else delete next[e.type];
+        for (const e of list) {
+          const mine = next[e.key];
+          const before = prev?.find((p) => p.key === e.key)?.current ?? null;
+          if (mine && e.key !== reset && isDirty(mine, before)) continue; // keep unsaved edits
+          if (e.current) next[e.key] = fromVersion(e.current, e.latest); else delete next[e.key];
         }
         return next;
       });
     } catch (e) {
-      setLoadErr((e as Error).message || "Couldn't load the email copy.");
-    } finally {
-      loadingRef.current = false;
+      if (seq === seqRef.current) setLoadErr((e as Error).message || "Couldn't load the email copy.");
     }
-  }, [storageKey]);
+  }, [storageKey, putEntries, addPicked]);
 
-  useEffect(() => { if (active && !libraryRef.current) load(); }, [active, load]);
+  // Load when the tab is first shown, and refresh each time it's shown again (unsaved edits are kept).
+  useEffect(() => { if (active) load(); }, [active, load]);
 
   /** Put a version the server just saved straight into the page (no second request needed). */
-  const applyVersion = useCallback((t: ClientTypeKey, v: Version) => {
-    const meta: VersionMeta = { id: v.id, clientType: v.clientType, version: v.version, savedBy: v.savedBy, savedAt: v.savedAt, note: v.note };
-    const lib = (libraryRef.current ?? []).map((e) => (e.type === t ? { ...e, current: v, versions: [meta, ...e.versions.filter((x) => x.version !== v.version)] } : e));
-    libraryRef.current = lib;
-    setLibrary(lib);
-    touchedRef.current.add(t);
-    setDrafts((d) => ({ ...d, [t]: fromVersion(v) }));
-  }, []);
+  const applyVersion = useCallback((key: string, v: Version) => {
+    seqRef.current++; // an answer to a load sent before this save is out of date
+    putEntries((entriesRef.current ?? []).map((e) => (e.key !== key ? e : {
+      ...e,
+      current: v.mode === "custom" && v.sequence ? v : null,
+      latest: v.version,
+      basedOn: v.basedOn,
+      clientType: v.clientType,
+      versions: [metaOf(v), ...e.versions.filter((x) => x.version !== v.version)],
+    })));
+    touchedRef.current.add(key);
+    setDrafts((d) => {
+      const next = { ...d };
+      if (v.mode === "custom" && v.sequence) next[key] = fromVersion(v, v.version); else delete next[key];
+      return next;
+    });
+  }, [putEntries]);
 
-  const entry = library?.find((e) => e.type === type) ?? null;
+  const entry = entries?.find((e) => e.key === targetKey) ?? null;
+  const target: Target = entry?.target ?? { kind: "type", type: "cleaning" };
   const current = entry?.current ?? null;
-  const draft = drafts[type] ?? null;
+  const draft = drafts[targetKey] ?? null;
   const steps = useMemo(() => draft?.steps ?? [], [draft]);
   const plain = useMemo(() => toPlain(steps), [steps]);
   const check = useMemo(() => checkSequence({ steps: plain }), [plain]);
   const days = useMemo(() => sendDays({ steps: plain }), [plain]);
   const dirty = isDirty(draft, current);
-  const dirtyTypes = useMemo(
-    () => (library ?? []).filter((e) => isDirty(drafts[e.type], e.current)).map((e) => e.type),
-    [library, drafts],
-  );
-  const anyDirty = dirtyTypes.length > 0;
+  const dirtyKeys = useMemo(() => (entries ?? []).filter((e) => isDirty(drafts[e.key], e.current)).map((e) => e.key), [entries, drafts]);
+  const anyDirty = dirtyKeys.length > 0;
   const sel = Math.min(selected, Math.max(0, steps.length - 1));
-  useFollowScroll(previewRef, gridRef, `${library ? 1 : 0}-${draft ? type : "none"}`);
+  const nameByTag = useMemo(() => new Map(pickable.map((c) => [c.tag.toUpperCase(), c.name])), [pickable]);
+  const sharedOf = useCallback((t: ClientTypeKey) => entries?.find((e) => e.key === `type:${t}`)?.current ?? null, [entries]);
+  useFollowScroll(previewRef, gridRef, `${entries ? 1 : 0}-${draft ? targetKey : "none"}`);
 
   // Keep unsaved edits in this browser (and warn before leaving the page).
   useEffect(() => {
-    if (!library || !touchedRef.current.size) return;
+    if (!entries || !touchedRef.current.size) return;
     try {
       let kept: Record<string, unknown> = {};
       try { const raw = JSON.parse(localStorage.getItem(storageKey) || "{}"); if (raw && typeof raw === "object") kept = raw; } catch { /* unreadable → start over */ }
-      for (const t of touchedRef.current) {
-        const d = drafts[t], cur = library.find((e) => e.type === t)?.current ?? null;
-        if (d && isDirty(d, cur)) kept[t] = { base: d.base, steps: toPlain(d.steps) };
-        else delete kept[t];
+      for (const k of touchedRef.current) {
+        const d = drafts[k], cur = entries.find((e) => e.key === k)?.current ?? null;
+        if (d && isDirty(d, cur)) kept[k] = { base: d.base, steps: toPlain(d.steps), clientType: d.clientType, basedOn: d.basedOn };
+        else delete kept[k];
       }
       if (Object.keys(kept).length) localStorage.setItem(storageKey, JSON.stringify(kept));
       else localStorage.removeItem(storageKey);
     } catch { /* storage unavailable — edits still live in the page */ }
-  }, [library, drafts, storageKey]);
+  }, [entries, drafts, storageKey]);
   useEffect(() => {
     if (!anyDirty) return;
     const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
@@ -506,12 +601,12 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
   }, [anyDirty]);
 
   const setSteps = useCallback((fn: (s: EditStep[]) => EditStep[]) => {
-    touchedRef.current.add(type);
+    touchedRef.current.add(targetKey);
     setDrafts((d) => {
-      const cur = d[type];
-      return cur ? { ...d, [type]: { ...cur, steps: fn(cur.steps) } } : d;
+      const cur = d[targetKey];
+      return cur ? { ...d, [targetKey]: { ...cur, steps: fn(cur.steps) } } : d;
     });
-  }, [type]);
+  }, [targetKey]);
   const patchStep = useCallback((i: number, patch: Partial<CopyStep>) => {
     setSteps((s) => s.map((x, k) => (k === i ? { ...x, ...patch } : x)));
   }, [setSteps]);
@@ -524,16 +619,16 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
     }
   }, []);
 
-  const startDraft = (from: CopyStep[]) => {
-    touchedRef.current.add(type);
-    setDrafts((d) => ({ ...d, [type]: { steps: toEdit(from), base: current?.version ?? null } }));
+  const startDraft = (from: CopyStep[], clientType: ClientTypeKey, basedOn: number | null) => {
+    touchedRef.current.add(targetKey);
+    setDrafts((d) => ({ ...d, [targetKey]: { steps: toEdit(from), base: entry?.latest ?? null, clientType, basedOn } }));
     setSelected(0);
   };
   const discard = () => {
-    touchedRef.current.add(type);
+    touchedRef.current.add(targetKey);
     setDrafts((d) => {
       const next = { ...d };
-      if (current) next[type] = fromVersion(current); else delete next[type];
+      if (current) next[targetKey] = fromVersion(current, entry?.latest ?? null); else delete next[targetKey];
       return next;
     });
     setSelected(0);
@@ -544,6 +639,13 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
     const uid = newUid();
     setSteps((s) => [...s, { uid, waitDays: 3, thread: "reply", subject: null, body: "" }]);
     focusEmail(steps.length, uid);
+  };
+  const open = (key: string) => { setTargetKey(key); setSelected(0); };
+  const pickClient = (tag: string) => {
+    const t = tag.toUpperCase();
+    addPicked(t);
+    if (!(entriesRef.current ?? []).some((e) => e.key === `client:${t}`)) putEntries([...(entriesRef.current ?? []), emptyClientEntry(t)]);
+    open(`client:${t}`);
   };
 
   const requestSave = useCallback(() => {
@@ -573,9 +675,29 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const switchType = (k: ClientTypeKey) => { setType(k); setSelected(0); };
+  /** A client's "use the shared copy again" / "mark as checked". */
+  const clientAction = async (action: "use-shared" | "checked") => {
+    if (!entry || entry.target.kind !== "client") return;
+    const tag = entry.target.tag;
+    setBusy(action);
+    try {
+      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, client: tag, baseVersion: entry.latest }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok || !j.version) { toast.error(j.error ?? `Couldn't do that (${r.status}).`); if (r.status === 409) void load(); return; }
+      const v = asClientVersion(j.version);
+      applyVersion(entry.key, v);
+      toast.success(action === "use-shared"
+        ? `${tag} uses the shared ${typeShort(v.clientType)} copy again. Its own versions stay in the history.`
+        : `Noted: ${tag}'s copy was checked against the shared ${typeShort(v.clientType)} copy, version ${v.basedOn}.`);
+      void load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  if (!library) {
+  if (!entries) {
     return (
       <div ref={rootRef} className="space-y-4">
         {loadErr ? (
@@ -586,6 +708,7 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
         ) : (
           <>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">{CLIENT_TYPES.map((t) => <div key={t.key} className="h-[74px] animate-pulse rounded-xl border bg-muted/40" />)}</div>
+            <div className="h-[72px] animate-pulse rounded-xl border bg-muted/30" />
             <div className="grid gap-5 lg:grid-cols-12">
               <div className="space-y-3 lg:col-span-7">{[0, 1, 2].map((i) => <div key={i} className="h-48 animate-pulse rounded-xl border bg-muted/30" />)}</div>
               <div className="h-96 animate-pulse rounded-xl border bg-muted/30 lg:col-span-5" />
@@ -596,9 +719,18 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
     );
   }
 
-  const cleaningCurrent = library.find((e) => e.type === "cleaning")?.current ?? null;
+  const typeEntries = entries.filter((e) => e.target.kind === "type");
+  const clientEntries = entries.filter((e) => e.target.kind === "client");
+  const isClient = target.kind === "client";
+  const clientTag = target.kind === "client" ? target.tag : null;
+  const followType: ClientTypeKey = draft?.clientType ?? entry?.clientType ?? (target.kind === "type" ? target.type : "cleaning");
+  const sharedNow = sharedOf(followType);
+  const basedOnNow = draft?.basedOn ?? entry?.basedOn ?? null;
+  const sharedMoved = isClient && !!(current || draft) && !!sharedNow && basedOnNow != null && sharedNow.version > basedOnNow;
+  const cleaningCurrent = sharedOf("cleaning");
   const totalDays = days[days.length - 1] ?? 0;
   const threads = plain.filter((s, i) => i === 0 || s.thread === "new").length;
+  const title = target.kind === "type" ? `the ${typeLabel(target.type)} copy` : `${target.tag}'s copy`;
 
   return (
     <div ref={rootRef} className="space-y-5">
@@ -608,20 +740,22 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
           <Button size="sm" variant="outline" onClick={() => load()}><RotateCcw /> Try again</Button>
         </div>
       )}
-      {/* Client types — what each has, at a glance */}
+
+      {/* Shared copy per client type — what each has, at a glance */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        {library.map((e) => {
-          const isOn = e.type === type, isEdited = dirtyTypes.includes(e.type);
-          const n = e.current?.sequence.steps.length ?? 0;
+        {typeEntries.map((e) => {
+          const t = (e.target as { type: ClientTypeKey }).type;
+          const isOn = e.key === targetKey, isEdited = dirtyKeys.includes(e.key);
+          const n = e.current?.sequence?.steps.length ?? 0;
           return (
-            <button key={e.type} type="button" onClick={() => switchType(e.type)} aria-pressed={isOn}
+            <button key={e.key} type="button" onClick={() => open(e.key)} aria-pressed={isOn}
               className={cn(
                 "group relative rounded-xl border bg-card px-4 py-3 text-left transition-all outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
                 isOn ? "border-foreground/25 shadow-sm ring-1 ring-foreground/10" : "hover:border-foreground/15 hover:bg-accent/30",
               )}>
               <div className="flex items-center gap-2">
                 <span className={cn("size-2 rounded-full", isEdited ? "bg-amber-500" : e.current ? "bg-emerald-500" : "bg-muted-foreground/30")} />
-                <span className="text-sm font-medium">{typeLabel(e.type)}</span>
+                <span className="text-sm font-medium">{typeLabel(t)}</span>
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
                 {isEdited ? <span className="text-amber-600 dark:text-amber-400">Unsaved changes</span>
@@ -634,17 +768,32 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
         })}
       </div>
 
-      {type === "os" && (
+      <ClientCopiesCard entries={clientEntries} selectedKey={targetKey} dirtyKeys={dirtyKeys} names={nameByTag}
+        sharedVersion={(t) => sharedOf(t)?.version ?? null} pickable={pickable} onOpen={open} onPick={pickClient} />
+
+      {target.kind === "type" && target.type === "os" && (
         <div className="flex items-start gap-2.5 rounded-xl border border-sky-500/20 bg-sky-500/[0.04] px-4 py-3 text-sm text-muted-foreground">
           <AlertCircle className="mt-0.5 size-4 shrink-0 text-sky-600 dark:text-sky-400" />
           <span>OS clients&apos; campaigns are set up by hand. This copy is kept here so it can be edited in one place for every OS client.</span>
         </div>
       )}
 
+      {isClient && clientTag && (draft || current) && (
+        <ClientHeader tag={clientTag} name={nameByTag.get(clientTag) ?? null} followType={followType}
+          own={!!current} dirty={dirty} basedOn={basedOnNow} sharedNow={sharedNow?.version ?? null} sharedMoved={sharedMoved} busy={busy}
+          onCompare={() => setCompareOpen(true)} onChecked={() => clientAction("checked")} onUseShared={() => clientAction("use-shared")} />
+      )}
+
       {!draft ? (
-        <EmptyCopy label={typeLabel(type)} who={`${typeShort(type)} clients`} hasCleaning={!!cleaningCurrent && type !== "cleaning"}
-          onFromCleaning={() => cleaningCurrent && startDraft(cleaningCurrent.sequence.steps)}
-          onBlank={() => startDraft(defaultStructure())} />
+        isClient && clientTag ? (
+          <ClientEmpty key={clientTag} tag={clientTag} name={nameByTag.get(clientTag) ?? null} typeEntries={typeEntries} defaultType={entry?.clientType ?? "cleaning"}
+            hadOwn={(entry?.versions.length ?? 0) > 0} onHistory={() => setHistoryOpen(true)}
+            onStart={(t) => { const s = sharedOf(t); if (s?.sequence) startDraft(s.sequence.steps, t, s.version); }} />
+        ) : (
+          <EmptyCopy label={typeLabel(followType)} who={`${typeShort(followType)} clients`} hasCleaning={!!cleaningCurrent && followType !== "cleaning"}
+            onFromCleaning={() => cleaningCurrent?.sequence && startDraft(cleaningCurrent.sequence.steps, followType, null)}
+            onBlank={() => startDraft(defaultStructure(), followType, null)} />
+        )
       ) : (
         <>
           {/* Toolbar: what's in use, and the actions */}
@@ -656,6 +805,8 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
                   <span className="mx-1.5 text-muted-foreground/50">·</span>{savedLine(current.savedBy, current.savedAt)}
                   {current.note && <><span className="mx-1.5 text-muted-foreground/50">·</span><span className="italic">“{current.note}”</span></>}
                 </span>
+              ) : isClient ? (
+                <span><span className="font-medium text-foreground">Not saved yet</span> — {clientTag}&apos;s campaigns still use the shared {typeShort(followType)} copy.</span>
               ) : (
                 <span><span className="font-medium text-foreground">New copy</span> — not saved yet, so no campaign uses it.</span>
               )}
@@ -725,27 +876,45 @@ export function EmailCopyEditor({ active }: { active: boolean }) {
 
             {/* Preview */}
             <div ref={previewRef} className="will-change-transform lg:col-span-5">
-              <PreviewPanel steps={plain} days={days} selected={sel} onPick={(i) => focusEmail(i, steps[i]?.uid)} />
+              <PreviewPanel steps={plain} days={days} selected={sel} onPick={(i) => focusEmail(i, steps[i]?.uid)}
+                companyName={clientTag ? nameByTag.get(clientTag) ?? null : null} />
             </div>
           </div>
         </>
       )}
 
-      {draft && (
-        <SaveDialog open={saveOpen} onOpenChange={setSaveOpen} label={typeLabel(type)} type={type}
-          steps={plain} base={draft.base} nextVersion={(current?.version ?? 0) + 1} days={totalDays}
-          warnings={check.warnings.length}
-          onSaved={(v) => { applyVersion(type, v); void load(); }}
-          onReloadNewest={async () => { await load(type); }}
+      {draft && entry && (
+        <SaveDialog key={`save-${targetKey}`} open={saveOpen} onOpenChange={setSaveOpen}
+          title={`Save ${title}`}
+          description={`Saved as version ${(entry.latest ?? 0) + 1}: ${plural(steps.length, "email")} over ${plural(totalDays, "day")}. ${isClient
+            ? `${clientTag}'s campaigns made from now on use it instead of the shared ${typeShort(followType)} copy.`
+            : "Campaigns made from now on use it."} Campaigns that already exist are not changed.`}
+          nextVersion={(entry.latest ?? 0) + 1} warnings={check.warnings.length}
+          body={(note) => (target.kind === "type"
+            ? { action: "save", type: target.type, steps: plain, note, baseVersion: draft.base }
+            : { action: "save", client: target.tag, type: draft.clientType, steps: plain, note, baseVersion: draft.base, basedOn: draft.basedOn })}
+          onSaved={(raw) => { applyVersion(targetKey, target.kind === "type" ? asTypeVersion(raw) : asClientVersion(raw)); void load(); }}
+          onReloadNewest={async () => { await load(targetKey); }}
           onKeepMine={async (latest) => {
             await load();
-            touchedRef.current.add(type);
-            setDrafts((d) => (d[type] ? { ...d, [type]: { ...d[type]!, base: latest } } : d));
+            touchedRef.current.add(targetKey);
+            setDrafts((d) => (d[targetKey] ? { ...d, [targetKey]: { ...d[targetKey], base: latest } } : d));
           }} />
       )}
       {entry && (
-        <HistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} entry={entry} dirty={dirty}
-          onRestored={(v) => { applyVersion(type, v); setSelected(0); void load(); }} />
+        <HistoryDialog key={`history-${targetKey}`} open={historyOpen} onOpenChange={setHistoryOpen}
+          title={target.kind === "type" ? `${typeLabel(target.type)} copy — history` : `${target.tag}'s copy — history`}
+          versions={entry.versions} current={current} latest={entry.latest} dirty={dirty}
+          sharedText={(v) => `From version ${v.version}, ${clientTag} used the shared ${typeShort(v.clientType)} copy again.`}
+          versionBody={(v) => (target.kind === "type" ? { action: "version", type: target.type, version: v } : { action: "version", client: target.tag, version: v })}
+          restoreBody={(v) => (target.kind === "type" ? { action: "restore", type: target.type, version: v, baseVersion: entry.latest } : { action: "restore", client: target.tag, version: v, baseVersion: entry.latest })}
+          parse={target.kind === "type" ? asTypeVersion : asClientVersion}
+          onRestored={(v) => { applyVersion(targetKey, v); setSelected(0); void load(); }}
+          onConflict={() => { void load(); }} />
+      )}
+      {isClient && clientTag && (
+        <CompareDialog open={compareOpen} onOpenChange={setCompareOpen} tag={clientTag} typeName={typeShort(followType)}
+          shared={sharedNow} mine={draft ? plain : current?.sequence?.steps ?? []} unsaved={dirty} />
       )}
     </div>
   );
@@ -993,10 +1162,14 @@ function InsertBar({ onInsert }: { onInsert: (snippet: string, spin?: boolean) =
   );
 }
 
-function PreviewPanel({ steps, days, selected, onPick }: { steps: CopyStep[]; days: number[]; selected: number; onPick: (i: number) => void }) {
+function PreviewPanel({ steps, days, selected, onPick, companyName }: {
+  steps: CopyStep[]; days: number[]; selected: number; onPick: (i: number) => void; companyName?: string | null;
+}) {
   const [seed, setSeed] = useState(1);
   const [filled, setFilled] = useState(true);
-  const [sample, setSample] = useState<Sample>(DEFAULT_SAMPLE);
+  const [edited, setSample] = useState<Sample>(DEFAULT_SAMPLE);
+  // A client's own copy previews with its company name (unless it was typed over).
+  const sample = useMemo(() => (companyName && edited.COMPANY_NAME === DEFAULT_SAMPLE.COMPANY_NAME ? { ...edited, COMPANY_NAME: companyName } : edited), [edited, companyName]);
   const [showSample, setShowSample] = useState(false);
   const step = steps[selected];
   const seq = useMemo(() => ({ steps }), [steps]);
@@ -1080,10 +1253,352 @@ function PreviewPanel({ steps, days, selected, onPick }: { steps: CopyStep[]; da
   );
 }
 
-function SaveDialog({ open, onOpenChange, label, type, steps, base, nextVersion, days, warnings, onSaved, onReloadNewest, onKeepMine }: {
-  open: boolean; onOpenChange: (v: boolean) => void; label: string; type: ClientTypeKey; steps: CopyStep[]; base: number | null;
-  nextVersion: number; days: number; warnings: number; onSaved: (v: Version) => void;
-  onReloadNewest: () => Promise<void>; onKeepMine: (latest: number | null) => Promise<void>;
+// ─────────────────────────── a client's own copy ───────────────────────────
+
+function TagPill({ tag, className }: { tag: string; className?: string }) {
+  return <span className={cn("inline-flex h-5 items-center rounded-md border bg-background px-1.5 font-mono text-[11px] font-semibold tracking-tight", className)}>{tag}</span>;
+}
+
+/** Clients with their own copy, and the way to give one to another client. */
+function ClientCopiesCard({ entries, selectedKey, dirtyKeys, names, sharedVersion, pickable, onOpen, onPick }: {
+  entries: Entry[]; selectedKey: string; dirtyKeys: string[]; names: Map<string, string | null>;
+  sharedVersion: (t: ClientTypeKey) => number | null; pickable: PickClient[];
+  onOpen: (key: string) => void; onPick: (tag: string) => void;
+}) {
+  const taken = new Set(entries.map((e) => (e.target as { tag: string }).tag));
+  return (
+    <div className="rounded-xl border bg-card px-4 py-3.5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg border bg-background"><Users className="size-4 text-muted-foreground" /></div>
+          <div className="min-w-0">
+            <div className="text-sm font-medium">Client copies</div>
+            <div className="text-xs text-muted-foreground">A client that needs something different — like the extra lines a Canadian client needs — gets its own copy. Its campaigns use it instead of the shared one.</div>
+          </div>
+        </div>
+        <ClientPicker pickable={pickable} taken={taken} onPick={onPick} />
+      </div>
+      {entries.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
+          {entries.map((e) => {
+            const tag = (e.target as { tag: string }).tag;
+            const isOn = e.key === selectedKey, edited = dirtyKeys.includes(e.key);
+            const sv = sharedVersion(e.clientType);
+            const moved = !!e.current && e.basedOn != null && sv != null && sv > e.basedOn;
+            const state = edited ? "Unsaved changes" : e.current ? `Own copy · ${typeShort(e.clientType)}` : e.versions.length ? "Back on the shared copy" : "Not customized yet";
+            return (
+              <button key={e.key} type="button" onClick={() => onOpen(e.key)} aria-pressed={isOn} title={names.get(tag) ?? undefined}
+                className={cn(
+                  "group inline-flex items-center gap-2.5 rounded-lg border px-2.5 py-1.5 text-left transition-all outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40",
+                  isOn ? "border-foreground/25 bg-accent/40 shadow-sm ring-1 ring-foreground/10" : "bg-background hover:border-foreground/15 hover:bg-accent/30",
+                )}>
+                <span className={cn("size-2 shrink-0 rounded-full", edited ? "bg-amber-500" : e.current ? "bg-violet-500" : "bg-muted-foreground/30")} />
+                <span className="font-mono text-xs font-semibold">{tag}</span>
+                <span className={cn("text-xs", edited ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>{state}</span>
+                {moved && !edited && <span title="The shared copy changed since this was made"><AlertTriangle className="size-3.5 text-amber-500" /></span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientPicker({ pickable, taken, onPick }: { pickable: PickClient[]; taken: Set<string>; onPick: (tag: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const list = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    return [...pickable]
+      .sort((a, b) => a.tag.localeCompare(b.tag))
+      .filter((c) => !s || c.tag.toLowerCase().includes(s) || (c.name ?? "").toLowerCase().includes(s))
+      .slice(0, 60);
+  }, [pickable, q]);
+  const pick = (tag: string) => { setOpen(false); onPick(tag); };
+  return (
+    <PopoverPrimitive.Root open={open} onOpenChange={(v) => { setOpen(v); if (v) setQ(""); }}>
+      <PopoverPrimitive.Trigger asChild>
+        <Button size="sm" variant="outline"><Plus /> Customize a client</Button>
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal>
+        <PopoverPrimitive.Content align="end" sideOffset={6}
+          className="z-50 w-80 overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-lg outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95">
+          <div className="border-b p-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find an onboarding client…" className="h-8 pl-8 text-sm"
+                onKeyDown={(e) => { if (e.key === "Enter" && list[0]) { e.preventDefault(); pick(list[0].tag); } }} />
+            </div>
+          </div>
+          <div className="max-h-72 overflow-auto p-1">
+            {list.length === 0 ? (
+              <div className="px-3 py-6 text-center text-sm text-muted-foreground">No onboarding client matches.</div>
+            ) : list.map((c) => (
+              <button key={c.tag} type="button" onClick={() => pick(c.tag)}
+                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none">
+                <TagPill tag={c.tag} />
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">{c.name || "—"}</span>
+                {taken.has(c.tag.toUpperCase()) && <span className="shrink-0 text-[11px] text-violet-600 dark:text-violet-400">has a copy</span>}
+              </button>
+            ))}
+          </div>
+          <div className="border-t bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">Clients on the onboarding checklist — their campaigns are the ones built from this copy.</div>
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
+  );
+}
+
+function ClientHeader({ tag, name, followType, own, dirty, basedOn, sharedNow, sharedMoved, busy, onCompare, onChecked, onUseShared }: {
+  tag: string; name: string | null; followType: ClientTypeKey; own: boolean; dirty: boolean;
+  basedOn: number | null; sharedNow: number | null; sharedMoved: boolean; busy: "use-shared" | "checked" | null;
+  onCompare: () => void; onChecked: () => void; onUseShared: () => void;
+}) {
+  const t = typeShort(followType);
+  return (
+    <div className="overflow-hidden rounded-xl border bg-card">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-violet-500/10 text-violet-700 dark:text-violet-300"><UserRound className="size-4" /></div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <TagPill tag={tag} />
+              {name && <span className="truncate text-sm font-medium">{name}</span>}
+              <span className={cn(
+                "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                own ? "bg-violet-500/10 text-violet-700 dark:text-violet-300" : "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+              )}>{own ? "Own copy" : "New — not saved"}</span>
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {own ? <>Its campaigns use this copy instead of the shared {t} copy</> : <>Until it&apos;s saved, its campaigns use the shared {t} copy</>}
+              {basedOn != null && <> · made from the shared copy&apos;s version {basedOn}</>}
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button size="sm" variant="outline" onClick={onCompare} disabled={!sharedNow}><GitCompareArrows /> Compare with shared</Button>
+          {own && (
+            <ConfirmButton onConfirm={onUseShared} confirmLabel="Use the shared copy?" icon={busy === "use-shared" ? <Loader2 className="animate-spin" /> : <Undo2 />}
+              disabled={dirty || busy !== null} title={dirty ? "Save or discard your changes first" : `Go back to the shared ${t} copy (this copy stays in the history)`}>
+              Use shared copy
+            </ConfirmButton>
+          )}
+        </div>
+      </div>
+      {sharedMoved && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-500/20 bg-amber-500/[0.06] px-4 py-2.5">
+          <div className="flex min-w-0 items-start gap-2 text-sm">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span>
+              The shared {t} copy has changed since this copy was made <span className="text-muted-foreground">(version {basedOn} → {sharedNow})</span>.
+              {" "}{tag} keeps its own emails — compare them and bring over anything it should have too.
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button size="sm" variant="outline" onClick={onCompare}><GitCompareArrows /> Compare</Button>
+            {own && (
+              <Button size="sm" variant="outline" onClick={onChecked} disabled={dirty || busy !== null} title={dirty ? "Save or discard your changes first" : undefined}>
+                {busy === "checked" ? <Loader2 className="animate-spin" /> : <CircleCheck />} Mark as checked
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientEmpty({ tag, name, typeEntries, defaultType, hadOwn, onStart, onHistory }: {
+  tag: string; name: string | null; typeEntries: Entry[]; defaultType: ClientTypeKey; hadOwn: boolean;
+  onStart: (t: ClientTypeKey) => void; onHistory: () => void;
+}) {
+  const withCopy = typeEntries.filter((e) => e.current).map((e) => (e.target as { type: ClientTypeKey }).type);
+  const [from, setFrom] = useState<ClientTypeKey>(withCopy.includes(defaultType) ? defaultType : withCopy[0] ?? defaultType);
+  const fromEntry = typeEntries.find((e) => e.key === `type:${from}`);
+  return (
+    <div className="rounded-2xl border border-dashed bg-card/50 px-6 py-12 text-center">
+      <div className="mx-auto grid size-12 place-items-center rounded-2xl border bg-background shadow-xs">
+        <UserRound className="size-5 text-muted-foreground" />
+      </div>
+      <h3 className="mt-4 flex items-center justify-center gap-2 text-base font-semibold tracking-tight">
+        <TagPill tag={tag} /> uses the shared copy
+      </h3>
+      {name && <div className="mt-1 text-sm text-muted-foreground">{name}</div>}
+      <p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">
+        Its campaigns are built from the shared copy for its client type. Give it its own version when it needs something different —
+        it starts as a copy of the shared emails, and later changes to the shared copy won&apos;t touch it.
+      </p>
+      {withCopy.length === 0 ? (
+        <p className="mt-6 text-sm text-muted-foreground">No client type has a shared copy yet — write one first.</p>
+      ) : (
+        <div className="mt-6 flex flex-col items-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground">
+            <span>Start from</span>
+            <Segmented<ClientTypeKey> size="xs" value={from} onChange={setFrom}
+              options={withCopy.map((t) => ({ value: t, label: typeShort(t) }))} />
+            {fromEntry?.current && <span className="tabular-nums">version {fromEntry.current.version}</span>}
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Button onClick={() => onStart(from)}><Sparkles /> Customize for {tag}</Button>
+            {hadOwn && <Button variant="outline" onClick={onHistory}><History /> Earlier versions</Button>}
+          </div>
+        </div>
+      )}
+      <p className="mt-4 text-xs text-muted-foreground">Nothing changes until you save.</p>
+    </div>
+  );
+}
+
+/** One client's emails next to the shared copy, email by email, with the lines that differ marked. */
+function CompareDialog({ open, onOpenChange, tag, typeName, shared, mine, unsaved }: {
+  open: boolean; onOpenChange: (v: boolean) => void; tag: string; typeName: string;
+  shared: Version | null; mine: CopyStep[]; unsaved: boolean;
+}) {
+  const [onlyDiff, setOnlyDiff] = useState(true);
+  const [full, setFull] = useState(false);
+  const left = useMemo(() => shared?.sequence?.steps ?? [], [shared]);
+  const rows = useMemo(() => {
+    const n = Math.max(left.length, mine.length);
+    const lDays = sendDays({ steps: left }), rDays = sendDays({ steps: mine });
+    const body = (x: CopyStep) => x.body.replace(/\r\n|\r/g, "\n");
+    return Array.from({ length: n }, (_, i) => {
+      const a = left[i], b = mine[i];
+      const aSubj = a ? subjectOf({ steps: left }, i) : "", bSubj = b ? subjectOf({ steps: mine }, i) : "";
+      // Same = same text, subject, wait and threading (email 1 always starts the thread).
+      const same = !!a && !!b && body(a) === body(b) && aSubj === bSubj && (i === 0 || (a.waitDays === b.waitDays && a.thread === b.thread));
+      const marks = a && b ? diffLines(body(a).split("\n"), body(b).split("\n")) : null;
+      return { i, a, b, same, aDay: lDays[i], bDay: rDays[i], aSubj, bSubj, markA: marks?.a ?? null, markB: marks?.b ?? null };
+    });
+  }, [left, mine]);
+  const diffCount = rows.filter((r) => !r.same).length;
+  const shown = onlyDiff ? rows.filter((r) => !r.same) : rows;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="gap-0 p-0 sm:max-w-6xl">
+        <DialogHeader className="border-b px-6 py-4">
+          <DialogTitle className="flex items-center gap-2"><GitCompareArrows className="size-4" /> {tag} next to the shared {typeName} copy</DialogTitle>
+          <DialogDescription>
+            {diffCount === 0 ? "Every email is the same as the shared copy." : `${plural(diffCount, "email")} ${diffCount === 1 ? "differs" : "differ"} — changed lines are marked${full ? "" : ", the rest is folded away"}.`}
+            {unsaved && " Showing your unsaved edits."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 border-b bg-muted/30 text-xs font-medium text-muted-foreground">
+          <div className="px-6 py-2">Shared {typeName} copy{shared ? ` · version ${shared.version}` : ""}</div>
+          <div className="border-l px-6 py-2">{tag}&apos;s copy</div>
+        </div>
+        <div className="max-h-[64vh] overflow-auto">
+          {shown.length === 0 ? (
+            <div className="px-6 py-16 text-center text-sm text-muted-foreground">Nothing differs.</div>
+          ) : shown.map((r) => (
+            <div key={r.i} className="border-b last:border-b-0">
+              <div className="flex items-center gap-2 px-6 pt-3 text-xs">
+                <span className="font-semibold">Email {r.i + 1}</span>
+                <span className={cn(
+                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  r.same ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                    : !r.a ? "bg-violet-500/10 text-violet-700 dark:text-violet-300"
+                    : !r.b ? "bg-muted text-muted-foreground"
+                    : "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+                )}>{r.same ? "Same" : !r.a ? `Only in ${tag}'s` : !r.b ? `Not in ${tag}'s` : "Different"}</span>
+              </div>
+              <div className="grid grid-cols-2">
+                <CompareSide step={r.a} index={r.i} day={r.aDay} subject={r.aSubj} other={r.b} otherSubject={r.bSubj} marked={r.markA} fold={!full} sameAs="the shared copy" />
+                <div className="border-l"><CompareSide step={r.b} index={r.i} day={r.bDay} subject={r.bSubj} other={r.a} otherSubject={r.aSubj} marked={r.markB} fold={!full} sameAs={`${tag}'s`} /></div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <DialogFooter className="flex-row items-center justify-between border-t px-6 py-3 sm:justify-between">
+          <div className="flex flex-wrap items-center gap-5">
+            <Switch checked={onlyDiff} onChange={setOnlyDiff} label="Only the emails that differ" />
+            <Switch checked={full} onChange={setFull} label="Full emails" />
+          </div>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Which lines differ between two texts, by position (a longest-common-subsequence
+ * diff): moved, repeated and blank lines count too, not just lines missing from the other side.
+ */
+function diffLines(a: string[], b: string[]): { a: boolean[]; b: boolean[] } {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ma = new Array<boolean>(n).fill(true), mb = new Array<boolean>(m).fill(true);
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (a[i] === b[j]) { ma[i] = false; mb[j] = false; i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  return { a: ma, b: mb };
+}
+
+/** Which lines to show when folding: the marked ones with `context` lines around them; the rest become gaps. */
+function foldLines(marked: boolean[], context = 2): ({ kind: "line"; i: number } | { kind: "gap"; count: number })[] {
+  const keep = marked.map(() => false);
+  marked.forEach((m, i) => { if (m) for (let k = Math.max(0, i - context); k <= Math.min(marked.length - 1, i + context); k++) keep[k] = true; });
+  const out: ({ kind: "line"; i: number } | { kind: "gap"; count: number })[] = [];
+  let gap = 0;
+  keep.forEach((k, i) => {
+    if (!k) { gap++; return; }
+    if (gap) { out.push({ kind: "gap", count: gap }); gap = 0; }
+    out.push({ kind: "line", i });
+  });
+  if (gap) out.push({ kind: "gap", count: gap });
+  return out;
+}
+
+function CompareSide({ step, index, day, subject, other, otherSubject, marked: given, fold, sameAs }: {
+  step: CopyStep | undefined; index: number; day: number | undefined; subject: string; other: CopyStep | undefined; otherSubject: string;
+  marked: boolean[] | null; fold: boolean; sameAs: string;
+}) {
+  if (!step) return <div className="px-6 py-4 text-sm italic text-muted-foreground">No email {index + 1}.</div>;
+  const lines = step.body.replace(/\r\n|\r/g, "\n").split("\n");
+  const marked = given ?? lines.map(() => false);
+  // Fold only when there's something to compare against; an email the other side doesn't have is shown whole.
+  const parts = fold && other ? foldLines(marked) : lines.map((_, i) => ({ kind: "line" as const, i }));
+  const how = index === 0 ? "starts the thread" : step.thread === "reply" ? `reply, +${step.waitDays}d` : `new thread, +${step.waitDays}d`;
+  const howOther = !other ? null : index === 0 ? "starts the thread" : other.thread === "reply" ? `reply, +${other.waitDays}d` : `new thread, +${other.waitDays}d`;
+  const subjectDiffers = !!other && otherSubject !== subject;
+  const mark = "rounded-[4px] bg-amber-400/15 ring-1 ring-inset ring-amber-500/20";
+  return (
+    <div className="space-y-2 px-6 py-3">
+      <div className={cn("inline-block px-1 text-[11px] text-muted-foreground", howOther !== null && howOther !== how && mark)}>Day {day} · {how}</div>
+      {fold && other && !subjectDiffers ? (
+        <div className="text-[11px] text-muted-foreground">{step.thread === "reply" && index > 0 ? "Re: subject" : "Subject"} — same as {sameAs}</div>
+      ) : (
+        <div className={cn("font-mono text-[12px] leading-[1.7]", subjectDiffers && mark)}>
+          <span className="mr-2 font-sans text-[11px] text-muted-foreground">{step.thread === "reply" && index > 0 ? "Re:" : "Subject"}</span>
+          <Highlighted text={subject} />
+        </div>
+      )}
+      <div className="whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[12px] leading-[1.7]">
+        {parts.map((p, k) => p.kind === "gap" ? (
+          <div key={`g${k}`} className="my-1.5 flex items-center gap-2 font-sans text-[11px] text-muted-foreground">
+            <span className="h-px flex-1 bg-border" />{plural(p.count, "line")} unchanged<span className="h-px flex-1 bg-border" />
+          </div>
+        ) : (
+          <div key={p.i} className={cn("-mx-1 px-1", marked[p.i] && mark)}>
+            {lines[p.i] ? <Highlighted text={lines[p.i]} /> : "\u200b"}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────── save & history ───────────────────────────
+
+function SaveDialog({ open, onOpenChange, title, description, nextVersion, warnings, body, onSaved, onReloadNewest, onKeepMine }: {
+  open: boolean; onOpenChange: (v: boolean) => void; title: string; description: string; nextVersion: number; warnings: number;
+  body: (note: string) => Record<string, unknown>;
+  onSaved: (raw: unknown) => void; onReloadNewest: () => Promise<void>; onKeepMine: (latest: number | null) => Promise<void>;
 }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1092,12 +1607,12 @@ function SaveDialog({ open, onOpenChange, label, type, steps, base, nextVersion,
   const save = async () => {
     setBusy(true);
     try {
-      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", type, steps, note, baseVersion: base }) });
+      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body(note)) });
       const j = await r.json().catch(() => ({}));
       if (r.status === 409) { setConflict({ message: j.error ?? "Someone else saved this copy meanwhile.", latest: typeof j.current === "number" ? j.current : null }); return; }
       if (!r.ok || !j.ok || !j.version) { toast.error(j.error ?? `Couldn't save (${r.status}).`); return; }
-      onSaved(j.version as Version);
-      toast.success(`Saved — version ${j.version?.version ?? nextVersion} of the ${label} copy is now in use.`);
+      onSaved(j.version);
+      toast.success(`Saved — version ${j.version.version} is now in use.`);
       setNote("");
       onOpenChange(false);
     } catch (e) {
@@ -1111,10 +1626,8 @@ function SaveDialog({ open, onOpenChange, label, type, steps, base, nextVersion,
     <Dialog open={open} onOpenChange={(v) => { if (!busy) { onOpenChange(v); if (!v) setConflict(null); } }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Save the {label} copy</DialogTitle>
-          <DialogDescription>
-            Saved as version {nextVersion}: {plural(steps.length, "email")} over {plural(days, "day")}. Campaigns made from now on use it; campaigns that already exist are not changed.
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         {conflict ? (
           <div className="space-y-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
@@ -1155,24 +1668,31 @@ function SaveDialog({ open, onOpenChange, label, type, steps, base, nextVersion,
   );
 }
 
-function HistoryDialog({ open, onOpenChange, entry, dirty, onRestored }: {
-  open: boolean; onOpenChange: (v: boolean) => void; entry: LibraryEntry; dirty: boolean; onRestored: (v: Version) => void;
+function HistoryDialog({ open, onOpenChange, title, versions, current, latest, dirty, sharedText, versionBody, restoreBody, parse, onRestored, onConflict }: {
+  open: boolean; onOpenChange: (v: boolean) => void; title: string;
+  versions: VersionMeta[]; current: Version | null; latest: number | null; dirty: boolean;
+  sharedText: (v: VersionMeta) => string;
+  versionBody: (v: number) => Record<string, unknown>; restoreBody: (v: number) => Record<string, unknown>;
+  parse: (raw: unknown) => Version; onRestored: (v: Version) => void; onConflict: () => void;
 }) {
   const [picked, setPicked] = useState<number | null>(null);
   const [loaded, setLoaded] = useState<Record<number, Version>>({});
   const [busy, setBusy] = useState(false);
-  const currentVersion = entry.current?.version ?? null;
-  const shown = picked ?? currentVersion;
-  const version = shown == null ? null : shown === currentVersion ? entry.current : loaded[shown] ?? null;
+  const shown = picked ?? latest;
+  const meta = versions.find((v) => v.version === shown) ?? null;
+  // An older "use the shared copy" version means nothing while the client already uses the shared copy.
+  const alreadyShared = meta?.mode === "shared" && !current;
+  const version = shown == null ? null : current && current.version === shown ? current : loaded[shown] ?? null;
 
   const pick = async (v: number) => {
     setPicked(v);
-    if (v === currentVersion || loaded[v]) return;
+    const m = versions.find((x) => x.version === v);
+    if (m?.mode === "shared" || (current && current.version === v) || loaded[v]) return;
     try {
-      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "version", type: entry.type, version: v }) });
+      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(versionBody(v)) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) { toast.error(j.error ?? "Couldn't load that version."); return; }
-      setLoaded((m) => ({ ...m, [v]: j.version as Version }));
+      setLoaded((all) => ({ ...all, [v]: parse(j.version) }));
     } catch (e) { toast.error((e as Error).message); }
   };
 
@@ -1180,11 +1700,12 @@ function HistoryDialog({ open, onOpenChange, entry, dirty, onRestored }: {
     if (shown == null) return;
     setBusy(true);
     try {
-      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "restore", type: entry.type, version: shown, baseVersion: currentVersion }) });
+      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(restoreBody(shown)) });
       const j = await r.json().catch(() => ({}));
+      if (r.status === 409) { toast.error(`${j.error ?? "Someone saved meanwhile."} The list is up to date now — pick the version again.`); onConflict(); setPicked(null); onOpenChange(false); return; }
       if (!r.ok || !j.ok || !j.version) { toast.error(j.error ?? `Couldn't restore (${r.status}).`); return; }
-      onRestored(j.version as Version);
-      toast.success(`Version ${shown} is back in use (saved as version ${j.version?.version}).`);
+      onRestored(parse(j.version));
+      toast.success(meta?.mode === "shared" ? "Back on the shared copy." : `Version ${shown} is back in use (saved as version ${j.version.version}).`);
       setPicked(null);
       onOpenChange(false);
     } catch (e) {
@@ -1194,28 +1715,28 @@ function HistoryDialog({ open, onOpenChange, entry, dirty, onRestored }: {
     }
   };
 
-  const vSteps = version?.sequence.steps ?? [];
+  const vSteps = version?.sequence?.steps ?? [];
   const vDays = sendDays({ steps: vSteps });
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!busy) { onOpenChange(v); if (!v) setPicked(null); } }}>
       <DialogContent className="gap-0 p-0 sm:max-w-5xl">
         <DialogHeader className="border-b px-6 py-4">
-          <DialogTitle>{typeLabel(entry.type)} copy — history</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription>Every save is kept. Restoring an old version saves it again as the newest.</DialogDescription>
         </DialogHeader>
         <div className="grid md:grid-cols-[17rem_1fr]">
           <ol className="max-h-[62vh] space-y-1 overflow-auto border-b p-3 md:border-r md:border-b-0">
-            {entry.versions.map((v) => (
+            {versions.map((v) => (
               <li key={v.id}>
                 <button type="button" onClick={() => pick(v.version)}
-                  className={cn(
-                    "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
-                    v.version === shown ? "bg-accent ring-1 ring-border" : "hover:bg-accent/50",
-                  )}>
+                  className={cn("w-full rounded-lg px-3 py-2.5 text-left transition-colors", v.version === shown ? "bg-accent ring-1 ring-border" : "hover:bg-accent/50")}>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-medium">Version {v.version}</span>
-                    {v.version === currentVersion && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">In use</span>}
+                    <span className="flex items-center gap-1">
+                      {v.mode === "shared" && <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">Shared copy</span>}
+                      {v.version === latest && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">In use</span>}
+                    </span>
                   </div>
                   <div className="mt-0.5 text-xs text-muted-foreground">{v.savedBy ? whoSaved(v.savedBy) : "Imported from Clay"} · {fmtWhen(v.savedAt)}</div>
                   {v.note && <div className="mt-1 line-clamp-2 text-xs italic text-muted-foreground">“{v.note}”</div>}
@@ -1225,7 +1746,14 @@ function HistoryDialog({ open, onOpenChange, entry, dirty, onRestored }: {
           </ol>
           <div className="flex min-h-[20rem] min-w-0 flex-col">
             <div className="max-h-[52vh] flex-1 space-y-3 overflow-auto p-5">
-              {!version ? (
+              {meta?.mode === "shared" ? (
+                <div className="grid h-full place-items-center py-16 text-center text-sm text-muted-foreground">
+                  <div className="max-w-sm space-y-2">
+                    <Undo2 className="mx-auto size-5" />
+                    <p>{sharedText(meta)}</p>
+                  </div>
+                </div>
+              ) : !version ? (
                 <div className="grid h-full place-items-center py-16 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /></div>
               ) : vSteps.map((s, i) => (
                 <div key={i} className="rounded-lg border bg-background">
@@ -1242,11 +1770,11 @@ function HistoryDialog({ open, onOpenChange, entry, dirty, onRestored }: {
               ))}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-3 border-t px-5 py-3">
-              {shown !== currentVersion && dirty && <span className="mr-auto text-xs text-amber-700 dark:text-amber-400">Restoring replaces your unsaved edits.</span>}
+              {shown !== latest && dirty && <span className="mr-auto text-xs text-amber-700 dark:text-amber-400">Restoring replaces your unsaved edits.</span>}
               <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Close</Button>
-              <Button disabled={busy || shown == null || shown === currentVersion || !version} onClick={restore}>
+              <Button disabled={busy || shown == null || shown === latest || alreadyShared || (meta?.mode !== "shared" && !version)} onClick={restore}>
                 {busy ? <Loader2 className="animate-spin" /> : <RotateCcw />}
-                {shown === currentVersion ? "This version is in use" : `Restore version ${shown}`}
+                {shown === latest ? "This version is in use" : alreadyShared ? "Already on the shared copy" : meta?.mode === "shared" ? "Use the shared copy again" : `Restore version ${shown}`}
               </Button>
             </div>
           </div>

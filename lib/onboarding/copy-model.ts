@@ -55,6 +55,12 @@ export const CLIENT_FIELDS = [
 ] as const;
 export type ClientFieldKey = (typeof CLIENT_FIELDS)[number]["key"];
 
+/** A client tag as stored (upper case). Real tags use letters, digits, "&" and "-" (JPC&A, UBM-OS). */
+export const normClientTag = (t: unknown): string | null => {
+  const s = typeof t === "string" ? t.trim().toUpperCase() : "";
+  return /^[A-Z0-9][A-Z0-9&._-]{0,31}$/.test(s) ? s : null;
+};
+
 export const LIMITS = { maxSteps: 10, minWait: 1, maxWait: 90, maxSubject: 1000, maxBody: 20_000 } as const;
 
 /** The structure the client asked for (2026-10-15): new, +2 reply, +3 reply, +15 new with email 1's subject. */

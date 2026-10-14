@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { GROUP_META, fmtDate, groupText } from "@/lib/onboarding/ui";
 import { CAMPAIGN_TIMEZONES, timezoneLabel } from "@/lib/onboarding/campaign-plan";
+import { clientTypeLabel, type ClientTypeKey } from "@/lib/onboarding/copy-model";
 import {
   type OnbClient, type OnbTask, type UserRow,
   UNASSIGNED, postMutate, TagPill, ClientChecklist,
@@ -176,6 +177,9 @@ export default function ClientDetailPage() {
               </button>
             )}
           </div>
+
+          {/* Email copy — the shared copy for its type, or its own */}
+          {isAdmin && <ClientCopyRow tag={client.client_tag} />}
         </CardContent>
       </Card>
 
@@ -198,6 +202,46 @@ export default function ClientDetailPage() {
             <DeleteClientDialog client={client} taskCount={tasks.length} />
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** Which emails this client's campaigns are built from, with a way to give it its own. */
+function ClientCopyRow({ tag }: { tag: string }) {
+  type Own = { version: number; mode: "custom" | "shared"; clientType: ClientTypeKey; basedOn: number | null };
+  const [state, setState] = useState<{ own: Own | null; shared: Record<string, number | null> } | "loading" | "failed">("loading");
+  useEffect(() => {
+    let live = true;
+    fetch(`/api/onboarding/email-copy?client=${encodeURIComponent(tag)}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (live) setState(d?.ok ? { own: d.client?.latest ?? null, shared: d.shared ?? {} } : "failed"); })
+      .catch(() => { if (live) setState("failed"); });
+    return () => { live = false; };
+  }, [tag]);
+  const href = `/onboarding?copy=${encodeURIComponent(tag)}`;
+  const own = typeof state === "object" && state.own?.mode === "custom" ? state.own : null;
+  const sharedNow = own && typeof state === "object" ? state.shared[own.clientType] ?? null : null;
+  const moved = !!own && own.basedOn != null && sharedNow != null && sharedNow > own.basedOn;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <span className="text-xs font-medium text-muted-foreground">Email copy</span>
+      {state === "loading" ? (
+        <span className="h-4 w-48 animate-pulse rounded bg-muted" />
+      ) : state === "failed" ? (
+        <span className="text-sm text-muted-foreground">Couldn&apos;t load it — <Link href={href} className="text-primary underline-offset-4 hover:underline">open Email copy</Link>.</span>
+      ) : own ? (
+        <>
+          <span className="rounded-full bg-violet-500/10 px-2 py-0.5 text-[11px] font-medium text-violet-700 dark:text-violet-300">Own copy · version {own.version}</span>
+          <span className="text-sm text-muted-foreground">Its campaigns use this instead of the shared {clientTypeLabel(own.clientType)} copy.</span>
+          {moved && <span className="text-xs text-amber-700 dark:text-amber-400">The shared copy has changed since (version {own.basedOn} → {sharedNow}).</span>}
+          <Link href={href} className="text-xs font-medium text-primary underline-offset-4 hover:underline">Open it →</Link>
+        </>
+      ) : (
+        <>
+          <span className="text-sm text-muted-foreground">Uses the shared copy for its client type.</span>
+          <Link href={href} className="text-xs font-medium text-primary underline-offset-4 hover:underline">Give it its own copy →</Link>
+        </>
       )}
     </div>
   );

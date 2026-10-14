@@ -19,6 +19,7 @@ import {
 } from "@/lib/onboarding/store";
 import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING } from "@/lib/onboarding/automations";
 import { isCampaignTimezone } from "@/lib/onboarding/campaign-plan";
+import { retireClientCopy } from "@/lib/onboarding/copy-store";
 import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
 import { placeProblems } from "@/lib/onboarding/campaign-copy";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
@@ -79,9 +80,14 @@ export async function POST(req: NextRequest) {
       case "set-client-status":
         await setClientStatus(String(body.client_tag || ""), body.status === "completed" ? "completed" : "active");
         return NextResponse.json({ ok: true });
-      case "delete-client":
-        await deleteOnboardingClient(String(body.client_tag || ""));
+      case "delete-client": {
+        const tag = String(body.client_tag || "");
+        await deleteOnboardingClient(tag);
+        // Its own email copy (if any) goes back to the shared copy — history kept.
+        const session = await getSession();
+        await retireClientCopy(tag, session?.email ?? null).catch((e) => console.error("[onboarding] retire client copy failed", e));
         return NextResponse.json({ ok: true });
+      }
       case "regenerate": {
         const n = await regenerateTasks(String(body.client_tag || ""));
         return NextResponse.json({ ok: true, added: n });

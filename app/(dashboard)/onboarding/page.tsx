@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
 import { ArrowRight, ChevronDown, ClipboardList, FileSpreadsheet, Loader2, Search, Zap } from "lucide-react";
@@ -66,8 +67,15 @@ let boardCache: BoardData | null = null;
 const EMPTY: BoardData = { clients: [], tasks: [], users: [], outreachifySlack: { saved: null, sendsTo: [] }, campaignMasters: {} };
 
 // ─────────────────────────── page ───────────────────────────
+// useSearchParams needs a Suspense boundary above it.
 export default function OnboardingPage() {
+  return <Suspense fallback={null}><OnboardingBoard /></Suspense>;
+}
+
+function OnboardingBoard() {
   const session = useSession();
+  // ?copy=TAG (from a client's page) opens that client's email copy.
+  const openClient = useSearchParams().get("copy")?.trim().toUpperCase() || null;
   const isAdmin = session?.role === "admin";
 
   const [board, setBoard] = useState<BoardData>(boardCache ?? EMPTY);
@@ -112,7 +120,8 @@ export default function OnboardingPage() {
   }, [clients, tasks, today]);
 
   const existingTags = useMemo(() => clients.map((c) => c.client_tag), [clients]);
-  const [tab, setTab] = useState("clients");
+  const [tab, setTab] = useState(openClient ? "copy" : "clients");
+  const pickClients = useMemo(() => clients.map((c) => ({ tag: c.client_tag.toUpperCase(), name: c.client_name ?? null })), [clients]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto w-full">
@@ -166,7 +175,7 @@ export default function OnboardingPage() {
         {isAdmin && (
           // Kept mounted (just hidden) so unsaved copy edits survive switching tabs.
           <TabsContent value="copy" forceMount className="mt-4 data-[state=inactive]:hidden">
-            <EmailCopyEditor active={tab === "copy"} />
+            <EmailCopyEditor active={tab === "copy"} clients={pickClients} openClient={openClient} />
           </TabsContent>
         )}
         {isAdmin && (
