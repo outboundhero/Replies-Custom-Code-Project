@@ -316,7 +316,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
 
   // Checks on the client's details.
   const group = c.group_num;
-  if (!group) blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+  if (!group) blockers.push("This client has no group yet — the first step (Tell Outreachify on Slack) picks it, or set it on the client's page.");
   if (!timezone) blockers.push("Choose the time zone the campaigns send in.");
   else if (!isCampaignTimezone(timezone)) blockers.push(`“${timezone}” isn't one of the campaign time zones.`);
   if (!tierSupported(tier)) blockers.push(tier ? `Tier ${tier} has no daily limits in Clay's rules (0.5, 1 or 2) — choose the tier to use.` : "Choose the tier (it sets the daily limits).");
@@ -621,7 +621,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   let summary = "Asks LeadSync which reserve domains this client would get.";
   const busyFor = c.group_num ? await lockHolder(allocationLock(c.group_num), ALLOCATION_LOCK_MS) : null;
   if (!c.group_num) {
-    blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
+    blockers.push("This client has no group yet — the first step (Tell Outreachify on Slack) picks it, or set it on the client's page.");
   } else if (busyFor && busyFor !== tag) {
     // Another client of the group is taking domains from the same reserve. LeadSync isn't asked
     // for a plan now: whatever it offered would be out of date by the time this client's turn comes.
@@ -666,7 +666,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
             else if (hits.length > 1) blockers.push(`${s.label}: ${hits.length} campaigns are named “${name}” — there should be one.`);
             else missing.push(slotKey(slot));
           }
-          if (missing.length) { blockers.push(`${s.label}: ${tag} has no ${missing.join(", ")} campaign${missing.length === 1 ? "" : "s"} yet — step 2 creates them.`); campaignIds = []; }
+          if (missing.length) { blockers.push(`${s.label}: ${tag} has no ${missing.join(", ")} campaign${missing.length === 1 ? "" : "s"} yet — the “Create the 12 campaigns” step creates them.`); campaignIds = []; }
         } catch (e) {
           blockers.push(`Couldn't read ${tag}'s campaigns on ${s.label}: ${(e as Error).message}`);
         }
@@ -825,7 +825,7 @@ async function planWhitelist(ctx: AutomationContext): Promise<WhitelistView> {
   if (p.exempt) {
     blockers.push(`${tag} is on LeadSync's no-whitelist-email list, so there is no email to send — complete the step by hand.`);
   } else {
-    if (d.assigned === 0) blockers.push(`${tag} has no sending domains in LeadSync yet — step 3 allocates them.`);
+    if (d.assigned === 0) blockers.push(`${tag} has no sending domains in LeadSync yet — the “Domains” step allocates them.`);
     if (p.recipientProblem) blockers.push(`${p.recipientProblem} — the email has nobody to go to.`);
     if (d.toSend.length > 0 && !p.webhookConfigured) blockers.push("LeadSync's email sender isn't set up, so it can't send.");
   }

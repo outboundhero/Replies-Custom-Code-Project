@@ -105,17 +105,33 @@ export interface TaskGate {
   blockerStep: number | null;
 }
 
-/** Where a task sits in its client's ordered steps, and what (if anything) it waits on. */
+/** A setup step: the in-order checklist steps, plus "Set up in Reply Router" (a day-0 task). */
+export const isSetupStep = (t: OnbTask) => t.no_due || t.automation === "replyrouter_setup";
+
+/** The client's setup steps in the order they're done — the same numbering on the checklist
+ *  and the guided page: the in-order steps, with "Set up in Reply Router" right after Slack. */
+export function setupSteps(clientTasks: OnbTask[]): OnbTask[] {
+  const list = clientTasks.filter((t) => t.no_due).sort((a, b) => a.order_index - b.order_index);
+  const rr = clientTasks.find((t) => t.automation === "replyrouter_setup");
+  if (rr) {
+    const i = list.findIndex((t) => t.automation === "slack_outreachify");
+    list.splice(i >= 0 ? i + 1 : 0, 0, rr);
+  }
+  return list;
+}
+
+/** Where a task sits in its client's setup steps, and what (if anything) it waits on.
+ *  Only the in-order steps wait on each other; Reply Router setup can run any time. */
 export function taskGate(task: OnbTask, clientTasks: OnbTask[]): TaskGate {
-  if (!task.no_due) return { step: null, total: 0, blocker: null, blockerStep: null };
-  const ordered = clientTasks.filter((t) => t.no_due).sort((a, b) => a.order_index - b.order_index);
+  if (!isSetupStep(task)) return { step: null, total: 0, blocker: null, blockerStep: null };
+  const ordered = setupSteps(clientTasks);
   const pos = (id: string) => ordered.findIndex((t) => t.id === id) + 1;
-  const blocker = task.status === "completed" ? null : blockingTask(task, clientTasks);
+  const blocker = task.status === "completed" || !task.no_due ? null : blockingTask(task, clientTasks);
   return { step: pos(task.id) || null, total: ordered.length, blocker, blockerStep: blocker ? pos(blocker.id) : null };
 }
 
 export function dueInfo(task: OnbTask, gate: TaskGate, today: string): { text: string; tone: "muted" | "overdue" | "today" } {
-  if (task.no_due) return { text: gate.step ? `Step ${gate.step} of ${gate.total}` : "No due date", tone: "muted" };
+  if (task.no_due || gate.step) return { text: gate.step ? `Step ${gate.step} of ${gate.total}` : "No due date", tone: "muted" };
   if (!task.due_date) return { text: "No due date", tone: "muted" };
   const open = task.status !== "completed";
   if (open && task.due_date < today) return { text: `${fmtDate(task.due_date)} · overdue`, tone: "overdue" };
@@ -128,10 +144,12 @@ export const DUE_TONE = {
   today: "text-blue-600 dark:text-blue-400 font-medium",
 } as const;
 
-export interface OwnerSection { ownerId: string; name: string; tasks: OnbTask[]; done: number; ordered: boolean }
+export interface OwnerSection { ownerId: string; name: string; tasks: OnbTask[]; done: number; ordered: boolean; someOrdered: boolean }
 
 /** A client's tasks split by owner, in checklist order (ordered steps first, then by due date). */
 export function ownerSections(tasks: OnbTask[], usersById: Map<string, UserRow>): OwnerSection[] {
+  const steps = setupSteps(tasks);
+  const stepOrder = (t: OnbTask) => steps.findIndex((x) => x.id === t.id);
   const by = new Map<string, OnbTask[]>();
   for (const t of tasks) {
     const key = t.assignee_email || "";
@@ -143,12 +161,13 @@ export function ownerSections(tasks: OnbTask[], usersById: Map<string, UserRow>)
       ownerId,
       name: ownerId ? usersById.get(ownerId)?.name ?? "Former team member" : "Unassigned",
       tasks: ts.slice().sort((a, b) =>
-        (a.no_due ? 0 : 1) - (b.no_due ? 0 : 1) ||
-        (a.no_due
-          ? a.order_index - b.order_index
+        (isSetupStep(a) ? 0 : 1) - (isSetupStep(b) ? 0 : 1) ||
+        (isSetupStep(a)
+          ? stepOrder(a) - stepOrder(b)
           : (a.due_date || "9999").localeCompare(b.due_date || "9999") || a.order_index - b.order_index)),
       done: ts.filter((t) => t.status === "completed").length,
-      ordered: ts.every((t) => t.no_due),
+      ordered: ts.every(isSetupStep),
+      someOrdered: ts.some(isSetupStep),
       first: Math.min(...ts.map((t) => t.order_index)),
     }))
     .sort((a, b) => (a.ownerId ? 0 : 1) - (b.ownerId ? 0 : 1) || a.first - b.first);
@@ -294,7 +313,7 @@ export function ClientChecklist({ client, tasks, users, isAdmin, onChanged, edit
             <div className="min-w-0">
               <div className="text-sm font-semibold leading-tight">{s.name}</div>
               <div className="text-[11px] text-muted-foreground">
-                {s.ordered ? "Runs in order · no due dates" : "Due by day from the start date"}
+                {s.ordered ? "Runs in order · no due dates" : s.someOrdered ? "Setup steps in order, then the rest by due date" : "Due by day from the start date"}
               </div>
             </div>
             <span className={cn("ml-auto text-xs tabular-nums", s.done === s.tasks.length ? "text-green-600 dark:text-green-400 font-medium" : "text-muted-foreground")}>

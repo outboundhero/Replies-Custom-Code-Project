@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import { AUTOMATION_META, GROUP_META, fmtDate, fmtStamp, shortEmail } from "@/lib/onboarding/ui";
 import { timezoneLabel } from "@/lib/onboarding/campaign-plan";
 import {
-  type OnbClient, type OnbTask, postMutate, taskGate, useStepRun, StepRunBody, TagPill,
+  type OnbClient, type OnbTask, postMutate, setupSteps, taskGate, useStepRun, StepRunBody, TagPill,
 } from "../../_ui/shared";
 
 /** Short names for the automated steps (the checklist keeps its full titles). */
@@ -33,17 +33,6 @@ const STEP_NAME: Record<string, string> = {
   go_live_email: "Go-live email to the client",
 };
 const stepName = (t: OnbTask) => (t.automation && STEP_NAME[t.automation]) || t.title;
-
-/** The setup steps in the order they're done: the ordered checklist, with "Set up in Reply Router" right after Slack. */
-function guidedSteps(tasks: OnbTask[]): OnbTask[] {
-  const list = tasks.filter((t) => t.no_due).sort((a, b) => a.order_index - b.order_index);
-  const rr = tasks.find((t) => t.automation === "replyrouter_setup");
-  if (rr) {
-    const i = list.findIndex((t) => t.automation === "slack_outreachify");
-    list.splice(i >= 0 ? i + 1 : 0, 0, rr);
-  }
-  return list;
-}
 
 type Kind = "auto" | "preview" | "manual";
 const kindOf = (t: OnbTask): Kind => (t.automation && AUTOMATION_META[t.automation] ? (t.runnable ? "auto" : "preview") : "manual");
@@ -87,7 +76,7 @@ export default function GuidedOnboardingPage() {
   }, [tag]);
   useEffect(() => { load(); }, [load]);
 
-  const steps = useMemo(() => guidedSteps(tasks), [tasks]);
+  const steps = useMemo(() => setupSteps(tasks), [tasks]);
   const done = steps.filter((t) => t.status === "completed").length;
   const firstOpen = steps.find((t) => t.status !== "completed") ?? null;
   const current = steps.find((t) => t.id === selected) ?? firstOpen ?? steps[steps.length - 1] ?? null;
@@ -100,6 +89,11 @@ export default function GuidedOnboardingPage() {
     setSelected(after?.id ?? null);
   }, [steps]);
 
+  async function addSetupSteps() {
+    const r = await postMutate({ action: "add-setup-steps", client_tag: tag });
+    if (r.ok) { toast.success("Added the setup steps."); load(); }
+    else toast.error(r.error || "Couldn't add the steps.");
+  }
   async function addMissing() {
     // Only this step — tasks someone deleted from this client on purpose stay deleted.
     const r = await postMutate({ action: "add-template-step", client_tag: tag, automation: "replyrouter_setup" });
@@ -120,6 +114,11 @@ export default function GuidedOnboardingPage() {
   }
 
   const pct = steps.length ? Math.round((done / steps.length) * 100) : 0;
+  // "Not chosen yet (step N asks)" while that step is still to do; otherwise point to the client page.
+  const askedBy = (automation: string) => {
+    const i = steps.findIndex((t) => t.automation === automation);
+    return i >= 0 && steps[i].status !== "completed" ? `Not chosen yet (step ${i + 1} asks)` : "Not set — set it on the client page";
+  };
   const allDone = steps.length > 0 && done === steps.length;
 
   return (
@@ -150,13 +149,13 @@ export default function GuidedOnboardingPage() {
         </div>
         <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 border-t pt-4 text-sm sm:grid-cols-4">
           <Fact label="Starts" value={fmtDate(client.start_date)} />
-          <Fact label="Group" value={client.group_num ? `${GROUP_META[client.group_num].label} — ${GROUP_META[client.group_num].b2b} + ${GROUP_META[client.group_num].b2c}` : "Not chosen yet (step 1)"} warn={!client.group_num} />
-          <Fact label="Time zone" value={client.campaign_timezone ? timezoneLabel(client.campaign_timezone) : "Not chosen yet (step 3 asks)"} warn={!client.campaign_timezone} />
+          <Fact label="Group" value={client.group_num ? `${GROUP_META[client.group_num].label} — ${GROUP_META[client.group_num].b2b} + ${GROUP_META[client.group_num].b2c}` : askedBy("slack_outreachify")} warn={!client.group_num} />
+          <Fact label="Time zone" value={client.campaign_timezone ? timezoneLabel(client.campaign_timezone) : askedBy("create_campaigns")} warn={!client.campaign_timezone} />
           <Fact label="Plan" value={client.plan_type || "—"} />
         </dl>
       </div>
 
-      {missingRr && (
+      {missingRr && steps.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-500/25 bg-sky-500/[0.05] px-4 py-3 text-sm">
           <span>This checklist was made before the <span className="font-medium">Set up in Reply Router</span> step existed{templateHasRr ? "" : " (it isn't in the template either)"}.</span>
           {templateHasRr && <Button size="sm" variant="outline" onClick={addMissing}><Plus /> Add the missing step</Button>}
@@ -220,7 +219,11 @@ export default function GuidedOnboardingPage() {
               onGo={(id) => setSelected(id)}
               onRunning={setBusy} />
           ) : (
-            <div className="rounded-2xl border border-dashed px-6 py-14 text-center text-sm text-muted-foreground">This client has no setup steps.</div>
+            <div className="rounded-2xl border border-dashed px-6 py-14 text-center">
+              <p className="text-sm font-medium">{client.client_tag}&apos;s checklist has none of the setup steps</p>
+              <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">It was made from an older template, before the guided steps existed. Add them to run them here — the tasks it already has stay as they are.</p>
+              <Button className="mt-5" onClick={addSetupSteps}><Plus /> Add the setup steps</Button>
+            </div>
           )}
         </div>
       </div>

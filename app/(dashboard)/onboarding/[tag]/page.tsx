@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Sparkles } from "lucide-react";
+import { Building2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { Button } from "@/components/ui/button";
@@ -115,7 +115,10 @@ export default function ClientDetailPage() {
               </div>
             </div>
             {isAdmin && (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button asChild variant="outline" className="gap-1.5" title="Reply Router settings, details, campaigns — everything about this client">
+                  <Link href={`/clients/${encodeURIComponent(client.client_tag)}`}><Building2 className="h-4 w-4" /> Client page</Link>
+                </Button>
                 <Button asChild className="gap-1.5">
                   <Link href={`/onboarding/${encodeURIComponent(client.client_tag)}/run`}><Sparkles className="h-4 w-4" /> Guided onboarding</Link>
                 </Button>
@@ -167,7 +170,7 @@ export default function ClientDetailPage() {
                 <SelectTrigger className="h-8 w-56 text-xs" aria-label="Campaign time zone"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NO_TZ}>Not chosen yet</SelectItem>
-                  {CAMPAIGN_TIMEZONES.map((z) => <SelectItem key={z} value={z}>{timezoneLabel(z)} <span className="text-muted-foreground">· {z}</span></SelectItem>)}
+                  {CAMPAIGN_TIMEZONES.map((z) => <SelectItem key={z} value={z}>{timezoneLabel(z)}</SelectItem>)}
                 </SelectContent>
               </Select>
             ) : null}
@@ -275,6 +278,7 @@ function DeleteClientDialog({ client, taskCount }: { client: OnbClient; taskCoun
           <DialogDescription>
             This removes <span className="font-mono font-semibold">{client.client_tag}</span> from onboarding and permanently
             deletes {taskCount === 0 ? "it" : `all ${taskCount} of its task${taskCount === 1 ? "" : "s"}`}. This can&apos;t be undone.
+            {" "}It stays in Reply Router (and its campaigns stay in Email Bison) — remove it there from its client page if it should go too.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

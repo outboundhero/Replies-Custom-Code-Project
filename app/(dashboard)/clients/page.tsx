@@ -1,16 +1,22 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+/**
+ * All clients in Reply Router, by section. Each row opens the client's page
+ * (/clients/[tag]) — the one place to see and change everything about it.
+ */
+import { useEffect, useState, useCallback, useMemo } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { ChevronRight, Loader2, Plus, Search, Users } from "lucide-react";
+import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { toast } from "sonner";
-import { BISON_INSTANCES, DEFAULT_INSTANCE, getInstanceLabel } from "@/lib/bison-instances-shared";
+import { DEFAULT_INSTANCE, getInstanceLabel } from "@/lib/bison-instances-shared";
+import { normClientTag } from "@/lib/onboarding/copy-model";
 
 interface Client {
   id: number;
@@ -18,20 +24,15 @@ interface Client {
   section_id: number;
   section_name: string;
   airtable_base_id: string;
-  clay_webhook_url_tracked: string | null;
-  config_id: number | null;
-  cc_name_1: string | null; cc_email_1: string | null;
-  cc_name_2: string | null; cc_email_2: string | null;
-  cc_name_3: string | null; cc_email_3: string | null;
-  cc_name_4: string | null; cc_email_4: string | null;
-  cc_name_5: string | null; cc_email_5: string | null;
-  cc_name_6: string | null; cc_email_6: string | null;
-  bcc_name_1: string | null; bcc_email_1: string | null;
-  bcc_name_2: string | null; bcc_email_2: string | null;
+  cc_email_1: string | null; cc_email_2: string | null; cc_email_3: string | null;
+  cc_email_4: string | null; cc_email_5: string | null; cc_email_6: string | null;
+  bcc_email_1: string | null; bcc_email_2: string | null;
   reply_template: string | null;
-  updated_at: string | null;
-  /** null = no mapping row yet → rendered as default instance. */
+  /** null = no mapping row yet → the default instance. */
   bison_instance: string | null;
+  churned?: boolean;
+  churnDate?: string | null;
+  group?: number | null;
 }
 
 interface Section {
@@ -40,45 +41,18 @@ interface Section {
   airtable_base_id: string;
 }
 
-type ConfigForm = {
-  cc_name_1: string; cc_email_1: string;
-  cc_name_2: string; cc_email_2: string;
-  cc_name_3: string; cc_email_3: string;
-  cc_name_4: string; cc_email_4: string;
-  cc_name_5: string; cc_email_5: string;
-  cc_name_6: string; cc_email_6: string;
-  bcc_name_1: string; bcc_email_1: string;
-  bcc_name_2: string; bcc_email_2: string;
-  reply_template: string;
-};
-
-const emptyForm = (): ConfigForm => ({
-  cc_name_1: "", cc_email_1: "",
-  cc_name_2: "", cc_email_2: "",
-  cc_name_3: "", cc_email_3: "",
-  cc_name_4: "", cc_email_4: "",
-  cc_name_5: "", cc_email_5: "",
-  cc_name_6: "", cc_email_6: "",
-  bcc_name_1: "", bcc_email_1: "",
-  bcc_name_2: "", bcc_email_2: "",
-  reply_template: "",
-});
+const ccCount = (c: Client) => [c.cc_email_1, c.cc_email_2, c.cc_email_3, c.cc_email_4, c.cc_email_5, c.cc_email_6].filter(Boolean).length;
+const bccCount = (c: Client) => [c.bcc_email_1, c.bcc_email_2].filter(Boolean).length;
 
 export default function ClientsPage() {
-  const [clients, setClients] = useState<Client[]>([]);
+  const router = useRouter();
+  const [clients, setClients] = useState<Client[] | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<ConfigForm>(emptyForm());
-  const [saving, setSaving] = useState(false);
-  const [forcing, setForcing] = useState(false);
   const [search, setSearch] = useState("");
-
-  // Onboard dialog
-  const [onboardOpen, setOnboardOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [newSectionId, setNewSectionId] = useState("");
-  const [onboarding, setOnboarding] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   const loadClients = useCallback(async () => {
@@ -86,9 +60,9 @@ export default function ClientsPage() {
       const res = await fetch("/api/config/clients");
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
       if (res.ok) { setClients(await res.json()); setFetchError(null); }
-      else setFetchError(`Failed to load clients (${res.status})`);
+      else setFetchError(`Couldn't load the clients (${res.status}). Reload to try again.`);
     } catch (err) {
-      setFetchError(`Network error: ${(err as Error).message}`);
+      setFetchError(`Couldn't load the clients (${(err as Error).message}). Reload to try again.`);
     }
   }, []);
 
@@ -104,555 +78,183 @@ export default function ClientsPage() {
     loadSections();
   }, [loadClients, loadSections]);
 
-  function startEdit(client: Client) {
-    setEditing(client.tag);
-    setEditForm({
-      cc_name_1: client.cc_name_1 || "",
-      cc_email_1: client.cc_email_1 || "",
-      cc_name_2: client.cc_name_2 || "",
-      cc_email_2: client.cc_email_2 || "",
-      cc_name_3: client.cc_name_3 || "",
-      cc_email_3: client.cc_email_3 || "",
-      cc_name_4: client.cc_name_4 || "",
-      cc_email_4: client.cc_email_4 || "",
-      cc_name_5: client.cc_name_5 || "",
-      cc_email_5: client.cc_email_5 || "",
-      cc_name_6: client.cc_name_6 || "",
-      cc_email_6: client.cc_email_6 || "",
-      bcc_name_1: client.bcc_name_1 || "",
-      bcc_email_1: client.bcc_email_1 || "",
-      bcc_name_2: client.bcc_name_2 || "",
-      bcc_email_2: client.bcc_email_2 || "",
-      reply_template: client.reply_template || "",
-    });
-  }
+  const tagTaken = !!newTag.trim() && !!clients?.some((c) => c.tag.toUpperCase() === newTag.trim().toUpperCase());
+  const tagBad = !!newTag.trim() && !normClientTag(newTag);
 
-  async function saveConfig(tag: string) {
-    setSaving(true);
+  async function addClient() {
+    const tag = newTag.trim();
+    if (!tag || !newSectionId || tagTaken || tagBad) return;
+    setAdding(true);
     try {
       const res = await fetch("/api/config/clients/mutate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "update", tag, ...editForm }),
+        body: JSON.stringify({ action: "create", tag, section_id: Number(newSectionId) }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
-        toast.error(`Failed to save config for ${tag}: ${data.error || res.statusText}`);
-        setSaving(false);
+        toast.error(`Couldn't add ${tag}: ${data.error || res.statusText}`);
         return;
       }
-      toast.success(`Config saved for ${tag}`);
-      setEditing(null);
-      loadClients();
-    } catch (err) {
-      toast.error(`Network error saving ${tag}: ${(err as Error).message}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Save the current config AND backfill it onto existing "Open Response" leads
-  // that have a positive AI category (the ones templates auto-apply for) — for
-  // when a template is set up AFTER leads have already come in. Previews the
-  // affected count and confirms before overwriting.
-  async function forceUpsert(tag: string) {
-    let count = 0;
-    try {
-      const res = await fetch("/api/config/clients/mutate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "force-upsert-template", tag, preview: true }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        toast.error(`Preview failed for ${tag}: ${data.error || res.statusText}`);
-        return;
-      }
-      count = data.count ?? 0;
-    } catch (err) {
-      toast.error(`Network error: ${(err as Error).message}`);
-      return;
-    }
-
-    if (count === 0) {
-      toast.info(`No "Open Response" leads with a positive AI category for ${tag} to update.`);
-      return;
-    }
-    if (!confirm(
-      `Apply this reply template + CC/BCC to ${count} existing "Open Response" lead${count === 1 ? "" : "s"} for ${tag}?\n\n` +
-      `These are leads with a positive AI category (Interested, Meeting Request, Follow Up, Referral Given, Unrecognizable). ` +
-      `It overwrites their current template/CC/BCC with what's in the editor above, and saves the config.`,
-    )) return;
-
-    setForcing(true);
-    try {
-      const res = await fetch("/api/config/clients/mutate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "force-upsert-template", tag, ...editForm }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        toast.error(`Force upsert failed for ${tag}: ${data.error || res.statusText}`);
-        return;
-      }
-      toast.success(`Applied template to ${data.updated} lead${data.updated === 1 ? "" : "s"} for ${tag}`);
-      setEditing(null);
-      loadClients();
-    } catch (err) {
-      toast.error(`Network error: ${(err as Error).message}`);
-    } finally {
-      setForcing(false);
-    }
-  }
-
-  async function onboardClient() {
-    if (!newTag.trim() || !newSectionId) return;
-    setOnboarding(true);
-    try {
-      const res = await fetch("/api/config/clients/mutate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create", tag: newTag.trim(), section_id: Number(newSectionId) }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        toast.error(`Failed to onboard ${newTag}: ${data.error || res.statusText}`);
-        setOnboarding(false);
-        return;
-      }
-      toast.success(`Client ${newTag} onboarded`);
-      setOnboardOpen(false);
+      toast.success(`${tag} added — set its CC and reply template next.`);
+      setAddOpen(false);
       setNewTag("");
       setNewSectionId("");
-      loadClients();
+      router.push(`/clients/${encodeURIComponent(tag)}`);
     } catch (err) {
-      toast.error(`Network error: ${(err as Error).message}`);
+      toast.error(`Couldn't add ${tag}: ${(err as Error).message}`);
     } finally {
-      setOnboarding(false);
+      setAdding(false);
     }
   }
 
-  async function moveClient(tag: string, newSectionId: number) {
-    const newSection = sections.find((s) => s.id === newSectionId);
-    const current = clients.find((c) => c.tag === tag);
-    if (!newSection || !current) return;
-    if (current.section_id === newSectionId) return;
-    if (!confirm(`Move ${tag} from "${current.section_name}" to "${newSection.name}"?\n\nCC/BCC recipients and reply template move with the client automatically.\n\nFuture leads will route to the new section's Airtable base. Historical leads stay where they are.`)) return;
-
-    // Optimistic update — flip section in-place so the card re-groups
-    // immediately, revert on failure.
-    setClients((prev) => prev.map((c) =>
-      c.tag === tag
-        ? { ...c, section_id: newSectionId, section_name: newSection.name, airtable_base_id: newSection.airtable_base_id }
-        : c
-    ));
-
-    try {
-      const res = await fetch("/api/config/clients/mutate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "move", tag, section_id: newSectionId }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        toast.error(`Failed to move ${tag}: ${data.error || res.statusText}`);
-        loadClients();
-        return;
-      }
-      toast.success(`${tag} moved to ${newSection.name}`);
-    } catch (err) {
-      toast.error(`Network error: ${(err as Error).message}`);
-      loadClients();
-    }
-  }
-
-  async function updateInstance(tag: string, instanceKey: string) {
-    // Optimistic UI — flip the badge instantly, revert on failure.
-    setClients((prev) => prev.map((c) => (c.tag === tag ? { ...c, bison_instance: instanceKey } : c)));
-    try {
-      const res = await fetch("/api/clients/instance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ client_tag: tag, instance_key: instanceKey }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        toast.error(`Failed to update instance for ${tag}: ${data.error || res.statusText}`);
-        loadClients(); // re-pull truth
-        return;
-      }
-      toast.success(`${tag} → ${getInstanceLabel(instanceKey)}`);
-    } catch (err) {
-      toast.error(`Network error: ${(err as Error).message}`);
-      loadClients();
-    }
-  }
-
-  async function removeClient(tag: string) {
-    if (!confirm(`Remove client "${tag}"? This will delete the tag and its config.`)) return;
-    try {
-      const res = await fetch("/api/config/clients/mutate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete", tag }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        toast.error(`Failed to remove ${tag}: ${data.error || res.statusText}`);
-        return;
-      }
-      toast.success(`Client ${tag} removed`);
-      loadClients();
-    } catch (err) {
-      toast.error(`Network error: ${(err as Error).message}`);
-    }
-  }
-
-  const filtered = clients.filter((c) =>
-    c.tag.toLowerCase().includes(search.toLowerCase()) ||
-    c.section_name.toLowerCase().includes(search.toLowerCase())
-  );
-
-  // Group by section
-  const bySection = filtered.reduce<Record<string, Client[]>>((acc, c) => {
-    const key = c.section_name;
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(c);
-    return acc;
-  }, {});
+  const q = search.trim().toLowerCase();
+  const filtered = useMemo(() => (clients ?? []).filter((c) =>
+    !q || c.tag.toLowerCase().includes(q) || c.section_name.toLowerCase().includes(q),
+  ), [clients, q]);
+  const bySection = useMemo(() => {
+    const m = new Map<string, Client[]>();
+    for (const c of filtered) m.set(c.section_name, [...(m.get(c.section_name) ?? []), c]);
+    return [...m.entries()];
+  }, [filtered]);
+  const all = clients ?? [];
+  const live = all.filter((c) => !c.churned);
+  const stats = [
+    { label: "Clients", value: live.length, hint: all.length - live.length ? `${all.length - live.length} churned` : undefined },
+    { label: "Sections", value: new Set(all.map((c) => c.section_id)).size },
+    { label: "No reply template", value: live.filter((c) => !c.reply_template).length, warn: true },
+    { label: "No CC", value: live.filter((c) => !ccCount(c)).length, warn: true },
+  ];
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="mx-auto w-full max-w-7xl space-y-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Clients</h2>
-          <p className="text-sm text-muted-foreground">
-            Manage client CC/BCC, reply templates, and onboard new clients
-          </p>
+          <p className="text-sm text-muted-foreground">Every client in Reply Router. Open one to see and change everything about it — section, CC / BCC, reply template, group, time zone and more.</p>
         </div>
-        <Button onClick={() => setOnboardOpen(true)}>Onboard New Client</Button>
+        <Button onClick={() => setAddOpen(true)} className="gap-1.5"><Plus className="size-4" /> Add to Reply Router</Button>
       </div>
 
       {fetchError && (
-        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          {fetchError}
+        <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">{fetchError}</div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        {stats.map((s) => (
+          <div key={s.label} className="rounded-xl border bg-card px-4 py-3">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{s.label}</div>
+            <div className={cn("mt-0.5 text-2xl font-semibold tabular-nums", s.warn && s.value > 0 && "text-amber-700 dark:text-amber-400")}>
+              {clients ? s.value : <span className="inline-block h-7 w-10 animate-pulse rounded bg-muted align-middle" />}
+            </div>
+            {s.hint && <div className="text-[11px] text-muted-foreground">{s.hint}</div>}
+          </div>
+        ))}
+      </div>
+
+      <div className="relative max-w-sm">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input placeholder="Search by tag or section…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-8" />
+      </div>
+
+      {!clients && !fetchError ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => <div key={i} className="h-56 animate-pulse rounded-2xl border bg-muted/30" />)}
+        </div>
+      ) : clients && filtered.length === 0 ? (
+        <div className="rounded-2xl border border-dashed px-6 py-14 text-center">
+          <div className="mx-auto grid size-11 place-items-center rounded-xl border bg-background text-muted-foreground"><Users className="size-5" /></div>
+          <p className="mt-3 text-sm font-medium">{q ? `No client matches “${search.trim()}”` : "No clients yet"}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{q ? "Try the tag (e.g. JPSCAL) or a section name." : "Add one to start routing its replies."}</p>
+        </div>
+      ) : (
+        <div className="grid items-start gap-4 lg:grid-cols-2">
+          {bySection.map(([sectionName, rows]) => (
+            <section key={sectionName} className="overflow-hidden rounded-2xl border bg-card">
+              <header className="flex items-center gap-2 border-b px-4 py-3">
+                <h3 className="text-sm font-semibold">{sectionName}</h3>
+                <span className="font-mono text-[11px] text-muted-foreground">{rows[0].airtable_base_id}</span>
+                <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">{rows.length} client{rows.length === 1 ? "" : "s"}</span>
+              </header>
+              <ul className="divide-y">
+                {rows.map((c) => {
+                  const cc = ccCount(c), bcc = bccCount(c);
+                  return (
+                    <li key={c.tag}>
+                      <Link href={`/clients/${encodeURIComponent(c.tag)}`}
+                        className="group flex items-center gap-3 px-4 py-2.5 text-sm transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none">
+                        <span className={cn("w-24 shrink-0 truncate font-mono font-medium", c.churned && "text-muted-foreground line-through decoration-muted-foreground/50")}>{c.tag}</span>
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                          {c.churned ? <Pill tone="red">Churned{c.churnDate ? ` ${c.churnDate}` : ""}</Pill> : (
+                            <>
+                              {c.reply_template ? <Pill tone="green">Template</Pill> : <Pill tone="amber">No template</Pill>}
+                              {cc ? <Pill>CC {cc}</Pill> : <Pill tone="amber">No CC</Pill>}
+                              {bcc > 0 && <Pill>BCC {bcc}</Pill>}
+                              {c.group ? <Pill>Group {c.group}</Pill> : null}
+                            </>
+                          )}
+                        </div>
+                        <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">{getInstanceLabel(c.bison_instance ?? DEFAULT_INSTANCE)}</span>
+                        <ChevronRight className="size-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
         </div>
       )}
 
-      <Input
-        placeholder="Search by tag or section..."
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        className="max-w-sm"
-      />
-
-      {Object.entries(bySection).map(([sectionName, sectionClients]) => {
-        const first = sectionClients[0];
-        return (
-          <Card key={sectionName}>
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-3">
-                <CardTitle className="text-base">{sectionName}</CardTitle>
-                <span className="font-mono text-xs text-muted-foreground">{first.airtable_base_id}</span>
-                {first.clay_webhook_url_tracked && (
-                  <Badge variant="outline" className="text-xs font-mono">
-                    Clay: {first.clay_webhook_url_tracked.split("/").pop()?.slice(0, 16)}…
-                  </Badge>
-                )}
-                <Badge variant="secondary" className="ml-auto">{sectionClients.length} clients</Badge>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {sectionClients.map((client) => (
-                <div key={client.tag} className="border rounded-md overflow-hidden">
-                  {/* Client row */}
-                  <div
-                    className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-muted/40 text-sm"
-                    onClick={() => setExpanded(expanded === client.tag ? null : client.tag)}
-                  >
-                    <span className="font-mono font-medium w-24 shrink-0">{client.tag}</span>
-                    <div className="flex gap-1.5 flex-wrap flex-1">
-                      {client.reply_template && (
-                        <Badge variant="secondary" className="text-xs">Reply Template ✓</Badge>
-                      )}
-                      {(client.cc_email_1 || client.cc_email_2 || client.cc_email_3 || client.cc_email_4 || client.cc_email_5 || client.cc_email_6) && (
-                        <Badge variant="secondary" className="text-xs">
-                          CC: {[client.cc_email_1, client.cc_email_2, client.cc_email_3, client.cc_email_4, client.cc_email_5, client.cc_email_6].filter(Boolean).length}
-                        </Badge>
-                      )}
-                      {(client.bcc_email_1 || client.bcc_email_2) && (
-                        <Badge variant="secondary" className="text-xs">
-                          BCC: {[client.bcc_email_1, client.bcc_email_2].filter(Boolean).length}
-                        </Badge>
-                      )}
-                    </div>
-                    {/* Section picker — moving a client updates client_tags
-                        and re-groups it under the new section card. */}
-                    <div onClick={(e) => e.stopPropagation()} className="shrink-0">
-                      <Select
-                        value={String(client.section_id)}
-                        onValueChange={(v) => moveClient(client.tag, Number(v))}
-                      >
-                        <SelectTrigger className="h-7 w-40 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {sections.map((s) => (
-                            <SelectItem key={s.id} value={String(s.id)} className="text-xs">
-                              {s.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    {/* Bison instance picker — stops click propagation so
-                        opening the menu doesn't toggle the expanded row. */}
-                    <div onClick={(e) => e.stopPropagation()} className="shrink-0">
-                      <Select
-                        value={client.bison_instance ?? DEFAULT_INSTANCE}
-                        onValueChange={(v) => updateInstance(client.tag, v)}
-                      >
-                        <SelectTrigger className="h-7 w-40 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {BISON_INSTANCES.map((i) => (
-                            <SelectItem key={i.key} value={i.key} className="text-xs">
-                              {i.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); removeClient(client.tag); }}
-                      className="text-xs text-muted-foreground hover:text-destructive"
-                    >
-                      Remove
-                    </button>
-                    <span className="text-xs text-muted-foreground">
-                      {expanded === client.tag ? "▲" : "▼"}
-                    </span>
-                  </div>
-
-                  {/* Expanded config */}
-                  {expanded === client.tag && (
-                    <div className="border-t bg-muted/20 px-4 py-4 space-y-4">
-                      {editing === client.tag ? (
-                        <div className="space-y-4">
-                          {/* CC fields */}
-                          <div>
-                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">CC Recipients</p>
-                            <div className="grid grid-cols-2 gap-3">
-                              {([1, 2, 3, 4, 5, 6] as const).map((n) => (
-                                <div key={n} className="flex gap-2">
-                                  <Input
-                                    placeholder={`CC Name ${n}`}
-                                    value={editForm[`cc_name_${n}` as keyof ConfigForm]}
-                                    onChange={(e) => setEditForm({ ...editForm, [`cc_name_${n}`]: e.target.value })}
-                                    className="text-xs"
-                                  />
-                                  <Input
-                                    placeholder={`CC Email ${n}`}
-                                    value={editForm[`cc_email_${n}` as keyof ConfigForm]}
-                                    onChange={(e) => setEditForm({ ...editForm, [`cc_email_${n}`]: e.target.value })}
-                                    className="text-xs"
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          {/* BCC fields */}
-                          <div>
-                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">BCC Recipients</p>
-                            <div className="grid grid-cols-2 gap-3">
-                              {([1, 2] as const).map((n) => (
-                                <div key={n} className="flex gap-2">
-                                  <Input
-                                    placeholder={`BCC Name ${n}`}
-                                    value={editForm[`bcc_name_${n}` as keyof ConfigForm]}
-                                    onChange={(e) => setEditForm({ ...editForm, [`bcc_name_${n}`]: e.target.value })}
-                                    className="text-xs"
-                                  />
-                                  <Input
-                                    placeholder={`BCC Email ${n}`}
-                                    value={editForm[`bcc_email_${n}` as keyof ConfigForm]}
-                                    onChange={(e) => setEditForm({ ...editForm, [`bcc_email_${n}`]: e.target.value })}
-                                    className="text-xs"
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          {/* Reply Template */}
-                          <div>
-                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Reply Template → "Our Reply" in Airtable</p>
-                            <div className="flex flex-wrap gap-1.5 mb-2">
-                              <span className="text-xs text-muted-foreground py-0.5">Insert variable:</span>
-                              {[
-                                { label: "First Name", value: "{FIRST_NAME}" },
-                                { label: "Phone", value: "{PHONE}" },
-                                { label: "Company", value: "{COMPANY}" },
-                                { label: "Context", value: "{CONTEXT}" },
-                                { label: "Sender Name", value: "{SENDER_NAME}" },
-                              ].map((v) => (
-                                <button
-                                  key={v.value}
-                                  type="button"
-                                  className={`text-xs px-2 py-0.5 rounded border transition-colors ${editForm.reply_template.includes(v.value) ? "bg-primary text-primary-foreground border-primary" : "bg-muted hover:bg-muted/80 border-border text-foreground"}`}
-                                  onClick={() => {
-                                    const textarea = document.getElementById(`template-${client.tag}`) as HTMLTextAreaElement | null;
-                                    if (textarea) {
-                                      const start = textarea.selectionStart;
-                                      const end = textarea.selectionEnd;
-                                      const before = editForm.reply_template.slice(0, start);
-                                      const after = editForm.reply_template.slice(end);
-                                      setEditForm({ ...editForm, reply_template: before + v.value + after });
-                                    } else {
-                                      setEditForm({ ...editForm, reply_template: editForm.reply_template + v.value });
-                                    }
-                                  }}
-                                >
-                                  {v.label}
-                                </button>
-                              ))}
-                            </div>
-                            <Textarea
-                              id={`template-${client.tag}`}
-                              placeholder="Enter the reply template that will be stored under 'Our Reply' in Airtable..."
-                              value={editForm.reply_template}
-                              onChange={(e) => setEditForm({ ...editForm, reply_template: e.target.value })}
-                              rows={4}
-                              className="text-xs"
-                            />
-                            <p className="text-xs text-muted-foreground mt-1">
-                              Variables are replaced with real lead data when sent to Airtable. Only mapped variables get replaced.
-                            </p>
-                          </div>
-
-                          <div className="flex gap-2 items-center">
-                            <Button size="sm" onClick={() => saveConfig(client.tag)} disabled={saving || forcing}>
-                              {saving ? "Saving..." : "Save"}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => setEditing(null)} disabled={forcing}>
-                              Cancel
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              className="ml-auto"
-                              onClick={() => forceUpsert(client.tag)}
-                              disabled={forcing || saving}
-                              title="Save this config AND apply the template + CC/BCC to existing 'Open Response' leads that have a positive AI category (Interested, Meeting Request, Follow Up, Referral Given, Unrecognizable)."
-                            >
-                              {forcing ? "Applying..." : "Save & apply to Open Response leads"}
-                            </Button>
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            &quot;Save &amp; apply to Open Response leads&quot; also backfills this template + CC/BCC onto existing
-                            Open-Response leads with a positive AI category — use it when a template was set up after leads came in.
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="space-y-3">
-                          {/* Read-only view */}
-                          {[1, 2, 3, 4, 5, 6].some((n) => client[`cc_email_${n}` as keyof Client]) && (
-                            <div>
-                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">CC Recipients</p>
-                              <div className="space-y-1">
-                                {([1, 2, 3, 4] as const).map((n) => client[`cc_email_${n}` as keyof Client] && (
-                                  <p key={n} className="text-xs">
-                                    <span className="text-muted-foreground">CC {n}:</span>{" "}
-                                    {client[`cc_name_${n}` as keyof Client] as string} &lt;{client[`cc_email_${n}` as keyof Client] as string}&gt;
-                                  </p>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                          {[1, 2].some((n) => client[`bcc_email_${n}` as keyof Client]) && (
-                            <div>
-                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">BCC Recipients</p>
-                              <div className="space-y-1">
-                                {([1, 2] as const).map((n) => client[`bcc_email_${n}` as keyof Client] && (
-                                  <p key={n} className="text-xs">
-                                    <span className="text-muted-foreground">BCC {n}:</span>{" "}
-                                    {client[`bcc_name_${n}` as keyof Client] as string} &lt;{client[`bcc_email_${n}` as keyof Client] as string}&gt;
-                                  </p>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                          {client.reply_template && (
-                            <div>
-                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Reply Template</p>
-                              <p className="text-xs bg-white border rounded p-2 whitespace-pre-wrap">{client.reply_template}</p>
-                            </div>
-                          )}
-                          {!client.reply_template && ![1, 2, 3, 4, 5, 6].some((n) => client[`cc_email_${n}` as keyof Client]) && (
-                            <p className="text-xs text-muted-foreground">No config set yet.</p>
-                          )}
-                          <Button size="sm" variant="outline" onClick={() => startEdit(client)}>
-                            Edit Config
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        );
-      })}
-
-      {filtered.length === 0 && (
-        <p className="text-sm text-muted-foreground text-center py-12">No clients found.</p>
-      )}
-
-      {/* Onboard dialog */}
-      <Dialog open={onboardOpen} onOpenChange={setOnboardOpen}>
-        <DialogContent>
+      <Dialog open={addOpen} onOpenChange={(o) => { if (!adding) setAddOpen(o); }}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Onboard New Client</DialogTitle>
+            <DialogTitle>Add a client to Reply Router</DialogTitle>
+            <DialogDescription>
+              Its replies start routing to the section&apos;s Airtable base. For a new client, the guided onboarding does this for you (Set up in Reply Router).
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 pt-2">
+          <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label>Client Tag</Label>
-              <Input
-                placeholder="e.g. ACME, GJEC, MPD"
-                value={newTag}
-                onChange={(e) => setNewTag(e.target.value.toUpperCase())}
-              />
-              <p className="text-xs text-muted-foreground">Must match the prefix before the colon in campaign names.</p>
+              <Label htmlFor="add-tag">Client tag</Label>
+              <Input id="add-tag" placeholder="e.g. ACME" value={newTag} onChange={(e) => setNewTag(e.target.value.toUpperCase())}
+                className={cn((tagTaken || tagBad) && "border-destructive/60")} />
+              <p className={cn("text-xs", tagTaken || tagBad ? "text-destructive" : "text-muted-foreground")}>
+                {tagBad ? "Letters, numbers and & . _ - only — no spaces, up to 32 characters."
+                  : tagTaken ? `${newTag.trim()} is already in Reply Router.`
+                  : "The prefix before the colon in its campaign names."}
+              </p>
             </div>
             <div className="space-y-1.5">
-              <Label>Section</Label>
+              <Label htmlFor="add-section">Section</Label>
               <Select value={newSectionId} onValueChange={setNewSectionId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a section..." />
-                </SelectTrigger>
+                <SelectTrigger id="add-section" className="w-full"><SelectValue placeholder="Choose a section" /></SelectTrigger>
                 <SelectContent>
-                  {sections.map((s) => (
-                    <SelectItem key={s.id} value={String(s.id)}>
-                      {s.name} — {s.airtable_base_id}
-                    </SelectItem>
-                  ))}
+                  {sections.map((s) => <SelectItem key={s.id} value={String(s.id)}>{s.name} — {s.airtable_base_id}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex gap-2 pt-2">
-              <Button onClick={onboardClient} disabled={!newTag.trim() || !newSectionId || onboarding}>
-                {onboarding ? "Onboarding..." : "Onboard Client"}
-              </Button>
-              <Button variant="outline" onClick={() => setOnboardOpen(false)}>Cancel</Button>
-            </div>
           </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setAddOpen(false)} disabled={adding}>Cancel</Button>
+            <Button onClick={addClient} disabled={!newTag.trim() || !newSectionId || tagTaken || tagBad || adding}>
+              {adding && <Loader2 className="animate-spin" />} Add client
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function Pill({ tone, children }: { tone?: "green" | "amber" | "red"; children: React.ReactNode }) {
+  return (
+    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
+      tone === "green" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+        : tone === "amber" ? "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+        : tone === "red" ? "bg-destructive/10 text-destructive"
+        : "bg-muted text-muted-foreground")}>
+      {children}
+    </span>
   );
 }

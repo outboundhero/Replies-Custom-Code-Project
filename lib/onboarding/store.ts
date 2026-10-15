@@ -27,6 +27,7 @@ import {
   type GeneratedTask,
 } from "@/lib/onboarding/generate";
 import { DEFAULT_TEMPLATE } from "@/lib/onboarding/seed";
+import { normClientTag } from "@/lib/onboarding/copy-model";
 
 const nowIso = () => new Date().toISOString();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -367,6 +368,36 @@ export async function addTemplateStepToClient(tag: string, automation: string): 
   return tasks.length > 0;
 }
 
+/** Give a client made from an older template the guided setup steps (the in-order steps and
+ *  "Set up in Reply Router") it doesn't have yet. Its other tasks are left as they are.
+ *  Returns how many were added. */
+export async function addSetupStepsToClient(tag: string): Promise<number> {
+  await ensureTables();
+  const client = await getClient(tag);
+  if (!client) throw new Error("client not onboarded");
+  const existing = await db.execute({ sql: "SELECT template_task_id, title, automation FROM onboarding_task WHERE client_tag = ?", args: [client.client_tag] });
+  const haveIds = new Set(existing.rows.map((r) => String(r.template_task_id ?? "")).filter(Boolean));
+  const haveAuto = new Set(existing.rows.map((r) => String(r.automation ?? "")).filter(Boolean));
+  const haveTitles = new Set(existing.rows.map((r) => String(r.title).trim().toLowerCase()));
+  const missing = (await listTemplate()).filter((t) =>
+    (t.no_due || t.automation === "replyrouter_setup") &&
+    !haveIds.has(t.id) && !(t.automation && haveAuto.has(t.automation)) && !haveTitles.has(t.title.trim().toLowerCase()));
+  if (!missing.length) return 0;
+  const tasks = generateTasks(
+    {
+      client_tag: client.client_tag,
+      start_date: client.start_date,
+      domains_owner_email: client.domains_owner_email,
+      inbox_owner_email: client.inbox_owner_email,
+      ops_owner_email: client.ops_owner_email,
+    },
+    missing,
+  );
+  await insertGeneratedTasks(tasks);
+  bumpVersion("onboarding");
+  return tasks.length;
+}
+
 /** Seed the standard template only when it's empty (idempotent). Returns count inserted. */
 export async function seedDefaultTemplate(): Promise<number> {
   await ensureTables();
@@ -554,6 +585,7 @@ async function ensureClientTag(tag: string): Promise<void> {
   try {
     await db.execute({ sql: "INSERT INTO client_tags (tag, section_id) VALUES (?, ?)", args: [tag, sectionId] });
     await db.execute({ sql: "INSERT OR IGNORE INTO client_config (client_tag) VALUES (?)", args: [tag] });
+    bumpVersion("config"); // the Clients list shows it straight away
   } catch { /* raced / already exists */ }
 }
 
@@ -593,6 +625,7 @@ export async function addOnboardingClient(input: AddClientInput): Promise<{ clie
   await ensureTables();
   const tag = input.client_tag.trim().toUpperCase();
   if (!tag) throw new Error("client_tag required");
+  if (!normClientTag(tag)) throw new Error(`"${tag}" isn't a valid client tag — use letters, numbers, & . _ - (no spaces), up to 32 characters.`);
   if (!isValidDate(input.start_date)) throw new Error("start_date must be YYYY-MM-DD");
 
   await ensureClientTag(tag);

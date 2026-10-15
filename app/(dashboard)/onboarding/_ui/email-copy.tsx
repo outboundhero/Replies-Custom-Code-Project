@@ -611,6 +611,44 @@ export function EmailCopyEditor({ active, clients: pickable, openClient }: {
     setSteps((s) => s.map((x, k) => (k === i ? { ...x, ...patch } : x)));
   }, [setSteps]);
 
+  // The email that just moved is briefly highlighted, so it's easy to see where it went.
+  const [flashUid, setFlashUid] = useState<string | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (flashTimer.current) clearTimeout(flashTimer.current); }, []);
+  const flash = useCallback((uid: string) => {
+    setFlashUid(uid);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlashUid(null), 1800);
+    requestAnimationFrame(() => requestAnimationFrame(() => document.getElementById(`copy-email-${uid}`)?.scrollIntoView({ behavior: "smooth", block: "center" })));
+  }, []);
+
+  /** Move an email up or down — shown, highlighted, and undoable. */
+  const moveEmail = (i: number, dir: -1 | 1) => {
+    const before = steps;
+    const moved = steps[i];
+    const to = i + dir;
+    if (!moved || to < 0 || to >= steps.length) return;
+    setSteps((x) => moveStep(x, i, dir));
+    setSelected(to);
+    flash(moved.uid);
+    toast.success(`Email ${i + 1} moved ${dir > 0 ? "down" : "up"} — it's now email ${to + 1}.`, {
+      description: i === 0 || to === 0
+        ? "The first email keeps the sequence's subject, and the waits stay with their place in the schedule."
+        : "The waits stay with their place in the schedule.",
+      action: { label: "Undo", onClick: () => { setSteps(() => before); setSelected(i); flash(moved.uid); } },
+    });
+  };
+  /** Remove an email — undoable for a few seconds. */
+  const removeEmail = (i: number) => {
+    const before = steps;
+    setSteps((x) => removeStep(x, i));
+    setSelected(Math.max(0, i - 1));
+    toast.success(`Email ${i + 1} removed.`, {
+      description: steps.length - 1 === 1 ? "One email is left." : `${steps.length - 1} emails are left.`,
+      action: { label: "Undo", onClick: () => { setSteps(() => before); setSelected(i); flash(before[i].uid); } },
+    });
+  };
+
   const focusEmail = useCallback((i: number, uid?: string) => {
     setSelected(i);
     if (uid) {
@@ -653,7 +691,7 @@ export function EmailCopyEditor({ active, clients: pickable, openClient }: {
     if (!dirty) { toast("Nothing to save — no changes yet."); return; }
     if (check.errors.length) {
       const first = check.errors[0];
-      toast.error(`Fix ${plural(check.errors.length, "problem")} before saving.`, { description: first.step ? `Email ${first.step}: ${first.message}` : first.message });
+      toast.error(`Fix ${plural(check.errors.length, "problem")} before saving.`, { description: first.step && !first.message.startsWith(`Email ${first.step} `) ? `Email ${first.step}: ${first.message}` : first.message });
       const s = steps[Math.max(0, first.step - 1)];
       if (s) focusEmail(Math.max(0, first.step - 1), s.uid);
       return;
@@ -855,8 +893,9 @@ export function EmailCopyEditor({ active, clients: pickable, openClient }: {
                       onSelect={() => setSelected(i)}
                       onToggleCollapse={() => setCollapsed((c) => ({ ...c, [s.uid]: !c[s.uid] }))}
                       onChange={(patch) => patchStep(i, patch)}
-                      onMove={(dir) => { setSteps((x) => moveStep(x, i, dir)); setSelected(i + dir); }}
-                      onDelete={() => { setSteps((x) => removeStep(x, i)); setSelected(Math.max(0, i - 1)); }}
+                      flash={flashUid === s.uid}
+                      onMove={(dir) => moveEmail(i, dir)}
+                      onDelete={() => removeEmail(i)}
                     />
                   </Fragment>
                 ))}
@@ -998,8 +1037,8 @@ function WaitConnector({ value, day, thread, onChange }: { value: number; day: n
   );
 }
 
-function StepCard({ index, step, total, day, firstSubject, threadSubject, selected, collapsed, issues, onSelect, onToggleCollapse, onChange, onMove, onDelete }: {
-  index: number; step: EditStep; total: number; day: number; firstSubject: string; threadSubject: string; selected: boolean; collapsed: boolean;
+function StepCard({ index, step, total, day, firstSubject, threadSubject, selected, collapsed, flash, issues, onSelect, onToggleCollapse, onChange, onMove, onDelete }: {
+  index: number; step: EditStep; total: number; day: number; firstSubject: string; threadSubject: string; selected: boolean; collapsed: boolean; flash?: boolean;
   issues: { errors: StepIssue[]; warnings: StepIssue[] };
   onSelect: () => void; onToggleCollapse: () => void; onChange: (p: Partial<CopyStep>) => void;
   onMove: (dir: -1 | 1) => void; onDelete: () => void;
@@ -1026,7 +1065,12 @@ function StepCard({ index, step, total, day, firstSubject, threadSubject, select
   };
 
   return (
-    <div id={`copy-email-${step.uid}`} className="relative grid scroll-mt-4 grid-cols-[36px_1fr] gap-3" onFocusCapture={onSelect} onMouseDown={onSelect}>
+    // Selecting a card shows its insert bar, which moves the cards below it. So a card is
+    // selected on click (after a button in it has done its job) or when a text field in it
+    // gets focus — never on mouse-down, which made the first click on a button miss.
+    <div id={`copy-email-${step.uid}`} className="relative grid scroll-mt-4 grid-cols-[36px_1fr] gap-3"
+      onFocusCapture={(e) => { if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) onSelect(); }}
+      onClick={(e) => { if (!(e.target as HTMLElement).closest("button, a, [role='button']")) onSelect(); }}>
       <div className="flex justify-center pt-3">
         <span className={cn(
           "relative z-10 grid size-9 place-items-center rounded-full border text-sm font-semibold tabular-nums transition-colors",
@@ -1036,8 +1080,9 @@ function StepCard({ index, step, total, day, firstSubject, threadSubject, select
       </div>
 
       <div className={cn(
-        "min-w-0 rounded-xl border bg-card transition-[box-shadow,border-color]",
+        "min-w-0 rounded-xl border bg-card transition-[box-shadow,border-color] duration-500",
         selected ? "border-foreground/20 shadow-md ring-1 ring-foreground/[0.04]" : "shadow-xs hover:border-foreground/15",
+        flash && "border-sky-500/60 ring-4 ring-sky-500/20",
       )}>
         {/* header */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-2.5">
@@ -1058,9 +1103,9 @@ function StepCard({ index, step, total, day, firstSubject, threadSubject, select
           <div className="ml-auto flex items-center gap-0.5">
             {errs > 0 && <span className="mr-1.5 inline-flex items-center gap-1 text-xs text-destructive"><AlertCircle className="size-3.5" />{errs}</span>}
             {!errs && warns > 0 && <span className="mr-1.5 inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400"><AlertTriangle className="size-3.5" />{warns}</span>}
-            <span className="mr-2 hidden text-xs tabular-nums text-muted-foreground sm:inline" title="Different ways this email can read">≈ {fmtVariants(variants)} versions</span>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label="Move up" title="Move up" disabled={index === 0} onClick={() => onMove(-1)}><ArrowUp /></Button>
-            <Button type="button" size="icon-sm" variant="ghost" aria-label="Move down" title="Move down" disabled={index === total - 1} onClick={() => onMove(1)}><ArrowDown /></Button>
+            <span className="mr-2 hidden text-xs tabular-nums text-muted-foreground sm:inline" title="Different ways this email can read">≈ {fmtVariants(variants)} {variants === 1 ? "version" : "versions"}</span>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Move up" title={index === 0 ? "Already the first email" : `Move up — it becomes email ${index}`} disabled={index === 0} onClick={() => onMove(-1)}><ArrowUp /></Button>
+            <Button type="button" size="icon-sm" variant="ghost" aria-label="Move down" title={index === total - 1 ? "Already the last email" : `Move down — it becomes email ${index + 2}`} disabled={index === total - 1} onClick={() => onMove(1)}><ArrowDown /></Button>
             {total > 1 && <ConfirmButton size="icon-sm" title="Remove this email" icon={<Trash2 />} confirmLabel="Remove?" onConfirm={onDelete} />}
             <Button type="button" size="icon-sm" variant="ghost" aria-label={collapsed ? "Expand" : "Collapse"} title={collapsed ? "Expand" : "Collapse"} onClick={onToggleCollapse}>
               <ChevronDown className={cn("transition-transform", collapsed && "-rotate-90")} />

@@ -11,7 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
 import {
-  addOnboardingClient, updateClientStartDate, setClientStatus, setClientGroup, setClientTimezone, deleteOnboardingClient, regenerateTasks,
+  addOnboardingClient, updateClientStartDate, setClientStatus, setClientGroup, setClientTimezone, deleteOnboardingClient, regenerateTasks, addSetupStepsToClient,
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
   bulkUpdateTaskStatus, listTasks, getTask,
   upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate, applyStandardTemplate,
@@ -90,6 +90,10 @@ export async function POST(req: NextRequest) {
         const automation = String(body.automation || "");
         if (automation !== "replyrouter_setup") return NextResponse.json({ error: "Unknown step" }, { status: 400 });
         const added = await addTemplateStepToClient(String(body.client_tag || ""), automation);
+        return NextResponse.json({ ok: true, added });
+      }
+      case "add-setup-steps": {
+        const added = await addSetupStepsToClient(String(body.client_tag || ""));
         return NextResponse.json({ ok: true, added });
       }
       case "regenerate": {

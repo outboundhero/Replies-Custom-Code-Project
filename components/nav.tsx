@@ -197,7 +197,9 @@ function NavGroupEl({
   defaultOpen?: boolean;
   onWarm?: (href: string) => void;
 }) {
-  const anyActive = kids.some((k) => pathname === k.href);
+  // A child is active on its own page and on pages under it (/clients/JPSCAL → All Clients).
+  const isKid = (href: string) => pathname === href || pathname.startsWith(href + "/");
+  const anyActive = kids.some((k) => isKid(k.href));
   // defaultOpen groups (Inbox) start expanded; others start collapsed but always
   // open while one of their children is the active page.
   const [open, setOpen] = useState(defaultOpen);
@@ -224,7 +226,7 @@ function NavGroupEl({
         <div className="overflow-hidden">
           <div className="ml-3 mt-1 pl-2 border-l border-border space-y-1">
             {kids.map((k) => (
-              <Link key={k.href} href={k.href} onMouseEnter={() => onWarm?.(k.href)} className={linkClass(pathname === k.href)}>
+              <Link key={k.href} href={k.href} onMouseEnter={() => onWarm?.(k.href)} className={linkClass(isKid(k.href))}>
                 {k.label}
               </Link>
             ))}

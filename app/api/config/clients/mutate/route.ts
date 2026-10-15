@@ -5,6 +5,7 @@ import { bumpVersion } from "@/lib/server-cache";
 import supabase from "@/lib/supabase";
 import { CC_BCC_CATEGORIES } from "@/lib/processing/lead-categorizer";
 import { bumpCacheVersion } from "@/lib/inbox-cache";
+import { normClientTag } from "@/lib/onboarding/copy-model";
 
 const CONFIG_KEYS = [
   "cc_name_1", "cc_email_1", "cc_name_2", "cc_email_2", "cc_name_3", "cc_email_3",
@@ -53,19 +54,28 @@ export async function POST(req: NextRequest) {
 
     // ── create ──────────────────────────────────────────────
     if (action === "create") {
-      const { tag, section_id } = body;
-      if (!tag || !section_id) {
+      const { section_id } = body;
+      if (!body.tag || !section_id) {
         return NextResponse.json({ error: "tag and section_id required" }, { status: 400 });
+      }
+      // Same rule as everywhere else that reads a tag (client page, onboarding).
+      const tag = normClientTag(body.tag);
+      if (!tag) {
+        return NextResponse.json({ error: `"${String(body.tag).trim()}" isn't a valid client tag — use letters, numbers, & . _ - (no spaces), up to 32 characters.` }, { status: 400 });
+      }
+      const dup = await db.execute({ sql: "SELECT tag FROM client_tags WHERE UPPER(tag) = ?", args: [tag] });
+      if (dup.rows.length) {
+        return NextResponse.json({ error: `${tag} is already in Reply Router.` }, { status: 409 });
       }
 
       await db.execute({
         sql: "INSERT INTO client_tags (tag, section_id) VALUES (?, ?)",
-        args: [tag.trim(), section_id],
+        args: [tag, section_id],
       });
 
       await db.execute({
         sql: "INSERT OR IGNORE INTO client_config (client_tag) VALUES (?)",
-        args: [tag.trim()],
+        args: [tag],
       });
 
       return NextResponse.json({ ok: true });

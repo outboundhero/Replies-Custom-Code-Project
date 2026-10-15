@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -146,7 +146,7 @@ function OnboardingBoard() {
       )}
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        <TabsList className="max-w-full overflow-x-auto">
           <TabsTrigger value="clients">Clients</TabsTrigger>
           <TabsTrigger value="people">By person</TabsTrigger>
           <TabsTrigger value="board">Board</TabsTrigger>
@@ -303,7 +303,7 @@ function ClientsList({ clients, tasks, users, loading, isAdmin, existingTags, on
                 <Progress done={c.tasks_done} total={c.tasks_total} className="w-full sm:w-52" />
                 <StatusChip status={c.status} />
               </button>
-              <Link href={`/onboarding/${encodeURIComponent(c.client_tag)}`} title="Open the client page"
+              <Link href={`/onboarding/${encodeURIComponent(c.client_tag)}`} title="Open the checklist"
                 className="flex items-center border-l px-3 text-muted-foreground hover:bg-muted/40 hover:text-primary transition-colors">
                 <ArrowRight className="h-4 w-4" />
               </Link>
@@ -698,7 +698,7 @@ function Board({ tasks, clients, users, onChange }: {
                       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                         <span className="truncate">{(t.assignee_email && usersById.get(t.assignee_email)) || "Unassigned"}</span>
                         <span className="tabular-nums shrink-0">
-                          {t.no_due ? `Step ${gate.step ?? "–"} of ${gate.total}` : `${fmtDate(t.due_date)}${t.template_task_id ? ` · D${t.day_offset}` : ""}`}
+                          {gate.step ? `Step ${gate.step} of ${gate.total}` : t.no_due ? "No due date" : `${fmtDate(t.due_date)}${t.template_task_id ? ` · D${t.day_offset}` : ""}`}
                         </span>
                       </div>
                     </div>
@@ -878,7 +878,7 @@ function TemplateRow({ task, index, users, onSave, busy }: {
           </Select>
           {inOrder
             ? <span className="text-[11px] text-muted-foreground">no due date</span>
-            : <Input type="number" min={0} value={day} onChange={(e) => setDay(e.target.value)} className="h-8 w-20" placeholder="0" />}
+            : <Input type="number" min={0} value={day} onChange={(e) => setDay(e.target.value)} className="h-8 w-20" placeholder="Day" />}
         </div>
       </TableCell>
       <TableCell>
@@ -897,8 +897,8 @@ function TemplateRow({ task, index, users, onSave, busy }: {
         ) : (
           <div className="flex items-center gap-1 justify-end">
             {dirty && <Button size="sm" variant="ghost" onClick={commit} disabled={busy}>Save</Button>}
-            <Button size="sm" variant="ghost" className="text-destructive" title="Remove from the template"
-              onClick={async () => { if (await onSave({ action: "template-delete", id: task.id })) toast.success("Removed from the template"); }} disabled={busy}>✕</Button>
+            <ArmedRemove title="Remove from the template" disabled={busy}
+              onConfirm={async () => { if (await onSave({ action: "template-delete", id: task.id })) toast.success("Removed from the template"); }} />
           </div>
         )}
       </TableCell>
@@ -1000,8 +1000,10 @@ function UserEditRow({ user, onSave, busy }: {
   const isNew = !user;
   const dirty = !isNew && (name !== user.name || slack.trim() !== (user.slack_member_id ?? "") || email.trim().toLowerCase() !== (user.email ?? ""));
 
+  const badEmail = !!email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
   async function commit() {
     if (!name.trim()) { if (isNew) return; toast.error("Name required"); return; }
+    if (badEmail) { toast.error(`“${email.trim()}” isn't an email address.`); return; }
     const ok = await onSave({ action: "user-upsert", id: user?.id ?? null, name, slack_member_id: slack.trim() || null, email: email.trim() || null });
     if (ok) toast.success(isNew ? "Team member added" : "Saved");
   }
@@ -1015,7 +1017,8 @@ function UserEditRow({ user, onSave, busy }: {
         <Input value={slack} onChange={(e) => setSlack(e.target.value)} placeholder="U0123ABCD" className="h-8 font-mono text-xs" />
       </TableCell>
       <TableCell>
-        <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@outboundhero.co" className="h-8 text-xs" />
+        <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@outboundhero.co"
+          className={cn("h-8 text-xs", badEmail && "border-destructive/60")} title={badEmail ? "This isn't an email address" : undefined} />
       </TableCell>
       <TableCell className="text-right">
         {isNew ? (
@@ -1023,11 +1026,25 @@ function UserEditRow({ user, onSave, busy }: {
         ) : (
           <div className="flex items-center gap-1 justify-end">
             {dirty && <Button size="sm" variant="ghost" onClick={commit} disabled={busy}>Save</Button>}
-            <Button size="sm" variant="ghost" className="text-destructive" title="Remove from the team"
-              onClick={async () => { if (await onSave({ action: "user-delete", id: user.id })) toast.success("Removed"); }} disabled={busy}>✕</Button>
+            <ArmedRemove title="Remove from the team" disabled={busy}
+              onConfirm={async () => { if (await onSave({ action: "user-delete", id: user.id })) toast.success("Removed"); }} />
           </div>
         )}
       </TableCell>
     </TableRow>
+  );
+}
+
+/** ✕ that asks once ("Remove?") before it removes — the confirm disarms itself after a few seconds. */
+function ArmedRemove({ title, disabled, onConfirm }: { title: string; disabled?: boolean; onConfirm: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return armed ? (
+    <Button size="sm" variant="destructive" className="h-8" disabled={disabled}
+      onClick={() => { if (timer.current) clearTimeout(timer.current); setArmed(false); onConfirm(); }}>Remove?</Button>
+  ) : (
+    <Button size="sm" variant="ghost" className="text-destructive" title={title} aria-label={title} disabled={disabled}
+      onClick={() => { setArmed(true); timer.current = setTimeout(() => setArmed(false), 3500); }}>✕</Button>
   );
 }
