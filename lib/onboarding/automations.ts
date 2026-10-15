@@ -8,7 +8,7 @@
  */
 import { dmBySlackIds, postToChannel } from "@/lib/slack";
 import {
-  getSetting, setClientGroup, setClientTimezone, listOnboardingUsers, lastFailedAttempt, runResults, takeLock, releaseLock, lockHolder,
+  getSetting, setClientGroup, setClientTimezone, listOnboardingUsers, lastFailedAttempt, runResults, takeLock, releaseLock, lockHolder, listTasks,
   type OnboardingClientRow, type OnboardingTaskRow,
 } from "@/lib/onboarding/store";
 import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
@@ -22,7 +22,7 @@ import { syncAll } from "@/lib/sync/sheets-to-supabase";
 import { parseFormPeople, buildReplyTemplate, isEmail, nearMiss } from "@/lib/onboarding/rr-setup";
 import { listCampaigns, lookUpCampaign, listTags, createTag } from "@/lib/outboundhero-api";
 import {
-  previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, previewOnboardingWhitelist, runOnboardingWhitelist,
+  previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, forgetAllocationPlans, previewOnboardingWhitelist, runOnboardingWhitelist,
   leadsyncRunSecretSet, type AllocationSide, type AllocationPlan, type WhitelistPlan,
 } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
@@ -233,7 +233,16 @@ interface CampaignPlan {
   steps: BisonStepPayload[];
   /** The client's own tag in each instance (null = it gets created when the first campaign there is made). */
   clientTagId: Partial<Record<BisonInstanceKey, number | null>>;
+  /** The client details this plan writes into the copy — saved with each campaign made, so a retry uses the same. */
+  pinned: Record<string, string>;
 }
+
+/** The inputs that change what the 12 campaigns say or how they're set up — all 12 must share them. */
+const PINNED_KEYS = ["client_type", "tier", "timezone", "city", "state", "abbr", "area", "office_address", "company_name", "service_area", "office_line"] as const;
+const PINNED_LABEL: Record<string, string> = {
+  client_type: "client type", tier: "tier", timezone: "time zone", city: "city", state: "state", abbr: "abbreviation", area: "area name",
+  office_address: "office address", company_name: "company name", service_area: "service-area line", office_line: "office line",
+};
 
 /**
  * Everything the preview shows and the run acts on — built the same way for
@@ -250,8 +259,19 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   const tag = c.client_tag.toUpperCase();
   const blockers: string[] = [];
   const notes: PreviewNote[] = [];
-  const param = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string).trim() : undefined);
-  const rawParam = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string) : undefined);
+  // Campaigns this step already made carry the client details they were made with. A retry starts
+  // from those (and is held to them below), so all 12 say the same thing.
+  let madeWith: Record<string, string> | null = null, madeCount = 0;
+  for (const res of await runResults(ctx.task.id)) {
+    for (const x of (Array.isArray(res.results) ? res.results : []) as { state?: unknown; lines?: unknown }[]) {
+      if (x.state !== "created") continue;
+      madeCount++;
+      if (x.lines && typeof x.lines === "object") madeWith = x.lines as Record<string, string>; // oldest wins (results are newest first)
+    }
+  }
+  const given = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string) : typeof madeWith?.[k] === "string" ? madeWith[k] : undefined);
+  const param = (k: string) => given(k)?.trim();
+  const rawParam = (k: string) => given(k);
 
   // What the sheets say (they only pre-fill — whatever is typed here wins).
   let sheet: NewClientInfoRow | undefined;
@@ -372,7 +392,8 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
         if (c === null) blockers.push(`Couldn't check whether #${x.campaignId} (from an earlier try at “${x.name}”) is still in Email Bison — try again.`);
         else if (c !== "gone" && !gone(c.status)) blockers.push(`#${x.campaignId} “${c.name}” from an earlier try is still in Email Bison — look at it and delete it, then run again.`);
       } else if (x.unsure && typeof x.at === "string" && Date.now() - Date.parse(x.at) < 10 * 60_000) {
-        blockers.push(`The last try at “${x.name}” got no answer from Email Bison, so it may have been made as “${BUILD_PREFIX}${x.name}”. Wait a few minutes, check Email Bison, then run again.`);
+        const mins = Math.max(1, Math.ceil((10 * 60_000 - (Date.now() - Date.parse(x.at))) / 60_000));
+        blockers.push(`The last try at “${x.name}” got no answer from Email Bison, so it may have been made as “${BUILD_PREFIX}${x.name}”. Check Email Bison for it — this step can run again in about ${mins} minute${mins === 1 ? "" : "s"}.`);
       }
     }
   }
@@ -402,7 +423,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
         if (n.toLowerCase().startsWith(`${CHECK_PREFIX}${tag}:`.toLowerCase()) || n.toLowerCase().startsWith(`${BUILD_PREFIX}${tag}:`.toLowerCase())) {
           blockers.push(`${label}: an unfinished campaign is still there — #${x.id} “${n}”. Look at it and delete it in Email Bison, then try again.`);
         } else if (n.toLowerCase().startsWith(prefix) && !CAMPAIGN_SLOTS.some((s) => campaignName(tag, s, suffix).toLowerCase() === n.toLowerCase()) && !/\[Nurture \d+\]/i.test(n)) {
-          blockers.push(`${label}: #${x.id} “${n}” is ${tag}'s but isn't one of the 12 names for a ${suffix} — was the client type different? Sort it out in Email Bison first.`);
+          blockers.push(`${label}: #${x.id} “${n}” is ${tag}'s but isn't one of the 12 names for ${/^[aeiou]/i.test(suffix) ? "an" : "a"} ${suffix} — was the client type different? Sort it out in Email Bison first.`);
         }
       }
       const byName = (want: string) => tags.find((t) => t.name.trim().toLowerCase() === want.toLowerCase()) ?? null;
@@ -431,20 +452,26 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   }
 
   const exists = items.filter((i) => i.existingIds.length).length;
+  // Held to the details the campaigns already made were written with.
+  const pinned = Object.fromEntries(inputs.filter((i) => (PINNED_KEYS as readonly string[]).includes(i.key)).map((i) => [i.key, String(i.value ?? "")]));
+  if (madeWith && exists > 0) {
+    const changed = PINNED_KEYS.filter((k) => typeof madeWith![k] === "string" && (madeWith![k] ?? "").trim() !== (pinned[k] ?? "").trim());
+    if (changed.length) blockers.push(`${exists} of the 12 campaigns were already made with a different ${changed.map((k) => PINNED_LABEL[k]).join(", ")} — put back what they were made with (reload this step), or delete those campaigns in Email Bison first, so all 12 match.`);
+  }
   const waits = steps.length ? steps.slice(0, -1).map((s) => s.wait_in_days).join(" → ") : "";
   const lines = [
     group
-      ? `Creates ${items.length - exists || 12} draft campaigns for ${tag} — 6 in B2B #${group} ${GROUP_META[group].b2b} and 6 in B2C #${group} ${GROUP_META[group].b2c}, named “${tag}: … (${suffix})”. Nothing is launched; no senders or leads are added.`
+      ? `${exists ? `Creates the other ${items.length - exists} of ${tag}'s 12 draft campaigns` : `Creates 12 draft campaigns for ${tag}`} — 6 in B2B #${group} ${GROUP_META[group].b2b} and 6 in B2C #${group} ${GROUP_META[group].b2c}, named “${tag}: … (${suffix})”. Nothing is launched; no senders or leads are added.`
       : "Creates 12 draft campaigns — 6 in each of the group's two instances. Nothing is launched.",
     steps.length ? `Emails: ${copyLabel} — ${plural(steps.length, "email")}${waits ? ` (days between: ${waits})` : ""}, with this client's lines and name filled in (below).` : "Emails: from the email copy library.",
     `Schedules: Monday–Friday in ${timezone || "the chosen time zone"}, each instance's usual window; nurture campaigns start 4 hours after their main one and end with it.`,
     `Settings: plain text, no open tracking, no unsubscribe link, follow-ups first; daily limits for tier ${tierSupported(tier) ? tier : "?"}.`,
     `Tags: New (main) or Nurture, plus ${tag}${toCreateTag.length ? ` — the ${tag} tag doesn't exist yet in ${toCreateTag.join(" and ")}, so it's created there` : ""}.`,
     "Works one campaign at a time and reads every part back. A campaign gets its real name only once everything in it has checked out; one that doesn't is kept aside as “CHECK COPY — …” and the run stops there.",
-    ...(exists ? [`${exists} of the 12 already exist and are left as they are.`] : []),
+    ...(exists ? [`${exists} of the 12 already exist and are left as they are.${madeWith && madeCount ? " The rest are made with the same client details as those." : ""}`] : []),
     "Marks this step Done once all 12 are there.",
   ];
-  return { tag, group, timezone, clientType, inputs, blockers, rows, notes, lines, items, steps, clientTagId };
+  return { tag, group, timezone, clientType, inputs, blockers, rows, notes, lines, items, steps, clientTagId, pinned };
 }
 
 const createCampaigns: Automation = {
@@ -468,7 +495,7 @@ const createCampaigns: Automation = {
     // Rebuilt now, from a fresh read — never trusted from the preview.
     const p = await planCampaigns(ctx, true);
     if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
-    if (p.items.length !== 2 * CAMPAIGN_SLOTS.length || !p.steps.length) return { ok: false, summary: "The plan isn't complete — open the preview to see why." };
+    if (p.items.length !== 2 * CAMPAIGN_SLOTS.length || !p.steps.length) return { ok: false, summary: "The plan isn't complete — reload this step to see why." };
     const total = p.items.length;
     const allThere = `All ${total} campaigns are there for ${p.tag} — drafts, ready for their senders.`;
 
@@ -513,7 +540,7 @@ const createCampaigns: Automation = {
       instance: next.instance, name: next.name, limits: next.limits, steps: p.steps, schedule: next.schedule,
       tags: [next.modeTag, { id: clientTag, name: p.tag }],
     }, realBisonOps);
-    const record = { instance: next.instance, name: r.name, state: r.state, campaignId: r.campaignId, note: r.note, unsure: !!r.unsure, at: new Date().toISOString() };
+    const record = { instance: next.instance, name: r.name, state: r.state, campaignId: r.campaignId, note: r.note, unsure: !!r.unsure, at: new Date().toISOString(), lines: p.pinned };
     if (r.state === "failed") {
       return {
         ok: false,
@@ -548,6 +575,15 @@ const DAILY_LIMIT = 3;
 /** How long a client's hold on its group's reserve lasts after its last batch. */
 const ALLOCATION_LOCK_MS = 10 * 60_000;
 const allocationLock = (group: 1 | 2) => `allocate:group:${group}`;
+/** LeadSync's refusals, said in plain words (its own text is written for developers). */
+function leadsyncSays(error: string): string {
+  if (/allocation is switched off/i.test(error)) return "LeadSync's domain allocation is switched off — set ONBOARDING_ALLOCATE_ENABLED=1 in LeadSync's Vercel settings and redeploy it.";
+  if (/sending is switched off/i.test(error)) return "LeadSync's whitelist sending is switched off — set ONBOARDING_WHITELIST_ENABLED=1 in LeadSync's Vercel settings and redeploy it.";
+  if (/ONBOARDING_RUN_SECRET is not set/i.test(error)) return "LeadSync has no run secret — set ONBOARDING_RUN_SECRET in LeadSync's Vercel settings (the same value as LEADSYNC_RUN_SECRET here) and redeploy it.";
+  if (/run secret is missing or wrong/i.test(error)) return "The run secret here doesn't match LeadSync's — LEADSYNC_RUN_SECRET (Reply Router) and ONBOARDING_RUN_SECRET (LeadSync) must be the same value.";
+  return /[.!?]$/.test(error.trim()) ? error.trim() : `${error.trim()}.`;
+}
+
 const groupBusy = (group: 1 | 2, holder: string) =>
   `Group ${group}'s domains are being allocated for ${holder} right now — two clients of a group can't take from the same reserve at once. Run this when that has finished (the hold lapses ${ALLOCATION_LOCK_MS / 60_000} minutes after its last batch).`;
 
@@ -648,6 +684,17 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
         }
       }
       summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
+      // The campaigns the "Create the 12 campaigns" step made, by id: Email Bison's search can lag
+      // behind campaigns made a moment ago, and this step must not say they're missing.
+      const madeIds = new Map<string, number>(); // `${instance}|${name lower}` → id
+      const createTask = (await listTasks({ tag: c.client_tag })).find((t) => t.automation === "create_campaigns");
+      if (createTask) {
+        for (const res of await runResults(createTask.id)) {
+          for (const x of (Array.isArray(res.results) ? res.results : []) as { instance?: unknown; name?: unknown; state?: unknown; campaignId?: unknown }[]) {
+            if (x.state === "created" && typeof x.campaignId === "number" && typeof x.name === "string") madeIds.set(`${x.instance}|${x.name.trim().toLowerCase()}`, x.campaignId);
+          }
+        }
+      }
       for (const s of p.instances) {
         // The client's own campaigns here — the ones step 2 made — are what the domains attach to.
         let campaignIds: number[] = [];
@@ -664,7 +711,12 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
             const hits = found.filter((x) => names.includes(x.name.trim().toLowerCase()));
             if (hits.length === 1) campaignIds.push(hits[0].id);
             else if (hits.length > 1) blockers.push(`${s.label}: ${hits.length} campaigns are named “${name}” — there should be one.`);
-            else missing.push(slotKey(slot));
+            else {
+              const made = names.map((n) => madeIds.get(`${s.instance}|${n}`)).find((id) => id != null);
+              const c2 = made != null ? await lookUpCampaign(s.instance as BisonInstanceKey, made) : null;
+              if (made != null && c2 && c2 !== "gone" && !gone(c2.status)) campaignIds.push(made);
+              else missing.push(slotKey(slot));
+            }
           }
           if (missing.length) { blockers.push(`${s.label}: ${tag} has no ${missing.join(", ")} campaign${missing.length === 1 ? "" : "s"} yet — the “Create the 12 campaigns” step creates them.`); campaignIds = []; }
         } catch (e) {
@@ -681,7 +733,8 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
       }
     }
   }
-  if (!redirect) blockers.unshift(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
+  // While another client holds the group, LeadSync wasn't asked — its website isn't known yet, so no verdict on it.
+  if (!redirect && !(busyFor && busyFor !== tag)) blockers.unshift(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
   return { tag, tier, redirect, plan, inputs, blockers, rows, notes, summary, sides };
 }
 
@@ -714,7 +767,7 @@ const allocateDomains: Automation = {
     const p = await planAllocation(ctx);
     const group = ctx.client.group_num;
     if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
-    if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — open the preview to see why." };
+    if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — reload this step to see why." };
     const total = (s: AllocationSidePlan) => `${s.label} ${s.cap}`;
     const side = p.sides.find((s) => s.need > 0);
     if (!side) {
@@ -737,6 +790,8 @@ const allocateDomains: Automation = {
       clientTag: p.tag, group, tier: p.tier, instance: side.instance,
       domains, redirectUrl: p.redirect, campaignIds: side.campaignIds, dailyLimit: DAILY_LIMIT,
     });
+    // The group's reserve just changed: plans kept for its other clients would offer domains that are gone.
+    forgetAllocationPlans(group);
     // Whatever went wrong, the kept plan is no longer trusted — the next try asks again.
     if (!r.ok) {
       rememberAllocationPlan(p.tag, group, p.tier, null);
@@ -747,8 +802,8 @@ const allocateDomains: Automation = {
         ok: false,
         summary: r.status === 0
           // No answer is not a "no": LeadSync may still be working through the batch.
-          ? `LeadSync didn't answer for ${side.label} (${r.error}) — it may still be working on this batch. Wait a few minutes, then open the preview: it shows what was added.`
-          : `LeadSync didn't take the batch for ${side.label}: ${r.error}${r.status === 409 ? " Nothing was changed — run it again for a fresh plan." : ""}`,
+          ? `LeadSync didn't answer for ${side.label} (${r.error}) — it may still be working on this batch. Wait a few minutes, then reload this step: it shows what was added.`
+          : `LeadSync didn't take the batch for ${side.label}: ${leadsyncSays(r.error)}${r.status === 409 ? " Nothing was changed — run it again for a fresh plan." : ""}`,
         result: { instance: side.instance, domains },
       };
     }
@@ -827,6 +882,7 @@ async function planWhitelist(ctx: AutomationContext): Promise<WhitelistView> {
   } else {
     if (d.assigned === 0) blockers.push(`${tag} has no sending domains in LeadSync yet — the “Domains” step allocates them.`);
     if (p.recipientProblem) blockers.push(`${p.recipientProblem} — the email has nobody to go to.`);
+    else if (!p.to.length && !p.bcc.length && d.toSend.length > 0) blockers.push(`The email has nobody to go to — ${tag} has no CC or BCC in Reply Router. Add them on its client page first.`);
     if (d.toSend.length > 0 && !p.webhookConfigured) blockers.push("LeadSync's email sender isn't set up, so it can't send.");
   }
 
@@ -893,7 +949,7 @@ const whitelistEmail: Automation = {
     const v = await planWhitelist(ctx);
     if (v.blockers.length) return { ok: false, summary: v.blockers.join(" ") };
     const p = v.plan;
-    if (!p) return { ok: false, summary: "LeadSync returned no email — open the preview to see why." };
+    if (!p) return { ok: false, summary: "LeadSync returned no email — reload this step to see why." };
     const d = p.domains;
     if (d.toSend.length === 0) {
       return { ok: true, summary: `LeadSync had already sent ${v.tag} the whitelist email for all ${domainCount(d.assigned)} — nothing was sent now.`, result: { sent: 0, alreadySent: d.alreadySent.length } };
@@ -903,8 +959,8 @@ const whitelistEmail: Automation = {
       return {
         ok: false,
         summary: r.status === 0
-          ? `No answer from LeadSync (${r.error}), so the email may or may not have gone out. Open the preview before running again — domains it went out for show as Sent.`
-          : `LeadSync didn't send the email: ${r.error}`,
+          ? `No answer from LeadSync (${r.error}), so the email may or may not have gone out. Reload this step before running again — the domains it went out for show as Sent.`
+          : `LeadSync didn't send the email: ${leadsyncSays(r.error)}`,
         result: { domains: d.toSend },
       };
     }
@@ -913,14 +969,14 @@ const whitelistEmail: Automation = {
       const why = res.failures.map((f) => `${f.reason} (${domainCount(f.domains.length)})`).join("; ");
       return {
         ok: false,
-        summary: `The whitelist email didn't fully go out — it covered ${res.sentDomains} of ${domainCount(d.toSend.length)}${why ? `: ${why}` : ""}. Open the preview before running again; it only sends what hasn't gone.`,
+        summary: `The whitelist email didn't fully go out — it covered ${res.sentDomains} of ${domainCount(d.toSend.length)}${why ? `: ${why}` : ""}. Reload this step before running again; it only sends what hasn't gone.`,
         result: { domains: d.toSend, leadsync: res },
       };
     }
     const who = [...p.to, ...p.bcc];
     return {
       ok: true,
-      summary: `Whitelist email sent to ${who.join(", ")} for ${domainCount(res.sentDomains)}.`,
+      summary: res.sentDomains ? `Whitelist email sent${who.length ? ` to ${who.join(", ")}` : ""} for ${domainCount(res.sentDomains)}.` : "Nothing new to send — the whitelist email had already gone out for every domain.",
       result: { domains: d.toSend, to: p.to, cc: p.cc, bcc: p.bcc, leadsync: res },
     };
   },
@@ -1102,12 +1158,12 @@ async function planReplyRouterSetup(ctx: AutomationContext): Promise<RrPlan> {
   ];
   if (form?.ccText) notes.push({ title: "What the client wrote on the form (who to CC)", text: form.ccText });
 
-  const ccText = filled.map((x) => (x.name ? `${x.name} <${x.email}>` : x.email)).join(", ") || "—";
+  const ccText = filled.map((x) => (x.name ? `${x.name} <${x.email}>` : x.email)).join(", ");
   const lines = [
     !existingSection ? `Adds ${tag} to ${sectionName(sectionId)}, so its replies are routed.`
       : existingSection.id !== sectionId ? `Moves ${tag} from ${existingSection.name} to ${sectionName(sectionId)} — its replies are routed there from now on.`
       : `${tag} stays in ${existingSection.name}.`,
-    `Saves CC: ${ccText}${bcc.email ? `; BCC: ${bcc.name ? `${bcc.name} <${bcc.email}>` : bcc.email}` : ""}.`,
+    ccText ? `Saves CC: ${ccText}${bcc.email ? `; BCC: ${bcc.name ? `${bcc.name} <${bcc.email}>` : bcc.email}` : ""}.` : "No CC filled in yet — add who a lead is handed to below.",
     "Saves the reply template below.",
     "Syncs the qualification rules and status from the Onboarding Form (the same sync that runs every hour), then reads everything back.",
   ];

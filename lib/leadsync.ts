@@ -102,8 +102,16 @@ const planKey = (clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2") => `
  * next batch doesn't ask LeadSync for a whole new plan — each plan is a heavy
  * read on its side, and it re-checks every batch itself anyway.
  */
+const keptPlans = new Map<1 | 2, Set<string>>();
 export function rememberAllocationPlan(clientTag: string, group: 1 | 2, tier: "0.5" | "1" | "2" | undefined, plan: AllocationPlan | null): void {
-  setCached(planKey(clientTag, group, tier), plan);
+  const key = planKey(clientTag, group, tier);
+  setCached(key, plan);
+  if (plan) { if (!keptPlans.has(group)) keptPlans.set(group, new Set()); keptPlans.get(group)!.add(key); }
+}
+/** After any batch in a group, every other client's kept plan for that group is out of date. */
+export function forgetAllocationPlans(group: 1 | 2): void {
+  for (const key of keptPlans.get(group) ?? []) setCached(key, null);
+  keptPlans.delete(group);
 }
 
 export interface AllocationRunResult {

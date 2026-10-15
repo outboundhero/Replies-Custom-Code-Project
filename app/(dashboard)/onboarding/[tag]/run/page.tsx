@@ -9,14 +9,15 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
-  ArrowLeft, ArrowRight, Check, CheckCircle2, Circle, Hand, Loader2, Lock, PartyPopper, Plus, Sparkles, Zap,
+  AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, Circle, Hand, Loader2, Lock, PartyPopper, Plus, Sparkles, Zap,
 } from "lucide-react";
 import { useSession } from "@/components/session-provider";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AUTOMATION_META, GROUP_META, fmtDate, fmtStamp, shortEmail } from "@/lib/onboarding/ui";
 import { timezoneLabel } from "@/lib/onboarding/campaign-plan";
 import {
@@ -35,6 +36,8 @@ const STEP_NAME: Record<string, string> = {
 const stepName = (t: OnbTask) => (t.automation && STEP_NAME[t.automation]) || t.title;
 
 type Kind = "auto" | "preview" | "manual";
+/** The steps that have a server switch (the rest are built, or preview-only for now). */
+const SWITCHED = new Set(["create_campaigns", "allocate_domains", "whitelist_email"]);
 const kindOf = (t: OnbTask): Kind => (t.automation && AUTOMATION_META[t.automation] ? (t.runnable ? "auto" : "preview") : "manual");
 const KIND_LABEL: Record<Kind, string> = { auto: "Automatic", preview: "Preview — do by hand", manual: "By hand" };
 
@@ -51,11 +54,24 @@ export default function GuidedOnboardingPage() {
   const [selected, setSelected] = useState<string | null>(null);
   // While a step runs, nothing else on the page can be clicked away to (the run would carry on unseen).
   const [busy, setBusy] = useState(false);
+  const [leaveTo, setLeaveTo] = useState<string | null>(null);
+  const router = useRouter();
   useEffect(() => {
     if (!busy) return;
     const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    // Any link in the app (the sidebar too) asks first: leaving stops the run after the request in flight.
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const a = (e.target as HTMLElement).closest("a[href]") as HTMLAnchorElement | null;
+      if (!a || a.target === "_blank") return;
+      const url = new URL(a.href, location.href);
+      if (url.origin !== location.origin || url.pathname === location.pathname) return;
+      e.preventDefault(); e.stopPropagation();
+      setLeaveTo(url.pathname + url.search);
+    };
     window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
+    document.addEventListener("click", onClick, true);
+    return () => { window.removeEventListener("beforeunload", warn); document.removeEventListener("click", onClick, true); };
   }, [busy]);
 
   const load = useCallback(async () => {
@@ -78,16 +94,20 @@ export default function GuidedOnboardingPage() {
 
   const steps = useMemo(() => setupSteps(tasks), [tasks]);
   const done = steps.filter((t) => t.status === "completed").length;
-  const firstOpen = steps.find((t) => t.status !== "completed") ?? null;
+  // A step left part-way (a run that stopped or failed) is where to pick up; else the first open one.
+  const firstOpen = steps.find((t) => t.status === "in_progress") ?? steps.find((t) => t.status !== "completed") ?? null;
   const current = steps.find((t) => t.id === selected) ?? firstOpen ?? steps[steps.length - 1] ?? null;
   const missingRr = !tasks.some((t) => t.automation === "replyrouter_setup");
 
-  const advance = useCallback((fromId: string) => {
-    // Next open step after this one (wrapping to any earlier one still open).
+  const advance = useCallback((fromId: string, skipping = false) => {
+    // Next open step after this one (wrapping to any earlier one still open). When skipping, only
+    // a step that doesn't wait on another — the ones after this one usually wait on it.
     const i = steps.findIndex((t) => t.id === fromId);
-    const after = [...steps.slice(i + 1), ...steps.slice(0, i)].find((t) => t.status !== "completed" && t.id !== fromId);
+    const open = [...steps.slice(i + 1), ...steps.slice(0, i)].filter((t) => t.status !== "completed" && t.id !== fromId);
+    const after = skipping ? open.find((t) => !taskGate(t, tasks).blocker) : open[0];
+    if (skipping && !after) { toast.info("The other open steps wait for this one — it has to be done (or marked done) first."); return; }
     setSelected(after?.id ?? null);
-  }, [steps]);
+  }, [steps, tasks]);
 
   async function addSetupSteps() {
     const r = await postMutate({ action: "add-setup-steps", client_tag: tag });
@@ -215,7 +235,7 @@ export default function GuidedOnboardingPage() {
               blockedBy={(() => { const b = taskGate(current, tasks).blocker; return b ? { name: stepName(b), n: steps.findIndex((x) => x.id === b.id) + 1, id: b.id } : null; })()}
               onDone={load}
               onFinished={() => { load().then(() => advance(current.id)); }}
-              onSkip={() => advance(current.id)}
+              onSkip={() => advance(current.id, true)}
               onGo={(id) => setSelected(id)}
               onRunning={setBusy} />
           ) : (
@@ -227,6 +247,21 @@ export default function GuidedOnboardingPage() {
           )}
         </div>
       </div>
+
+      <Dialog open={!!leaveTo} onOpenChange={(o) => { if (!o) setLeaveTo(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>A step is running — leave anyway?</DialogTitle>
+            <DialogDescription>
+              Leaving stops it after the part in flight (one campaign or one batch of domains). Nothing is undone — come back and run the step again to carry on from where it stopped.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setLeaveTo(null)}>Stay</Button>
+            <Button variant="destructive" onClick={() => { const to = leaveTo; setLeaveTo(null); if (to) router.push(to); }}>Leave and stop it</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -341,17 +376,30 @@ function AutoBody({ task, kind, onDone, onFinished, onSkip, onRunning }: {
         <div className="flex items-start gap-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3 text-sm">
           <Circle className="mt-0.5 size-4 shrink-0 text-amber-600" />
           <div>
-            <div className="font-medium">Switched off on this server — this is a preview</div>
+            <div className="font-medium">{SWITCHED.has(task.automation ?? "") ? "Switched off on this server — this is a preview" : "Not automated yet — this is a preview"}</div>
             <div className="mt-0.5 text-muted-foreground">Do it by hand as shown below, then mark it done.</div>
+          </div>
+        </div>
+      )}
+      {task.last_run && !task.last_run.ok && !r.error && !r.running && (
+        <div className="flex items-start gap-3 rounded-xl border border-destructive/25 bg-destructive/[0.04] px-4 py-3 text-sm">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" />
+          <div>
+            <div className="font-medium text-destructive">The last run stopped{task.last_run.at ? ` (${fmtStamp(task.last_run.at)})` : ""}</div>
+            <div className="mt-0.5 text-foreground/80">{task.last_run.summary}</div>
           </div>
         </div>
       )}
       <StepRunBody task={task} r={r} />
       <Footer onSkip={onSkip} disabled={r.running}>
         {r.running && r.progress.length > 0 && <Button variant="ghost" onClick={r.stopAfterBatch} className="text-muted-foreground">Stop after this batch</Button>}
+        {/* When it can't run automatically for this client (exempt, OS client, …), it can still be done by hand. */}
+        {r.canRun && r.blocked && !r.loading && !r.running && (
+          <Button variant="outline" onClick={markDone} disabled={marking}>{marking ? <Loader2 className="animate-spin" /> : <Check />} Done by hand — mark done</Button>
+        )}
         {r.canRun ? (
-          <Button onClick={r.run} disabled={r.blocked || r.loading || r.running} className="gap-1.5">
-            {r.running ? <><Loader2 className="animate-spin" /> Running…</> : <><Zap /> Approve &amp; run</>}
+          <Button onClick={r.run} disabled={(r.blocked && !r.loading) || r.running || r.waiting} className="gap-1.5">
+            {r.running ? <><Loader2 className="animate-spin" /> Running…</> : r.waiting ? <><Loader2 className="animate-spin" /> Updating preview…</> : <><Zap /> Approve &amp; run</>}
           </Button>
         ) : (
           <Button onClick={markDone} disabled={marking || r.loading}>{marking ? <Loader2 className="animate-spin" /> : <Check />} Done by hand — mark done</Button>

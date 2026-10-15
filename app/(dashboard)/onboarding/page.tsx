@@ -36,6 +36,15 @@ type TemplateTask = {
   id: string; title: string; day_offset: number; order_index: number; task_group: string | null;
   assignee_id: string | null; no_due: number; automation: string | null;
 };
+/** The template in the order a client's checklist numbers it: the setup steps in order (Reply Router
+ *  setup right after the Slack step), then the dated tasks by day. */
+function inSetupOrder(template: TemplateTask[]): TemplateTask[] {
+  const steps = template.filter((t) => t.no_due).sort((a, b) => a.order_index - b.order_index);
+  const rr = template.find((t) => t.automation === "replyrouter_setup" && !t.no_due);
+  if (rr) { const i = steps.findIndex((t) => t.automation === "slack_outreachify"); steps.splice(i >= 0 ? i + 1 : 0, 0, rr); }
+  const rest = template.filter((t) => !steps.includes(t)).sort((a, b) => a.day_offset - b.day_offset || a.order_index - b.order_index);
+  return [...steps, ...rest];
+}
 
 // Plan / package options (from the client tracker). Kept as a simple list so it's
 // easy to edit if the tiers change.
@@ -436,7 +445,7 @@ function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; on
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={submit} disabled={busy}>{busy ? "Adding…" : "Add & start onboarding"}</Button>
+          <Button onClick={submit} disabled={busy || looking} title={looking ? "Wait for the sheet lookup to finish" : undefined}>{busy ? "Adding…" : looking ? "Reading the sheet…" : "Add & start onboarding"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -788,7 +797,7 @@ function TemplateEditor({ users, states, onUsersChanged }: { users: UserRow[]; s
             </TableRow>
           </TableHeader>
           <TableBody>
-            {template.map((t, i) => (
+            {inSetupOrder(template).map((t, i) => (
               <TemplateRow key={`${t.id}:${t.title}:${t.assignee_id}:${t.no_due}:${t.day_offset}`} task={t} index={i} users={users} states={states} onSave={save} busy={busy} />
             ))}
             <TemplateRow key={`new:${template.length}`} task={null} index={template.length} users={users} onSave={save} busy={busy} />

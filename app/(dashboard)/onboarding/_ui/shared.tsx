@@ -422,6 +422,11 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
   // "Approve & run" while its preview loads; the preview's answer then confirms it.
   const [canRun, setCanRun] = useState(!!(task.runnable ?? (task.automation && AUTOMATION_META[task.automation]?.built)));
 
+  // "Approve & run" clicked while the preview was refreshing (e.g. right after typing in a field):
+  // the run waits for the new preview and then goes ahead — unless that preview has something in the way.
+  const queued = useRef(false);
+  const [waiting, setWaiting] = useState(false);
+  const runNext = useRef<(p: Preview, s: Record<string, unknown>) => void>(() => {});
   const showPreview = useCallback(({ status, data }: Awaited<ReturnType<typeof postRun>>, forParams: Record<string, unknown>) => {
     setLoading(false);
     if (data.preview) {
@@ -431,7 +436,15 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
       // Take the server's values, except for the field being typed in right now.
       setDrafts((prev) => Object.fromEntries(p.inputs.filter(isTyped)
         .map((i) => [i.key, focused.current === i.key && i.key in prev ? prev[i.key] : String(i.value ?? "")])));
-    } else setError(data.error || `Couldn't load the preview (${status})`);
+      if (queued.current) {
+        queued.current = false; setWaiting(false);
+        if (!p.blockers.length && data.runnable !== false) runNext.current(p, forParams);
+        else toast.info("Not run — the updated preview has something to sort out first.");
+      }
+    } else {
+      setError(data.error || `Couldn't load the preview (${status})`);
+      if (queued.current) { queued.current = false; setWaiting(false); }
+    }
   }, []);
   useEffect(() => {
     let alive = true;
@@ -458,37 +471,67 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
   // A step done in batches reports each one here and is sent again until nothing is left.
   const [progress, setProgress] = useState<string[]>([]);
   const stop = useRef(false);
-  async function run() {
+  const gone = useRef(false);
+  // Leaving the page (or closing the dialog) stops a running loop after the request in flight.
+  useEffect(() => { gone.current = false; return () => { gone.current = true; stop.current = true; }; }, []);
+  const showFailure = (msg: string) => {
+    toast.error(msg.length > 220 ? `${msg.slice(0, 217)}…` : msg, { duration: 10_000 });
+    requestAnimationFrame(() => document.getElementById(`run-error-${task.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  };
+  async function runWith(p: Preview | null, values: Record<string, unknown>) {
     setRunning(true); setError(null);
     stop.current = false;
     // Exactly what's on screen is what runs: every value the preview showed (incl. hidden ones, like
     // which copy version it was), with what was typed on top — nothing is worked out again later.
-    const approved = { ...Object.fromEntries((preview?.inputs ?? []).map((i) => [i.key, i.value])), ...shown };
+    const approved = { ...Object.fromEntries((p?.inputs ?? []).map((i) => [i.key, i.value])), ...values };
+    let batches = 0;
     try {
       for (let round = 0; round < 40; round++) {
         const { status, data } = await postRun(task.id, "run", approved);
         onDone(); // the task shows the batch, or keeps a note of the failed run
         if (!data.ok) {
-          setError(data.error || `The run failed (${status})`);
+          const msg = data.error || `The run failed (${status})`;
           if (data.preview) setPreview(data.preview);
+          // When it's exactly what the preview lists as in the way, the amber box already says it.
+          const same = !!data.preview?.blockers.length && data.preview.blockers.join(" ") === msg;
+          setError(same ? null : msg);
+          if (!gone.current) showFailure(same ? "Can't run yet — see what's in the way." : msg);
           break;
         }
         if (!data.more) { onSuccess(data.summary || "Done"); return; }
-        setProgress((p) => [...p, data.summary || "A batch went through."]);
-        if (stop.current) break;
+        batches++;
+        setProgress((pr) => [...pr, data.summary || "A batch went through."]);
+        if (stop.current) {
+          if (!gone.current) {
+            toast.info(`Stopped after ${batches} batch${batches === 1 ? "" : "es"} — run it again to carry on.`);
+            // The plan on screen still shows the start; ask for the current one.
+            setLoading(true);
+            const mine = ++latest.current;
+            postRun(task.id, "preview", values).then((r) => { if (mine === latest.current) showPreview(r, values); });
+          }
+          break;
+        }
       }
     } catch (e) {
       // The request itself never came back (connection, timeout) — what it did is unknown.
-      setError(`The request didn't come back (${(e as Error).message}). It may still have gone through — close this, look at the step, and open its preview before running it again.`);
+      const msg = `The request didn't come back (${(e as Error).message}). It may still have gone through — reload this step and check it before running it again.`;
+      setError(msg);
+      if (!gone.current) showFailure(msg);
       onDone();
     } finally {
       // Always release the dialog, or it could never be closed.
       setRunning(false);
     }
   }
+  runNext.current = (p, s) => { void runWith(p, s); };
+  function run() {
+    // A preview is being refreshed (a field was just left): run once it's in.
+    if (loading) { queued.current = true; setWaiting(true); return; }
+    void runWith(preview, shown);
+  }
 
   return {
-    preview, loading, running, error, canRun, drafts, setDrafts, focused, progress, setParam, commitText, run,
+    preview, loading, running, error, canRun, drafts, setDrafts, focused, progress, setParam, commitText, run, waiting,
     stopAfterBatch: () => { stop.current = true; },
     blocked: !preview || preview.blockers.length > 0,
   };
@@ -499,6 +542,8 @@ export type StepRun = ReturnType<typeof useStepRun>;
 export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
   const { preview, loading, running, drafts, setDrafts, focused, setParam, commitText, progress, error } = r;
   const fields = preview?.inputs.filter((i) => i.type !== "group" && i.type !== "hidden") ?? [];
+  // Name / email pairs (CC 1, CC 2, …) sit two to a row so each pair stays together.
+  const paired = fields.some((i) => /_name$/.test(i.key)) && fields.some((i) => /_email$/.test(i.key));
   return (
     <>
       {!preview && loading && (
@@ -534,9 +579,12 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
           ))}
 
           {fields.length > 0 && (
-            <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
+            <div className={cn("grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2", !paired && "xl:grid-cols-3")}>
               {fields.map((inp) => (
-                <div key={inp.key} className={cn("space-y-1.5", inp.type === "textarea" && "sm:col-span-3")}>
+                <div key={inp.key} className={cn("space-y-1.5",
+                  inp.type === "textarea" ? (paired ? "sm:col-span-2" : "sm:col-span-2 xl:col-span-3")
+                  // In the paired layout anything that isn't half of a pair takes the whole row, so the pairs line up.
+                  : paired && !/_(name|email)$/.test(inp.key) && "sm:col-span-2")}>
                   <label htmlFor={`run-${inp.key}`} className="text-xs font-medium text-muted-foreground">{inp.label}</label>
                   {inp.type === "select" ? (
                     <Select value={String(inp.value ?? "")} onValueChange={(v) => setParam(inp.key, v)} disabled={running}>
@@ -565,7 +613,7 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
           )}
 
           <div className="space-y-1.5">
-            <div className="text-xs font-medium text-muted-foreground">What happens when you run it</div>
+            <div className="text-xs font-medium text-muted-foreground">{r.canRun ? "What happens when you run it" : "What it would do"}</div>
             <ol className="space-y-1 text-sm">
               {preview.lines.map((l, i) => (
                 <li key={i} className="flex gap-2">
@@ -597,7 +645,11 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
                   </thead>
                   <tbody className="divide-y">
                     {t.rows.map((row, i) => (
-                      <tr key={i}>{row.map((cell, j) => <td key={j} className={cn("px-2.5 py-1.5 align-top", j === 1 ? "min-w-48 font-medium" : "whitespace-nowrap text-muted-foreground")}>{cell}</td>)}</tr>
+                      <tr key={i}>{row.map((cell, j) => {
+                        // The main column: the name in wider tables (after a short label column), the first in two-column ones.
+                        const main = t.columns.length > 2 ? j === 1 : j === 0;
+                        return <td key={j} className={cn("px-2.5 py-1.5 align-top", main ? "min-w-48 font-medium" : "whitespace-nowrap text-muted-foreground")}>{cell}</td>;
+                      })}</tr>
                     ))}
                   </tbody>
                 </table>
@@ -614,7 +666,7 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
 
           {preview.blockers.length > 0 && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
-              <div className="flex items-center gap-1.5 font-medium"><AlertTriangle className="h-3.5 w-3.5" /> Can&apos;t run yet</div>
+              <div className="flex items-center gap-1.5 font-medium"><AlertTriangle className="h-3.5 w-3.5" /> {r.canRun ? "Can't run yet" : "Check first"}</div>
               <ul className="mt-1 list-disc space-y-0.5 pl-5">
                 {preview.blockers.map((b, i) => <li key={i}>{b}</li>)}
               </ul>
@@ -633,7 +685,9 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
       )}
 
       {error && (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">{error}</div>
+        <div id={`run-error-${task.id}`} role="alert" className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span>
+        </div>
       )}
     </>
   );
