@@ -124,15 +124,25 @@ export default function ClientProfilePage() {
   const d = p.details;
   const company = d.company || p.onboarding?.name || null;
   const group = p.onboarding?.group ?? p.group.app ?? p.group.sheet;
-  // Not in Reply Router, onboarding or any sheet — say so instead of showing an empty profile.
-  if (!p.exists && !p.onboarding && !company && !d.goLive && !p.qualification && !p.group.sheet && !p.group.app) {
+  // Not in Reply Router, onboarding, any sheet or Email Bison — say so instead of showing an
+  // empty profile (a tag can have live campaigns without being anywhere else, e.g. LRL).
+  const nothingKnown = !p.exists && !p.onboarding && !company && !d.goLive && !p.qualification && !p.group.sheet && !p.group.app;
+  if (nothingKnown && camps === null) {
+    return (
+      <div className="mx-auto w-full max-w-7xl space-y-5">
+        <BackLink />
+        <div className="flex items-center justify-center gap-2 rounded-2xl border bg-card px-6 py-14 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Looking for {p.tag} in Email Bison…</div>
+      </div>
+    );
+  }
+  if (nothingKnown && (camps === "failed" || !!camps?.instances.every((i) => !i.campaigns.length))) {
     return (
       <div className="mx-auto w-full max-w-7xl space-y-4">
         <BackLink />
         <div className="rounded-2xl border border-dashed bg-card px-6 py-14 text-center">
           <div className="mx-auto grid size-11 place-items-center rounded-xl border bg-background text-muted-foreground"><Building2 className="size-5" /></div>
           <p className="mt-3 text-sm font-medium">There&apos;s no client called {p.tag}</p>
-          <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">It isn&apos;t in Reply Router, in onboarding, or on the client sheets. Check the tag, or add it from the Clients page.</p>
+          <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">It isn&apos;t in Reply Router, in onboarding, on the client sheets or in Email Bison{camps === "failed" ? " (Email Bison couldn't be read just now)" : ""}. Check the tag, or add it from the Clients page.</p>
           <Button asChild variant="outline" className="mt-5"><Link href="/clients">All clients</Link></Button>
         </div>
       </div>
