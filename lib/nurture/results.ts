@@ -194,11 +194,24 @@ export interface ResultsView {
   total: number;
   fromNurture: number;
   stages: StageResult[];
-  months: Array<{ month: string; main: number; nurture: number; unknown: number }>;
+  /** The chart: by week (Monday) for a 30 / 90 day window, by month for all time. */
+  trend: { by: "week" | "month"; points: Array<{ key: string; main: number; nurture: number; unknown: number }> };
   tags: Array<{ tag: string; total: number; main: number; nurture: number }>;
   trackedSince: string | null;
   refreshedAt: string | null;
   lastRun: Record<string, unknown> | null;
+}
+
+type TrendPoint = { key: string; main: number; nurture: number; unknown: number };
+const DAY_MS = 86_400_000;
+/** The Monday (UTC) of the week a moment falls in, as YYYY-MM-DD — matches SQLite's date(x, '-6 days', 'weekday 1'). */
+const mondayOf = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - ((d.getUTCDay() + 6) % 7))).toISOString().slice(0, 10);
+const nextMonth = (m: string) => { const [y, mo] = m.split("-").map(Number); return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, "0")}`; };
+/** Every period from `from` through the current one, with empty ones as zeros, so a quiet stretch shows as a gap. */
+function fillPeriods(map: Map<string, TrendPoint>, from: string, end: string, next: (k: string) => string): TrendPoint[] {
+  const out: TrendPoint[] = [];
+  for (let k = from, i = 0; k <= end && i < 120; k = next(k), i++) out.push(map.get(k) ?? { key: k, main: 0, nurture: 0, unknown: 0 });
+  return out;
 }
 
 /** Delivered leads for one client (or all of them), over the last N days (null = all time). */
@@ -210,7 +223,7 @@ export async function resultsView(opts: { tag?: string | null; days: number | nu
   if (tag) { where.push("client_tag = ?"); args.push(tag); }
   if (since) { where.push("delivered_at >= ?"); args.push(since); }
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const [rows, months, tags, first, state] = await Promise.all([
+  const [rows, months, tags, first, state, weeks] = await Promise.all([
     db.execute({ sql: `SELECT stage, esp, category, COUNT(*) AS n FROM nurture_delivered_leads ${w} GROUP BY stage, esp, category`, args }),
     db.execute({ sql: `SELECT substr(delivered_at, 1, 7) AS m, stage, COUNT(*) AS n FROM nurture_delivered_leads ${tag ? "WHERE client_tag = ?" : ""} GROUP BY m, stage ORDER BY m`, args: tag ? [tag] : [] }),
     tag ? Promise.resolve({ rows: [] as unknown[] })
@@ -219,6 +232,8 @@ export async function resultsView(opts: { tag?: string | null; days: number | nu
     // (sheet pushes started in August 2026; a handful of earlier ones would mislead).
     db.execute("SELECT substr(delivered_at, 1, 7) AS m, COUNT(*) AS n FROM nurture_delivered_leads GROUP BY m ORDER BY m"),
     db.execute({ sql: "SELECT value, updated_at FROM cron_state WHERE key = ?", args: ["nurture:results"] }),
+    // Week starting Monday, for the window's chart.
+    opts.days ? db.execute({ sql: `SELECT date(delivered_at, '-6 days', 'weekday 1') AS w, stage, COUNT(*) AS n FROM nurture_delivered_leads ${w} GROUP BY w, stage ORDER BY w`, args }) : Promise.resolve({ rows: [] as unknown[] }),
   ]);
 
   const byStage = new Map<string, StageResult>();
@@ -246,15 +261,40 @@ export async function resultsView(opts: { tag?: string | null; days: number | nu
     monthMap.set(m, e);
   }
 
+  const weekMap = new Map<string, TrendPoint>();
+  for (const r of weeks.rows as Array<Record<string, unknown>>) {
+    if (!r.w) continue;
+    const k = String(r.w);
+    const e = weekMap.get(k) ?? { key: k, main: 0, nurture: 0, unknown: 0 };
+    const n = Number(r.n) || 0;
+    if (r.stage == null) e.unknown += n; else if (Number(r.stage) === 0) e.main += n; else e.nurture += n;
+    weekMap.set(k, e);
+  }
+
   let lastRun: Record<string, unknown> | null = null;
   const st = state.rows[0] as Record<string, unknown> | undefined;
   try { lastRun = st ? JSON.parse(String(st.value)) : null; } catch { lastRun = null; }
   const perMonth = (first.rows as Array<Record<string, unknown>>).map((r) => ({ m: String(r.m), n: Number(r.n) || 0 }));
   const peak = Math.max(0, ...perMonth.map((x) => x.n));
   const startMonth = perMonth.find((x) => x.n >= Math.max(1, peak * 0.1))?.m ?? null;
+
+  // The chart runs to the current week / month. It starts at the window's start, but not before
+  // tracking began, unless there's an earlier delivery in the window.
+  const now = new Date();
+  let trend: ResultsView["trend"];
+  if (opts.days) {
+    const firstData = [...weekMap.keys()].sort()[0];
+    const startWeek = [mondayOf(new Date(since)), startMonth ? mondayOf(new Date(`${startMonth}-01T00:00:00Z`)) : ""].sort().pop()!;
+    const from = firstData && firstData < startWeek ? firstData : startWeek;
+    trend = { by: "week", points: weekMap.size ? fillPeriods(weekMap, from, mondayOf(now), (k) => new Date(Date.parse(`${k}T00:00:00Z`) + 7 * DAY_MS).toISOString().slice(0, 10)) : [] };
+  } else {
+    const byMonth = new Map([...monthMap.values()].map((m) => [m.month, { key: m.month, main: m.main, nurture: m.nurture, unknown: m.unknown }]));
+    trend = { by: "month", points: startMonth && monthMap.size ? fillPeriods(byMonth, startMonth, now.toISOString().slice(0, 7), nextMonth) : [] };
+  }
+
   return {
     days: opts.days, total, fromNurture, stages,
-    months: [...monthMap.values()].filter((m) => !startMonth || m.month >= startMonth).slice(-6),
+    trend,
     tags: (tags.rows as Array<Record<string, unknown>>).map((r) => ({ tag: String(r.client_tag), total: Number(r.total) || 0, main: Number(r.main) || 0, nurture: Number(r.nurture) || 0 })),
     trackedSince: startMonth ? `${startMonth}-01` : null,
     refreshedAt: lastRun && typeof lastRun.at === "string" ? lastRun.at : null,

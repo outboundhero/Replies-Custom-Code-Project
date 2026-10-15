@@ -5,7 +5,7 @@
  * "where contacts sit" (main campaigns, each nurture batch, the nurture queue).
  * Used on the Nurture overview and on each client's page.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { fmt, Skel, ago, useNow } from "./shared";
 
@@ -17,8 +17,8 @@ type Esp = "google" | "outlook" | "segs" | "other";
 interface StageResult { stage: number | null; leads: number; categories: Record<Cat, number>; esps: Record<Esp, number> }
 interface ResultsData {
   days: number | null; total: number; fromNurture: number; stages: StageResult[];
-  months: Array<{ month: string; main: number; nurture: number; unknown: number }>;
   tags: Array<{ tag: string; total: number; main: number; nurture: number }>;
+  trend: { by: "week" | "month"; points: Array<{ key: string; main: number; nurture: number; unknown: number }> };
   trackedSince: string | null; refreshedAt: string | null;
 }
 
@@ -156,9 +156,56 @@ const WINDOWS: Array<[string, string]> = [["30", "30 days"], ["90", "90 days"], 
 const CATS: Array<[Cat, string]> = [["meeting", "Meeting-ready"], ["interested", "Interested"], ["followup", "Follow up"], ["referral", "Referral"]];
 const ESPS: Array<[Esp, string]> = [["google", "Google"], ["outlook", "Outlook"], ["segs", "SEGs"]];
 
-export function ResultsCard({ tag, serverNow }: { tag?: string; serverNow: number }) {
+/** Stages for display: Main, Nurture 1, Nurture 2, "Nurture 3+" (later batches together), Not matched. */
+interface Group { key: string; label: string; color: string; leads: number; categories: Record<Cat, number>; esps: Record<Esp, number>; detail?: string }
+function groupStages(stages: StageResult[]): Group[] {
+  const blank = (): Pick<Group, "leads" | "categories" | "esps"> => ({ leads: 0, categories: { meeting: 0, interested: 0, followup: 0, referral: 0, other: 0 }, esps: { google: 0, outlook: 0, segs: 0, other: 0 } });
+  const add = (g: Pick<Group, "leads" | "categories" | "esps">, s: StageResult) => {
+    g.leads += s.leads;
+    for (const k of Object.keys(g.categories) as Cat[]) g.categories[k] += s.categories[k];
+    for (const k of Object.keys(g.esps) as Esp[]) g.esps[k] += s.esps[k];
+  };
+  const out: Group[] = [];
+  for (const s of stages.filter((x) => x.stage != null && x.stage <= 2)) {
+    const g = { key: `s${s.stage}`, label: stageLabel(s.stage), color: stageColor(s.stage), ...blank() };
+    add(g, s); out.push(g);
+  }
+  const later = stages.filter((x) => x.stage != null && x.stage >= 3);
+  if (later.length) {
+    const g = { key: "s3", label: "Nurture 3+", color: stageColor(3), ...blank(), detail: later.map((x) => `Nurture ${x.stage}: ${x.leads}`).join(", ") };
+    for (const s of later) add(g, s);
+    out.push(g);
+  }
+  const unk = stages.find((x) => x.stage == null);
+  if (unk) { const g = { key: "u", label: "Not matched", color: stageColor(null), ...blank() }; add(g, unk); out.push(g); }
+  return out;
+}
+
+// Open / closed, remembered in this browser (a convenience — safe to lose).
+const openListeners = new Set<() => void>();
+function readOpen(key: string, fallback: boolean): boolean {
+  try { const v = localStorage.getItem(key); return v == null ? fallback : v === "1"; } catch { return fallback; }
+}
+function usePersistedOpen(key: string, fallback: boolean): [boolean, (v: boolean) => void] {
+  const subscribe = useCallback((cb: () => void) => {
+    openListeners.add(cb);
+    window.addEventListener("storage", cb);
+    return () => { openListeners.delete(cb); window.removeEventListener("storage", cb); };
+  }, []);
+  const open = useSyncExternalStore(subscribe, () => readOpen(key, fallback), () => fallback);
+  const set = useCallback((v: boolean) => {
+    try { localStorage.setItem(key, v ? "1" : "0"); } catch { /* storage off — stays as is this visit */ }
+    openListeners.forEach((l) => l());
+  }, [key]);
+  return [open, set];
+}
+
+export function ResultsCard({ tag, serverNow, defaultOpen = true }: { tag?: string; serverNow: number; defaultOpen?: boolean }) {
   const now = useNow(serverNow);
+  const [open, setOpen] = usePersistedOpen(`nurture:results-open:${tag ? "client" : "overview"}`, defaultOpen);
+  const bodyId = useId();
   const [win, setWin] = useState("90");
+  const [view, setView] = useState<"result" | "inbox">("result");
   const [state, setState] = useState<{ key: string; data?: ResultsData; error?: string } | null>(null);
   const key = `${tag ?? ""}|${win}`;
   useEffect(() => {
@@ -177,131 +224,208 @@ export function ResultsCard({ tag, serverNow }: { tag?: string; serverNow: numbe
   const current = state?.key === key ? state : null;
   const d = current?.data;
   const winText = win === "all" ? "so far" : `in the last ${win} days`;
+  const groups = d ? groupStages(d.stages) : [];
+  const main = groups.find((g) => g.key === "s0");
+  const nurture = groups.filter((g) => g.key.startsWith("s") && g.key !== "s0");
+  const nurtureLeads = nurture.reduce((n, g) => n + g.leads, 0);
+  const nurtureMeetings = nurture.reduce((n, g) => n + g.categories.meeting, 0);
+  const unmatched = groups.find((g) => g.key === "u");
+  const meetings = groups.reduce((n, g) => n + g.categories.meeting, 0);
+  const toggle = () => setOpen(!open);
+
   return (
-    <div className="card cardpad">
-      <div className="card-h">
-        <h3>Leads delivered</h3><span className="hint">pushed to the client&apos;s lead sheet — by where they came from</span>
-        <span className="r" style={{ marginLeft: "auto" }}>
-          <div className="seg">{WINDOWS.map(([v, l]) => <button key={v} type="button" className={win === v ? "on" : ""} aria-pressed={win === v} onClick={() => setWin(v)}>{l}</button>)}</div>
-        </span>
+    <div className="card rcard">
+      {/* The whole header opens and closes it; the button inside is what keyboards and screen readers use. */}
+      <div className={`rhd${open ? " open" : ""}`} onClick={toggle}>
+        <span className="chev" aria-hidden>{Chevron}</span>
+        <div className="rt">
+          <h3>
+            <button type="button" className="rtog" aria-expanded={open} aria-controls={bodyId}>Leads delivered</button>
+            {d && d.total > 0 && <span className="pill p-vio" style={{ fontSize: 11 }}>{share(d.fromNurture, d.total)} from nurture</span>}
+          </h3>
+          <div className="rsum">
+            {!current ? <Skel w={260} /> : current.error ? <span style={{ color: "var(--red-fg)" }}>Couldn&apos;t load the results</span>
+              : !d || !d.total ? <span>{d?.refreshedAt ? `No leads delivered ${winText}` : "Counted every 6 hours — the first count hasn't run yet"}</span>
+              : (<>
+                  <span><b>{fmt(d.total)}</b> delivered {winText}</span>
+                  <span><i className="sw" style={{ display: "inline-block", width: 8, height: 8, borderRadius: 3, background: stageColor(0), marginRight: 5 }} /><b>{fmt(main?.leads ?? 0)}</b> main</span>
+                  <span><i className="sw" style={{ display: "inline-block", width: 8, height: 8, borderRadius: 3, background: stageColor(1), marginRight: 5 }} /><b>{fmt(nurtureLeads)}</b> nurture</span>
+                </>)}
+          </div>
+        </div>
+        {d && d.total > 0 && <div className="rbar"><StackBar thin parts={groups.map((g) => ({ key: g.key, value: g.leads, color: g.color, title: `${g.label}: ${fmt(g.leads)}` }))} /></div>}
+        <div className="seg" onClick={(e) => e.stopPropagation()}>
+          {WINDOWS.map(([v, l]) => <button key={v} type="button" className={win === v ? "on" : ""} aria-pressed={win === v} onClick={() => setWin(v)}>{l}</button>)}
+        </div>
       </div>
 
-      {!current ? (
-        <div className="rtiles">{[0, 1, 2, 3].map((i) => <div key={i} className="rtile"><Skel w={70} /><div style={{ marginTop: 10 }}><Skel w={50} /></div></div>)}</div>
-      ) : current.error ? (
-        <div className="banner warn" style={{ margin: 0 }}>Couldn&apos;t load the results: {current.error}</div>
-      ) : !d || d.total === 0 ? (
-        <div className="empty" style={{ padding: "18px 0" }}>
-          {d?.refreshedAt ? `No leads delivered ${winText}${tag ? ` for ${tag}` : ""}.` : "The results are worked out every 6 hours — the first count hasn't run yet."}
-        </div>
-      ) : (
-        <>
-          <div className="rtiles">
-            <div className="rtile">
-              <div className="k">Delivered</div>
-              <div className="v">{fmt(d.total)}</div>
-              <div className="s"><b style={{ color: "var(--violet-fg)" }}>{share(d.fromNurture, d.total)}</b> from nurture</div>
-            </div>
-            {d.stages.map((s) => (
-              <div key={String(s.stage)} className="rtile">
-                <div className="k"><i className="sw" style={{ width: 8, height: 8, borderRadius: 3, background: stageColor(s.stage), display: "inline-block" }} />{stageShort(s.stage)}</div>
-                <div className="v">{fmt(s.leads)}</div>
-                <div className="s">{share(s.leads, d.total)} of delivered{s.categories.meeting ? ` · ${fmt(s.categories.meeting)} meeting-ready` : ""}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ marginTop: 14 }}><StackBar parts={d.stages.map((s) => ({ key: String(s.stage), value: s.leads, color: stageColor(s.stage), title: `${stageLabel(s.stage)}: ${s.leads}` }))} /></div>
-
-          <div style={{ overflowX: "auto", marginTop: 16 }}>
-            <table className="mini">
-              <thead>
-                <tr>
-                  <th>Came from</th><th className="num">Leads</th>
-                  {CATS.map(([k, l]) => <th key={k} className="num">{l}</th>)}
-                  {ESPS.map(([k, l]) => <th key={k} className="num">{l}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {d.stages.map((s) => (
-                  <tr key={String(s.stage)}>
-                    <td><span className="camp"><span className="d" style={{ background: stageColor(s.stage) }} />{stageLabel(s.stage)}</span></td>
-                    <td className="num"><b>{fmt(s.leads)}</b></td>
-                    {CATS.map(([k]) => <td key={k} className="num">{s.categories[k] ? fmt(s.categories[k]) : <span className="muted">—</span>}</td>)}
-                    {ESPS.map(([k]) => <td key={k} className="num">{s.esps[k] ? fmt(s.esps[k]) : <span className="muted">—</span>}</td>)}
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td>Total</td><td className="num">{fmt(d.total)}</td>
-                  {CATS.map(([k]) => <td key={k} className="num">{fmt(d.stages.reduce((n, s) => n + s.categories[k], 0))}</td>)}
-                  {ESPS.map(([k]) => <td key={k} className="num">{fmt(d.stages.reduce((n, s) => n + s.esps[k], 0))}</td>)}
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          <div className="rgrid">
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>By month</div>
-              <MonthBars months={d.months} />
-            </div>
-            {!tag && d.tags.length > 0 && (
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10 }}>Most leads from nurture {winText}</div>
-                {d.tags.filter((t) => t.nurture > 0).slice(0, 8).map((t) => (
-                  <div key={t.tag} className="bar-row" style={{ marginTop: 7 }}>
-                    <Link href={`/nurture/c/${encodeURIComponent(t.tag)}`} className="bl" style={{ width: 92, fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, color: "var(--foreground)" }}>{t.tag}</Link>
-                    <span className="bar-track" title={`${t.nurture} from nurture, ${t.main} from main campaigns`}>
-                      <span className="bar-fill" style={{ width: `${pct(t.nurture, Math.max(...d.tags.map((x) => x.nurture), 1))}%`, background: stageColor(1) }} />
-                    </span>
-                    <span className="bn" style={{ fontSize: 11.5, width: 92 }}>{t.nurture} <span className="muted">of {t.total}</span></span>
+      {open && (
+        <div className="rbody" id={bodyId}>
+          {!current ? (
+            <div className="kpis">{[0, 1, 2].map((i) => <div key={i} className="kpi"><Skel w={90} /><div style={{ marginTop: 12 }}><Skel w={60} /></div></div>)}</div>
+          ) : current.error ? (
+            <div className="banner warn" style={{ margin: 0 }}>Couldn&apos;t load the results: {current.error}</div>
+          ) : !d || d.total === 0 ? (
+            <div className="empty" style={{ padding: "10px 0" }}>{d?.refreshedAt ? `No leads delivered ${winText}${tag ? ` for ${tag}` : ""}.` : "The results are counted every 6 hours — the first count hasn't run yet."}</div>
+          ) : (
+            <>
+              <div className="kpis">
+                <div className="kpi">
+                  <div className="kh"><i className="sw" style={{ width: 8, height: 8, borderRadius: 3, background: stageColor(0), display: "inline-block" }} />From main campaigns</div>
+                  <div className="kv"><b>{fmt(main?.leads ?? 0)}</b><span>{share(main?.leads ?? 0, d.total)} of delivered</span></div>
+                  <div className="kf">{fmt(main?.categories.meeting ?? 0)} meeting-ready</div>
+                </div>
+                <div className="kpi">
+                  <div className="kh"><i className="sw" style={{ width: 8, height: 8, borderRadius: 3, background: stageColor(1), display: "inline-block" }} />From nurture</div>
+                  <div className="kv"><b>{fmt(nurtureLeads)}</b><span>{share(nurtureLeads, d.total)} of delivered</span></div>
+                  <div className="kf">{fmt(nurtureMeetings)} meeting-ready</div>
+                  {nurture.length > 0 && (
+                    <div className="chips">
+                      {nurture.map((g) => <span key={g.key} className="chip" title={g.detail}><i style={{ background: g.color }} />{g.label} <b>{fmt(g.leads)}</b></span>)}
+                    </div>
+                  )}
+                </div>
+                <div className="kpi">
+                  <div className="kh">Meeting-ready</div>
+                  <div className="kv"><b>{fmt(meetings)}</b><span>{share(meetings, d.total)} of delivered</span></div>
+                  <div className="kf">
+                    {unmatched ? <>{fmt(unmatched.leads)} lead{unmatched.leads === 1 ? "" : "s"} couldn&apos;t be matched to a campaign (the reply didn&apos;t record it).</> : "Every lead was matched to its campaign."}
                   </div>
-                ))}
-                {!d.tags.some((t) => t.nurture > 0) && <div className="muted" style={{ fontSize: 12.5 }}>No leads from nurture {winText}.</div>}
+                </div>
               </div>
-            )}
-          </div>
-        </>
-      )}
 
-      {d && (
-        <div className="rnote">
-          Each lead counts once, credited to the campaign of its first delivery.
-          {d.trackedSince ? ` Deliveries to lead sheets are tracked since ${monthYear(d.trackedSince)}.` : ""}
-          {d.stages.some((s) => s.stage == null) ? " “Not matched” = the reply didn't record its campaign." : ""}
-          {d.refreshedAt ? ` Counted ${ago(d.refreshedAt, now)} — every 6 hours.` : ""}
+              <div className="rsplit">
+                <div className="rpanel">
+                  <div className="ph"><h4>{d.trend.by === "week" ? "By week" : "By month"}</h4><span className="hint">{d.trend.by === "week" ? `weeks starting Monday, ${winText}` : "since tracking began"}</span></div>
+                  <Trend points={d.trend.points} by={d.trend.by} />
+                  <div className="lgd" style={{ fontSize: 11 }}>
+                    <span><i className="sw" style={{ background: stageColor(0) }} />Main</span>
+                    <span><i className="sw" style={{ background: stageColor(1) }} />Nurture</span>
+                    {unmatched && <span><i className="sw" style={{ background: stageColor(null) }} />Not matched</span>}
+                  </div>
+                </div>
+                {!tag ? (
+                  <div className="rpanel">
+                    <div className="ph"><h4>Most leads from nurture</h4><span className="hint">{winText}</span></div>
+                    <TopClients tags={d.tags} />
+                  </div>
+                ) : (
+                  <div className="rpanel">
+                    <div className="ph"><h4>By inbox type</h4><span className="hint">the campaign it came from</span></div>
+                    {ESPS.map(([k, l]) => {
+                      const m = main?.esps[k] ?? 0, n = nurture.reduce((x, g) => x + g.esps[k], 0);
+                      return (
+                        <div key={k} style={{ marginTop: 10 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 5 }}><span>{l}</span><span className="tnum muted">{fmt(m)} main · <b style={{ color: "var(--violet-fg)" }}>{fmt(n)}</b> nurture</span></div>
+                          <StackBar thin parts={[{ key: "m", value: m, color: stageColor(0), title: `${m} main` }, { key: "n", value: n, color: stageColor(1), title: `${n} nurture` }]} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="rpanel" style={{ marginTop: 16 }}>
+                <div className="ph">
+                  <h4>Breakdown</h4><span className="hint">where each delivered lead came from</span>
+                  <div className="seg">
+                    <button type="button" className={view === "result" ? "on" : ""} aria-pressed={view === "result"} onClick={() => setView("result")}>By result</button>
+                    <button type="button" className={view === "inbox" ? "on" : ""} aria-pressed={view === "inbox"} onClick={() => setView("inbox")}>By inbox type</button>
+                  </div>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="mini">
+                    <thead>
+                      <tr>
+                        <th>Came from</th><th className="num">Leads</th><th className="num">Share</th>
+                        {(view === "result" ? CATS : ESPS).map(([k, l]) => <th key={k} className="num">{l}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groups.map((g) => (
+                        <tr key={g.key} title={g.detail}>
+                          <td><span className="camp"><span className="d" style={{ background: g.color }} />{g.label}</span></td>
+                          <td className="num"><b>{fmt(g.leads)}</b></td>
+                          <td className="num muted">{share(g.leads, d.total)}</td>
+                          {view === "result"
+                            ? CATS.map(([k]) => <td key={k} className="num">{g.categories[k] ? fmt(g.categories[k]) : <span className="muted">—</span>}</td>)
+                            : ESPS.map(([k]) => <td key={k} className="num">{g.esps[k] ? fmt(g.esps[k]) : <span className="muted">—</span>}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td>Total</td><td className="num">{fmt(d.total)}</td><td className="num muted">100%</td>
+                        {view === "result"
+                          ? CATS.map(([k]) => <td key={k} className="num">{fmt(groups.reduce((n, g) => n + g.categories[k], 0))}</td>)
+                          : ESPS.map(([k]) => <td key={k} className="num">{fmt(groups.reduce((n, g) => n + g.esps[k], 0))}</td>)}
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+
+              <div className="rnote">
+                Each lead counts once, credited to the campaign of its first delivery.
+                {d.trackedSince ? ` Deliveries to lead sheets are tracked since ${monthYear(d.trackedSince)}.` : ""}
+                {d.refreshedAt ? ` Counted ${ago(d.refreshedAt, now)} — every 6 hours.` : ""}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function MonthBars({ months }: { months: ResultsData["months"] }) {
-  if (!months.length) return <div className="muted" style={{ fontSize: 12.5 }}>No deliveries yet.</div>;
-  const max = Math.max(...months.map((m) => m.main + m.nurture + m.unknown), 1);
+const Chevron = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="m9 18 6-6-6-6" /></svg>;
+
+const weekLabel = (ymd: string) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+
+function Trend({ points, by }: { points: ResultsData["trend"]["points"]; by: "week" | "month" }) {
+  if (!points.length) return <div className="muted" style={{ fontSize: 12.5, padding: "40px 0", textAlign: "center" }}>No deliveries in this window.</div>;
+  const max = Math.max(...points.map((p) => p.main + p.nurture + p.unknown), 1);
+  const every = points.length > 9 ? 2 : 1; // thin the labels when there are many weeks
+  const label = (k: string) => (by === "week" ? weekLabel(k) : monthName(k));
   return (
     <>
-      <div className="months">
-        {months.map((m) => {
-          const t = m.main + m.nurture + m.unknown;
+      <div className="tchart">
+        {points.map((p, i) => {
+          const t = p.main + p.nurture + p.unknown;
+          const when = `${by === "week" ? `Week of ${weekLabel(p.key)}` : monthName(p.key)}${i === points.length - 1 ? " (so far)" : ""}`; // the last one is the current week / month
           return (
-            <div key={m.month} className="mcol" title={`${monthName(m.month)}: ${t} delivered — ${m.main} main, ${m.nurture} nurture${m.unknown ? `, ${m.unknown} not matched` : ""}`}>
-              <span style={{ fontSize: 11, fontVariantNumeric: "tabular-nums", color: "var(--muted-foreground)" }}>{t}</span>
-              <div className="mbar" style={{ height: `${Math.max(4, (t / max) * 86)}px` }}>
-                {m.main > 0 && <i style={{ display: "block", height: `${(m.main / t) * 100}%`, background: stageColor(0) }} />}
-                {m.nurture > 0 && <i style={{ display: "block", height: `${(m.nurture / t) * 100}%`, background: stageColor(1) }} />}
-                {m.unknown > 0 && <i style={{ display: "block", height: `${(m.unknown / t) * 100}%`, background: stageColor(null) }} />}
+            <div key={p.key} className="tcol" title={`${when}: ${t} delivered — ${p.main} main, ${p.nurture} nurture${p.unknown ? `, ${p.unknown} not matched` : ""}`}>
+              <span className="tv">{t ? fmt(t) : ""}</span>
+              <div className="tbar" style={{ height: `${Math.max(3, (t / max) * 100)}%` }}>
+                {p.main > 0 && <i style={{ height: `${(p.main / t) * 100}%`, background: stageColor(0) }} />}
+                {p.nurture > 0 && <i style={{ height: `${(p.nurture / t) * 100}%`, background: stageColor(1) }} />}
+                {p.unknown > 0 && <i style={{ height: `${(p.unknown / t) * 100}%`, background: stageColor(null) }} />}
               </div>
-              <span className="mlab">{monthName(m.month)}</span>
             </div>
           );
         })}
       </div>
-      <div className="lgd" style={{ fontSize: 11 }}>
-        <span><i className="sw" style={{ background: stageColor(0) }} />Main</span>
-        <span><i className="sw" style={{ background: stageColor(1) }} />Nurture</span>
-      </div>
+      <div className="tlabels">{points.map((p, i) => <span key={p.key}>{i % every === 0 ? label(p.key) : ""}</span>)}</div>
     </>
+  );
+}
+
+function TopClients({ tags }: { tags: ResultsData["tags"] }) {
+  const top = tags.filter((t) => t.nurture > 0).slice(0, 8);
+  if (!top.length) return <div className="muted" style={{ fontSize: 12.5 }}>No leads from nurture in this window.</div>;
+  const max = Math.max(...top.map((t) => t.total), 1);
+  return (
+    <div className="rank">
+      {top.map((t, i) => (
+        <Link key={t.tag} href={`/nurture/c/${encodeURIComponent(t.tag)}`} title={`${t.tag}: ${t.nurture} from nurture, ${t.main} from main campaigns (${share(t.nurture, t.total)} nurture)`}>
+          <span className="rn">{i + 1}</span>
+          <span className="rtag">{t.tag}</span>
+          <span style={{ width: `${Math.max(8, (t.total / max) * 100)}%` }}>
+            <StackBar thin parts={[{ key: "n", value: t.nurture, color: stageColor(1), title: `${t.nurture} nurture` }, { key: "m", value: t.main, color: stageColor(0), title: `${t.main} main` }, { key: "u", value: Math.max(0, t.total - t.main - t.nurture), color: stageColor(null), title: "not matched" }]} />
+          </span>
+          <span className="rv"><b style={{ color: "var(--violet-fg)" }}>{fmt(t.nurture)}</b> <span className="muted">of {fmt(t.total)}</span></span>
+        </Link>
+      ))}
+    </div>
   );
 }

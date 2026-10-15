@@ -234,11 +234,6 @@ main:has(> .nx){overflow:visible;min-width:0}
 .nx .lgd span{display:inline-flex;align-items:center;gap:6px}
 .nx .lgd b{color:var(--foreground);font-weight:600;font-variant-numeric:tabular-nums}
 .nx .lgd .sw{width:8px;height:8px;border-radius:3px;flex:none}
-.nx .rtiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.nx .rtile{border:1px solid var(--border-soft);border-radius:10px;padding:12px 14px;background:var(--muted-2)}
-.nx .rtile .k{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--muted-foreground);text-transform:uppercase;letter-spacing:.05em}
-.nx .rtile .v{font-size:24px;font-weight:600;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
-.nx .rtile .s{font-size:11.5px;color:var(--muted-foreground);margin-top:2px}
 .nx .mini{width:100%;border-collapse:collapse;font-size:12.5px}
 .nx .mini th{font-size:10.5px;padding:8px 10px;background:transparent;border-bottom:1px solid var(--border)}
 .nx .mini td{padding:9px 10px;border-bottom:1px solid var(--border-soft)}
@@ -248,9 +243,53 @@ main:has(> .nx){overflow:visible;min-width:0}
 .nx .dcell .nums{font-size:12.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .nx .dcell .nums b{font-weight:600}
 .nx .rnote{font-size:11.5px;color:var(--muted-foreground);margin-top:12px;line-height:1.5}
-.nx .rgrid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:16px;margin-top:16px}
-@media (max-width:1100px){.nx .rgrid{grid-template-columns:1fr}}
-.nx .months{display:flex;align-items:flex-end;gap:10px;height:120px;margin-top:6px}
-.nx .months .mcol{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
-.nx .months .mbar{width:100%;max-width:46px;display:flex;flex-direction:column-reverse;border-radius:6px 6px 2px 2px;overflow:hidden;background:var(--muted)}
-.nx .months .mlab{font-size:11px;color:var(--muted-foreground)}
+
+/* ── Leads delivered (collapsible) ───────────────────────────────────────── */
+.nx .rcard{padding:0;overflow:hidden}
+.nx .rhd{display:flex;align-items:center;gap:14px;padding:16px 20px;cursor:pointer;user-select:none}
+.nx .rhd:hover{background:var(--muted-2)}
+.nx .rhd .rtog{all:unset;cursor:pointer;border-radius:4px}
+.nx .rhd .rtog:focus-visible{outline:2px solid var(--ring);outline-offset:3px}
+.nx .rhd .chev{flex:none;width:28px;height:28px;border-radius:8px;border:1px solid var(--border);display:grid;place-items:center;color:var(--muted-foreground);background:var(--card);transition:transform .18s ease}
+.nx .rhd.open .chev{transform:rotate(90deg)}
+.nx .rhd .rt{min-width:0;flex:1}
+.nx .rhd .rt h3{font-size:14.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.nx .rhd .rsum{margin-top:4px;font-size:12.5px;color:var(--muted-foreground);display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.nx .rhd .rsum b{color:var(--foreground);font-weight:600;font-variant-numeric:tabular-nums}
+.nx .rhd .rbar{width:220px;flex:none}
+@media (max-width:1100px){.nx .rhd .rbar{display:none}}
+.nx .rbody{border-top:1px solid var(--border-soft);padding:18px 20px 20px}
+.nx .kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+@media (max-width:1000px){.nx .kpis{grid-template-columns:1fr}}
+.nx .kpi{border:1px solid var(--border-soft);border-radius:12px;padding:14px 16px;background:var(--card)}
+.nx .kpi .kh{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--muted-foreground);text-transform:uppercase;letter-spacing:.05em}
+.nx .kpi .kv{display:flex;align-items:baseline;gap:8px;margin-top:6px}
+.nx .kpi .kv b{font-size:26px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.nx .kpi .kv span{font-size:12.5px;color:var(--muted-foreground);font-variant-numeric:tabular-nums}
+.nx .kpi .kf{margin-top:8px;font-size:12px;color:var(--muted-foreground)}
+.nx .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.nx .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border-soft);border-radius:999px;padding:3px 9px;font-size:11.5px;background:var(--muted-2);font-variant-numeric:tabular-nums}
+.nx .chip i{width:7px;height:7px;border-radius:50%;flex:none}
+.nx .chip b{font-weight:600}
+.nx .rsplit{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:16px;margin-top:16px}
+@media (max-width:1100px){.nx .rsplit{grid-template-columns:1fr}}
+.nx .rpanel{border:1px solid var(--border-soft);border-radius:12px;padding:14px 16px}
+.nx .rpanel .ph{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.nx .rpanel .ph h4{font-size:13px;font-weight:600}
+.nx .rpanel .ph .hint{font-size:11.5px;color:var(--muted-foreground)}
+.nx .rpanel .ph .seg{margin-left:auto}
+.nx .rpanel .ph .seg button{padding:4px 10px;font-size:11.5px}
+.nx .tchart{display:flex;align-items:flex-end;gap:6px;height:150px;padding-top:16px;border-bottom:1px solid var(--border)}
+.nx .tcol{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px}
+.nx .tcol .tv{font-size:10.5px;color:var(--muted-foreground);font-variant-numeric:tabular-nums;white-space:nowrap}
+.nx .tbar{width:100%;max-width:38px;display:flex;flex-direction:column-reverse;border-radius:5px 5px 0 0;overflow:hidden;min-height:3px}
+.nx .tbar i{display:block;width:100%}
+.nx .tcol:hover .tbar{filter:brightness(1.08)}
+.nx .tlabels{display:flex;gap:6px;margin-top:6px}
+.nx .tlabels span{flex:1;min-width:0;text-align:center;font-size:10.5px;color:var(--muted-foreground);white-space:nowrap;overflow:hidden}
+.nx .rank{display:flex;flex-direction:column;gap:9px}
+.nx .rank a{display:grid;grid-template-columns:18px 84px minmax(0,1fr) 78px;align-items:center;gap:8px;font-size:12px;color:inherit;text-decoration:none}
+.nx .rank a:hover .rtag{text-decoration:underline}
+.nx .rank .rn{color:var(--muted-foreground);font-size:11px;font-variant-numeric:tabular-nums}
+.nx .rank .rtag{font-family:var(--mono);font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.nx .rank .rv{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}

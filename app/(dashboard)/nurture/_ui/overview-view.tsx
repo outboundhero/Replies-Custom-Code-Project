@@ -254,7 +254,7 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
           <div className="stat card"><div className="k">Tags with errors</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{tiles ? fmt(tiles.tagsWithErrors) : <Skel />}</div></div>
         </div>
 
-        <div style={{ marginTop: 14 }}><ResultsCard serverNow={serverNow} /></div>
+        <div style={{ marginTop: 14 }}><ResultsCard serverNow={serverNow} defaultOpen={false} /></div>
 
         <div className="sec">
           <h3>Client tag overview</h3>
