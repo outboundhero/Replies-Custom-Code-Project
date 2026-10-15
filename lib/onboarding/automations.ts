@@ -1159,6 +1159,15 @@ const replyRouterSetup: Automation = {
 };
 
 /** Whether a task's automation may be RUN on this server right now (previews are separate). */
+/** What each automation can do on this server right now: "on" (it runs when approved),
+ *  "off" (built, but its switch isn't set — preview only) or "preview" (sending isn't built). */
+export type AutomationState = "on" | "off" | "preview";
+const SWITCHED = new Set(["create_campaigns", "allocate_domains", "whitelist_email"]);
+export function automationStates(): Record<string, AutomationState> {
+  return Object.fromEntries(Object.keys(AUTOMATION_META).map((k) => [k,
+    automationRunnable(k) ? "on" : SWITCHED.has(k) ? "off" : "preview"] as const));
+}
+
 export function automationRunnable(key: string | null | undefined): boolean {
   if (!key) return false;
   if (key === "create_campaigns") return campaignCreationEnabled();

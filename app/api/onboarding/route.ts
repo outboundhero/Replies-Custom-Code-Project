@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { withCache, setCached, nsVersion } from "@/lib/server-cache";
 import { listClients, listTasks, listOnboardingUsers, getSetting, upgradeTemplate } from "@/lib/onboarding/store";
-import { OUTREACHIFY_SLACK_SETTING, outreachifyDestinations, automationRunnable } from "@/lib/onboarding/automations";
+import { OUTREACHIFY_SLACK_SETTING, outreachifyDestinations, automationRunnable, automationStates } from "@/lib/onboarding/automations";
 
 async function loadBoard() {
   await upgradeTemplate().catch((e) => console.error("[api/onboarding] template upgrade failed", e));
@@ -21,6 +21,8 @@ async function loadBoard() {
     // the row offers Run (not just Preview) where its switch is on.
     tasks: tasks.map((task) => (task.automation ? { ...task, runnable: automationRunnable(task.automation) } : task)),
     outreachifySlack: { saved: slackSetting, sendsTo: slackDests.map((d) => d.label) },
+    // Each automation's live state (its switch), for the Template tab's labels.
+    automationStates: automationStates(),
   };
 }
 

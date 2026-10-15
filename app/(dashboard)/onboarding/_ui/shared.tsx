@@ -46,6 +46,8 @@ export type UserRow = { id: string; name: string; slack_member_id: string | null
 export type BoardData = {
   clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[];
   outreachifySlack: { saved: string | null; sendsTo: string[] };
+  /** Each automation's live state on the server: on / off (switch not set) / preview (sending not built). */
+  automationStates: Record<string, "on" | "off" | "preview">;
 };
 
 export const UNASSIGNED = "—";

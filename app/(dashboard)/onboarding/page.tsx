@@ -64,7 +64,7 @@ function Stat({ label, value, accent }: { label: string; value: string | number;
 // navigating back to Onboarding paints instantly (no skeleton) while a fresh copy
 // loads in the background. Lives for the browser session.
 let boardCache: BoardData | null = null;
-const EMPTY: BoardData = { clients: [], tasks: [], users: [], outreachifySlack: { saved: null, sendsTo: [] } };
+const EMPTY: BoardData = { clients: [], tasks: [], users: [], outreachifySlack: { saved: null, sendsTo: [] }, automationStates: {} };
 
 // ─────────────────────────── page ───────────────────────────
 // useSearchParams needs a Suspense boundary above it.
@@ -94,6 +94,7 @@ function OnboardingBoard() {
       const next: BoardData = {
         clients: data.clients ?? [], tasks: data.tasks ?? [], users: data.users ?? [],
         outreachifySlack: data.outreachifySlack ?? EMPTY.outreachifySlack,
+        automationStates: data.automationStates ?? {},
       };
       boardCache = next;
       setBoard(next);
@@ -168,7 +169,7 @@ function OnboardingBoard() {
         </TabsContent>
         {isAdmin && (
           <TabsContent value="template" className="mt-4">
-            <TemplateEditor users={users} onUsersChanged={reload} />
+            <TemplateEditor users={users} states={board.automationStates} onUsersChanged={reload} />
           </TabsContent>
         )}
         {isAdmin && (
@@ -717,7 +718,7 @@ function Board({ tasks, clients, users, onChange }: {
 // Self-fetching: only mounts (and hits the API) when the Template tab is opened —
 // keeps it off the page's initial load. Cached in module scope for instant re-open.
 let templateCache: TemplateTask[] | null = null;
-function TemplateEditor({ users, onUsersChanged }: { users: UserRow[]; onUsersChanged: () => void }) {
+function TemplateEditor({ users, states, onUsersChanged }: { users: UserRow[]; states: BoardData["automationStates"]; onUsersChanged: () => void }) {
   const [template, setTemplate] = useState<TemplateTask[]>(templateCache ?? []);
   const [loaded, setLoaded] = useState(!!templateCache);
   const [busy, setBusy] = useState(false);
@@ -745,8 +746,16 @@ function TemplateEditor({ users, onUsersChanged }: { users: UserRow[]; onUsersCh
     return false;
   }
 
-  const isStandard = template.length === DEFAULT_TEMPLATE.length && DEFAULT_TEMPLATE.every((s, i) => template[i]?.title === s.title);
-  const owners = (name: string) => DEFAULT_TEMPLATE.filter((t) => t.owner === name).length;
+  // Same tasks as the standard checklist, in any order (a step added later, like
+  // Reply Router setup, sits at the end of an older template — that's still standard).
+  const isStandard = template.length === DEFAULT_TEMPLATE.length && (() => {
+    const have = template.map((t) => t.title.trim()).sort(), want = DEFAULT_TEMPLATE.map((t) => t.title.trim()).sort();
+    return want.every((w, i) => have[i] === w);
+  })();
+  const owners = (name: string) => {
+    const all = DEFAULT_TEMPLATE.filter((t) => t.owner === name), ordered = all.filter((t) => t.day == null).length;
+    return ordered === all.length ? `${all.length} (in order, no due dates)` : ordered ? `${all.length} (${ordered} in order, ${all.length - ordered} due by day)` : `${all.length} (due by day)`;
+  };
 
   return (
     <div className="space-y-4">
@@ -759,7 +768,7 @@ function TemplateEditor({ users, onUsersChanged }: { users: UserRow[]; onUsersCh
           <div className="min-w-0 flex-1 basis-72">
             <div className="text-sm font-medium">This isn&apos;t the standard checklist</div>
             <div className="text-xs text-muted-foreground mt-0.5">
-              The standard one has {DEFAULT_TEMPLATE.length} tasks — Nick {owners("Nick")} (in order, no due dates), Madison {owners("Madison")} and Spencer {owners("Spencer")} (due by day).
+              The standard one has {DEFAULT_TEMPLATE.length} tasks — Nick {owners("Nick")}, Madison {owners("Madison")} and Spencer {owners("Spencer")}.
             </div>
           </div>
           <ApplyStandardDialog current={template.length} onApplied={async () => { await loadTemplate(); onUsersChanged(); }} />
@@ -780,7 +789,7 @@ function TemplateEditor({ users, onUsersChanged }: { users: UserRow[]; onUsersCh
           </TableHeader>
           <TableBody>
             {template.map((t, i) => (
-              <TemplateRow key={`${t.id}:${t.title}:${t.assignee_id}:${t.no_due}:${t.day_offset}`} task={t} index={i} users={users} onSave={save} busy={busy} />
+              <TemplateRow key={`${t.id}:${t.title}:${t.assignee_id}:${t.no_due}:${t.day_offset}`} task={t} index={i} users={users} states={states} onSave={save} busy={busy} />
             ))}
             <TemplateRow key={`new:${template.length}`} task={null} index={template.length} users={users} onSave={save} busy={busy} />
           </TableBody>
@@ -828,8 +837,8 @@ function ApplyStandardDialog({ current, onApplied }: { current: number; onApplie
   );
 }
 
-function TemplateRow({ task, index, users, onSave, busy }: {
-  task: TemplateTask | null; index: number; users: UserRow[];
+function TemplateRow({ task, index, users, states, onSave, busy }: {
+  task: TemplateTask | null; index: number; users: UserRow[]; states?: BoardData["automationStates"];
   onSave: (b: Record<string, unknown>) => Promise<boolean>; busy: boolean;
 }) {
   const [title, setTitle] = useState(task?.title ?? "");
@@ -841,6 +850,8 @@ function TemplateRow({ task, index, users, onSave, busy }: {
     title !== task.title || owner !== (task.assignee_id ?? "") || inOrder !== !!task.no_due
     || (!inOrder && String(task.no_due ? "" : task.day_offset) !== day));
   const auto = task?.automation ? AUTOMATION_META[task.automation] : null;
+  // Live state from the server (its switch); until the board has loaded, no claim either way.
+  const autoState = task?.automation ? states?.[task.automation] ?? null : null;
 
   async function commit() {
     if (!title.trim()) { if (isNew) return; toast.error("Title required"); return; }
@@ -883,11 +894,12 @@ function TemplateRow({ task, index, users, onSave, busy }: {
       </TableCell>
       <TableCell>
         {isNew ? null : auto ? (
-          <span title={auto.label} className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium",
-            auto.built
-              ? "border-primary/30 bg-primary/5 text-primary"
+          <span title={`${auto.label}${autoState === "off" ? " — built, but its switch isn't on on this server, so it's preview only" : autoState === "preview" ? " — the preview works; sending isn't built yet" : ""}`}
+            className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+            autoState === "on" ? "border-primary/30 bg-primary/5 text-primary"
+              : autoState === null ? "border-border bg-muted/40 text-muted-foreground"
               : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300")}>
-            <Zap className="h-3 w-3" />{auto.built ? "Automated" : "Automation coming"}
+            <Zap className="h-3 w-3" />{autoState === "on" ? "Automated" : autoState === "off" ? "Switched off" : autoState === "preview" ? "Preview only" : "Automation"}
           </span>
         ) : <span className="text-[11px] text-muted-foreground">Manual check-off</span>}
       </TableCell>
