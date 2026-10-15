@@ -309,18 +309,13 @@ let templateUpgraded = false;
 export async function upgradeTemplate(): Promise<void> {
   if (templateUpgraded) return;
   await ensureTables();
-  const key = "template_added:replyrouter_setup";
-  // Claimed first, atomically: of two servers doing this at once, only one adds the step.
-  const claim = await db.execute({ sql: "INSERT OR IGNORE INTO onboarding_setting (key, value, updated_at) VALUES (?, ?, ?)", args: [key, "adding", nowIso()] });
-  if (claim.rowsAffected === 0) { templateUpgraded = true; return; }
-  try {
+  await onceEver("template_added:replyrouter_setup", async () => {
     const tpl = await listTemplate();
     // An empty template is seeded with the step already; one that has it needs nothing.
     if (tpl.length && !tpl.some((t) => t.automation === "replyrouter_setup")) {
       const seed = DEFAULT_TEMPLATE.find((t) => t.automation === "replyrouter_setup")!;
-      // The owner is whoever is called Nick already — nobody is created for this.
-      const users = await listOnboardingUsers();
-      const owner = users.find((u) => u.name.trim().toLowerCase().split(/\s+/)[0] === seed.owner.toLowerCase())?.id ?? null;
+      // The owner is whoever already has the seed owner's first name — nobody is created for this.
+      const owner = (await userIdsByFirstName()).get(seed.owner.toLowerCase()) ?? null;
       const now = nowIso();
       const order = Math.max(...tpl.map((t) => t.order_index)) + 1;
       await db.execute({
@@ -331,13 +326,45 @@ export async function upgradeTemplate(): Promise<void> {
       });
       bumpVersion("onboarding");
     }
+  });
+  // "Set up in Reply Router" went from Nick to Madison (2026-10-16): the template's step and clients'
+  // unfinished ones move — only where Nick still has them, so an owner picked by hand since is kept.
+  await onceEver("template_owner:replyrouter_setup:madison", async () => {
+    const ids = await userIdsByFirstName();
+    const nick = ids.get("nick"), madison = ids.get("madison");
+    if (!nick || !madison) return;
+    const now = nowIso();
+    await db.batch([
+      { sql: "UPDATE onboarding_template_task SET assignee_id = ?, updated_at = ? WHERE automation = 'replyrouter_setup' AND assignee_id = ?", args: [madison, now, nick] },
+      { sql: "UPDATE onboarding_task SET assignee_email = ?, updated_at = ? WHERE automation = 'replyrouter_setup' AND status != 'completed' AND assignee_email = ?", args: [madison, now, nick] },
+    ], "write");
+    bumpVersion("onboarding");
+  });
+  templateUpgraded = true;
+}
+
+/** Runs `work` once, ever: the key is claimed first, atomically, so of two servers doing this at
+ *  once only one does it. A failure frees the claim for the next request to try again. */
+async function onceEver(key: string, work: () => Promise<void>): Promise<void> {
+  const claim = await db.execute({ sql: "INSERT OR IGNORE INTO onboarding_setting (key, value, updated_at) VALUES (?, ?, ?)", args: [key, "adding", nowIso()] });
+  if (claim.rowsAffected === 0) return;
+  try {
+    await work();
     await setSetting(key, nowIso());
-    templateUpgraded = true;
   } catch (e) {
-    // Let the next request try again.
     await db.execute({ sql: "DELETE FROM onboarding_setting WHERE key = ? AND value = 'adding'", args: [key] }).catch(() => {});
     throw e;
   }
+}
+
+/** Onboarding users by lower-case first name (the first one wins). */
+async function userIdsByFirstName(): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const u of await listOnboardingUsers()) {
+    const first = u.name.trim().toLowerCase().split(/\s+/)[0];
+    if (first && !out.has(first)) out.set(first, u.id);
+  }
+  return out;
 }
 
 /**

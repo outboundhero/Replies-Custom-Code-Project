@@ -409,8 +409,8 @@ export async function fetchOnboardingForm(): Promise<OnboardingFormRow[]> {
     "Inclusion locations (make sure to include zip codes, counties, or cities + states):",
     "Inclusion locations",
   );
-  // hq_anchor: Column G "Client Office ({City, State} or {ZIP})" (exact),
-  // with Column F "Company Address…" as fallback.
+  // hq_anchor: a "Client Office ({City, State} or {ZIP})" column if the form has one (it doesn't
+  // today), else "Company Address…" (column H).
   const hqIdx = findColumnIndex(headers, "Client Office ({City, State} or {ZIP})");
   const hqIdxLoose = hqIdx !== -1 ? hqIdx : findColumnStartsWith(headers, "Client Office");
   const addressIdx = findColumnStartsWith(headers, "Company Address");

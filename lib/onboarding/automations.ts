@@ -305,7 +305,9 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   const tier = param("tier") ?? tierOf(c.plan_type) ?? tierOf(sheet?.plan) ?? "";
 
   // The client lines and name that fill the copy's [[fields]].
-  const officeAddress = param("office_address") ?? (form?.address || sheet?.office || "");
+  // The office address is the Onboarding Form's Company Address (column H) and nothing else — the New
+  // Client Information tab's office "location" is often just a city, which isn't an address.
+  const officeAddress = param("office_address") ?? (form?.address || "");
   const serviceArea = rawParam("service_area") ?? (city && state ? serviceAreaLine(clientType === "cleaning", place) : "");
   const officeLine = rawParam("office_line") ?? addressSpintax(officeAddress, region ? { abbr: region.abbr, name: region.name } : null);
   const companyName = param("company_name") ?? (form?.companyName || c.client_name || "");
@@ -326,7 +328,9 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
     { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "Orange County",
       hint: `How the area is named in the service-area line. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
     { key: "office_address", label: "Office address", type: "text", value: officeAddress, placeholder: "811 E Chapman Ave, Orange, CA 92866",
-      hint: form?.address ? "From the Onboarding Form." : undefined },
+      hint: form?.address ? "From the Onboarding Form's Company Address (column H)."
+        : form ? `${tag}'s Onboarding Form has no Company Address (column H) — type the office address.`
+        : `${tag} isn't on the Onboarding Form, so there's no Company Address (column H) to use — type the office address.` },
     { key: "company_name", label: "Company name", type: "text", value: companyName, hint: "Fills [[COMPANY_NAME]] wherever the copy uses it." },
     { key: "service_area", label: "Service-area line ([[SERVICE_AREA]])", type: "textarea", value: serviceArea,
       hint: rawParam("service_area") === undefined ? "Written from the area, city and state in Clay's pattern — edit it if needed." : undefined },
