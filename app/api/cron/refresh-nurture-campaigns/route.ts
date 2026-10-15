@@ -17,10 +17,15 @@ import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { BISON_INSTANCES } from "@/lib/bison-instances";
 import { reactivateCompletedNurture } from "@/lib/nurture/reactivate-completed";
 import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
+import { ensureStageColumns, hasStageColumns } from "@/lib/nurture/stage-columns";
 
 export const maxDuration = 300;
 
-interface Row { id: number; uuid: string | null; name: string; status: string; client_tag: string | null; total_leads: number; bison_instance: string }
+interface Row {
+  id: number; uuid: string | null; name: string; status: string; client_tag: string | null; total_leads: number; bison_instance: string;
+  contacted: number | null; completion: number | null; replied: number | null;
+}
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 export async function GET(req: NextRequest) {
   const secret =
@@ -47,6 +52,7 @@ export async function GET(req: NextRequest) {
           id: c.id, uuid: c.uuid ?? null, name: c.name, status: c.status,
           client_tag: extractTagFromCampaignName(c.name) || null,
           total_leads: c.total_leads ?? 0, bison_instance: key,
+          contacted: num(c.total_leads_contacted), completion: num(c.completion_percentage), replied: num(c.unique_replies ?? c.replied),
         });
       }
     } else failures.push(`${key}: ${(s.reason as Error)?.message || "unknown"}`);
@@ -59,6 +65,18 @@ export async function GET(req: NextRequest) {
       PRIMARY KEY (id, bison_instance)
     )`,
   );
+  await db.execute(
+    `CREATE TABLE IF NOT EXISTS main_campaigns_cache (
+      id INTEGER, bison_instance TEXT, client_tag TEXT, name TEXT, status TEXT,
+      total_leads INTEGER, synced_at TEXT, PRIMARY KEY (id, bison_instance)
+    )`,
+  ).catch((e) => console.error("[cron/refresh-nurture-campaigns] main-campaign table:", (e as Error).message));
+  // Progress columns ("where contacts sit"): contacted, completion, replies. Never let them
+  // stop the refresh — without them the rows are written the way they always were.
+  const progress = await ensureStageColumns().then(() => hasStageColumns()).catch((e) => {
+    console.error("[cron/refresh-nurture-campaigns] progress columns unavailable:", (e as Error).message);
+    return false;
+  });
 
   // Replace ONLY the instances that answered (a failed instance keeps its last
   // rows), each in one transaction so a reader never sees a half-filled cache.
@@ -70,7 +88,10 @@ export async function GET(req: NextRequest) {
       const mine = rows.filter((r) => r.bison_instance === key);
       await db.batch([
         { sql: "DELETE FROM nurture_campaigns_cache WHERE bison_instance = ?", args: [key] },
-        ...mine.map((r) => ({
+        ...mine.map((r) => (progress ? {
+          sql: "INSERT OR REPLACE INTO nurture_campaigns_cache (id, uuid, name, status, client_tag, total_leads, bison_instance, synced_at, contacted, completion, replied) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+          args: [r.id, r.uuid, r.name, r.status, r.client_tag, r.total_leads, r.bison_instance, now, r.contacted, r.completion, r.replied],
+        } : {
           sql: "INSERT OR REPLACE INTO nurture_campaigns_cache (id, uuid, name, status, client_tag, total_leads, bison_instance, synced_at) VALUES (?,?,?,?,?,?,?,?)",
           args: [r.id, r.uuid, r.name, r.status, r.client_tag, r.total_leads, r.bison_instance, now],
         })),
@@ -83,12 +104,6 @@ export async function GET(req: NextRequest) {
   // so no extra Bison calls. Replaced per instance only when that instance's
   // list came back (a failed instance keeps its previous snapshot).
   try {
-    await db.execute(
-      `CREATE TABLE IF NOT EXISTS main_campaigns_cache (
-        id INTEGER, bison_instance TEXT, client_tag TEXT, name TEXT, status TEXT,
-        total_leads INTEGER, synced_at TEXT, PRIMARY KEY (id, bison_instance)
-      )`,
-    );
     const now = new Date().toISOString();
     for (let idx = 0; idx < settled.length; idx++) {
       const s = settled[idx];
@@ -101,7 +116,10 @@ export async function GET(req: NextRequest) {
       // One transaction per instance (same reason as above).
       await db.batch([
         { sql: "DELETE FROM main_campaigns_cache WHERE bison_instance = ?", args: [key] },
-        ...mains.map(({ c, tag }) => ({
+        ...mains.map(({ c, tag }) => (progress ? {
+          sql: "INSERT OR REPLACE INTO main_campaigns_cache (id, bison_instance, client_tag, name, status, total_leads, synced_at, contacted, completion, replied) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          args: [c.id, key, tag, c.name, c.status, c.total_leads ?? 0, now, num(c.total_leads_contacted), num(c.completion_percentage), num(c.unique_replies ?? c.replied)],
+        } : {
           sql: "INSERT OR REPLACE INTO main_campaigns_cache (id, bison_instance, client_tag, name, status, total_leads, synced_at) VALUES (?,?,?,?,?,?,?)",
           args: [c.id, key, tag, c.name, c.status, c.total_leads ?? 0, now],
         })),

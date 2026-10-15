@@ -225,3 +225,32 @@
 main:has(> .nx){overflow:visible;min-width:0}
 .nx tr.link:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
 .nx .menu [role=menuitem]:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+
+/* ── Results: what nurture produces + where contacts sit ─────────────────── */
+.nx .stk{display:flex;height:12px;border-radius:999px;overflow:hidden;background:var(--muted);gap:2px}
+.nx .stk.thin{height:6px;gap:1px}
+.nx .stk > i{display:block;height:100%;min-width:3px}
+.nx .lgd{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-size:12px;color:var(--muted-foreground)}
+.nx .lgd span{display:inline-flex;align-items:center;gap:6px}
+.nx .lgd b{color:var(--foreground);font-weight:600;font-variant-numeric:tabular-nums}
+.nx .lgd .sw{width:8px;height:8px;border-radius:3px;flex:none}
+.nx .rtiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.nx .rtile{border:1px solid var(--border-soft);border-radius:10px;padding:12px 14px;background:var(--muted-2)}
+.nx .rtile .k{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--muted-foreground);text-transform:uppercase;letter-spacing:.05em}
+.nx .rtile .v{font-size:24px;font-weight:600;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
+.nx .rtile .s{font-size:11.5px;color:var(--muted-foreground);margin-top:2px}
+.nx .mini{width:100%;border-collapse:collapse;font-size:12.5px}
+.nx .mini th{font-size:10.5px;padding:8px 10px;background:transparent;border-bottom:1px solid var(--border)}
+.nx .mini td{padding:9px 10px;border-bottom:1px solid var(--border-soft)}
+.nx .mini tr:last-child td{border-bottom:none}
+.nx .mini tfoot td{font-weight:600;border-top:1px solid var(--border);border-bottom:none}
+.nx .dcell{display:flex;flex-direction:column;gap:5px;min-width:96px}
+.nx .dcell .nums{font-size:12.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.nx .dcell .nums b{font-weight:600}
+.nx .rnote{font-size:11.5px;color:var(--muted-foreground);margin-top:12px;line-height:1.5}
+.nx .rgrid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:16px;margin-top:16px}
+@media (max-width:1100px){.nx .rgrid{grid-template-columns:1fr}}
+.nx .months{display:flex;align-items:flex-end;gap:10px;height:120px;margin-top:6px}
+.nx .months .mcol{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
+.nx .months .mbar{width:100%;max-width:46px;display:flex;flex-direction:column-reverse;border-radius:6px 6px 2px 2px;overflow:hidden;background:var(--muted)}
+.nx .months .mlab{font-size:11px;color:var(--muted-foreground)}

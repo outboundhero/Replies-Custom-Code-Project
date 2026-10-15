@@ -120,6 +120,8 @@ function lean(t: OverviewTag) {
     mapping: t.mapping, mapIssues: t.mapIssues, batches: t.batches, extraLiveBatches: t.extraLiveBatches,
     lastContactDay: t.lastContactDay, lastContactCheckedAt: t.lastContactCheckedAt,
     added: t.added, stoppedRecovered: t.stoppedRecovered, errors: t.errors,
+    // Older snapshots (built before these existed) have neither.
+    stages: t.stages ?? [], delivered90: t.delivered90 ?? null,
     stats: s ? {
       queue: s.queue, ready: s.ready, sources: s.sources, esps: s.esps,
       email_endings: s.email_endings, site_endings: s.site_endings, email_domains: s.email_domains,

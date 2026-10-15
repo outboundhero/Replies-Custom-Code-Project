@@ -25,6 +25,8 @@ import { trioReadyToExpand } from "@/lib/nurture/campaign-expansion";
 import { getInstanceConfig, getInstanceLabel } from "@/lib/bison-instances";
 import { toQueueContact } from "@/lib/nurture/queue-filters";
 import { acquireHeavyLease, renewHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
+import { ensureStageColumns, hasStageColumns } from "@/lib/nurture/stage-columns";
+import { deliveredByTag } from "@/lib/nurture/results";
 
 export const ESPS: Esp[] = ["google", "outlook", "segs"];
 const ON = new Set(["active", "queued"]);
@@ -46,7 +48,37 @@ export interface TagStats {
 
 export interface NurtureCampaignRef {
   id: number; instance: string; name: string; status: string; esp: Esp | null; batch: number; totalLeads: number;
+  /** Progress from Bison (null until the campaign cache has it). */
+  contacted?: number | null; completion?: number | null; replied?: number | null;
 }
+
+/** Where a client's contacts sit: its main campaigns (stage 0) and each nurture batch (1, 2, …). */
+export interface StageRow {
+  stage: number;
+  campaigns: number;          // current campaigns (not archived / completed / stopped)
+  live: number;               // of those, active or queued
+  leads: number;              // contacts in them
+  contacted: number | null;   // emailed at least once (null = not known yet)
+  replied: number | null;     // distinct leads that replied
+  completion: number | null;  // how far through their sequences, 0–100, weighted by contacts
+}
+const RETIRED = new Set(["archived", "completed", "stopped", "deleted"]);
+type StageAcc = { campaigns: number; live: number; leads: number; contacted: number; contactedKnown: boolean; replied: number; repliedKnown: boolean; compW: number; compLeads: number };
+const newAcc = (): StageAcc => ({ campaigns: 0, live: 0, leads: 0, contacted: 0, contactedKnown: true, replied: 0, repliedKnown: true, compW: 0, compLeads: 0 });
+function addToAcc(a: StageAcc, c: { status: string; totalLeads: number; contacted?: number | null; completion?: number | null; replied?: number | null }) {
+  a.campaigns++;
+  if (ON.has(c.status)) a.live++;
+  a.leads += c.totalLeads;
+  if (c.contacted == null) a.contactedKnown = false; else a.contacted += c.contacted;
+  if (c.replied == null) a.repliedKnown = false; else a.replied += c.replied;
+  if (c.completion != null) { a.compW += c.completion * c.totalLeads; a.compLeads += c.totalLeads; }
+}
+const accRow = (stage: number, a: StageAcc): StageRow => ({
+  stage, campaigns: a.campaigns, live: a.live, leads: a.leads,
+  contacted: a.campaigns && a.contactedKnown ? a.contacted : null,
+  replied: a.campaigns && a.repliedKnown ? a.replied : null,
+  completion: a.compLeads > 0 ? Math.round((a.compW / a.compLeads) * 10) / 10 : null,
+});
 
 export interface MapSlot {
   lane: "b2b" | "b2c"; instance: string; instanceLabel: string; esp: Esp;
@@ -81,6 +113,10 @@ export interface OverviewTag {
   errors: StatusBadge[];
   slots: MapSlot[];                  // target campaigns, lane × instance × ESP (client page)
   batchCampaigns: Array<{ batch: number; state: BatchState; campaigns: Array<NurtureCampaignRef & { instanceLabel: string }> }>;
+  /** Contacts by stage — main campaigns, then each nurture batch (current campaigns only). */
+  stages: StageRow[];
+  /** Leads delivered to the client in the last 90 days, by where they came from (null = not computed yet). */
+  delivered90: { main: number; nurture: number; unknown: number } | null;
 }
 
 // ── Turso caches written by the cron ─────────────────────────────────────────
@@ -156,14 +192,18 @@ export async function buildOverview(): Promise<{
   campaignsSyncedAt: string | null;
 }> {
   await ensureOverviewTables();
+  // Campaign progress (contacted / completion / replies) — read only once the columns exist.
+  await ensureStageColumns().catch(() => undefined);
+  const progress = await hasStageColumns();
+  const extra = progress ? ", contacted, completion, replied" : "";
   const { tags: allTags, churned } = await activeClientTags();
   const wanted = allTags;
 
-  const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows, expRows] = await Promise.all([
+  const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows, expRows, delivered] = await Promise.all([
     getAllClientInstances(),
     fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS).catch(() => new Set<string>()),
-    db.execute("SELECT id, name, status, client_tag, total_leads, bison_instance, synced_at FROM nurture_campaigns_cache"),
-    db.execute("SELECT client_tag, status FROM main_campaigns_cache").catch(() => ({ rows: [] as unknown[] })),
+    db.execute(`SELECT id, name, status, client_tag, total_leads, bison_instance, synced_at${extra} FROM nurture_campaigns_cache`),
+    db.execute(`SELECT client_tag, status, total_leads${extra} FROM main_campaigns_cache`).catch(() => ({ rows: [] as unknown[] })),
     db.execute("SELECT client_tag, bison_instance, esp, campaign_id, campaign_name FROM nurture_campaign_map"),
     db.execute("SELECT client_tag, auto_nurture_disabled, nurture_map_confirmed_at FROM client_config"),
     db.execute("SELECT client_tag, bison_instance, esp, completion_percentage, total_leads FROM nurture_routing_health").catch(() => ({ rows: [] as unknown[] })),
@@ -175,7 +215,9 @@ export async function buildOverview(): Promise<{
     getCronState<CronState>("nurture:auto-map"),
     db.execute("SELECT UPPER(client_tag) AS t, COUNT(*) AS n FROM nurture_stopped_recovered WHERE added_at IS NOT NULL GROUP BY 1").catch(() => ({ rows: [] as unknown[] })),
     db.execute("SELECT DISTINCT UPPER(client_tag) AS t, bison_instance AS i, old_campaign_id AS id FROM nurture_campaign_expansions").catch(() => ({ rows: [] as unknown[] })),
+    deliveredByTag(new Date(Date.now() - 90 * 86_400_000).toISOString()),
   ]);
+  const numOrNull = (v: unknown) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Number(v) : null);
   // Campaigns that were already duplicated into a newer batch, per tag + instance.
   const duplicatedFrom = new Set((expRows.rows as Array<Record<string, unknown>>).map((r) => `${r.t}:${r.i}:${r.id}`));
 
@@ -191,6 +233,7 @@ export async function buildOverview(): Promise<{
     const ref: NurtureCampaignRef = {
       id: Number(r.id), instance: String(r.bison_instance), name, status: String(r.status || "").toLowerCase(),
       esp: detectCampaignEsp(name), batch: nurtureBatchOf(name), totalLeads: Number(r.total_leads) || 0,
+      contacted: numOrNull(r.contacted), completion: numOrNull(r.completion), replied: numOrNull(r.replied),
     };
     campById.set(`${ref.instance}:${ref.id}`, ref);
     if (!isCanonicalNurtureCampaign(name)) continue;
@@ -199,12 +242,19 @@ export async function buildOverview(): Promise<{
     nurtByTag.get(T)!.push(ref);
   }
   const mainByTag = new Map<string, { active: number; total: number }>();
+  const mainStageByTag = new Map<string, StageAcc>();
   for (const r of mainRows.rows as Array<Record<string, unknown>>) {
     const T = up(r.client_tag);
     const m = mainByTag.get(T) ?? { active: 0, total: 0 };
     m.total++;
-    if (ON.has(String(r.status || "").toLowerCase())) m.active++;
+    const status = String(r.status || "").toLowerCase();
+    if (ON.has(status)) m.active++;
     mainByTag.set(T, m);
+    if (!RETIRED.has(status)) {
+      const a = mainStageByTag.get(T) ?? newAcc();
+      addToAcc(a, { status, totalLeads: Number(r.total_leads) || 0, contacted: numOrNull(r.contacted), completion: numOrNull(r.completion), replied: numOrNull(r.replied) });
+      mainStageByTag.set(T, a);
+    }
   }
   const mapByTag = new Map<string, Array<{ instance: string; esp: Esp; id: number; name: string | null }>>();
   for (const r of mapRows.rows) {
@@ -329,6 +379,15 @@ export async function buildOverview(): Promise<{
       campaigns: current.filter((c) => c.batch === k).map((c) => ({ ...c, instanceLabel: getInstanceLabel(c.instance) })),
     }));
 
+    // ── where contacts sit: main campaigns, then each nurture batch (current campaigns only)
+    const stages: StageRow[] = [accRow(0, mainStageByTag.get(T) ?? newAcc())];
+    const live = relevant.filter((c) => !RETIRED.has(c.status));
+    for (const k of [...new Set(live.map((c) => c.batch))].sort((a, b) => a - b)) {
+      const a = newAcc();
+      for (const c of live.filter((x) => x.batch === k)) addToAcc(a, c);
+      stages.push(accRow(k, a));
+    }
+
     // ── status badges (each with the hover "what + how to fix")
     const errors: StatusBadge[] = [];
     if (prelaunch) {
@@ -358,6 +417,7 @@ export async function buildOverview(): Promise<{
       stoppedRecovered: recByTag.get(T) ?? 0,
       errors,
       slots: mapSlots, batchCampaigns,
+      stages, delivered90: delivered.get(T) ?? (delivered.size ? { main: 0, nurture: 0, unknown: 0 } : null),
     });
   }
 

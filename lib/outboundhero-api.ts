@@ -449,6 +449,14 @@ export interface OutboundCampaign {
   emails_sent?: number;
   replied?: number;
   bounced?: number;
+  /** Leads the campaign has emailed at least once (the rest haven't started yet). */
+  total_leads_contacted?: number;
+  /** How far the campaign is through its sequences, 0–100. */
+  completion_percentage?: number;
+  /** Distinct leads that replied. */
+  unique_replies?: number;
+  /** Bison's own "interested" count. */
+  interested?: number;
   /** ISO timestamp of when the campaign was created (Bison `created_at`). */
   created_at?: string | null;
 }
@@ -585,6 +593,10 @@ async function listCampaignsForStatus(
       emails_sent: row.emails_sent as number | undefined,
       replied: row.replied as number | undefined,
       bounced: row.bounced as number | undefined,
+      total_leads_contacted: row.total_leads_contacted as number | undefined,
+      completion_percentage: row.completion_percentage as number | undefined,
+      unique_replies: row.unique_replies as number | undefined,
+      interested: row.interested as number | undefined,
       created_at: (row.created_at as string | null) ?? null,
     }));
     return { rows, lastPage };

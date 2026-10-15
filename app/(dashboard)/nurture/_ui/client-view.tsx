@@ -18,6 +18,7 @@ import {
   type OverviewTag, type BatchState, fmt, ago, ptDate, lastContactText, useNow, Ico, TypeBadge, Avatar, MappingPill, StatusCell, HoverTip,
   Skel, BarRow, ESP_ROWS, SOURCE_ROWS, sourceValues, useToast, Toast, ConfirmDialog, ActionsMenu,
 } from "./shared";
+import { ResultsCard, WhereContactsCard } from "./results";
 import { type QueueResult, type QueueContact, QUEUE_PAGE, queueQuery, getCachedQueue, isFresh, fetchQueue, prefetchQueuePage, dropQueueCache } from "./queue-cache";
 
 interface Slot {
@@ -116,7 +117,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
   }), ZERO);
 
   // ── tabs
-  const [tab, setTab] = useState<"ov" | "q">("ov");
+  const [tab, setTab] = useState<"ov" | "q" | "r">("ov");
 
   // ── queue
   const [f, setF] = useState<QueueFilters>(NO_FILTERS);
@@ -478,6 +479,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
 
         <div className="tabs" role="tablist">
           <button type="button" role="tab" aria-selected={tab === "ov"} className={tab === "ov" ? "on" : ""} onClick={() => setTab("ov")}>{Ico.grid}Nurture overview</button>
+          <button type="button" role="tab" aria-selected={tab === "r"} className={tab === "r" ? "on" : ""} onClick={() => setTab("r")}>{Ico.tick}Results</button>
           <button type="button" role="tab" aria-selected={tab === "q"} className={tab === "q" ? "on" : ""} onClick={() => setTab("q")}>{Ico.lines}Queue <span className="cnt">{queueCount != null ? fmt(queueCount) : "…"}</span></button>
         </div>
 
@@ -567,6 +569,16 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
               <div className="mm" style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 8 }}>Leads crossing the 45-day cooldown, by day.{s ? (fsum ? ` ${fmt(fsum)} in the next 30 days.` : " None in the next 30 days.") : ""}</div>
             </div>
           </div>
+        </div>
+
+        {/* TAB: results — what nurture produces, and where the contacts sit */}
+        <div className={tab === "r" ? "" : "hidden"} role="tabpanel">
+          {tab === "r" && (
+            <>
+              <WhereContactsCard stages={c?.stages} waiting={s ? s.queue : null} loading={!c} />
+              <div style={{ marginTop: 16 }}><ResultsCard tag={tag} serverNow={serverNow} /></div>
+            </>
+          )}
         </div>
 
         {/* TAB: queue */}

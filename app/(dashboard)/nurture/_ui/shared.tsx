@@ -30,6 +30,10 @@ export interface OverviewTag {
   lastContactDay: string | null; lastContactCheckedAt: string | null;
   stats: TagStats | null; added: number | null; stoppedRecovered: number;
   errors: StatusBadge[];
+  /** Contacts by stage: main campaigns (0), then each nurture batch. */
+  stages?: Array<{ stage: number; campaigns: number; live: number; leads: number; contacted: number | null; replied: number | null; completion: number | null }>;
+  /** Leads delivered in the last 90 days, by where they came from (null = not counted yet). */
+  delivered90?: { main: number; nurture: number; unknown: number } | null;
 }
 
 // ── formatting ───────────────────────────────────────────────────────────────

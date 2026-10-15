@@ -13,6 +13,7 @@ import {
   type OverviewTag, fmt, ago, ptTime, lastContactText, useNow, Ico, TypeBadge, Avatar, MappingPill, Batches,
   StatusCell, Skel, BarRow, ESP_ROWS, sourceValues, useToast, Toast, ActionsMenu,
 } from "./shared";
+import { ResultsCard, DeliveredCell, StageSummary } from "./results";
 
 interface CronInfo { at?: string; churned?: number; active?: number; manual?: boolean; checked?: number; newlyMapped?: number; remapped?: number }
 export interface OverviewResp {
@@ -253,6 +254,8 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
           <div className="stat card"><div className="k">Tags with errors</div><div className="v tnum" style={{ color: "var(--amber-fg)" }}>{tiles ? fmt(tiles.tagsWithErrors) : <Skel />}</div></div>
         </div>
 
+        <div style={{ marginTop: 14 }}><ResultsCard serverNow={serverNow} /></div>
+
         <div className="sec">
           <h3>Client tag overview</h3>
           <div className="d">Campaigns, mapping, nurture batches, queue and health for every tag. <b style={{ color: "var(--foreground)" }}>Click a row to expand its nurture overview inline</b> — campaigns, pipeline and analytics — then open the full view + queue from there.</div>
@@ -283,22 +286,22 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
             <table>
               <thead>
                 <tr>
-                  <th>Client tag</th><th>Campaigns</th><th>Mapping</th><th>Nurture batches</th><th>Last contact</th><th className="num">Queue</th><th>Status</th><th></th>
+                  <th>Client tag</th><th>Campaigns</th><th>Mapping</th><th>Nurture batches</th><th>Last contact</th><th title="Leads delivered to the client in the last 90 days — from main campaigns vs nurture">Delivered · 90d</th><th className="num">Queue</th><th>Status</th><th></th>
                 </tr>
               </thead>
               <tbody>
                 {!data ? (
                   Array.from({ length: 8 }, (_, i) => (
-                    <tr key={i}>{Array.from({ length: 8 }, (_, j) => <td key={j}>{j < 7 ? <Skel w={j === 0 ? 110 : 60} /> : null}</td>)}</tr>
+                    <tr key={i}>{Array.from({ length: 9 }, (_, j) => <td key={j}>{j < 8 ? <Skel w={j === 0 ? 110 : 60} /> : null}</td>)}</tr>
                   ))
                 ) : remoteState === "needs-enter" ? (
-                  <tr><td colSpan={8}><div className="empty">Press <b>Enter</b> to search every client&apos;s queue for contacts ending in “{emailMode === "remote" ? emailKey : webKey}”. Endings like <b>.in</b>, <b>.co.uk</b> or <b>gmail.com</b> filter instantly.</div></td></tr>
+                  <tr><td colSpan={9}><div className="empty">Press <b>Enter</b> to search every client&apos;s queue for contacts ending in “{emailMode === "remote" ? emailKey : webKey}”. Endings like <b>.in</b>, <b>.co.uk</b> or <b>gmail.com</b> filter instantly.</div></td></tr>
                 ) : remoteState === "loading" ? (
-                  <tr><td colSpan={8}><div className="empty">Searching every client&apos;s queue… this can take up to a minute.</div></td></tr>
+                  <tr><td colSpan={9}><div className="empty">Searching every client&apos;s queue… this can take up to a minute.</div></td></tr>
                 ) : remoteState === "error" ? (
-                  <tr><td colSpan={8}><div className="empty">The search didn&apos;t finish ({remote?.error}). Press <b>Enter</b> in the filter to try again.</div></td></tr>
+                  <tr><td colSpan={9}><div className="empty">The search didn&apos;t finish ({remote?.error}). Press <b>Enter</b> in the filter to try again.</div></td></tr>
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={8}><div className="empty">{filtersOn ? "No client tags match these filters." : "No active client tags."}</div></td></tr>
+                  <tr><td colSpan={9}><div className="empty">{filtersOn ? "No client tags match these filters." : "No active client tags."}</div></td></tr>
                 ) : rows.map((c) => {
                   const isOpen = openRows.has(c.tag);
                   return (
@@ -320,12 +323,13 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
                         <td><MappingPill mapping={c.mapping} issues={c.mapIssues} /></td>
                         <td><Batches b={c.batches} extra={c.extraLiveBatches} /></td>
                         <td className="muted" style={{ fontSize: 12.5 }}>{lastContactText(c, now)}</td>
+                        <td><DeliveredCell d={c.delivered90} /></td>
                         <td className="num mono">{c.stats ? fmt(c.stats.queue) : <span className="muted" title="Queue numbers haven’t been computed yet">…</span>}</td>
                         <td><StatusCell errors={c.errors} /></td>
                         <td style={{ textAlign: "right" }}>{Ico.chevron}</td>
                       </tr>
                       {isOpen && (
-                        <tr className="exprow"><td colSpan={8}><ExpandInner c={c} now={now} onOpen={() => openClient(c.tag)} /></td></tr>
+                        <tr className="exprow"><td colSpan={9}><ExpandInner c={c} now={now} onOpen={() => openClient(c.tag)} /></td></tr>
                       )}
                     </Fragment>
                   );
@@ -382,6 +386,7 @@ function ExpandInner({ c, now, onOpen }: { c: OverviewTag; now: number; onOpen: 
         <div style={{ fontSize: 11, color: "var(--muted-foreground)", marginTop: 9 }}>
           <b style={{ color: "var(--foreground)", fontWeight: 600 }} className="tnum">{s ? fmt(queue) : "—"}</b> in queue · last contact {lastContactText(c, now).toLowerCase()}
         </div>
+        {c.stages && <StageSummary stages={c.stages} waiting={s ? queue : null} />}
       </div>
       <div className="exp-col">
         <div className="eh">Source breakdown</div>
