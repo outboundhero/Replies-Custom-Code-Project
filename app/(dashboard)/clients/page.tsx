@@ -54,6 +54,7 @@ export default function ClientsPage() {
   const [newSectionId, setNewSectionId] = useState("");
   const [adding, setAdding] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [companies, setCompanies] = useState<Record<string, string>>({});
 
   const loadClients = useCallback(async () => {
     try {
@@ -77,6 +78,12 @@ export default function ClientsPage() {
     loadClients();
     loadSections();
   }, [loadClients, loadSections]);
+  // Company names from the Client Tracker (a sheet read — after the list, best effort).
+  useEffect(() => {
+    let live = true;
+    fetch("/api/clients/companies").then((r) => (r.ok ? r.json() : null)).then((j) => { if (live && j?.companies) setCompanies(j.companies); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
 
   const tagTaken = !!newTag.trim() && !!clients?.some((c) => c.tag.toUpperCase() === newTag.trim().toUpperCase());
   const tagBad = !!newTag.trim() && !normClientTag(newTag);
@@ -110,8 +117,8 @@ export default function ClientsPage() {
 
   const q = search.trim().toLowerCase();
   const filtered = useMemo(() => (clients ?? []).filter((c) =>
-    !q || c.tag.toLowerCase().includes(q) || c.section_name.toLowerCase().includes(q),
-  ), [clients, q]);
+    !q || c.tag.toLowerCase().includes(q) || c.section_name.toLowerCase().includes(q) || (companies[c.tag.toUpperCase()] ?? "").toLowerCase().includes(q),
+  ), [clients, q, companies]);
   const bySection = useMemo(() => {
     const m = new Map<string, Client[]>();
     for (const c of filtered) m.set(c.section_name, [...(m.get(c.section_name) ?? []), c]);
@@ -127,7 +134,7 @@ export default function ClientsPage() {
   ];
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-5">
+    <div className="mx-auto w-full max-w-[1400px] space-y-5 2xl:max-w-[1600px]">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Clients</h2>
@@ -154,7 +161,7 @@ export default function ClientsPage() {
 
       <div className="relative max-w-sm">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input placeholder="Search by tag or section…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-8" />
+        <Input placeholder="Search by tag, company or section…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-8" />
       </div>
 
       {!clients && !fetchError ? (
@@ -183,7 +190,10 @@ export default function ClientsPage() {
                     <li key={c.tag}>
                       <Link href={`/clients/${encodeURIComponent(c.tag)}`}
                         className="group flex items-center gap-3 px-4 py-2.5 text-sm transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none">
-                        <span className={cn("w-24 shrink-0 truncate font-mono font-medium", c.churned && "text-muted-foreground line-through decoration-muted-foreground/50")}>{c.tag}</span>
+                        <span className="w-48 min-w-0 shrink-0">
+                          <span className={cn("block truncate font-mono text-[13px] font-semibold", c.churned && "text-muted-foreground line-through decoration-muted-foreground/50")}>{c.tag}</span>
+                          {companies[c.tag.toUpperCase()] && <span className="block truncate text-xs text-muted-foreground" title={companies[c.tag.toUpperCase()]}>{companies[c.tag.toUpperCase()]}</span>}
+                        </span>
                         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                           {c.churned ? <Pill tone="red">Churned{c.churnDate ? ` ${c.churnDate}` : ""}</Pill> : (
                             <>

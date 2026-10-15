@@ -124,6 +124,65 @@ export async function fetchGoLiveDates(): Promise<Map<string, string>> {
   return out;
 }
 
+/** One client's row on the Client Tracker (raw cell text; empty cells left out). */
+export interface ClientTrackerRecord {
+  company?: string; website?: string; location?: string; status?: string; plan?: string;
+  contactPerson?: string; contactEmail?: string; startDate?: string; goLive?: string; churnDate?: string;
+  health?: string; healthNotes?: string; mrr?: string; dealSource?: string; leadSource?: string; testimonial?: string;
+}
+let _trackerCache: { map: Map<string, ClientTrackerRecord>; ts: number } | null = null;
+/**
+ * Map of client TAG (upper) → its Client Tracker row, for the client page. Bundled
+ * abbreviations ("JPDFW & JPK") map each tag to the row; a later row for the same
+ * tag wins. Cached 5 minutes; on a quota error it retries, then reuses the last read.
+ */
+export async function fetchClientTrackerRecords(): Promise<Map<string, ClientTrackerRecord>> {
+  if (_trackerCache && Date.now() - _trackerCache.ts < 5 * 60_000) return _trackerCache.map;
+  const sheets = google.sheets({ version: "v4", auth: getAuth() });
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "'Client Tracker'" });
+      break;
+    } catch (e) {
+      const quota = /quota|rate limit|429/i.test(String((e as Error)?.message ?? e));
+      if (quota && attempt < 2) { await new Promise((r) => setTimeout(r, attempt === 0 ? 8_000 : 20_000)); continue; }
+      if (_trackerCache && Date.now() - _trackerCache.ts < 60 * 60_000) return _trackerCache.map;
+      throw e;
+    }
+  }
+  const rows = res.data.values || [];
+  const out = new Map<string, ClientTrackerRecord>();
+  if (rows.length >= 2) {
+    const headers = rows[0].map((h: string) => h?.toString() || "");
+    const abbrIdx = findColumnIndex(headers, "Client Abbreviation", "Client Abbrevation");
+    const col: Record<keyof ClientTrackerRecord, number> = {
+      company: findColumnIndex(headers, "Company Name"), website: findColumnIndex(headers, "Website"),
+      location: findColumnIndex(headers, "Location"), status: findColumnIndex(headers, "Status"), plan: findColumnIndex(headers, "Plan"),
+      contactPerson: findColumnIndex(headers, "Contact Person"), contactEmail: findColumnIndex(headers, "Contact Email"),
+      startDate: findColumnIndex(headers, "Start Date"), goLive: findColumnIndex(headers, "Go Live Date"), churnDate: findColumnIndex(headers, "Churn Date"),
+      health: findColumnIndex(headers, "Health"), healthNotes: findColumnIndex(headers, "Health Notes"), mrr: findColumnIndex(headers, "Est. MRR"),
+      dealSource: findColumnIndex(headers, "Deal Source"), leadSource: findColumnIndex(headers, "Lead Source"), testimonial: findColumnIndex(headers, "Testimonial Complete"),
+    };
+    if (abbrIdx !== -1) {
+      for (let i = 1; i < rows.length; i++) {
+        const rawAbbr = rows[i][abbrIdx]?.toString()?.trim();
+        if (!rawAbbr) continue;
+        const rec: ClientTrackerRecord = {};
+        for (const [k, idx] of Object.entries(col) as [keyof ClientTrackerRecord, number][]) {
+          const v = idx === -1 ? "" : rows[i][idx]?.toString()?.trim() || "";
+          if (v) rec[k] = v;
+        }
+        for (const tag of rawAbbr.split(/\s+&\s+|\s+and\s+|\s*\/\s*/i).map((t: string) => t.trim()).filter(Boolean)) {
+          out.set(tag.toUpperCase(), rec);
+        }
+      }
+    }
+  }
+  _trackerCache = { map: out, ts: Date.now() };
+  return out;
+}
+
 /**
  * Client tags NOT yet live — their "Go Live Date" (+ optional `lagDays`) is in
  * the FUTURE (strictly after today). A blank/unparseable date is treated as live

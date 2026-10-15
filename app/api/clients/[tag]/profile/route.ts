@@ -14,12 +14,21 @@ import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import { getSession } from "@/lib/auth";
 import { withCache } from "@/lib/server-cache";
-import { fetchNewClientInfo, fetchOnboardingFormDetails, fetchGoLiveDates, fetchNotYetLiveTags, fetchClientGroupRecords } from "@/lib/google-sheets";
+import { fetchNewClientInfo, fetchOnboardingFormDetails, fetchClientTrackerRecords, fetchNotYetLiveTags, fetchClientGroupRecords } from "@/lib/google-sheets";
 import { getClient, listTasks } from "@/lib/onboarding/store";
 import { readClientCopies, readLibrary } from "@/lib/onboarding/copy-store";
 import { normClientTag } from "@/lib/onboarding/copy-model";
 
 const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+/** A sheet date ("4/16/2025", "2025-04-16") as YYYY-MM-DD; anything else unchanged. */
+const isoDate = (v: string | null | undefined): string | null => {
+  const t = v?.trim(); if (!t) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const m = t.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (!m) return t;
+  const y = Number(m[3]) < 100 ? 2000 + Number(m[3]) : Number(m[3]);
+  return `${y}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+};
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag: string }> }) {
   const session = await getSession();
@@ -37,7 +46,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag
     const sheet = async <T,>(label: string, key: string, fn: () => Promise<T>): Promise<T | null> => {
       try { return await withCache(key, 60_000, fn); } catch (e) { readErrors.push(`${label}: ${(e as Error).message}`); return null; }
     };
-    const [tagRow, sectionRows, cfgRow, instRow, groupRow, info, form, goLive, notLive, groups, qual] = await Promise.all([
+    const [tagRow, sectionRows, cfgRow, instRow, groupRow, info, form, tracker, notLive, groups, qual] = await Promise.all([
       db.execute({ sql: "SELECT t.tag, t.section_id, sec.name FROM client_tags t LEFT JOIN sections sec ON sec.id = t.section_id WHERE UPPER(t.tag) = ?", args: [tag] }),
       db.execute("SELECT id, name FROM sections ORDER BY id"),
       db.execute({ sql: "SELECT * FROM client_config WHERE UPPER(client_tag) = ?", args: [tag] }),
@@ -45,9 +54,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag
       db.execute({ sql: "SELECT group_num FROM client_groups WHERE UPPER(client_tag) = ?", args: [tag] }).catch(() => ({ rows: [] })),
       sheet("New Client Information", "onboarding:new-client-info", fetchNewClientInfo),
       sheet("Onboarding Form", "onboarding:form-details", fetchOnboardingFormDetails),
-      sheet("Client Tracker (go-live dates)", "profile:go-live", fetchGoLiveDates),
+      sheet("Client Tracker", "profile:tracker", fetchClientTrackerRecords),
       // The same go-live test the campaign activation gate uses.
-      sheet("Client Tracker (go-live dates)", "profile:not-live", () => fetchNotYetLiveTags(0)),
+      sheet("Client Tracker", "profile:not-live", () => fetchNotYetLiveTags(0)),
       sheet("Groups tab", "profile:groups", fetchClientGroupRecords),
       supabase.from("client_qualifications").select("inclusion_locations, exclusion_industries, hq_anchor").eq("client_abbreviation", tag).maybeSingle(),
     ]);
@@ -56,6 +65,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag
     const nci = info ? [...info].reverse().find((r) => r.tags.includes(tag)) : undefined;
     const fd = form?.get(tag);
     const gr = groups?.find((g) => g.tag === tag);
+    const tr = tracker?.get(tag);
 
     // Its onboarding basics (name, plan, start, group, time zone) for everyone who can see the
     // page; checklist progress and email copy for admins only (onboarding is admin-only).
@@ -96,16 +106,20 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag
         updated_at: s(c.updated_at),
       },
       instance: s((instRow.rows[0] as Record<string, unknown> | undefined)?.instance_key),
+      // The Client Tracker first (it's the most complete), then the onboarding sheets.
       details: {
-        company: nci?.companyName || fd?.companyName || null,
-        plan: nci?.plan || null,
-        startDate: nci?.startDate || null,
-        goLive: goLive?.get(tag) ?? null,
+        company: tr?.company || nci?.companyName || fd?.companyName || null,
+        plan: tr?.plan || nci?.plan || null,
+        startDate: isoDate(tr?.startDate) || isoDate(nci?.startDate) || null,
+        goLive: isoDate(tr?.goLive),
         notLiveYet: notLive?.has(tag) ?? false,
-        status: gr?.status || null,
-        churnDate: gr?.churnDate || null,
+        status: tr?.status || gr?.status || null,
+        churnDate: isoDate(tr?.churnDate) || gr?.churnDate || null,
         clientType: fd?.clientType || nci?.clientType || null,
-        website: fd?.website || null,
+        website: tr?.website || fd?.website || null,
+        location: tr?.location || null,
+        contactPerson: tr?.contactPerson || null,
+        contactEmail: tr?.contactEmail || null,
         office: nci?.office || null,
         address: fd?.address || null,
         area: nci?.area || null,
@@ -115,6 +129,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag
       },
       group: { sheet: gr?.group ?? null, app: groupRow.rows[0] ? Number((groupRow.rows[0] as Record<string, unknown>).group_num) : null },
       onboarding, copy,
+      // Business notes from the Client Tracker — admins only.
+      business: admin && tr ? { mrr: tr.mrr ?? null, health: tr.health ?? null, healthNotes: tr.healthNotes ?? null, dealSource: tr.dealSource ?? null, leadSource: tr.leadSource ?? null, testimonial: tr.testimonial ?? null } : null,
       qualification: qual.data ? { inclusion: s(qual.data.inclusion_locations), exclusion: s(qual.data.exclusion_industries), hq: s(qual.data.hq_anchor) } : null,
       readErrors,
     });
