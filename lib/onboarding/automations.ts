@@ -298,7 +298,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
     { key: "tier", label: "Tier (sets the daily limits)", type: "select", value: tier,
       options: [{ value: "0.5", label: "Tier 0.5 (Trial)" }, { value: "1", label: "Tier 1 (Base)" }, { value: "2", label: "Tier 2 (Scale) — double" }],
       hint: c.plan_type ? `Plan: ${c.plan_type}` : sheet?.plan ? `The sheet's plan: ${sheet.plan}` : undefined },
-    { key: "timezone", label: "Time zone the campaigns send in", type: "select", value: timezone, options: CAMPAIGN_TIMEZONES.map((z) => ({ value: z, label: `${timezoneLabel(z)} · ${z}` })),
+    { key: "timezone", label: "Time zone the campaigns send in", type: "select", value: timezone, options: CAMPAIGN_TIMEZONES.map((z) => ({ value: z, label: timezoneLabel(z) })),
       hint: c.campaign_timezone ? `The client's time zone (set on its page): ${c.campaign_timezone}` : "Not set on the client's page yet — suggested from the office's state." },
     { key: "city", label: "City", type: "text", value: city, placeholder: "Anaheim", hint: guess && !guess.sure && param("city") === undefined ? `Guessed from the sheet — check it. ${fromSheet}` : fromSheet },
     { key: "state", label: "State", type: "text", value: state, placeholder: "California" },
@@ -609,7 +609,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   };
   const inputs: AutomationInput[] = [
     { key: "tier", label: "Tier", type: "select", value: tier ?? "",
-      options: [{ value: "0.5", label: "Tier 0.5 — 20 B2B + 5 B2C domains" }, { value: "1", label: "Tier 1 — 20 B2B + 5 B2C domains" }, { value: "2", label: "Tier 2 — 40 B2B + 10 B2C domains" }],
+      options: [{ value: "0.5", label: "Tier 0.5 · 20 B2B + 5 B2C" }, { value: "1", label: "Tier 1 · 20 B2B + 5 B2C" }, { value: "2", label: "Tier 2 · 40 B2B + 10 B2C" }],
       hint: c.plan_type ? `The client's plan here: ${c.plan_type}` : "No plan on the client — left empty, LeadSync uses the Client Tracker's tier." },
     redirectInput,
   ];
@@ -696,7 +696,7 @@ const allocateDomains: Automation = {
         p.summary,
         "LeadSync only gives domains that no client it knows is using, that are at least 21 days old, not marked Burnt and not blacklisted — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.",
         `Running it has LeadSync tag those domains for ${p.tag}, point their redirect at ${p.redirect || "the client's website"}, attach them to ${p.tag}'s campaigns, add them to the client's sheet, queue the whitelist email (6:30 AM PT) and set every sender to ${DAILY_LIMIT} a day.`,
-        `It works in batches of ${ALLOCATION_BATCH} domains${left ? ` — ${Math.ceil(left / ALLOCATION_BATCH)} to go here` : ""} — and marks this step Done when nothing is left to add.`,
+        `It works in batches of ${ALLOCATION_BATCH} domains${left ? ` (${Math.ceil(left / ALLOCATION_BATCH)} batch${Math.ceil(left / ALLOCATION_BATCH) === 1 ? "" : "es"} for this client)` : ""} and marks this step Done when nothing is left to add.`,
       ],
       inputs: p.inputs,
       blockers: p.blockers,

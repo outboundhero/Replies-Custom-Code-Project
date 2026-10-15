@@ -384,9 +384,9 @@ function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; on
         </DialogHeader>
         <div className="space-y-4 py-1">
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">Client Tag</label>
+            <label htmlFor="onb-add-tag" className="text-xs font-medium text-muted-foreground">Client Tag</label>
             <div className="flex gap-2">
-              <Input value={tag} onChange={(e) => { setTag(e.target.value.toUpperCase()); setSheetNote(null); }} placeholder="ACME" className="font-mono" />
+              <Input id="onb-add-tag" value={tag} onChange={(e) => { setTag(e.target.value.toUpperCase()); setSheetNote(null); }} placeholder="ACME" className="font-mono" />
               <Button type="button" variant="outline" className="shrink-0 gap-1.5" onClick={fillFromSheet} disabled={looking || !tag.trim()}>
                 {looking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
                 Fill from sheet
@@ -395,13 +395,13 @@ function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; on
             {sheetNote && <p className={cn("text-[11px]", sheetNote.ok ? "text-green-700 dark:text-green-400" : "text-amber-700 dark:text-amber-400")}>{sheetNote.text}</p>}
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">Client Name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Cleaning Co." />
+            <label htmlFor="onb-add-name" className="text-xs font-medium text-muted-foreground">Client Name</label>
+            <Input id="onb-add-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Cleaning Co." />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Start Date</label>
-              <Input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+              <label htmlFor="onb-add-start" className="text-xs font-medium text-muted-foreground">Start Date</label>
+              <Input id="onb-add-start" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground">Plan / Package <span className="opacity-60">(optional)</span></label>

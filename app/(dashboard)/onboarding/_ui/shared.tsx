@@ -418,7 +418,9 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
   const latest = useRef(0);
   const [shown, setShown] = useState<Record<string, unknown>>({});
   // Whether this step can be run is the server's call (some are preview-only until switched on).
-  const [canRun, setCanRun] = useState(!!(task.automation && AUTOMATION_META[task.automation]?.built));
+  // Start from the server's switch state (task.runnable) so an automatic step shows
+  // "Approve & run" while its preview loads; the preview's answer then confirms it.
+  const [canRun, setCanRun] = useState(!!(task.runnable ?? (task.automation && AUTOMATION_META[task.automation]?.built)));
 
   const showPreview = useCallback(({ status, data }: Awaited<ReturnType<typeof postRun>>, forParams: Record<string, unknown>) => {
     setLoading(false);
@@ -595,7 +597,7 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
                   </thead>
                   <tbody className="divide-y">
                     {t.rows.map((row, i) => (
-                      <tr key={i}>{row.map((cell, j) => <td key={j} className={cn("px-2.5 py-1.5 align-top whitespace-nowrap", j === 1 ? "font-medium" : "text-muted-foreground")}>{cell}</td>)}</tr>
+                      <tr key={i}>{row.map((cell, j) => <td key={j} className={cn("px-2.5 py-1.5 align-top", j === 1 ? "min-w-48 font-medium" : "whitespace-nowrap text-muted-foreground")}>{cell}</td>)}</tr>
                     ))}
                   </tbody>
                 </table>
