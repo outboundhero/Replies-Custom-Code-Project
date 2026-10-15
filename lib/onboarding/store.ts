@@ -298,6 +298,75 @@ function standardTemplateInserts(owners: Map<string, string>, now: string) {
   }));
 }
 
+/**
+ * Steps added to the standard checklist after it went live, put into an
+ * existing template once (each is remembered in onboarding_setting, so an
+ * admin who later deletes the step doesn't get it back). Existing clients get
+ * it through "Add missing template tasks" (the guided run does that too).
+ */
+let templateUpgraded = false;
+export async function upgradeTemplate(): Promise<void> {
+  if (templateUpgraded) return;
+  await ensureTables();
+  const key = "template_added:replyrouter_setup";
+  // Claimed first, atomically: of two servers doing this at once, only one adds the step.
+  const claim = await db.execute({ sql: "INSERT OR IGNORE INTO onboarding_setting (key, value, updated_at) VALUES (?, ?, ?)", args: [key, "adding", nowIso()] });
+  if (claim.rowsAffected === 0) { templateUpgraded = true; return; }
+  try {
+    const tpl = await listTemplate();
+    // An empty template is seeded with the step already; one that has it needs nothing.
+    if (tpl.length && !tpl.some((t) => t.automation === "replyrouter_setup")) {
+      const seed = DEFAULT_TEMPLATE.find((t) => t.automation === "replyrouter_setup")!;
+      // The owner is whoever is called Nick already — nobody is created for this.
+      const users = await listOnboardingUsers();
+      const owner = users.find((u) => u.name.trim().toLowerCase().split(/\s+/)[0] === seed.owner.toLowerCase())?.id ?? null;
+      const now = nowIso();
+      const order = Math.max(...tpl.map((t) => t.order_index)) + 1;
+      await db.execute({
+        sql: `INSERT INTO onboarding_template_task
+                (id, title, role, day_offset, order_index, task_group, assignee_id, no_due, automation, created_at, updated_at)
+              VALUES (?, ?, 'ops', ?, ?, ?, ?, 0, ?, ?, ?)`,
+        args: [randomUUID(), seed.title, seed.day ?? 0, order, seed.task_group, owner, seed.automation!, now, now],
+      });
+      bumpVersion("onboarding");
+    }
+    await setSetting(key, nowIso());
+    templateUpgraded = true;
+  } catch (e) {
+    // Let the next request try again.
+    await db.execute({ sql: "DELETE FROM onboarding_setting WHERE key = ? AND value = 'adding'", args: [key] }).catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * Give one client the template's step for `automation` if it doesn't have it
+ * (other missing tasks — e.g. ones deleted on purpose — are left alone).
+ * Returns whether a task was added.
+ */
+export async function addTemplateStepToClient(tag: string, automation: string): Promise<boolean> {
+  await ensureTables();
+  const client = await getClient(tag);
+  if (!client) throw new Error("client not onboarded");
+  const has = await db.execute({ sql: "SELECT 1 FROM onboarding_task WHERE client_tag = ? AND automation = ? LIMIT 1", args: [client.client_tag, automation] });
+  if (has.rows.length) return false;
+  const step = (await listTemplate()).find((t) => t.automation === automation);
+  if (!step) throw new Error("that step isn't in the template");
+  const tasks = generateTasks(
+    {
+      client_tag: client.client_tag,
+      start_date: client.start_date,
+      domains_owner_email: client.domains_owner_email,
+      inbox_owner_email: client.inbox_owner_email,
+      ops_owner_email: client.ops_owner_email,
+    },
+    [step],
+  );
+  await insertGeneratedTasks(tasks);
+  bumpVersion("onboarding");
+  return tasks.length > 0;
+}
+
 /** Seed the standard template only when it's empty (idempotent). Returns count inserted. */
 export async function seedDefaultTemplate(): Promise<number> {
   await ensureTables();

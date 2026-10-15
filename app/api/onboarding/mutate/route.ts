@@ -15,20 +15,18 @@ import {
   updateTaskStatus, updateTaskAssignee, updateTaskDueDate, addManualTask, deleteTask,
   bulkUpdateTaskStatus, listTasks, getTask,
   upsertTemplateTask, deleteTemplateTask, reorderTemplate, seedDefaultTemplate, applyStandardTemplate,
-  upsertOnboardingUser, deleteOnboardingUser, setSetting,
+  upsertOnboardingUser, deleteOnboardingUser, setSetting, addTemplateStepToClient,
 } from "@/lib/onboarding/store";
-import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING } from "@/lib/onboarding/automations";
+import { OUTREACHIFY_SLACK_SETTING } from "@/lib/onboarding/automations";
 import { isCampaignTimezone } from "@/lib/onboarding/campaign-plan";
 import { retireClientCopy } from "@/lib/onboarding/copy-store";
-import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
-import { placeProblems } from "@/lib/onboarding/campaign-copy";
 import { notifyOwnersOnAdd, notifyAssignee } from "@/lib/onboarding/notify";
 import type { OnboardingRole, TaskStatus } from "@/lib/onboarding/generate";
 
 const STATUSES = new Set<TaskStatus>(["not_started", "in_progress", "completed"]);
 const asStatus = (v: unknown): TaskStatus | null => (STATUSES.has(v as TaskStatus) ? (v as TaskStatus) : null);
 // Settings the UI may change.
-const SETTING_KEYS = new Set([OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING]);
+const SETTING_KEYS = new Set([OUTREACHIFY_SLACK_SETTING]);
 const asGroup = (v: unknown): 1 | 2 | null => (Number(v) === 1 ? 1 : Number(v) === 2 ? 2 : null);
 
 export async function POST(req: NextRequest) {
@@ -87,6 +85,12 @@ export async function POST(req: NextRequest) {
         const session = await getSession();
         await retireClientCopy(tag, session?.email ?? null).catch((e) => console.error("[onboarding] retire client copy failed", e));
         return NextResponse.json({ ok: true });
+      }
+      case "add-template-step": {
+        const automation = String(body.automation || "");
+        if (automation !== "replyrouter_setup") return NextResponse.json({ error: "Unknown step" }, { status: 400 });
+        const added = await addTemplateStepToClient(String(body.client_tag || ""), automation);
+        return NextResponse.json({ ok: true, added });
       }
       case "regenerate": {
         const n = await regenerateTasks(String(body.client_tag || ""));
@@ -187,14 +191,6 @@ export async function POST(req: NextRequest) {
       case "setting-set": {
         const key = String(body.key || "");
         if (!SETTING_KEYS.has(key)) return NextResponse.json({ error: "Unknown setting" }, { status: 400 });
-        if (key === CAMPAIGN_MASTERS_SETTING) {
-          // Stored normalised; a group with no master tag is simply left out.
-          const masters = parseMasterSettings(typeof body.value === "string" ? body.value : JSON.stringify(body.value ?? {}));
-          const issues = Object.values(masters).flatMap((m) => (m ? placeProblems(m.place, `Master ${m.tag}`) : []));
-          if (issues.length) return NextResponse.json({ error: issues.join(" ") }, { status: 400 });
-          await setSetting(key, JSON.stringify(masters));
-          return NextResponse.json({ ok: true });
-        }
         // Empty = back to the default destination.
         await setSetting(key, String(body.value ?? "").trim() || null);
         return NextResponse.json({ ok: true });

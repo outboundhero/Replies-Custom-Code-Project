@@ -480,3 +480,64 @@ export async function fetchOnboardingWebsites(): Promise<Map<string, string>> {
   }
   return out;
 }
+
+/** One client's answers on the Onboarding Form that Reply Router's setup uses (CC list, signature, type). */
+export interface OnboardingFormDetails {
+  tag: string;
+  /** "Email Address" — the person who filled the form. */
+  email: string;
+  companyName: string;
+  phones: string;
+  address: string;
+  zip: string;
+  website: string;
+  /** "Provide the names and email addresses for everyone who should be CC'd …" as typed. */
+  ccText: string;
+  clientType: string;
+}
+
+/**
+ * Client tag → that client's Onboarding Form answers (the newest row wins; a
+ * row listing several tags counts for each).
+ */
+export async function fetchOnboardingFormDetails(): Promise<Map<string, OnboardingFormDetails>> {
+  const auth = getAuth();
+  const sheets = google.sheets({ version: "v4", auth });
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "'Onboarding Form Responses'" });
+  const rows = res.data.values || [];
+  const out = new Map<string, OnboardingFormDetails>();
+  if (rows.length < 2) return out;
+  const headers = rows[0].map((h: string) => h?.toString() || "");
+  const col = (...prefixes: string[]) => findColumnStartsWith(headers, ...prefixes);
+  const abbrIdx = findColumnIndex(headers, "Client Abbreviation", "Client Abbrevation");
+  if (abbrIdx === -1) throw new Error("Onboarding Form: missing the Client Abbreviation column");
+  const idx = {
+    email: findColumnIndex(headers, "Email Address"),
+    company: col("Company Name"),
+    phones: col("Direct Phone Number"),
+    address: col("Company Address"),
+    zip: col("Company Zip Code"),
+    website: col("Company Website"),
+    cc: col("Provide the names and email addresses"),
+    type: findColumnIndex(headers, "Client Type"),
+  };
+  const cell = (r: unknown[], i: number) => (i === -1 ? "" : String(r[i] ?? "").trim());
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const tags = cell(r, abbrIdx).toUpperCase().split(/\s*(?:[\/,]|\s&\s|\band\b)\s*/i).map((t) => t.trim()).filter(Boolean);
+    for (const tag of tags) {
+      out.set(tag, {
+        tag,
+        email: cell(r, idx.email),
+        companyName: cell(r, idx.company),
+        phones: cell(r, idx.phones),
+        address: cell(r, idx.address),
+        zip: cell(r, idx.zip),
+        website: cell(r, idx.website),
+        ccText: cell(r, idx.cc),
+        clientType: cell(r, idx.type),
+      });
+    }
+  }
+  return out;
+}

@@ -1754,3 +1754,47 @@ export async function duplicateCampaignOnce(instanceKey: string, campaignId: num
   const d = ((json as { data?: CampaignDetails } | null)?.data ?? json) as CampaignDetails | null;
   return res.ok && d && typeof d.id === "number" ? d : null;
 }
+
+// ── Writes used by onboarding's campaign builder (lib/onboarding/build-campaigns.ts) ──
+// Single attempts: a retried create could leave a second campaign; every write
+// is read back by the builder anyway.
+
+/**
+ * Create an empty draft campaign (POST /api/campaigns). Null when Bison refused it;
+ * "unsure" when it didn't answer properly (timeout / 5xx) — it may have been made anyway.
+ */
+export async function createCampaignOnce(instanceKey: string, name: string): Promise<{ id: number } | "unsure" | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const { res, json } = await writeOnce(`${baseUrl}/api/campaigns`, "POST", token, { name, type: "outbound" });
+  const d = ((json as { data?: { id?: unknown } } | null)?.data ?? json) as { id?: unknown } | null;
+  if (res.ok && typeof d?.id === "number") return { id: d.id };
+  return res.status === 0 || res.status >= 500 ? "unsure" : null;
+}
+
+/** PATCH /api/campaigns/{id}/update with ONE attempt. */
+export async function updateCampaignOnce(instanceKey: string, campaignId: number, fields: Record<string, unknown>): Promise<WriteResult> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  return (await writeOnce(`${baseUrl}/api/campaigns/${campaignId}/update`, "PATCH", token, fields)).res;
+}
+
+/** A campaign as Email Bison returns it (GET /api/campaigns/{id}), or null when it can't be read. */
+export async function getCampaignRaw(instanceKey: string, campaignId: number): Promise<Record<string, unknown> | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}/api/campaigns/${campaignId}`, { headers: buildHeaders(token), timeoutMs: 30_000 });
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => null)) as { data?: Record<string, unknown> } | null;
+  const d = body?.data ?? (body as Record<string, unknown> | null);
+  return d && typeof d.id === "number" ? d : null;
+}
+
+/** Add emails to a campaign's sequence (POST /api/campaigns/v1.1/{id}/sequence-steps — appends). */
+export async function addSequenceSteps(instanceKey: string, campaignId: number, title: string, steps: Record<string, unknown>[]): Promise<WriteResult> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  return (await writeOnce(`${baseUrl}/api/campaigns/v1.1/${campaignId}/sequence-steps`, "POST", token, { title, sequence_steps: steps })).res;
+}
+
+/** Create a campaign's schedule (POST /api/campaigns/{id}/schedule) with ONE attempt; 200 + success:false counts as refused. */
+export async function createScheduleOnce(instanceKey: string, campaignId: number, schedule: Record<string, unknown>): Promise<WriteResult> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  return (await writeOnce(`${baseUrl}/api/campaigns/${campaignId}/schedule`, "POST", token, schedule)).res;
+}

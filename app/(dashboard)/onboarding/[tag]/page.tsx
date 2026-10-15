@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "@/components/session-provider";
 import { Button } from "@/components/ui/button";
@@ -115,6 +116,9 @@ export default function ClientDetailPage() {
             </div>
             {isAdmin && (
               <div className="flex items-center gap-2">
+                <Button asChild className="gap-1.5">
+                  <Link href={`/onboarding/${encodeURIComponent(client.client_tag)}/run`}><Sparkles className="h-4 w-4" /> Guided onboarding</Link>
+                </Button>
                 <StartDateDialog tag={client.client_tag} current={client.start_date} onSaved={reload} />
                 <Select value={client.status === "completed" ? "completed" : "active"}
                   onValueChange={(v) => refresh({ action: "set-client-status", client_tag: client.client_tag, status: v }, "Status updated")}>

@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
 import { ArrowRight, ChevronDown, ClipboardList, FileSpreadsheet, Loader2, Search, Zap } from "lucide-react";
@@ -26,7 +26,7 @@ import {
 import { addDays, groupForStartDate, isValidDate, type TaskStatus } from "@/lib/onboarding/generate";
 import { DEFAULT_TEMPLATE } from "@/lib/onboarding/seed";
 import {
-  type BoardData, type CampaignMasters, type OnbClient, type OnbTask, type UserRow,
+  type BoardData, type OnbClient, type OnbTask, type UserRow,
   UNASSIGNED, DUE_TONE, postMutate, taskGate, dueInfo, useStatusSetter,
   TagPill, GroupBadge, Progress, StatusSelect, TaskAction, TaskNotes, ClientChecklist, RunDialog,
 } from "./_ui/shared";
@@ -64,7 +64,7 @@ function Stat({ label, value, accent }: { label: string; value: string | number;
 // navigating back to Onboarding paints instantly (no skeleton) while a fresh copy
 // loads in the background. Lives for the browser session.
 let boardCache: BoardData | null = null;
-const EMPTY: BoardData = { clients: [], tasks: [], users: [], outreachifySlack: { saved: null, sendsTo: [] }, campaignMasters: {} };
+const EMPTY: BoardData = { clients: [], tasks: [], users: [], outreachifySlack: { saved: null, sendsTo: [] } };
 
 // ─────────────────────────── page ───────────────────────────
 // useSearchParams needs a Suspense boundary above it.
@@ -94,7 +94,6 @@ function OnboardingBoard() {
       const next: BoardData = {
         clients: data.clients ?? [], tasks: data.tasks ?? [], users: data.users ?? [],
         outreachifySlack: data.outreachifySlack ?? EMPTY.outreachifySlack,
-        campaignMasters: data.campaignMasters ?? {},
       };
       boardCache = next;
       setBoard(next);
@@ -180,7 +179,7 @@ function OnboardingBoard() {
         )}
         {isAdmin && (
           <TabsContent value="team" className="mt-4">
-            <TeamManager users={users} slack={board.outreachifySlack} masters={board.campaignMasters} onChange={reload} />
+            <TeamManager users={users} slack={board.outreachifySlack} onChange={reload} />
           </TabsContent>
         )}
       </Tabs>
@@ -323,6 +322,7 @@ function ClientsList({ clients, tasks, users, loading, isAdmin, existingTags, on
 
 // ─────────────────────────── Add dialog ───────────────────────────
 function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; onAdded: () => void }) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [looking, setLooking] = useState(false);
@@ -365,13 +365,17 @@ function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; on
       group_num: groupSel === "auto" ? null : Number(groupSel),
     });
     setBusy(false);
-    if (r.ok) { toast.success(`${t} added — ${r.tasks ?? 0} tasks created`); setOpen(false); reset(); onAdded(); }
+    if (r.ok) {
+      toast.success(`${t} added — ${r.tasks ?? 0} tasks created. Opening its guided onboarding…`);
+      setOpen(false); reset(); onAdded();
+      router.push(`/onboarding/${encodeURIComponent(t)}/run`);
+    }
     else toast.error(r.error || "Failed to add client");
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild><Button>Add to Onboarding</Button></DialogTrigger>
+      <DialogTrigger asChild><Button className="gap-1.5"><Zap className="h-4 w-4" /> Onboard a client</Button></DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Add client to onboarding</DialogTitle>
@@ -431,7 +435,7 @@ function AddClientDialog({ existingTags, onAdded }: { existingTags: string[]; on
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={submit} disabled={busy}>{busy ? "Adding…" : "Add & create checklist"}</Button>
+          <Button onClick={submit} disabled={busy}>{busy ? "Adding…" : "Add & start onboarding"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -903,8 +907,8 @@ function TemplateRow({ task, index, users, onSave, busy }: {
 }
 
 // ─────────────────────────── Team ───────────────────────────
-function TeamManager({ users, slack, masters, onChange }: {
-  users: UserRow[]; slack: BoardData["outreachifySlack"]; masters: CampaignMasters; onChange: () => void;
+function TeamManager({ users, slack, onChange }: {
+  users: UserRow[]; slack: BoardData["outreachifySlack"]; onChange: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   async function save(body: Record<string, unknown>): Promise<boolean> {
@@ -942,61 +946,8 @@ function TeamManager({ users, slack, masters, onChange }: {
       </div>
       <div className="space-y-6">
         <SlackDestinationCard key={slack.saved ?? ""} slack={slack} onSave={save} busy={busy} />
-        <CampaignMastersCard key={JSON.stringify(masters)} masters={masters} onSave={save} busy={busy} />
       </div>
     </div>
-  );
-}
-
-/** Whose campaigns step 2 ("Create email campaigns") copies, per group. */
-function CampaignMastersCard({ masters, onSave, busy }: {
-  masters: CampaignMasters; onSave: (b: Record<string, unknown>) => Promise<boolean>; busy: boolean;
-}) {
-  const blank = { tag: "", area: "", city: "", state: "", abbr: "" };
-  const start = (g: "1" | "2") => (masters[g] ? { tag: masters[g].tag, ...masters[g].place } : blank);
-  const [form, setForm] = useState({ "1": start("1"), "2": start("2") });
-  const dirty = JSON.stringify(form) !== JSON.stringify({ "1": start("1"), "2": start("2") });
-  const set = (g: "1" | "2", k: keyof typeof blank, v: string) => setForm((f) => ({ ...f, [g]: { ...f[g], [k]: v } }));
-  const value = Object.fromEntries((["1", "2"] as const).filter((g) => form[g].tag.trim())
-    .map((g) => [g, { tag: form[g].tag.trim().toUpperCase(), place: { area: form[g].area, city: form[g].city, state: form[g].state, abbr: form[g].abbr.toUpperCase() } }]));
-  return (
-    <Card className="h-fit gap-0 p-0">
-      <div className="border-b px-4 py-3">
-        <div className="flex items-center gap-2 text-sm font-semibold"><Zap className="h-3.5 w-3.5 text-primary" /> Master campaigns for “Create email campaigns”</div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          A new client&apos;s 12 campaigns are copies of one existing client&apos;s. Give that client&apos;s tag for each group, and its place names exactly as they are written in its emails — those are the words swapped for the new client&apos;s.
-        </p>
-      </div>
-      <div className="space-y-4 px-4 py-4">
-        {(["1", "2"] as const).map((g) => (
-          <div key={g} className="space-y-2">
-            <div className="text-xs font-medium text-muted-foreground">
-              {GROUP_META[g === "1" ? 1 : 2].label} — {GROUP_META[g === "1" ? 1 : 2].b2b} + {GROUP_META[g === "1" ? 1 : 2].b2c}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Input value={form[g].tag} onChange={(e) => set(g, "tag", e.target.value.toUpperCase())} placeholder="Master client tag" className="h-8 font-mono text-xs" />
-              <Input value={form[g].city} onChange={(e) => set(g, "city", e.target.value)} placeholder="City (e.g. Winnipeg)" className="h-8 text-xs" />
-              <Input value={form[g].state} onChange={(e) => set(g, "state", e.target.value)} placeholder="State (e.g. Manitoba)" className="h-8 text-xs" />
-              <Input value={form[g].abbr} onChange={(e) => set(g, "abbr", e.target.value.toUpperCase())} placeholder="Abbreviation (e.g. MB)" className="h-8 text-xs" />
-              <Input value={form[g].area} onChange={(e) => set(g, "area", e.target.value)} placeholder="Area name (e.g. Winnipeg Area)" className="col-span-2 h-8 text-xs" />
-            </div>
-          </div>
-        ))}
-        <p className="text-[11px] text-muted-foreground">
-          Open step 2 on any client to preview the result. A master whose emails carry a street address can&apos;t be used.
-        </p>
-        <div className="flex justify-end">
-          <Button size="sm" disabled={busy || !dirty}
-            onClick={async () => {
-              const orphan = (["1", "2"] as const).find((g) => !form[g].tag.trim() && [form[g].area, form[g].city, form[g].state, form[g].abbr].some((v) => v.trim()));
-              if (orphan) { toast.error(`Group ${orphan} has place names but no master client tag — add the tag, or clear the fields.`); return; }
-              if (await onSave({ action: "setting-set", key: "campaign_masters", value: JSON.stringify(value) })) toast.success("Master campaigns saved");
-            }}>
-            Save
-          </Button>
-        </div>
-      </div>
-    </Card>
   );
 }
 

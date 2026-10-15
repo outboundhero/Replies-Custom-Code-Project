@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   if (denied) return denied;
   const body = await req.json().catch(() => ({}));
   const taskId = String(body?.taskId || "");
-  const mode = body?.mode === "run" ? "run" : "preview";
+  const mode: "run" | "preview" = body?.mode === "run" ? "run" : "preview";
   const params = (body?.params && typeof body.params === "object" ? body.params : {}) as Record<string, unknown>;
 
   try {
@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
     const client = await getClient(task.client_tag);
     if (!client) return NextResponse.json({ error: `${task.client_tag} isn't in onboarding.` }, { status: 404 });
     const session = await getSession();
-    const ctx = { client, task, params, by: session?.email ?? null };
+    const ctx = { client, task, params, by: session?.email ?? null, mode };
 
     const preview = await automation.preview(ctx);
     if (task.status === "completed") preview.blockers.unshift("This step is already Done. Reopen it first to run it again.");

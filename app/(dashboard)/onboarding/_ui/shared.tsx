@@ -11,6 +11,7 @@ import { AlertTriangle, Check, Loader2, Lock, Pencil, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -42,12 +43,9 @@ export type OnbTask = {
   completed_at: string | null; completed_by: string | null; last_run: LastRun | null;
 };
 export type UserRow = { id: string; name: string; slack_member_id: string | null; email: string | null };
-export type MasterPlace = { area: string; city: string; state: string; abbr: string };
-export type CampaignMasters = Partial<Record<"1" | "2", { tag: string; place: MasterPlace }>>;
 export type BoardData = {
   clients: OnbClient[]; tasks: OnbTask[]; users: UserRow[];
   outreachifySlack: { saved: string | null; sendsTo: string[] };
-  campaignMasters: CampaignMasters;
 };
 
 export const UNASSIGNED = "—";
@@ -360,7 +358,7 @@ export function ClientChecklist({ client, tasks, users, isAdmin, onChanged, edit
 
 // ─────────────────────────── Run dialog ───────────────────────────
 type PreviewInput = {
-  key: string; label: string; type: "group" | "text" | "select"; value: number | string | null;
+  key: string; label: string; type: "group" | "text" | "select" | "textarea" | "hidden"; value: number | string | null;
   hint?: string; placeholder?: string; options?: { value: string; label: string }[];
 };
 type Preview = {
@@ -378,14 +376,14 @@ async function postRun(taskId: string, mode: "preview" | "run", params: Record<s
   return { status: res.status, data };
 }
 
+const isTyped = (i: PreviewInput) => i.type === "text" || i.type === "textarea";
+
 /**
- * The Run button's dialog: shows exactly what the automation will do (who gets
- * what message, what changes) before anything happens, then runs it. Mounted
- * only while a task is being run.
+ * A step's preview and run, shared by the Run dialog and the guided onboarding
+ * page: loads the preview, re-previews on every change, runs (in batches when
+ * the step works in batches) and reports back.
  */
-export function RunDialog({ task, clientLabel, onClose, onDone }: {
-  task: OnbTask; clientLabel: string; onClose: () => void; onDone: () => void;
-}) {
+export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () => void; onSuccess: (summary: string) => void }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
@@ -408,7 +406,7 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
       setPreview(p); setError(null); setShown(forParams);
       if (typeof data.runnable === "boolean") setCanRun(data.runnable);
       // Take the server's values, except for the field being typed in right now.
-      setDrafts((prev) => Object.fromEntries(p.inputs.filter((i) => i.type === "text")
+      setDrafts((prev) => Object.fromEntries(p.inputs.filter(isTyped)
         .map((i) => [i.key, focused.current === i.key && i.key in prev ? prev[i.key] : String(i.value ?? "")])));
     } else setError(data.error || `Couldn't load the preview (${status})`);
   }, []);
@@ -428,6 +426,11 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
     // An older answer arriving late must not replace a newer one (stays "loading" until the latest lands).
     if (mine === latest.current) showPreview(r, next);
   }
+  function commitText(key: string) {
+    focused.current = null;
+    const current = preview?.inputs.find((i) => i.key === key);
+    if (current && (drafts[key] ?? "") !== String(current.value ?? "")) setParam(key, drafts[key] ?? "");
+  }
 
   // A step done in batches reports each one here and is sent again until nothing is left.
   const [progress, setProgress] = useState<string[]>([]);
@@ -435,16 +438,19 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
   async function run() {
     setRunning(true); setError(null);
     stop.current = false;
+    // Exactly what's on screen is what runs: every value the preview showed (incl. hidden ones, like
+    // which copy version it was), with what was typed on top — nothing is worked out again later.
+    const approved = { ...Object.fromEntries((preview?.inputs ?? []).map((i) => [i.key, i.value])), ...shown };
     try {
       for (let round = 0; round < 40; round++) {
-        const { status, data } = await postRun(task.id, "run", shown);
+        const { status, data } = await postRun(task.id, "run", approved);
         onDone(); // the task shows the batch, or keeps a note of the failed run
         if (!data.ok) {
           setError(data.error || `The run failed (${status})`);
           if (data.preview) setPreview(data.preview);
           break;
         }
-        if (!data.more) { toast.success(data.summary || "Done"); onClose(); return; }
+        if (!data.more) { onSuccess(data.summary || "Done"); return; }
         setProgress((p) => [...p, data.summary || "A batch went through."]);
         if (stop.current) break;
       }
@@ -458,160 +464,184 @@ export function RunDialog({ task, clientLabel, onClose, onDone }: {
     }
   }
 
-  const blocked = !preview || preview.blockers.length > 0;
-  const wide = !!preview?.tables?.length;
-  const fields = preview?.inputs.filter((i) => i.type !== "group") ?? [];
-  function commitText(key: string) {
-    focused.current = null;
-    const current = preview?.inputs.find((i) => i.key === key);
-    if (current && (drafts[key] ?? "") !== String(current.value ?? "")) setParam(key, drafts[key] ?? "");
-  }
+  return {
+    preview, loading, running, error, canRun, drafts, setDrafts, focused, progress, setParam, commitText, run,
+    stopAfterBatch: () => { stop.current = true; },
+    blocked: !preview || preview.blockers.length > 0,
+  };
+}
+export type StepRun = ReturnType<typeof useStepRun>;
 
+/** What a step will do: its choices, the plan, the message / tables / notes, and what's in the way. */
+export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
+  const { preview, loading, running, drafts, setDrafts, focused, setParam, commitText, progress, error } = r;
+  const fields = preview?.inputs.filter((i) => i.type !== "group" && i.type !== "hidden") ?? [];
   return (
-    <Dialog open onOpenChange={(o) => { if (!o && !running) onClose(); }}>
+    <>
+      {!preview && loading && (
+        <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Preparing the preview…
+        </div>
+      )}
+
+      {preview && (
+        <div className={cn("space-y-4 transition-opacity", loading && "opacity-60")}>
+          {preview.inputs.map((inp) => inp.type === "group" && (
+            <div key={inp.key} className="space-y-2">
+              <div className="text-xs font-medium text-muted-foreground">{inp.label}</div>
+              <div className="grid grid-cols-2 gap-2">
+                {([1, 2] as const).map((g) => {
+                  const selected = Number(inp.value) === g;
+                  return (
+                    <button key={g} type="button" disabled={running} onClick={() => setParam(inp.key, g)}
+                      className={cn("rounded-lg border px-3 py-2.5 text-left transition-colors",
+                        selected ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:border-primary/40 hover:bg-muted/40")}>
+                      <div className="flex items-center justify-between text-sm font-semibold">
+                        {GROUP_META[g].label}
+                        {selected && <Check className="h-4 w-4 text-primary" />}
+                      </div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">B2B #{g} {GROUP_META[g].b2b}</div>
+                      <div className="text-xs text-muted-foreground">B2C #{g} {GROUP_META[g].b2c}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              {inp.hint && <div className="text-xs text-muted-foreground">{inp.hint}</div>}
+            </div>
+          ))}
+
+          {fields.length > 0 && (
+            <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
+              {fields.map((inp) => (
+                <div key={inp.key} className={cn("space-y-1.5", inp.type === "textarea" && "sm:col-span-3")}>
+                  <label htmlFor={`run-${inp.key}`} className="text-xs font-medium text-muted-foreground">{inp.label}</label>
+                  {inp.type === "select" ? (
+                    <Select value={String(inp.value ?? "")} onValueChange={(v) => setParam(inp.key, v)} disabled={running}>
+                      <SelectTrigger id={`run-${inp.key}`} className="h-9 w-full text-sm"><SelectValue placeholder="Choose…" /></SelectTrigger>
+                      <SelectContent>
+                        {(inp.options ?? []).map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  ) : inp.type === "textarea" ? (
+                    <Textarea id={`run-${inp.key}`} value={drafts[inp.key] ?? ""} placeholder={inp.placeholder} disabled={running} spellCheck={false}
+                      className="min-h-20 font-mono text-[12.5px] leading-relaxed"
+                      onFocus={() => { focused.current = inp.key; }}
+                      onChange={(e) => setDrafts((d) => ({ ...d, [inp.key]: e.target.value }))}
+                      onBlur={() => commitText(inp.key)} />
+                  ) : (
+                    <Input id={`run-${inp.key}`} value={drafts[inp.key] ?? ""} placeholder={inp.placeholder} disabled={running} className="h-9"
+                      onFocus={() => { focused.current = inp.key; }}
+                      onChange={(e) => setDrafts((d) => ({ ...d, [inp.key]: e.target.value }))}
+                      onBlur={() => commitText(inp.key)}
+                      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+                  )}
+                  {inp.hint && <p className="text-[11px] leading-snug text-muted-foreground">{inp.hint}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium text-muted-foreground">What happens when you run it</div>
+            <ol className="space-y-1 text-sm">
+              {preview.lines.map((l, i) => (
+                <li key={i} className="flex gap-2">
+                  <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold tabular-nums text-muted-foreground">{i + 1}</span>
+                  <span>{l}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {preview.message && (
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">
+                {task.automation === "slack_outreachify"
+                  ? <>The message, exactly as it will be sent <span className="font-normal">(Slack shows *text* in bold)</span></>
+                  : "The email, exactly as it will be sent"}
+              </div>
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/40 px-3 py-2.5 font-sans text-[13px] leading-relaxed">{preview.message}</pre>
+            </div>
+          )}
+
+          {preview.tables?.map((t) => (
+            <div key={t.title} className="space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">{t.title}</div>
+              <div className="overflow-x-auto rounded-lg border">
+                <table className="w-full text-xs">
+                  <thead className="bg-muted/40 text-left text-muted-foreground">
+                    <tr>{t.columns.map((col) => <th key={col} className="px-2.5 py-1.5 font-medium whitespace-nowrap">{col}</th>)}</tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {t.rows.map((row, i) => (
+                      <tr key={i}>{row.map((cell, j) => <td key={j} className={cn("px-2.5 py-1.5 align-top whitespace-nowrap", j === 1 ? "font-medium" : "text-muted-foreground")}>{cell}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+
+          {preview.notes?.map((n) => (
+            <div key={n.title} className="space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">{n.title}</div>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-[11px] leading-relaxed">{n.text}</pre>
+            </div>
+          ))}
+
+          {preview.blockers.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+              <div className="flex items-center gap-1.5 font-medium"><AlertTriangle className="h-3.5 w-3.5" /> Can&apos;t run yet</div>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                {preview.blockers.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      {progress.length > 0 && (
+        <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
+          <div className="text-xs font-medium text-muted-foreground">Done so far{running ? " — working on the next batch…" : ""}</div>
+          <ul className="mt-1 space-y-0.5">
+            {progress.map((line, i) => <li key={i} className="flex gap-1.5"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />{line}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">{error}</div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The Run button's dialog: shows exactly what the automation will do (who gets
+ * what message, what changes) before anything happens, then runs it. Mounted
+ * only while a task is being run.
+ */
+export function RunDialog({ task, clientLabel, onClose, onDone }: {
+  task: OnbTask; clientLabel: string; onClose: () => void; onDone: () => void;
+}) {
+  const r = useStepRun(task, { onDone, onSuccess: (summary) => { toast.success(summary); onClose(); } });
+  const wide = !!r.preview?.tables?.length || !!r.preview?.inputs.some((i) => i.type === "textarea");
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !r.running) onClose(); }}>
       <DialogContent className={cn("max-h-[90vh] overflow-y-auto", wide ? "sm:max-w-5xl" : "sm:max-w-xl")}>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><Zap className="h-4 w-4 text-primary" />{preview?.title ?? task.title}</DialogTitle>
-          <DialogDescription>{clientLabel} — {canRun ? "review what will happen, then run it." : "a preview of what this step will do. Nothing is created."}</DialogDescription>
+          <DialogTitle className="flex items-center gap-2"><Zap className="h-4 w-4 text-primary" />{r.preview?.title ?? task.title}</DialogTitle>
+          <DialogDescription>{clientLabel} — {r.canRun ? "review what will happen, then run it." : "a preview of what this step will do. Nothing is created."}</DialogDescription>
         </DialogHeader>
-
-        {!preview && loading && (
-          <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Preparing the preview…
-          </div>
-        )}
-
-        {preview && (
-          <div className={cn("space-y-4 transition-opacity", loading && "opacity-60")}>
-            {preview.inputs.map((inp) => inp.type === "group" && (
-              <div key={inp.key} className="space-y-2">
-                <div className="text-xs font-medium text-muted-foreground">{inp.label}</div>
-                <div className="grid grid-cols-2 gap-2">
-                  {([1, 2] as const).map((g) => {
-                    const selected = Number(inp.value) === g;
-                    return (
-                      <button key={g} type="button" disabled={running} onClick={() => setParam(inp.key, g)}
-                        className={cn("rounded-lg border px-3 py-2.5 text-left transition-colors",
-                          selected ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:border-primary/40 hover:bg-muted/40")}>
-                        <div className="flex items-center justify-between text-sm font-semibold">
-                          {GROUP_META[g].label}
-                          {selected && <Check className="h-4 w-4 text-primary" />}
-                        </div>
-                        <div className="mt-0.5 text-xs text-muted-foreground">B2B #{g} {GROUP_META[g].b2b}</div>
-                        <div className="text-xs text-muted-foreground">B2C #{g} {GROUP_META[g].b2c}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-                {inp.hint && <div className="text-xs text-muted-foreground">{inp.hint}</div>}
-              </div>
-            ))}
-
-            {fields.length > 0 && (
-              <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
-                {fields.map((inp) => (
-                  <div key={inp.key} className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">{inp.label}</label>
-                    {inp.type === "select" ? (
-                      <Select value={String(inp.value ?? "")} onValueChange={(v) => setParam(inp.key, v)} disabled={running}>
-                        <SelectTrigger className="h-9 w-full text-sm"><SelectValue placeholder="Choose…" /></SelectTrigger>
-                        <SelectContent>
-                          {(inp.options ?? []).map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    ) : (
-                      <Input value={drafts[inp.key] ?? ""} placeholder={inp.placeholder} disabled={running} className="h-9"
-                        onFocus={() => { focused.current = inp.key; }}
-                        onChange={(e) => setDrafts((d) => ({ ...d, [inp.key]: e.target.value }))}
-                        onBlur={() => commitText(inp.key)}
-                        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
-                    )}
-                    {inp.hint && <p className="text-[11px] leading-snug text-muted-foreground">{inp.hint}</p>}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium text-muted-foreground">What happens when you run it</div>
-              <ol className="space-y-1 text-sm">
-                {preview.lines.map((l, i) => (
-                  <li key={i} className="flex gap-2">
-                    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold tabular-nums text-muted-foreground">{i + 1}</span>
-                    <span>{l}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
-            {preview.message && (
-              <div className="space-y-1.5">
-                <div className="text-xs font-medium text-muted-foreground">
-                  {task.automation === "slack_outreachify"
-                    ? <>The message, exactly as it will be sent <span className="font-normal">(Slack shows *text* in bold)</span></>
-                    : "The email, exactly as it will be sent"}
-                </div>
-                <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/40 px-3 py-2.5 font-sans text-[13px] leading-relaxed">{preview.message}</pre>
-              </div>
-            )}
-
-            {preview.tables?.map((t) => (
-              <div key={t.title} className="space-y-1.5">
-                <div className="text-xs font-medium text-muted-foreground">{t.title}</div>
-                <div className="overflow-x-auto rounded-lg border">
-                  <table className="w-full text-xs">
-                    <thead className="bg-muted/40 text-left text-muted-foreground">
-                      <tr>{t.columns.map((col) => <th key={col} className="px-2.5 py-1.5 font-medium whitespace-nowrap">{col}</th>)}</tr>
-                    </thead>
-                    <tbody className="divide-y">
-                      {t.rows.map((r, i) => (
-                        <tr key={i}>{r.map((cell, j) => <td key={j} className={cn("px-2.5 py-1.5 align-top whitespace-nowrap", j === 1 ? "font-medium" : "text-muted-foreground")}>{cell}</td>)}</tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            ))}
-
-            {preview.notes?.map((n) => (
-              <div key={n.title} className="space-y-1.5">
-                <div className="text-xs font-medium text-muted-foreground">{n.title}</div>
-                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-[11px] leading-relaxed">{n.text}</pre>
-              </div>
-            ))}
-
-            {preview.blockers.length > 0 && (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
-                <div className="flex items-center gap-1.5 font-medium"><AlertTriangle className="h-3.5 w-3.5" /> Can&apos;t run yet</div>
-                <ul className="mt-1 list-disc space-y-0.5 pl-5">
-                  {preview.blockers.map((b, i) => <li key={i}>{b}</li>)}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
-
-        {progress.length > 0 && (
-          <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
-            <div className="text-xs font-medium text-muted-foreground">Done so far{running ? " — working on the next batch…" : ""}</div>
-            <ul className="mt-1 space-y-0.5">
-              {progress.map((line, i) => <li key={i} className="flex gap-1.5"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />{line}</li>)}
-            </ul>
-          </div>
-        )}
-
-        {error && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">{error}</div>
-        )}
-
+        <StepRunBody task={task} r={r} />
         <DialogFooter>
-          {running && progress.length > 0 && (
-            <Button variant="ghost" onClick={() => { stop.current = true; }} className="sm:mr-auto text-muted-foreground">Stop after this batch</Button>
+          {r.running && r.progress.length > 0 && (
+            <Button variant="ghost" onClick={r.stopAfterBatch} className="sm:mr-auto text-muted-foreground">Stop after this batch</Button>
           )}
-          <Button variant="outline" onClick={onClose} disabled={running}>{canRun ? "Cancel" : "Close"}</Button>
-          {canRun && (
-            <Button onClick={run} disabled={blocked || loading || running} className="gap-1.5">
-              {running ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</> : <><Zap className="h-3.5 w-3.5" /> Run &amp; mark done</>}
+          <Button variant="outline" onClick={onClose} disabled={r.running}>{r.canRun ? "Cancel" : "Close"}</Button>
+          {r.canRun && (
+            <Button onClick={r.run} disabled={r.blocked || r.loading || r.running} className="gap-1.5">
+              {r.running ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</> : <><Zap className="h-3.5 w-3.5" /> Run &amp; mark done</>}
             </Button>
           )}
         </DialogFooter>

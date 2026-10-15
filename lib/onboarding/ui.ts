@@ -48,6 +48,7 @@ export function groupText(g: 1 | 2 | null | undefined): string {
  */
 export const AUTOMATION_META: Record<string, { label: string; built: boolean; preview?: boolean }> = {
   slack_outreachify: { label: "Sends the client tag + group to Outreachify on Slack", built: true },
+  replyrouter_setup: { label: "Adds the tag, CC/BCC, reply template and qualification rules in Reply Router", built: true },
   create_campaigns: { label: "Creates the 12 Email Bison campaigns", built: false, preview: true },
   allocate_domains: { label: "Allocates reserve domains, tags + attaches them, sets 3/day", built: false, preview: true },
   whitelist_email: { label: "Sends the whitelisting-domains email", built: false, preview: true },

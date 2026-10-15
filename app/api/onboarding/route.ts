@@ -7,14 +7,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth";
 import { withCache, setCached, nsVersion } from "@/lib/server-cache";
-import { listClients, listTasks, listOnboardingUsers, getSetting } from "@/lib/onboarding/store";
-import { OUTREACHIFY_SLACK_SETTING, CAMPAIGN_MASTERS_SETTING, outreachifyDestinations, automationRunnable } from "@/lib/onboarding/automations";
-import { parseMasterSettings } from "@/lib/onboarding/campaign-plan";
+import { listClients, listTasks, listOnboardingUsers, getSetting, upgradeTemplate } from "@/lib/onboarding/store";
+import { OUTREACHIFY_SLACK_SETTING, outreachifyDestinations, automationRunnable } from "@/lib/onboarding/automations";
 
 async function loadBoard() {
-  const [clients, tasks, users, slackSetting, slackDests, masters] = await Promise.all([
+  await upgradeTemplate().catch((e) => console.error("[api/onboarding] template upgrade failed", e));
+  const [clients, tasks, users, slackSetting, slackDests] = await Promise.all([
     listClients(), listTasks(), listOnboardingUsers(), getSetting(OUTREACHIFY_SLACK_SETTING), outreachifyDestinations(),
-    getSetting(CAMPAIGN_MASTERS_SETTING),
   ]);
   return {
     clients, users,
@@ -22,7 +21,6 @@ async function loadBoard() {
     // the row offers Run (not just Preview) where its switch is on.
     tasks: tasks.map((task) => (task.automation ? { ...task, runnable: automationRunnable(task.automation) } : task)),
     outreachifySlack: { saved: slackSetting, sendsTo: slackDests.map((d) => d.label) },
-    campaignMasters: parseMasterSettings(masters),
   };
 }
 

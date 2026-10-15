@@ -14,23 +14,34 @@ import {
 import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache, nsVersion } from "@/lib/server-cache";
-import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
-import { listCampaigns, getSequenceSteps, getCampaignSchedule, lookUpCampaign } from "@/lib/outboundhero-api";
+import { fetchNewClientInfo, fetchOnboardingWebsites, fetchOnboardingFormDetails, type NewClientInfoRow, type OnboardingFormDetails } from "@/lib/google-sheets";
+import db from "@/lib/db";
+import supabase from "@/lib/supabase";
+import { bumpVersion } from "@/lib/server-cache";
+import { syncAll } from "@/lib/sync/sheets-to-supabase";
+import { parseFormPeople, buildReplyTemplate, isEmail, nearMiss } from "@/lib/onboarding/rr-setup";
+import { listCampaigns, lookUpCampaign, listTags, createTag } from "@/lib/outboundhero-api";
 import {
   previewOnboardingAllocation, runOnboardingAllocation, rememberAllocationPlan, previewOnboardingWhitelist, runOnboardingWhitelist,
   leadsyncRunSecretSet, type AllocationSide, type AllocationPlan, type WhitelistPlan,
 } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { clientContacts } from "@/lib/onboarding/contacts";
-import { localizeSteps, placeProblems, defaultArea, type Place } from "@/lib/onboarding/campaign-copy";
-import { createCampaignFromMaster, CHECK_PREFIX, BUILD_PREFIX, type MasterStep } from "@/lib/onboarding/create-campaigns";
+import { defaultArea } from "@/lib/onboarding/campaign-copy";
 import {
-  CAMPAIGN_SLOTS, GROUP_INSTANCES, CAMPAIGN_TIMEZONES, isCampaignTimezone, timezoneLabel, suggestTimezone, campaignName, slotKey, slotOfName, parseMasterSettings,
+  buildCampaign, campaignLimits, campaignSchedule, serviceAreaLine, addressSpintax, tierOf, tierSupported, unsafeForSpintax,
+  BUILD_PREFIX, CHECK_PREFIX, type CampaignScheduleBody, type InstanceKind,
+} from "@/lib/onboarding/build-campaigns";
+import { realBisonOps } from "@/lib/onboarding/bison-ops";
+import { copyForClient } from "@/lib/onboarding/copy-store";
+import { CLIENT_TYPES, checkSequence, clientTypeLabel, isClientType, sendDays, toBisonSteps, type BisonStepPayload, type ClientTypeKey } from "@/lib/onboarding/copy-model";
+import {
+  CAMPAIGN_SLOTS, GROUP_INSTANCES, CAMPAIGN_TIMEZONES, isCampaignTimezone, timezoneLabel, suggestTimezone, campaignName, slotKey,
   parsePlace, regionByAny, type CampaignSlot,
 } from "@/lib/onboarding/campaign-plan";
 
 export interface AutomationInput {
-  key: string; label: string; type: "group" | "text" | "select";
+  key: string; label: string; type: "group" | "text" | "select" | "textarea" | "hidden";
   value: number | string | null; hint?: string; placeholder?: string;
   options?: { value: string; label: string }[];
 }
@@ -60,6 +71,8 @@ export interface AutomationContext {
   task: OnboardingTaskRow;
   params: Record<string, unknown>;
   by: string | null;
+  /** "run" when the preview is the check right before running — it then reads fresh, not from a recent answer. */
+  mode?: "preview" | "run";
 }
 interface Automation {
   preview(ctx: AutomationContext): Promise<AutomationPreview>;
@@ -180,231 +193,271 @@ const slackOutreachify: Automation = {
 };
 
 // ── 2. Create email campaigns ───────────────────────────────────────────────
-// Each new campaign is a copy of the master client's campaign in the same slot
-// and instance, with the master's place names swapped for this client's
-// (lib/onboarding/campaign-copy.ts, lib/onboarding/create-campaigns.ts).
-// Creating is OFF unless ONBOARDING_CREATE_CAMPAIGNS=1 is set on the server —
-// it is switched on once the masters are confirmed and one test has been run
-// in Email Bison. Until then this is a preview.
+// The client's 12 campaigns are built from scratch, the way Clay's workbook
+// built them, from the email copy library (lib/onboarding/build-campaigns.ts):
+// 6 in its group's B2B instance and 6 in its B2C instance, as drafts. Nothing
+// is launched; no senders or leads are added (step 3 adds the senders).
+// Creating is OFF unless ONBOARDING_CREATE_CAMPAIGNS=1 is set on the server.
 
-export const CAMPAIGN_MASTERS_SETTING = "campaign_masters";
 /** Server-side switch for actually creating campaigns (the preview always works). */
 export const campaignCreationEnabled = () => process.env.ONBOARDING_CREATE_CAMPAIGNS === "1";
 const NOT_SWITCHED_ON =
-  "Creating the campaigns isn't switched on yet — it waits for the master campaigns to be confirmed and one test in Email Bison. This is a preview; complete the step by hand for now.";
+  "Creating the campaigns isn't switched on on this server (ONBOARDING_CREATE_CAMPAIGNS). This is a preview; complete the step by hand for now.";
 
-interface MasterCampaign { id: number; name: string; status: string; slot: CampaignSlot; sequenceId: number | null; steps: MasterStep[]; schedule: Record<string, unknown> | null }
 const gone = (status: string) => /archiv|delet/i.test(status);
 
-/**
- * The master client's live campaigns in one instance, by slot (a slot can hold
- * none, one or several). Kept for a few minutes, for the run as well: a master
- * that changed in between can't produce a wrong campaign, because every copy
- * is compared with what was read here and thrown away if it differs.
- */
-function loadMasterCampaigns(instance: BisonInstanceKey, tag: string): Promise<Map<string, MasterCampaign[]>> {
-  const read = async () => {
-    const out = new Map<string, MasterCampaign[]>();
-    for (const c of await listCampaigns(instance, { search: tag, strict: true })) {
-      const slot = slotOfName(c.name, tag);
-      if (!slot || gone(c.status)) continue;
-      const [steps, schedule] = await Promise.all([getSequenceSteps(instance, c.id), getCampaignSchedule(instance, c.id)]);
-      // A failed read throws, so it is reported now and never cached as "no emails".
-      if (!steps) throw new Error(`couldn't read the emails of #${c.id} “${c.name}”`);
-      const raw = steps as { sequence_id?: unknown; sequence_steps?: MasterStep[] } | null;
-      const list = (raw?.sequence_steps ?? []).slice().sort((a, b) => a.order - b.order);
-      const key = slotKey(slot);
-      out.set(key, [...(out.get(key) ?? []), { id: c.id, name: c.name, status: c.status, slot, sequenceId: typeof raw?.sequence_id === "number" ? raw.sequence_id : null, steps: list, schedule }]);
-    }
-    return out;
-  };
-  return withCache(`onboarding:masters:${instance}:${tag}`, 5 * 60_000, read);
+/** The client type from the sheet's "Client Type" answer (blank → Cleaning, the usual case). */
+function clientTypeFromSheet(text: string | null | undefined): ClientTypeKey {
+  const t = String(text ?? "").trim().toLowerCase();
+  if (!t) return "cleaning";
+  if (/non[\s-]*clean/.test(t)) return "non_cleaning";
+  if (/\bos\b|other services/.test(t)) return "os";
+  if (/internal/.test(t)) return "internal";
+  if (/clean|janitor/.test(t)) return "cleaning";
+  return "non_cleaning";
 }
 
-const DAYS: [string, string][] = [["monday", "Mon"], ["tuesday", "Tue"], ["wednesday", "Wed"], ["thursday", "Thu"], ["friday", "Fri"], ["saturday", "Sat"], ["sunday", "Sun"]];
-function scheduleText(s: Record<string, unknown> | null, timezone: string): string {
-  if (!s) return "no schedule on the master";
-  const on = DAYS.filter(([k]) => s[k]).map(([, d]) => d);
-  const days = on.join("") === "MonTueWedThuFri" ? "Mon–Fri" : on.join(" ");
-  const hm = (v: unknown) => String(v ?? "").slice(0, 5);
-  const from = String(s.timezone ?? "");
-  // The new timezone is stated once above the table; here only where the master differs.
-  return `${days} ${hm(s.start_time)}–${hm(s.end_time)}${from && from !== timezone ? ` (master is on ${from})` : ""}`;
+/** One campaign the step would make. */
+interface PlannedCampaign {
+  instance: BisonInstanceKey; kind: InstanceKind; label: string; slot: CampaignSlot; name: string;
+  existingIds: number[];
+  limits: { max_emails_per_day: number; max_new_leads_per_day: number };
+  schedule: CampaignScheduleBody;
+  modeTag: { id: number; name: string } | null;
 }
-
-/** One campaign the step would make: where, under what name, copied from what. */
-interface PlannedCampaign { instance: BisonInstanceKey; label: string; slot: CampaignSlot; name: string; master: MasterCampaign; existingIds: number[] }
 interface CampaignPlan {
-  tag: string; group: 1 | 2 | null; master: { tag: string; place: Place } | undefined;
-  target: Place; timezone: string;
-  inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[];
-  /** Slots that can be created (one clear master each). All 12 are here when nothing blocks. */
+  tag: string; group: 1 | 2 | null; timezone: string; clientType: ClientTypeKey;
+  inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[]; lines: string[];
+  /** All 12 when nothing blocks. */
   items: PlannedCampaign[];
+  steps: BisonStepPayload[];
+  /** The client's own tag in each instance (null = it gets created when the first campaign there is made). */
+  clientTagId: Partial<Record<BisonInstanceKey, number | null>>;
 }
 
 /**
  * Everything the preview shows and the run acts on — built the same way for
- * both. `fresh` (the run) searches Email Bison now for what already exists
- * instead of reusing a recent search: acting on a stale list would create
- * duplicates.
+ * both. `fresh` (the run) asks Email Bison now instead of using a recent answer:
+ * acting on a stale list could create duplicates.
  */
 async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<CampaignPlan> {
   const search = (instance: BisonInstanceKey, q: string) =>
     fresh ? listCampaigns(instance, { search: q, strict: true })
       : withCache(`onboarding:existing:${instance}:${q}:v${nsVersion("onboarding")}`, 30_000, () => listCampaigns(instance, { search: q, strict: true }));
+  const tagsOf = (instance: BisonInstanceKey) =>
+    fresh ? listTags(instance) : withCache(`onboarding:tags:${instance}:v${nsVersion("onboarding")}`, 60_000, () => listTags(instance));
   const c = ctx.client;
   const tag = c.client_tag.toUpperCase();
   const blockers: string[] = [];
+  const notes: PreviewNote[] = [];
   const param = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string).trim() : undefined);
+  const rawParam = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string) : undefined);
 
-  // The sheet only pre-fills — whatever is typed in the dialog wins.
+  // What the sheets say (they only pre-fill — whatever is typed here wins).
   let sheet: NewClientInfoRow | undefined;
-  try {
-    sheet = [...(await withCache("onboarding:new-client-info", 60_000, fetchNewClientInfo))].reverse().find((r) => r.tags.includes(tag));
-  } catch { /* no pre-fill */ }
-  const guess = parsePlace(sheet?.office) ?? parsePlace(sheet?.area);
+  let unread = false;
+  try { sheet = [...(await withCache("onboarding:new-client-info", 60_000, fetchNewClientInfo))].reverse().find((r) => r.tags.includes(tag)); } catch { unread = true; }
+  let form: OnboardingFormDetails | undefined;
+  try { form = (await withCache("onboarding:form-details", 60_000, fetchOnboardingFormDetails)).get(tag); } catch { unread = true; }
+  // Right before a run nothing may quietly fall back to a default because a sheet didn't answer.
+  if (fresh && unread) blockers.push("Couldn't read the onboarding sheet just now — try again in a moment.");
+
+  // Client type.
+  const typeParam = param("client_type");
+  const clientType: ClientTypeKey = isClientType(typeParam) ? typeParam : clientTypeFromSheet(form?.clientType || sheet?.clientType);
+  const typeSaid = form?.clientType || sheet?.clientType || "";
+  if (clientType === "os") blockers.push("OS clients' campaigns are set up by hand — that's the rule for OS clients.");
+
+  // Place (city / state / abbreviation / area).
+  const guess = parsePlace(sheet?.office) ?? parsePlace(form?.address) ?? parsePlace(sheet?.area);
   const city = param("city") ?? guess?.city ?? "";
-  // Whatever is typed wins; a field left alone follows the other one, then the sheet —
-  // so changing the state to Texas doesn't keep the sheet's "CA".
   const typedState = param("state"), typedAbbr = param("abbr");
   let state = typedState ?? (typedAbbr ? regionByAny(typedAbbr)?.name : undefined) ?? guess?.state ?? "";
   let abbr = (typedAbbr ?? (typedState ? regionByAny(typedState)?.abbr : undefined) ?? guess?.abbr ?? "").toUpperCase();
   if (!state && abbr) state = regionByAny(abbr)?.name ?? "";
   if (!abbr && state) abbr = regionByAny(state)?.abbr ?? "";
   const area = param("area") ?? "";
-  const target: Place = { area: area || defaultArea(city), city, state, abbr };
-  // The client's time zone (set on its page — Clay's "Time Zone" column); a choice here wins, then a suggestion from the state.
+  const place = { area: area || defaultArea(city), city, state, abbr };
+  const region = regionByAny(state) ?? regionByAny(abbr);
+
+  // Time zone and tier.
   const timezone = param("timezone") ?? c.campaign_timezone ?? suggestTimezone(state) ?? suggestTimezone(abbr) ?? "";
-  const clientType = param("client_type") ?? (sheet?.clientType && !/clean|janitor/i.test(sheet.clientType) ? "other" : "cleaning");
+  const tier = param("tier") ?? tierOf(c.plan_type) ?? tierOf(sheet?.plan) ?? "";
+
+  // The client lines and name that fill the copy's [[fields]].
+  const officeAddress = param("office_address") ?? (form?.address || sheet?.office || "");
+  const serviceArea = rawParam("service_area") ?? (city && state ? serviceAreaLine(clientType === "cleaning", place) : "");
+  const officeLine = rawParam("office_line") ?? addressSpintax(officeAddress, region ? { abbr: region.abbr, name: region.name } : null);
+  const companyName = param("company_name") ?? (form?.companyName || c.client_name || "");
 
   const fromSheet = sheet?.office ? `The sheet's office location: ${sheet.office}` : sheet ? "The sheet has no office location for this client." : `${tag} isn't in the sheet's New Client Information tab.`;
   const inputs: AutomationInput[] = [
+    { key: "client_type", label: "Client type", type: "select", value: clientType,
+      options: CLIENT_TYPES.map((t) => ({ value: t.key, label: t.label })),
+      hint: typeSaid ? `The sheet says: ${typeSaid}` : "The sheet doesn't say — Cleaning is assumed. Check it." },
+    { key: "tier", label: "Tier (sets the daily limits)", type: "select", value: tier,
+      options: [{ value: "0.5", label: "Tier 0.5 (Trial)" }, { value: "1", label: "Tier 1 (Base)" }, { value: "2", label: "Tier 2 (Scale) — double" }],
+      hint: c.plan_type ? `Plan: ${c.plan_type}` : sheet?.plan ? `The sheet's plan: ${sheet.plan}` : undefined },
+    { key: "timezone", label: "Time zone the campaigns send in", type: "select", value: timezone, options: CAMPAIGN_TIMEZONES.map((z) => ({ value: z, label: `${timezoneLabel(z)} · ${z}` })),
+      hint: c.campaign_timezone ? `The client's time zone (set on its page): ${c.campaign_timezone}` : "Not set on the client's page yet — suggested from the office's state." },
     { key: "city", label: "City", type: "text", value: city, placeholder: "Anaheim", hint: guess && !guess.sure && param("city") === undefined ? `Guessed from the sheet — check it. ${fromSheet}` : fromSheet },
     { key: "state", label: "State", type: "text", value: state, placeholder: "California" },
     { key: "abbr", label: "State abbreviation", type: "text", value: abbr, placeholder: "CA" },
     { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "Orange County",
-      hint: `How the area is named in the emails. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
-    { key: "timezone", label: "Timezone the campaigns send in", type: "select", value: timezone, options: CAMPAIGN_TIMEZONES.map((z) => ({ value: z, label: `${timezoneLabel(z)} · ${z}` })),
-      hint: c.campaign_timezone ? `The client's time zone (set on its page): ${c.campaign_timezone}` : "Not set on the client's page yet — suggested from the office's state." },
-    { key: "client_type", label: "Client type", type: "select", value: clientType,
-      options: [{ value: "cleaning", label: "Cleaning client" }, { value: "other", label: "Other services (not covered yet)" }],
-      hint: sheet?.clientType ? `The sheet says: ${sheet.clientType}` : undefined },
+      hint: `How the area is named in the service-area line. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
+    { key: "office_address", label: "Office address", type: "text", value: officeAddress, placeholder: "811 E Chapman Ave, Orange, CA 92866",
+      hint: form?.address ? "From the Onboarding Form." : undefined },
+    { key: "company_name", label: "Company name", type: "text", value: companyName, hint: "Fills [[COMPANY_NAME]] wherever the copy uses it." },
+    { key: "service_area", label: "Service-area line ([[SERVICE_AREA]])", type: "textarea", value: serviceArea,
+      hint: rawParam("service_area") === undefined ? "Written from the area, city and state in Clay's pattern — edit it if needed." : undefined },
+    { key: "office_line", label: "Office line ([[OFFICE_ADDRESS]])", type: "textarea", value: officeLine,
+      hint: rawParam("office_line") === undefined ? "The office address with spintax, by Clay's rules — edit it if needed." : undefined },
   ];
 
+  // Checks on the client's details.
   const group = c.group_num;
-  const master = group ? parseMasterSettings(await getSetting(CAMPAIGN_MASTERS_SETTING))[String(group) as "1" | "2"] : undefined;
   if (!group) blockers.push("This client has no group yet — run step 1, or set the group on the client's page.");
-  else if (!master) blockers.push(`No master client is set for Group ${group} — an admin sets it under Onboarding → Team.`);
-  if (clientType !== "cleaning") blockers.push("Only cleaning clients are covered — other clients' copy is written differently, so create these campaigns by hand.");
-  const placeIssues = [...placeProblems(target, "This client"), ...(master ? placeProblems(master.place, `Master ${master.tag}`) : [])];
-  blockers.push(...placeIssues);
-  const known = regionByAny(state);
-  if (known && state && known.name.toLowerCase() !== state.toLowerCase()) blockers.push(`State: write the full name — “${known.name}”, not “${state}”.`);
-  else if (known && abbr && known.abbr !== abbr) blockers.push(`The state and its abbreviation don't match — ${known.name} is ${known.abbr}, not ${abbr}.`);
-  if (!timezone) blockers.push("Choose the timezone the campaigns send in.");
+  if (!timezone) blockers.push("Choose the time zone the campaigns send in.");
   else if (!isCampaignTimezone(timezone)) blockers.push(`“${timezone}” isn't one of the campaign time zones.`);
+  if (!tierSupported(tier)) blockers.push(tier ? `Tier ${tier} has no daily limits in Clay's rules (0.5, 1 or 2) — choose the tier to use.` : "Choose the tier (it sets the daily limits).");
+  if (!city || !state || !abbr) blockers.push("Fill in the city, state and abbreviation.");
+  const known = regionByAny(state);
+  if (state && !known) blockers.push(`“${state}” isn't a state or province this knows — check the spelling.`);
+  else if (known && state && known.name.toLowerCase() !== state.toLowerCase()) blockers.push(`State: write the full name — “${known.name}”, not “${state}”.`);
+  else if (known && abbr && known.abbr !== abbr) blockers.push(`The state and its abbreviation don't match — ${known.name} is ${known.abbr}, not ${abbr}.`);
+  if (abbr && !regionByAny(abbr)) blockers.push(`“${abbr}” isn't a state or province abbreviation.`);
+  for (const [label, v] of [["The area name", area], ["The city", city], ["The state", state]] as const) {
+    if (v && unsafeForSpintax(v)) blockers.push(`${label} can't contain { } | [ ] < or >.`);
+  }
 
+  // The emails: the client's own copy, else its type's shared copy, with the fields filled.
+  let steps: BisonStepPayload[] = [];
+  let copyLabel = "";
+  const copy = clientType === "os" ? null : await copyForClient(tag, clientType);
+  if (clientType !== "os" && !copy) blockers.push(`There's no shared ${clientTypeLabel(clientType)} copy yet — write it under Onboarding › Email copy.`);
+  if (copy) {
+    copyLabel = copy.source === "client" ? `${tag}'s own copy (version ${copy.version})` : `the shared ${clientTypeLabel(clientType)} copy (version ${copy.version})`;
+    // The copy this preview showed travels with the approval: if it changes before or during the
+    // run, the run stops rather than building some campaigns from one version and some from another.
+    const pin = `${copy.source}:${copy.version}`;
+    const pinned = param("copy_pin");
+    if (pinned && pinned !== pin) blockers.push(`The email copy changed since this preview (now ${copyLabel}) — look at the preview again before running.`);
+    inputs.push({ key: "copy_pin", label: "", type: "hidden", value: pin });
+    const check = checkSequence(copy.sequence);
+    if (check.errors.length) blockers.push(`The copy has problems — fix them under Email copy first: ${check.errors.slice(0, 3).map((e) => `email ${e.step}: ${e.message}`).join(" ")}`);
+    const built = toBisonSteps(copy.sequence, { SERVICE_AREA: serviceArea, OFFICE_ADDRESS: officeLine, COMPANY_NAME: companyName });
+    steps = built.steps;
+    const label: Record<string, string> = { SERVICE_AREA: "service-area line", OFFICE_ADDRESS: "office line", COMPANY_NAME: "company name" };
+    if (built.missing.length) blockers.push(`The copy uses the ${built.missing.map((m) => label[m] ?? m).join(" and ")}, which ${built.missing.length > 1 ? "are" : "is"} empty — fill ${built.missing.length > 1 ? "them" : "it"} in.`);
+    for (const pr of built.problems) blockers.push(`${pr} (check the client lines above)`);
+    const days = sendDays(copy.sequence);
+    notes.push({
+      title: `The emails, as they'll be written — ${copyLabel}`,
+      text: steps.map((s, i) => [
+        `── Email ${i + 1} · day ${days[i]} · ${i === 0 ? "starts the thread" : s.thread_reply ? "reply in the same thread" : "new thread"}`,
+        `Subject: ${s.thread_reply ? "Re: " : ""}${s.email_subject}`,
+        "",
+        s.email_body,
+      ].join("\n")).join("\n\n"),
+    });
+  }
+
+  // An earlier try that stopped part-way: its campaign must be gone before another is made for that slot
+  // (asked by id — Email Bison's search can lag), and an unanswered create gets time to show up.
+  for (const res of await runResults(ctx.task.id, 20)) {
+    for (const x of (Array.isArray(res.results) ? res.results : []) as { instance?: unknown; name?: unknown; state?: unknown; campaignId?: unknown; unsure?: unknown; at?: unknown }[]) {
+      if (x.state !== "failed") continue;
+      if (typeof x.campaignId === "number" && typeof x.instance === "string") {
+        const c = await lookUpCampaign(x.instance, x.campaignId);
+        if (c === null) blockers.push(`Couldn't check whether #${x.campaignId} (from an earlier try at “${x.name}”) is still in Email Bison — try again.`);
+        else if (c !== "gone" && !gone(c.status)) blockers.push(`#${x.campaignId} “${c.name}” from an earlier try is still in Email Bison — look at it and delete it, then run again.`);
+      } else if (x.unsure && typeof x.at === "string" && Date.now() - Date.parse(x.at) < 10 * 60_000) {
+        blockers.push(`The last try at “${x.name}” got no answer from Email Bison, so it may have been made as “${BUILD_PREFIX}${x.name}”. Wait a few minutes, check Email Bison, then run again.`);
+      }
+    }
+  }
+
+  // The 12 campaigns, and what's in Email Bison already.
   const rows: string[][] = [];
-  const notes: PreviewNote[] = [];
   const items: PlannedCampaign[] = [];
-  const copyIssues = new Set<string>();
-  if (group && master) {
+  const clientTagId: Partial<Record<BisonInstanceKey, number | null>> = {};
+  const toCreateTag: string[] = [];
+  const suffix = clientTypeLabel(clientType);
+  if (group) {
     for (const kind of ["b2b", "b2c"] as const) {
       const instance = GROUP_INSTANCES[group][kind];
       const label = `${kind === "b2b" ? "B2B" : "B2C"} #${group} ${GROUP_META[group][kind]}`;
-      let masters: Map<string, MasterCampaign[]>;
       let mine: { id: number; name: string; status: string }[];
-      let fromMaster: { id: number; name: string; status: string }[];
+      let tags: { id: number; name: string }[];
       try {
-        [masters, mine, fromMaster] = await Promise.all([
-          loadMasterCampaigns(instance, master.tag), search(instance, tag), search(instance, master.tag),
-        ]);
+        [mine, tags] = await Promise.all([search(instance, tag), tagsOf(instance)]);
       } catch (e) {
         blockers.push(`Couldn't read ${label} in Email Bison: ${(e as Error).message}`);
         continue;
       }
-      // A copy that was made but never finished (an interrupted run) must be dealt with by a person first.
-      const live = [...new Map([...mine, ...fromMaster].filter((x) => !gone(x.status)).map((y) => [y.id, y])).values()];
+      const live = mine.filter((x) => !gone(x.status));
+      const prefix = `${tag}:`.toLowerCase();
       for (const x of live) {
-        if (x.name.startsWith(`${CHECK_PREFIX}${tag}:`) || x.name.startsWith(`${BUILD_PREFIX}${tag}:`)) {
-          blockers.push(`${label}: an unfinished copy is still there — #${x.id} “${x.name}”. Look at it and delete it in Email Bison, then try again.`);
-        } else if (x.name.startsWith("Copy of ") && x.name.includes(`${master.tag}:`)) {
-          // Not necessarily ours: a nurture copy of the master looks the same while it is being made.
-          blockers.push(`${label}: #${x.id} “${x.name}” is a copy of the master that hasn't been finished. If nobody is making a nurture copy of ${master.tag} right now, it is a leftover — delete it in Email Bison, then try again.`);
+        const n = x.name.trim();
+        if (n.toLowerCase().startsWith(`${CHECK_PREFIX}${tag}:`.toLowerCase()) || n.toLowerCase().startsWith(`${BUILD_PREFIX}${tag}:`.toLowerCase())) {
+          blockers.push(`${label}: an unfinished campaign is still there — #${x.id} “${n}”. Look at it and delete it in Email Bison, then try again.`);
+        } else if (n.toLowerCase().startsWith(prefix) && !CAMPAIGN_SLOTS.some((s) => campaignName(tag, s, suffix).toLowerCase() === n.toLowerCase()) && !/\[Nurture \d+\]/i.test(n)) {
+          blockers.push(`${label}: #${x.id} “${n}” is ${tag}'s but isn't one of the 12 names for a ${suffix} — was the client type different? Sort it out in Email Bison first.`);
         }
       }
-      const copies: string[] = [];
-      let shown = false;
+      const byName = (want: string) => tags.find((t) => t.name.trim().toLowerCase() === want.toLowerCase()) ?? null;
+      const newTag = byName("New"), nurtureTag = byName("Nurture");
+      if (!newTag || !nurtureTag) blockers.push(`${label}: the ${[!newTag && "“New”", !nurtureTag && "“Nurture”"].filter(Boolean).join(" and ")} tag isn't there.`);
+      const own = byName(tag);
+      clientTagId[instance] = own?.id ?? null;
+      if (!own) toCreateTag.push(label);
       for (const slot of CAMPAIGN_SLOTS) {
-        const name = campaignName(tag, slot);
-        const already = mine.filter((x) => x.name.trim().toLowerCase() === name.toLowerCase() && !gone(x.status));
-        const candidates = masters.get(slotKey(slot)) ?? [];
-        if (candidates.length !== 1) {
-          blockers.push(candidates.length
-            ? `${label}: ${candidates.length} campaigns are named “${campaignName(master.tag, slot)}” (${candidates.map((m) => `#${m.id} ${m.status}`).join(", ")}) — only one can be the master.`
-            : `${label}: the master ${master.tag} has no “${campaignName(master.tag, slot)}” campaign.`);
-          rows.push([label, name, "—", "", "", ""]);
-          continue;
-        }
-        const m = candidates[0];
+        const name = campaignName(tag, slot, suffix);
+        const already = live.filter((x) => x.name.trim().toLowerCase() === name.toLowerCase());
         if (already.length > 1) blockers.push(`${label}: ${already.length} campaigns are named “${name}” (${already.map((x) => `#${x.id}`).join(", ")}) — there should be one. Delete the extra in Email Bison.`);
-        if (!m.steps.length) copyIssues.add(`${label}: couldn't read the emails of #${m.id} “${m.name}”.`);
-        // A/B variants share a position, so a copy's emails can't be matched to the master's one for one.
-        if (m.steps.some((x) => x.variant) || new Set(m.steps.map((x) => x.order)).size !== m.steps.length) {
-          copyIssues.add(`${label}: the master #${m.id} “${m.name}” has A/B variants — those can't be copied automatically, so create this client's campaigns by hand.`);
-        }
-        if (!m.schedule) copyIssues.add(`${label}: the master #${m.id} “${m.name}” has no schedule.`);
-        copies.push(JSON.stringify(m.steps.map((s) => [s.email_subject, s.email_body, s.wait_in_days, s.thread_reply])));
-        if (!placeIssues.length && m.steps.length) {
-          const loc = localizeSteps(m.steps, master.place, target);
-          for (const p of loc.problems) copyIssues.add(`${label} · ${slotKey(slot)}: ${p}`);
-          if (!shown && !loc.problems.length) {
-            shown = true;
-            const seen = new Map<string, number[]>();
-            for (const ch of loc.changes) { const k = `    was: ${ch.before}\n    now: ${ch.after}`; seen.set(k, [...(seen.get(k) ?? []), ch.order]); }
-            notes.push({
-              title: `Lines that change in the ${kind === "b2b" ? "B2B" : "B2C"} emails (everything else is copied as it is)`,
-              text: [...seen.entries()].map(([k, orders]) => `Email${orders.length > 1 ? "s" : ""} ${[...new Set(orders)].join(", ")}\n${k}`).join("\n\n"),
-            });
-          }
-        }
-        items.push({ instance, label, slot, name, master: m, existingIds: already.map((x) => x.id) });
+        const limits = campaignLimits(kind, slot, tierSupported(tier) ? tier : "1");
+        const schedule = campaignSchedule(instance, slot, timezone);
+        const modeTag = slot.nurture ? nurtureTag : newTag;
+        items.push({ instance, kind, label, slot, name, existingIds: already.map((x) => x.id), limits, schedule, modeTag });
         rows.push([
-          label,
+          `${kind === "b2b" ? "B2B" : "B2C"} #${group}`,
           already.length ? `${name} — already exists (${already.map((x) => `#${x.id}`).join(", ")}), left as it is` : name,
-          `#${m.id} ${m.status}`,
-          String(m.steps.length),
-          m.steps.slice(0, -1).map((s) => s.wait_in_days).join(" → "),
-          scheduleText(m.schedule, timezone),
+          `${limits.max_emails_per_day} / ${limits.max_new_leads_per_day}`,
+          `${schedule.start_time}–${schedule.end_time}`,
+          `${slot.nurture ? "Nurture" : "New"} + ${tag}`,
         ]);
       }
-      if (new Set(copies).size > 1) notes.push({ title: `${label}: the master's six campaigns don't all carry the same emails`, text: "Each new campaign copies the master campaign in its own slot, so those differences carry over." });
     }
   }
-  blockers.push(...copyIssues);
-  return { tag, group, master, target, timezone, inputs, blockers, rows, notes, items };
+
+  const exists = items.filter((i) => i.existingIds.length).length;
+  const waits = steps.length ? steps.slice(0, -1).map((s) => s.wait_in_days).join(" → ") : "";
+  const lines = [
+    group
+      ? `Creates ${items.length - exists || 12} draft campaigns for ${tag} — 6 in B2B #${group} ${GROUP_META[group].b2b} and 6 in B2C #${group} ${GROUP_META[group].b2c}, named “${tag}: … (${suffix})”. Nothing is launched; no senders or leads are added.`
+      : "Creates 12 draft campaigns — 6 in each of the group's two instances. Nothing is launched.",
+    steps.length ? `Emails: ${copyLabel} — ${plural(steps.length, "email")}${waits ? ` (days between: ${waits})` : ""}, with this client's lines and name filled in (below).` : "Emails: from the email copy library.",
+    `Schedules: Monday–Friday in ${timezone || "the chosen time zone"}, each instance's usual window; nurture campaigns start 4 hours after their main one and end with it.`,
+    `Settings: plain text, no open tracking, no unsubscribe link, follow-ups first; daily limits for tier ${tierSupported(tier) ? tier : "?"}.`,
+    `Tags: New (main) or Nurture, plus ${tag}${toCreateTag.length ? ` — the ${tag} tag doesn't exist yet in ${toCreateTag.join(" and ")}, so it's created there` : ""}.`,
+    "Works one campaign at a time and reads every part back. A campaign gets its real name only once everything in it has checked out; one that doesn't is kept aside as “CHECK COPY — …” and the run stops there.",
+    ...(exists ? [`${exists} of the 12 already exist and are left as they are.`] : []),
+    "Marks this step Done once all 12 are there.",
+  ];
+  return { tag, group, timezone, clientType, inputs, blockers, rows, notes, lines, items, steps, clientTagId };
 }
 
 const createCampaigns: Automation = {
   async preview(ctx) {
-    const p = await planCampaigns(ctx);
-    const exists = p.items.filter((i) => i.existingIds.length).length;
+    // Right before a run, read Email Bison fresh: a campaign deleted a moment ago must not still block it.
+    const p = await planCampaigns(ctx, ctx.mode === "run");
     if (!campaignCreationEnabled()) p.blockers.push(NOT_SWITCHED_ON);
     return {
       title: "Create email campaigns",
-      lines: [
-        p.master && p.group
-          ? `Copies ${p.master.tag}'s 6 campaigns in each of Group ${p.group}'s two instances — 12 new campaigns for ${p.tag}, created as drafts. Nothing is launched.`
-          : "Copies the master client's 6 campaigns in each of the group's two instances — 12 new campaigns, created as drafts.",
-        `Renames them for ${p.tag} and swaps the master's place names for ${p.target.city || "this client's city"}${p.target.state ? `, ${p.target.state}` : ""} in the email bodies. Subjects and variables ({CITY}, {QUESTION}, …) are not touched.`,
-        `Sets every schedule to ${p.timezone || "the chosen timezone"}; days and hours stay as on the master.`,
-        "Works one campaign at a time and reads each back after writing it. A campaign gets the client's name only once everything in it has checked out; one that doesn't is kept aside under a “CHECK COPY” name, and the run stops there.",
-        ...(exists ? [`${exists} of the 12 already exist and are left as they are.`] : []),
-        "Marks this step Done once all 12 are there.",
-      ],
+      lines: p.lines,
       inputs: p.inputs,
       blockers: p.blockers,
-      tables: p.rows.length ? [{ title: "The 12 campaigns", columns: ["Instance", "New campaign", "Copied from", "Emails", "Days between", "Schedule"], rows: p.rows }] : [],
+      tables: p.rows.length ? [{ title: "The 12 campaigns", columns: ["", "New campaign", "Per day (emails / leads)", "Mon–Fri", "Tags"], rows: p.rows }] : [],
       notes: p.notes,
     };
   },
@@ -412,12 +465,12 @@ const createCampaigns: Automation = {
   /** ONE campaign per request. `more` tells the caller to run again; the step is Done when all 12 are there. */
   async run(ctx) {
     if (!campaignCreationEnabled()) return { ok: false, summary: NOT_SWITCHED_ON };
-    // Rebuilt now, on a fresh search — never trusted from the preview.
+    // Rebuilt now, from a fresh read — never trusted from the preview.
     const p = await planCampaigns(ctx, true);
     if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
-    if (!p.master || p.items.length !== 2 * CAMPAIGN_SLOTS.length) return { ok: false, summary: "The plan isn't complete — open the preview to see why." };
+    if (p.items.length !== 2 * CAMPAIGN_SLOTS.length || !p.steps.length) return { ok: false, summary: "The plan isn't complete — open the preview to see why." };
     const total = p.items.length;
-    const allThere = `All ${total} campaigns are there for ${p.tag} — drafts, copied from ${p.master.tag}.`;
+    const allThere = `All ${total} campaigns are there for ${p.tag} — drafts, ready for their senders.`;
 
     // What earlier requests of this step made. Email Bison's search can lag
     // behind a campaign made a moment ago, so those are asked for by id — a
@@ -446,23 +499,33 @@ const createCampaigns: Automation = {
     // The campaigns send in this zone, so it becomes the client's — the client page shows what they use.
     if (ctx.client.campaign_timezone !== p.timezone) await setClientTimezone(ctx.client.client_tag, p.timezone);
 
-    const r = await createCampaignFromMaster({
-      instance: next.instance, name: next.name, nurture: next.slot.nurture, clientTag: p.tag,
-      master: { id: next.master.id, name: next.master.name, sequenceId: next.master.sequenceId, steps: next.master.steps },
-      masterPlace: p.master.place, target: p.target, timezone: p.timezone,
-    }, new Map());
+    // The client's own tag in this instance (created once, then found by name).
+    let clientTag = p.clientTagId[next.instance] ?? null;
+    if (clientTag == null) {
+      await createTag(next.instance, p.tag);
+      const again = (await listTags(next.instance)).find((t) => t.name.trim().toLowerCase() === p.tag.toLowerCase());
+      if (!again) return { ok: false, summary: `Couldn't create the tag ${p.tag} in ${next.label} — nothing else was made. Try again.` };
+      clientTag = again.id;
+    }
+    if (!next.modeTag) return { ok: false, summary: `${next.label}: the ${next.slot.nurture ? "Nurture" : "New"} tag is missing.` };
+
+    const r = await buildCampaign({
+      instance: next.instance, name: next.name, limits: next.limits, steps: p.steps, schedule: next.schedule,
+      tags: [next.modeTag, { id: clientTag, name: p.tag }],
+    }, realBisonOps);
+    const record = { instance: next.instance, name: r.name, state: r.state, campaignId: r.campaignId, note: r.note, unsure: !!r.unsure, at: new Date().toISOString() };
     if (r.state === "failed") {
       return {
         ok: false,
-        summary: `Stopped at “${r.name}” (${next.label}): ${r.note} ${there} of ${total} are there. Fix that, then run again — the ones already made are kept.`,
-        result: { results: [r] },
+        summary: `Stopped at “${r.name}” (${next.label}): ${r.note} ${there} of ${total} are there. The ones already made are kept.`,
+        result: { results: [record] },
       };
     }
     const more = there + 1 < total;
     return {
       ok: true, more,
       summary: more ? `Created “${r.name}” — ${there + 1} of ${total}.` : allThere,
-      result: { results: [r] },
+      result: { results: [record] },
     };
   },
 };
@@ -595,8 +658,10 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
             .filter((x) => !gone(x.status));
           const missing: string[] = [];
           for (const slot of CAMPAIGN_SLOTS) {
+            // Step 2 names them after the client type ("(Cleaning Client)", "(Internal)", …).
+            const names = CLIENT_TYPES.map((t) => campaignName(tag, slot, t.label).toLowerCase());
             const name = campaignName(tag, slot);
-            const hits = found.filter((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+            const hits = found.filter((x) => names.includes(x.name.trim().toLowerCase()));
             if (hits.length === 1) campaignIds.push(hits[0].id);
             else if (hits.length > 1) blockers.push(`${s.label}: ${hits.length} campaigns are named “${name}” — there should be one.`);
             else missing.push(slotKey(slot));
@@ -923,6 +988,176 @@ const goLiveEmail: Automation = {
   },
 };
 
+// ── Set the client up in Reply Router ───────────────────────────────────────
+// What used to be done by hand for every new client: the client tag in its
+// section (so its replies are routed), CC / BCC and the reply template (from
+// the Onboarding Form), then the qualification rules synced from the form.
+// Everything is read from the form and shown in editable fields first; only
+// Reply Router's own data changes.
+
+/** client_config has six CC slots; at least three are always shown. */
+const RR_CC_MAX = 6;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+interface RrPlan {
+  tag: string;
+  sections: { id: number; name: string }[];
+  sectionId: number | null;
+  existingSection: { id: number; name: string } | null;
+  cc: { name: string; email: string }[];
+  bcc: { name: string; email: string };
+  template: string;
+  inputs: AutomationInput[];
+  blockers: string[];
+  lines: string[];
+  notes: PreviewNote[];
+}
+
+async function planReplyRouterSetup(ctx: AutomationContext): Promise<RrPlan> {
+  const tag = ctx.client.client_tag.toUpperCase();
+  const param = (k: string) => (typeof ctx.params[k] === "string" ? (ctx.params[k] as string) : undefined);
+  const blockers: string[] = [];
+  const notes: PreviewNote[] = [];
+
+  const [sectionRows, tagRow, cfgRow, recent] = await Promise.all([
+    db.execute("SELECT id, name FROM sections ORDER BY id"),
+    db.execute({ sql: "SELECT t.section_id, s.name FROM client_tags t LEFT JOIN sections s ON s.id = t.section_id WHERE UPPER(t.tag) = ?", args: [tag] }),
+    db.execute({ sql: `SELECT ${Array.from({ length: RR_CC_MAX }, (_, i) => `cc_name_${i + 1}, cc_email_${i + 1}`).join(", ")}, bcc_name_1, bcc_email_1, reply_template FROM client_config WHERE UPPER(client_tag) = ?`, args: [tag] }),
+    // Where the latest clients that were fully set up went (today Section 8).
+    db.execute({ sql: "SELECT t.section_id FROM client_tags t JOIN client_config c ON c.client_tag = t.tag WHERE c.cc_email_1 IS NOT NULL AND c.cc_email_1 != '' AND UPPER(t.tag) != ? ORDER BY t.id DESC LIMIT 1", args: [tag] }),
+  ]);
+  const sections = sectionRows.rows.map((r) => ({ id: Number(r.id), name: String(r.name ?? `Section ${r.id}`) }));
+  const sectionName = (id: number | null) => sections.find((x) => x.id === id)?.name ?? (id ? `Section ${id}` : "—");
+  const existingSection = tagRow.rows[0] ? { id: Number(tagRow.rows[0].section_id), name: sectionName(Number(tagRow.rows[0].section_id)) } : null;
+  const recentRow = recent.rows[0] ? Number(recent.rows[0].section_id) : null;
+  const recentSection = recentRow != null && sections.some((x) => x.id === recentRow) ? recentRow : sections[sections.length - 1]?.id ?? null;
+
+  let form: Awaited<ReturnType<typeof fetchOnboardingFormDetails>> extends Map<string, infer V> ? V | undefined : never;
+  try { form = (await withCache("onboarding:form-details", 60_000, fetchOnboardingFormDetails)).get(tag); } catch (e) {
+    form = undefined;
+    notes.push({ title: "The Onboarding Form couldn't be read", text: (e as Error).message });
+  }
+  const cfg = cfgRow.rows[0] as Record<string, unknown> | undefined;
+  const has = (v: unknown) => typeof v === "string" && v.trim() !== "";
+  const configured = !!cfg && (has(cfg.cc_email_1) || has(cfg.reply_template));
+
+  // Section: "Add to Onboarding" files a new tag in the first section as a placeholder; a client
+  // that isn't set up yet goes where the latest set-up clients went. One already set up stays put.
+  const placeholder = !!existingSection && existingSection.id === sections[0]?.id && !configured;
+  const chosen = Number(param("section"));
+  const sectionId = sections.some((x) => x.id === chosen) ? chosen : existingSection && !placeholder ? existingSection.id : recentSection;
+
+  // Suggestions from the form (used only where nothing is saved yet and nothing was typed).
+  const people = form ? parseFormPeople(form.ccText) : [];
+  const allCc = people.filter((p) => p.kind === "cc");
+  const ccPeople = allCc.slice(0, RR_CC_MAX);
+  const bccPerson = people.find((p) => p.kind === "bcc");
+  const savedSlots = configured ? Array.from({ length: RR_CC_MAX }, (_, i) => i + 1).filter((n) => has(cfg?.[`cc_email_${n}`])).pop() ?? 0 : 0;
+  const slots = Math.min(RR_CC_MAX, Math.max(3, configured ? savedSlots : ccPeople.length));
+  const suggestedTemplate = form ? buildReplyTemplate({ people: ccPeople, companyName: form.companyName, website: form.website, phones: form.phones, address: form.address }) : "";
+
+  const pick = (key: string, saved: unknown, suggested: string) => param(key) ?? (configured ? (has(saved) ? String(saved) : "") : suggested);
+  const cc = Array.from({ length: slots }, (_, i) => ({
+    name: pick(`cc${i + 1}_name`, cfg?.[`cc_name_${i + 1}`], ccPeople[i]?.name ?? "").trim(),
+    email: pick(`cc${i + 1}_email`, cfg?.[`cc_email_${i + 1}`], ccPeople[i]?.email ?? "").trim(),
+  }));
+  const bcc = { name: pick("bcc1_name", cfg?.bcc_name_1, bccPerson?.name ?? "").trim(), email: pick("bcc1_email", cfg?.bcc_email_1, bccPerson?.email ?? "").trim() };
+  const template = (param("template") ?? (configured && has(cfg?.reply_template) ? String(cfg?.reply_template) : suggestedTemplate)).replace(/\r\n?/g, "\n");
+
+  // Checks.
+  const filled = cc.filter((x) => x.email);
+  if (!filled.length) blockers.push(form ? "Add at least one CC email — the form's answer had none this could read." : `${tag} has no Onboarding Form row — fill the form first, or type the CC and the template here.`);
+  for (const [i, x] of cc.entries()) {
+    if (x.email && !isEmail(x.email)) blockers.push(`CC ${i + 1}: “${x.email}” isn't an email address.`);
+    if (x.name && !x.email) blockers.push(`CC ${i + 1}: ${x.name} has no email address.`);
+  }
+  if (bcc.email && !isEmail(bcc.email)) blockers.push(`BCC: “${bcc.email}” isn't an email address.`);
+  if (!template.trim()) blockers.push("Write the reply template.");
+  else {
+    if (!/\{FIRST_NAME\}/.test(template)) notes.push({ title: "Check the template", text: "It doesn't greet the lead by name ({FIRST_NAME})." });
+    const unknown = (template.match(/\{[A-Z_]+\}/g) ?? []).filter((t) => !["{FIRST_NAME}", "{CONTEXT}", "{COMPANY}", "{PHONE}", "{SENDER_NAME}"].includes(t));
+    if (unknown.length) blockers.push(`The template uses ${[...new Set(unknown)].join(", ")}, which Reply Router doesn't fill in. Use {FIRST_NAME}, {CONTEXT}, {COMPANY}, {PHONE} or {SENDER_NAME}.`);
+  }
+  if (!sectionId) blockers.push("Choose the section the client's replies go to.");
+  else if (!sections.some((x) => x.id === sectionId)) blockers.push(`Section ${sectionId} doesn't exist — choose another.`);
+  if (allCc.length > RR_CC_MAX) notes.push({ title: "More people than CC slots", text: `The form lists ${allCc.length} people to CC; Reply Router has ${RR_CC_MAX} CC slots, so only the first ${RR_CC_MAX} are used.` });
+  if (form?.email) {
+    for (const x of [...cc, bcc]) {
+      if (x.email && nearMiss(x.email, form.email)) notes.push({ title: "Possible typo", text: `${x.email} is a letter or two away from the form's own address, ${form.email}. Check which is right.` });
+    }
+  }
+
+  const inputs: AutomationInput[] = [
+    { key: "section", label: "Section", type: "select", value: sectionId ? String(sectionId) : "", options: sections.map((x) => ({ value: String(x.id), label: x.name })),
+      hint: !existingSection ? `Where the client's replies are routed. New clients go where the latest set-up clients went (${sectionName(recentSection)}).`
+        : placeholder ? `Adding to onboarding put ${tag} in ${existingSection.name} as a placeholder — it moves to where the latest set-up clients went (${sectionName(recentSection)}) unless you choose otherwise.`
+        : `${tag} is in ${existingSection.name}.` },
+    ...cc.flatMap((x, i) => [
+      { key: `cc${i + 1}_name`, label: `CC ${i + 1} — name`, type: "text" as const, value: x.name, placeholder: i === 0 ? "Doug Ferrell" : "" },
+      { key: `cc${i + 1}_email`, label: `CC ${i + 1} — email`, type: "text" as const, value: x.email, placeholder: i === 0 ? "doug@company.com" : "" },
+    ]),
+    { key: "bcc1_name", label: "BCC — name", type: "text", value: bcc.name },
+    { key: "bcc1_email", label: "BCC — email", type: "text", value: bcc.email },
+    { key: "template", label: "Reply template", type: "textarea", value: template,
+      hint: "Sent to a lead who's interested, with the CC people copied. {FIRST_NAME}, {CONTEXT}, {COMPANY}, {PHONE} and {SENDER_NAME} are filled in for each lead." },
+  ];
+  if (form?.ccText) notes.push({ title: "What the client wrote on the form (who to CC)", text: form.ccText });
+
+  const ccText = filled.map((x) => (x.name ? `${x.name} <${x.email}>` : x.email)).join(", ") || "—";
+  const lines = [
+    !existingSection ? `Adds ${tag} to ${sectionName(sectionId)}, so its replies are routed.`
+      : existingSection.id !== sectionId ? `Moves ${tag} from ${existingSection.name} to ${sectionName(sectionId)} — its replies are routed there from now on.`
+      : `${tag} stays in ${existingSection.name}.`,
+    `Saves CC: ${ccText}${bcc.email ? `; BCC: ${bcc.name ? `${bcc.name} <${bcc.email}>` : bcc.email}` : ""}.`,
+    "Saves the reply template below.",
+    "Syncs the qualification rules and status from the Onboarding Form (the same sync that runs every hour), then reads everything back.",
+  ];
+  if (configured) lines.unshift(`${tag} already has CC / a template in Reply Router — the fields show what's saved; running again saves what's in them.`);
+  return { tag, sections, sectionId, existingSection, cc, bcc, template, inputs, blockers, lines, notes };
+}
+
+const replyRouterSetup: Automation = {
+  async preview(ctx) {
+    const p = await planReplyRouterSetup(ctx);
+    return { title: "Set up the client in Reply Router", lines: p.lines, inputs: p.inputs, blockers: p.blockers, notes: p.notes };
+  },
+  async run(ctx) {
+    const p = await planReplyRouterSetup(ctx);
+    if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
+    const tag = p.tag;
+    if (!p.existingSection) {
+      await db.execute({ sql: "INSERT INTO client_tags (tag, section_id) VALUES (?, ?)", args: [tag, p.sectionId] });
+    } else if (p.existingSection.id !== p.sectionId) {
+      // Same as Clients › Move: routing of its future replies only.
+      await db.execute({ sql: "UPDATE client_tags SET section_id = ? WHERE UPPER(tag) = ?", args: [p.sectionId, tag] });
+    }
+    await db.execute({ sql: "INSERT OR IGNORE INTO client_config (client_tag) VALUES (?)", args: [tag] });
+    const v = (s: string) => (s.trim() ? s.trim() : null);
+    const ccCols = p.cc.map((_, i) => `cc_name_${i + 1}=?, cc_email_${i + 1}=?`).join(", ");
+    await db.execute({
+      sql: `UPDATE client_config SET ${ccCols}, bcc_name_1=?, bcc_email_1=?, reply_template=?, updated_at=CURRENT_TIMESTAMP WHERE UPPER(client_tag)=?`,
+      args: [...p.cc.flatMap((x) => [v(x.name), v(x.email)]), v(p.bcc.name), v(p.bcc.email), p.template, tag],
+    });
+    bumpVersion("config");
+    let synced = "";
+    try { const r = await syncAll(); synced = `qualification sync: ${r.qualificationCount} clients`; }
+    catch (e) { synced = `the qualification sync failed (${(e as Error).message}) — it runs again within the hour`; }
+
+    // Read it all back.
+    const [t, c, q] = await Promise.all([
+      db.execute({ sql: "SELECT section_id FROM client_tags WHERE UPPER(tag) = ?", args: [tag] }),
+      db.execute({ sql: `SELECT ${p.cc.map((_, i) => `cc_email_${i + 1}`).join(", ")}, bcc_email_1, reply_template FROM client_config WHERE UPPER(client_tag) = ?`, args: [tag] }),
+      supabase.from("client_qualifications").select("client_abbreviation").eq("client_abbreviation", tag).maybeSingle(),
+    ]);
+    const row = c.rows[0] as Record<string, unknown> | undefined;
+    const want = p.cc.map((x) => x.email.trim() || null);
+    const ok = t.rows.length === 1 && Number(t.rows[0].section_id) === p.sectionId && !!row && String(row.reply_template ?? "") === p.template
+      && p.cc.every((_, i) => (row[`cc_email_${i + 1}`] ?? null) === want[i]) && (row.bcc_email_1 ?? null) === (p.bcc.email.trim() || null);
+    if (!ok) return { ok: false, summary: `Saved, but reading it back didn't match — open Clients › ${tag} and check its CC and template.` };
+    const rules = q.data ? "qualification rules are in" : "no qualification rules found for it in the Onboarding Form yet";
+    return { ok: true, summary: `${tag} is set up in Reply Router: ${p.sections.find((x) => x.id === p.sectionId)?.name ?? "section"}, ${plural(p.cc.filter((x) => x.email).length, "CC")}${p.bcc.email ? " + BCC" : ""}, reply template saved; ${rules} (${synced}).`, result: { tag, section: p.sectionId } };
+  },
+};
+
 /** Whether a task's automation may be RUN on this server right now (previews are separate). */
 export function automationRunnable(key: string | null | undefined): boolean {
   if (!key) return false;
@@ -934,6 +1169,7 @@ export function automationRunnable(key: string | null | undefined): boolean {
 
 const AUTOMATIONS: Record<string, Automation> = {
   slack_outreachify: slackOutreachify,
+  replyrouter_setup: replyRouterSetup,
   create_campaigns: createCampaigns,
   allocate_domains: allocateDomains,
   whitelist_email: whitelistEmail,

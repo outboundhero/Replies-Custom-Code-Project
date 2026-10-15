@@ -31,6 +31,9 @@ export const DEFAULT_TEMPLATE: SeedTask[] = [
   { title: "Push data into campaigns — Database pull", owner: "Nick", day: null, task_group: "Data" },
   { title: "Push data into campaigns — Clay people + company search", owner: "Nick", day: null, task_group: "Data" },
   { title: "Send client go-live email", owner: "Nick", day: null, task_group: "Go live", automation: "go_live_email" },
+  // Dated (due on the start date), so it never waits on — or holds up — the ordered steps above.
+  // Added after they, as the template upgrade does for existing templates; the guided page shows it right after Slack.
+  { title: "Set up the client in Reply Router (tag, CC/BCC, reply template, rules)", owner: "Nick", day: 0, task_group: "Setup", automation: "replyrouter_setup" },
 
   // ── Madison — manual ─────────────────────────────────────────────────────
   { title: "Create Client Lead Tracking Sheet & Connect To Sheet Link LeadSync For Client Tag", owner: "Madison", day: 2, task_group: "Lead tracking" },
