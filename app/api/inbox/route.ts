@@ -99,6 +99,9 @@ async function computeCounts(args: {
   // Scoped user whose scope ∩ view is empty → no visible clients here. A non-null
   // EMPTY allowlist means "none"; never let it fall through to "all clients".
   if (!clientTag && Array.isArray(allowed) && allowed.length === 0) return { counts: {}, total: 0 };
+  // An AI filter narrows the view's AI allowlist — one outside it matches nothing (as in the leads
+  // query, which applies both). Base Clients never counts AI "Person No Longer Employed" replies.
+  if (aiCategory && view?.aiCategoryAllowlist?.length && !view.aiCategoryAllowlist.includes(aiCategory)) return { counts: {}, total: 0 };
   const cacheKey = `counts:v${getCacheVersion()}:${JSON.stringify({ clientTag, allowed, workflow, search, view: viewParam, ai: aiCategory || null })}`;
   if (!fresh) {
     const hit = getInboxCache<{ counts: Record<string, number>; total: number }>(cacheKey, COUNTS_TTL_MS);

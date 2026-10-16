@@ -515,6 +515,11 @@ export default function InboxPage() {
   // Default to the curated Cherry view — that's where the team lives day-to-day.
   // Master Inbox ("all") is still selectable from the dropdown.
   const [view, setView] = useState<string>(initialView);
+  // The AI Suggested filter only offers — and only applies — the AI categories the current view
+  // admits (Base Clients never shows AI "Person No Longer Employed", so it isn't offered there).
+  const viewAiAllow = getView(view)?.aiCategoryAllowlist;
+  const aiFilterOptions = viewAiAllow?.length ? AI_FILTER_CATEGORIES.filter((c) => viewAiAllow.includes(c)) : AI_FILTER_CATEGORIES;
+  const aiFilter = filterAi && aiFilterOptions.includes(filterAi) ? filterAi : "";
   const [clientTags, setClientTags] = useState<string[]>(boot?.clientTags ?? []);
   // Per-user client scoping mirrored from the session so the controls don't lie
   // (the API enforces it server-side regardless).
@@ -606,7 +611,7 @@ export default function InboxPage() {
       const p = new URLSearchParams({ mode: "bootstrap" });
       if (debouncedSearch) p.set("search", debouncedSearch);
       if (filterClient) p.set("client_tag", filterClient);
-      if (filterAi) p.set("ai_category", filterAi);
+      if (aiFilter) p.set("ai_category", aiFilter);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.redirected || res.status === 401) { window.location.href = "/login"; return; }
@@ -625,7 +630,7 @@ export default function InboxPage() {
       setFetchError((e as Error).message);
       setBooted(true);
     }
-  }, [debouncedSearch, filterClient, filterAi, view]);
+  }, [debouncedSearch, filterClient, aiFilter, view]);
 
   // Run on mount + whenever view / client / (debounced) search change. When we
   // hydrated from the app-load prefetch the UI is already painted (booted), so
@@ -634,8 +639,8 @@ export default function InboxPage() {
 
   // Keep the realtime handler's view of the active filters current.
   useEffect(() => {
-    filtersRef.current = { search: debouncedSearch || "", client: filterClient || "", category: filterCategory || "", ai: filterAi || "" };
-  }, [debouncedSearch, filterClient, filterCategory, filterAi]);
+    filtersRef.current = { search: debouncedSearch || "", client: filterClient || "", category: filterCategory || "", ai: aiFilter || "" };
+  }, [debouncedSearch, filterClient, filterCategory, aiFilter]);
 
   // Load leads for a specific category (paginated). `append` pulls the next
   // page and concatenates; otherwise it loads the first page.
@@ -647,7 +652,7 @@ export default function InboxPage() {
     const p = new URLSearchParams({ category: cat, offset: String(offset), limit: "100" });
     if (debouncedSearch) p.set("search", debouncedSearch);
     if (filterClient) p.set("client_tag", filterClient);
-    if (filterAi) p.set("ai_category", filterAi);
+    if (aiFilter) p.set("ai_category", aiFilter);
     if (view && view !== "all") p.set("view", view);
     let lastErr = "";
     for (const wait of [0, 800, 2500]) {
@@ -682,7 +687,7 @@ export default function InboxPage() {
       const p = new URLSearchParams({ mode: "bootstrap" });
       if (debouncedSearch) p.set("search", debouncedSearch);
       if (filterClient) p.set("client_tag", filterClient);
-      if (filterAi) p.set("ai_category", filterAi);
+      if (aiFilter) p.set("ai_category", aiFilter);
       if (view && view !== "all") p.set("view", view);
       const res = await fetch(`/api/inbox?${p}`);
       if (res.ok) {
@@ -693,7 +698,7 @@ export default function InboxPage() {
     } catch { /* transient — next signal refreshes */ }
     for (const cat of expandedRef.current) loadCategoryLeads(cat);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, filterClient, filterAi, view]);
+  }, [debouncedSearch, filterClient, aiFilter, view]);
   const refreshLiveRef = useRef<() => void>(() => {});
   useEffect(() => { refreshLiveRef.current = refreshLive; }, [refreshLive]);
 
@@ -1482,9 +1487,9 @@ export default function InboxPage() {
           </div>
           {/* §18: AI Suggested category filter (server-side, all buckets). */}
           <SearchableCombobox
-            value={filterAi}
+            value={aiFilter}
             onValueChange={(v) => setFilterAi(v === "All AI Suggested" ? "" : v)}
-            options={["All AI Suggested", ...AI_FILTER_CATEGORIES]}
+            options={["All AI Suggested", ...aiFilterOptions]}
             placeholder="All AI Suggested"
             searchPlaceholder="Search AI categories..."
             triggerClassName="h-6 text-[11px] py-0"
