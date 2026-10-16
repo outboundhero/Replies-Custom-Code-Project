@@ -60,6 +60,7 @@ const items: NavItem[] = [
     ],
   },
   { href: "/nurture", label: "Nurture", adminOnly: true },
+  { href: "/costing", label: "Costing", adminOnly: true },
   { href: "/migrate", label: "Move Leads", adminOnly: true },
   { href: "/blacklist", label: "Blacklist", adminOnly: true },
   { href: "/webhooks", label: "Webhook Activity", adminOnly: true },
