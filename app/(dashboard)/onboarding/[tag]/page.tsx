@@ -18,7 +18,7 @@ import { CAMPAIGN_TIMEZONES, timezoneLabel } from "@/lib/onboarding/campaign-pla
 import { clientTypeLabel, type ClientTypeKey } from "@/lib/onboarding/copy-model";
 import {
   type OnbClient, type OnbTask, type UserRow,
-  UNASSIGNED, postMutate, TagPill, ClientChecklist,
+  UNASSIGNED, postMutate, TagPill, ClientChecklist, FormGateBanner,
 } from "../_ui/shared";
 
 const NO_GROUP = "none";
@@ -99,6 +99,8 @@ export default function ClientDetailPage() {
   return (
     <div className="space-y-6 max-w-5xl mx-auto w-full">
       <Link href="/onboarding" className="text-sm text-muted-foreground hover:underline">← Onboarding</Link>
+
+      {isAdmin && client.status !== "completed" && <FormGateBanner tag={client.client_tag} onReady={reload} />}
 
       {/* Header */}
       <Card>

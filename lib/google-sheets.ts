@@ -553,6 +553,8 @@ export interface OnboardingFormDetails {
   /** "Provide the names and email addresses for everyone who should be CC'd …" as typed. */
   ccText: string;
   clientType: string;
+  /** "Onboarding Call" (column D) as typed — "" when empty, null when the form has no such column. */
+  onboardingCall: string | null;
 }
 
 /**
@@ -579,6 +581,7 @@ export async function fetchOnboardingFormDetails(): Promise<Map<string, Onboardi
     website: col("Company Website"),
     cc: col("Provide the names and email addresses"),
     type: findColumnIndex(headers, "Client Type"),
+    call: findColumnIndex(headers, "Onboarding Call") !== -1 ? findColumnIndex(headers, "Onboarding Call") : col("Onboarding Call"),
   };
   const cell = (r: unknown[], i: number) => (i === -1 ? "" : String(r[i] ?? "").trim());
   for (let i = 1; i < rows.length; i++) {
@@ -595,6 +598,7 @@ export async function fetchOnboardingFormDetails(): Promise<Map<string, Onboardi
         website: cell(r, idx.website),
         ccText: cell(r, idx.cc),
         clientType: cell(r, idx.type),
+        onboardingCall: idx.call === -1 ? null : cell(r, idx.call),
       });
     }
   }

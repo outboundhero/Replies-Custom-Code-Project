@@ -14,7 +14,8 @@ import {
 import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache, nsVersion } from "@/lib/server-cache";
-import { fetchNewClientInfo, fetchOnboardingWebsites, fetchOnboardingFormDetails, type NewClientInfoRow, type OnboardingFormDetails } from "@/lib/google-sheets";
+import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
+import { onboardingFormGate } from "@/lib/onboarding/form-gate";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import { bumpVersion } from "@/lib/server-cache";
@@ -277,8 +278,12 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   let sheet: NewClientInfoRow | undefined;
   let unread = false;
   try { sheet = [...(await withCache("onboarding:new-client-info", 60_000, fetchNewClientInfo))].reverse().find((r) => r.tags.includes(tag)); } catch { unread = true; }
-  let form: OnboardingFormDetails | undefined;
-  try { form = (await withCache("onboarding:form-details", 60_000, fetchOnboardingFormDetails)).get(tag); } catch { unread = true; }
+  // The client's Onboarding Form, once it's in (a row with the tag in column A and the Onboarding
+  // Call date in column D — see form-gate.ts). Until then this step waits for it.
+  const gate = await onboardingFormGate(tag);
+  if (gate.state === "unread") unread = true;
+  else if (!gate.ready) blockers.push(gate.message!);
+  const form = gate.form;
   // Right before a run nothing may quietly fall back to a default because a sheet didn't answer.
   if (fresh && unread) blockers.push("Couldn't read the onboarding sheet just now — try again in a moment.");
 
@@ -330,7 +335,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
     { key: "office_address", label: "Office address", type: "text", value: officeAddress, placeholder: "811 E Chapman Ave, Orange, CA 92866",
       hint: form?.address ? "From the Onboarding Form's Company Address (column H)."
         : form ? `${tag}'s Onboarding Form has no Company Address (column H) — type the office address.`
-        : `${tag} isn't on the Onboarding Form, so there's no Company Address (column H) to use — type the office address.` },
+        : `Comes from the Onboarding Form's Company Address (column H) once ${tag}'s form is in.` },
     { key: "company_name", label: "Company name", type: "text", value: companyName, hint: "Fills [[COMPANY_NAME]] wherever the copy uses it." },
     { key: "service_area", label: "Service-area line ([[SERVICE_AREA]])", type: "textarea", value: serviceArea,
       hint: rawParam("service_area") === undefined ? "Written from the area, city and state in Clay's pattern — edit it if needed." : undefined },
@@ -1091,11 +1096,11 @@ async function planReplyRouterSetup(ctx: AutomationContext): Promise<RrPlan> {
   const recentRow = recent.rows[0] ? Number(recent.rows[0].section_id) : null;
   const recentSection = recentRow != null && sections.some((x) => x.id === recentRow) ? recentRow : sections[sections.length - 1]?.id ?? null;
 
-  let form: Awaited<ReturnType<typeof fetchOnboardingFormDetails>> extends Map<string, infer V> ? V | undefined : never;
-  try { form = (await withCache("onboarding:form-details", 60_000, fetchOnboardingFormDetails)).get(tag); } catch (e) {
-    form = undefined;
-    notes.push({ title: "The Onboarding Form couldn't be read", text: (e as Error).message });
-  }
+  // Everything here comes from the client's Onboarding Form, so this step waits until it's in (a row
+  // with the tag in column A and the Onboarding Call date in column D — see form-gate.ts).
+  const gate = await onboardingFormGate(tag);
+  if (!gate.ready) blockers.push(gate.message!);
+  const form = gate.form;
   const cfg = cfgRow.rows[0] as Record<string, unknown> | undefined;
   const has = (v: unknown) => typeof v === "string" && v.trim() !== "";
   const configured = !!cfg && (has(cfg.cc_email_1) || has(cfg.reply_template));
@@ -1125,7 +1130,7 @@ async function planReplyRouterSetup(ctx: AutomationContext): Promise<RrPlan> {
 
   // Checks.
   const filled = cc.filter((x) => x.email);
-  if (!filled.length) blockers.push(form ? "Add at least one CC email — the form's answer had none this could read." : `${tag} has no Onboarding Form row — fill the form first, or type the CC and the template here.`);
+  if (!filled.length && gate.ready) blockers.push("Add at least one CC email — the form's answer had none this could read.");
   for (const [i, x] of cc.entries()) {
     if (x.email && !isEmail(x.email)) blockers.push(`CC ${i + 1}: “${x.email}” isn't an email address.`);
     if (x.name && !x.email) blockers.push(`CC ${i + 1}: ${x.name} has no email address.`);

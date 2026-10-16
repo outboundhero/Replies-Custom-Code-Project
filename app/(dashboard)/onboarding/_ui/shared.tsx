@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Loader2, Lock, Pencil, Zap } from "lucide-react";
+import { AlertTriangle, Check, FileClock, Loader2, Lock, Pencil, RefreshCw, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,6 +61,50 @@ export async function postMutate(body: Record<string, unknown>): Promise<{ ok?: 
 }
 
 // ─────────────────────────── small bits ───────────────────────────
+/**
+ * "Waiting for the Onboarding Form" — shown on a client's checklist and guided page until its form is
+ * in (a row with the tag in column A and the Onboarding Call date in column D; lib/onboarding/form-gate.ts).
+ * Nothing shows once it's in, or when the sheet couldn't be read (the steps say that themselves).
+ */
+export function FormGateBanner({ tag, onReady }: { tag: string; onReady?: () => void }) {
+  const [gate, setGate] = useState<{ state: string; ready: boolean; message: string | null } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const check = useCallback(async (fresh: boolean) => {
+    const r = await fetch(`/api/onboarding/form-status?tag=${encodeURIComponent(tag)}${fresh ? "&fresh=1" : ""}`).catch(() => null);
+    const j = r?.ok ? await r.json().catch(() => null) : null;
+    return j?.ok ? (j as { state: string; ready: boolean; message: string | null }) : null;
+  }, [tag]);
+  useEffect(() => {
+    let live = true;
+    check(false).then((g) => { if (live) setGate(g); });
+    return () => { live = false; };
+  }, [check]);
+  async function again() {
+    setChecking(true);
+    const g = await check(true);
+    setChecking(false);
+    if (!g) { toast.error("Couldn't read the Onboarding Form just now — try again in a moment."); return; }
+    setGate(g);
+    if (g.ready) { toast.success(`${tag}'s Onboarding Form is in.`); onReady?.(); }
+    else toast.info("Still not in yet.");
+  }
+  if (!gate || gate.ready || gate.state === "unread") return null;
+  return (
+    <div role="status" className="flex flex-wrap items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3 text-sm">
+      <FileClock className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+      <div className="min-w-0 flex-1 basis-72">
+        <div className="font-medium">Waiting for the Onboarding Form</div>
+        {/* The title already says it's waiting — the rest of the message says why. */}
+        <p className="mt-0.5 text-muted-foreground">{(gate.message ?? "").replace(/^Waiting for .+? Onboarding Form — (.)/, (_, c: string) => c.toUpperCase())}</p>
+        <p className="mt-1 text-xs text-muted-foreground">Until then, Set up in Reply Router and creating the campaigns can&apos;t run (the steps after the campaigns wait for them).</p>
+      </div>
+      <Button size="sm" variant="outline" onClick={again} disabled={checking}>
+        {checking ? <Loader2 className="animate-spin" /> : <RefreshCw />} Check again
+      </Button>
+    </div>
+  );
+}
+
 export function TagPill({ tag }: { tag: string }) {
   return <span className="font-mono text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded">{tag}</span>;
 }

@@ -21,7 +21,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AUTOMATION_META, GROUP_META, fmtDate, fmtStamp, shortEmail } from "@/lib/onboarding/ui";
 import { timezoneLabel } from "@/lib/onboarding/campaign-plan";
 import {
-  type OnbClient, type OnbTask, postMutate, setupSteps, taskGate, useStepRun, StepRunBody, TagPill,
+  type OnbClient, type OnbTask, postMutate, setupSteps, taskGate, useStepRun, StepRunBody, TagPill, FormGateBanner,
 } from "../../_ui/shared";
 
 /** Short names for the automated steps (the checklist keeps its full titles). */
@@ -174,6 +174,8 @@ export default function GuidedOnboardingPage() {
           <Fact label="Plan" value={client.plan_type || "—"} />
         </dl>
       </div>
+
+      {client.status !== "completed" && <FormGateBanner tag={client.client_tag} onReady={load} />}
 
       {missingRr && steps.length > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-500/25 bg-sky-500/[0.05] px-4 py-3 text-sm">
