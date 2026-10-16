@@ -77,6 +77,8 @@ const CHERRY_HIDDEN = [
   "Mailbox No Longer Active",
   "Change Of Target",
   "Unqualified (Cleaning)",
+  // Worked from the Master Inbox, not the cherry views (2026-10-17).
+  "Person No Longer Employed",
 ];
 
 export const INBOX_VIEWS: InboxView[] = [
