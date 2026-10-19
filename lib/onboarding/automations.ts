@@ -14,7 +14,7 @@ import {
 import { GROUP_META, AUTOMATION_META, groupText, fmtDate, fmtStamp } from "@/lib/onboarding/ui";
 import { groupForStartDate } from "@/lib/onboarding/generate";
 import { withCache, nsVersion } from "@/lib/server-cache";
-import { fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
+import { fetchGoLiveDates, fetchNewClientInfo, fetchOnboardingWebsites, type NewClientInfoRow } from "@/lib/google-sheets";
 import { onboardingFormGate } from "@/lib/onboarding/form-gate";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
@@ -625,9 +625,20 @@ function sameSite(a: string, b: string): boolean {
   return ka !== null && ka === kb;
 }
 
+/** The Client Tracker's "Go Live Date" ("10/23/2026") as "2026-10-23"; null when blank or not a real date. Same reading as the go-live gate. */
+function goLiveIso(raw: string): string | null {
+  const m = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/.exec(raw.trim());
+  if (!m) return null;
+  let y = Number(m[3]); if (y < 100) y += 2000;
+  const d = new Date(Date.UTC(y, Number(m[1]) - 1, Number(m[2])));
+  return d.getUTCMonth() === Number(m[1]) - 1 && d.getUTCDate() === Number(m[2]) ? d.toISOString().slice(0, 10) : null;
+}
+
 interface AllocationSidePlan extends AllocationSide { campaignIds: number[] }
 interface AllocationPlanView {
   tag: string; tier: "0.5" | "1" | "2" | undefined; redirect: string;
+  /** The go-live date LeadSync was asked with (null = none, fully warmed domains only). */
+  goLiveDate: string | null;
   /** LeadSync's plan as received (null when it couldn't be had). */
   plan: AllocationPlan | null;
   inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[];
@@ -640,8 +651,14 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   const tag = c.client_tag.toUpperCase();
   const blockers: string[] = [];
   const tier = typeof ctx.params.tier === "string" && ["0.5", "1", "2"].includes(ctx.params.tier) ? (ctx.params.tier as "0.5" | "1" | "2") : tierOfPlan(c.plan_type);
+  // With the Client Tracker's Go Live Date, LeadSync also offers domains that will have at most
+  // 4 warm-up days left on that day (OutboundHero 2026-10-19). Without one, fully warmed only.
+  let goLiveRaw = "";
+  try { goLiveRaw = (await fetchGoLiveDates()).get(tag) ?? ""; } catch { /* read failed: fully warmed only */ }
+  const goLiveDate = goLiveIso(goLiveRaw);
 
-  // Redirect = the client's website on the onboarding form; what is typed here wins.
+  // Redirect = the website LeadSync has for the client (it keeps the domains pointed there), else
+  // the client's website on the onboarding form; what is typed here wins.
   let fromSheet = "";
   try { fromSheet = (await withCache("onboarding:websites", 60_000, fetchOnboardingWebsites)).get(tag) ?? ""; } catch { /* no pre-fill */ }
   const typed = typeof ctx.params.redirect === "string" ? ctx.params.redirect.trim() : undefined;
@@ -673,7 +690,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
     blockers.push(groupBusy(c.group_num, busyFor));
     summary = `Group ${c.group_num}'s reserve is in use for ${busyFor} — this client's plan is drawn up once that has finished.`;
   } else {
-    const r = await previewOnboardingAllocation(tag, c.group_num, tier, fresh);
+    const r = await previewOnboardingAllocation(tag, c.group_num, tier, fresh, goLiveDate);
     if (!r.ok) {
       blockers.push(`Couldn't get the plan from LeadSync: ${r.error}`);
     } else {
@@ -683,16 +700,29 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
       // What LeadSync itself needs in place before it will run (the group is already said above).
       for (const why of p.runBlockers ?? []) if (!/allocation sheet has/.test(why)) blockers.push(`LeadSync isn't ready for ${tag}: ${why}.`);
       // LeadSync redirects a client's domains to the website IT has (the Client Tracker's) and
-      // re-points any that drift every day — so that is the address used, and the one here must agree.
+      // re-points any that drift every day — so that is the address used, and one typed here must agree.
+      // The form's address is often a page with tracking on it (CVJNWO's ?utm_…), so it isn't used over LeadSync's.
       const known = typeof p.knownRedirect === "string" ? p.knownRedirect.trim() : "";
       if (known) {
-        if (!redirectRaw) { redirectRaw = known; redirect = asHttpsUrl(known); redirectInput.value = known; }
-        redirectInput.hint = `LeadSync (Client Tracker) has ${known}. ${fromSheet ? `The onboarding form's Company Website: ${fromSheet}` : "The onboarding form has no Company Website."}`;
+        if (!typed) { redirectRaw = known; redirect = asHttpsUrl(known); redirectInput.value = known; }
+        redirectInput.hint = `LeadSync (Client Tracker) has ${known} — it keeps ${tag}'s domains pointed there.${
+          !fromSheet ? "" : sameSite(fromSheet, known) ? ` The onboarding form says the same (${fromSheet}).`
+            : ` The onboarding form says ${fromSheet}; to use that instead, change the Client Tracker's Website first.`}`;
         if (redirect && !sameSite(redirect, known)) {
           blockers.push(`The website here (${redirectRaw}) isn't the one LeadSync has for ${tag} (${known}). LeadSync keeps a client's domains pointed at its own, so make the Client Tracker and this agree first.`);
         }
       }
       summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
+      const w = p.warmup;
+      if (!goLiveDate) {
+        notes.push({ title: "Only fully warmed domains are offered", text: goLiveRaw
+          ? `The Client Tracker's Go Live Date for ${tag} (“${goLiveRaw}”) isn't a date this can read, so only domains past their 21-day warm-up are offered.`
+          : `${tag} has no Go Live Date on the Client Tracker, so only domains past their 21-day warm-up are offered. With one, domains that will have at most 4 warm-up days left on go-live are offered too.` });
+      } else if (!w) {
+        notes.push({ title: "Only fully warmed domains are offered", text: "This LeadSync doesn't offer domains still in their warm-up yet." });
+      } else if (!w.applied) {
+        notes.push({ title: "Only fully warmed domains are offered", text: `LeadSync: ${w.reason ?? "the go-live date wasn't used"}.` });
+      }
       // The campaigns the "Create the 12 campaigns" step made, by id: Email Bison's search can lag
       // behind campaigns made a moment ago, and this step must not say they're missing.
       const madeIds = new Map<string, number>(); // `${instance}|${name lower}` → id
@@ -732,19 +762,29 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
           blockers.push(`Couldn't read ${tag}'s campaigns on ${s.label}: ${(e as Error).message}`);
         }
         sides.push({ ...s, campaignIds });
-        rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), String(s.reserveAvailable), s.short ? String(s.short) : "—", campaignIds.length ? `${campaignIds.length} campaigns` : "—"]);
-        if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve.`);
+        const warming = s.warming ?? 0;
+        rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), `${s.reserveAvailable}${warming ? ` (${warming} still warming)` : ""}`, s.short ? String(s.short) : "—", campaignIds.length ? `${campaignIds.length} campaigns` : "—"]);
+        if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve${warming ? ` (${warming} of them still warming)` : ""}.`);
         // LeadSync's note is why its OWN automatic top-up leaves this client alone (it does that for
         // every client that isn't sending yet) — true of any new client, so it is shown, not a stop.
         if (s.note) notes.push({ title: `${s.label} — LeadSync's automatic top-up skips ${tag} for now`, text: `Its reason: “${s.note}”. That is about its own top-ups; this step allocates the first domains regardless.` });
         if (s.setAside) notes.push({ title: `${s.label} — ${s.setAside} reserve domain${s.setAside === 1 ? " was" : "s were"} left out`, text: "They already carry a client's tag, so they are not offered." });
-        if (s.picking.length) notes.push({ title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give`, text: s.picking.join("\n") });
+        if (s.picking.length) {
+          const left = s.warmupLeftAtGoLive ?? {};
+          const warm = s.picking.filter((d) => d in left).length;
+          const surbl = new Set(s.surblListed ?? []);
+          notes.push({
+            title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give${warm ? ` (${warm} still warming)` : ""}${surbl.size ? ` · ${surbl.size} on SURBL` : ""}`,
+            text: s.picking.map((d) => (d in left ? `${d} — ${left[d] === 0 ? "warmed up by" : `${left[d]} warm-up day${left[d] === 1 ? "" : "s"} left on`} go-live, ${fmtDate(w?.goLiveDate ?? goLiveDate)}` : d)
+              + (surbl.has(d) ? " — on SURBL (no clean domain left)" : "")).join("\n"),
+          });
+        }
       }
     }
   }
   // While another client holds the group, LeadSync wasn't asked — its website isn't known yet, so no verdict on it.
   if (!redirect && !(busyFor && busyFor !== tag)) blockers.unshift(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
-  return { tag, tier, redirect, plan, inputs, blockers, rows, notes, summary, sides };
+  return { tag, tier, redirect, goLiveDate, plan, inputs, blockers, rows, notes, summary, sides };
 }
 
 const allocateDomains: Automation = {
@@ -752,11 +792,14 @@ const allocateDomains: Automation = {
     const p = await planAllocation(ctx);
     if (!domainAllocationEnabled()) p.blockers.push(ALLOCATION_NOT_SWITCHED_ON);
     const left = p.sides.reduce((n, s) => n + s.need, 0);
+    const w = p.plan?.warmup;
     return {
       title: "Attach client tags / redirects / add to campaigns / set 3 per day",
       lines: [
         p.summary,
-        "LeadSync only gives domains that no client it knows is using, that are at least 21 days old, not marked Burnt and not blacklisted — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.",
+        `LeadSync only gives domains that no client it knows is using, ${w?.applied
+          ? `that are past their 21-day warm-up or will have at most 4 days of it left on ${p.tag}'s go-live (${fmtDate(w.goLiveDate)}, from the Client Tracker) — fully warmed ones first`
+          : "that are at least 21 days old"}, not marked Burnt and not on Spamhaus's list — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.`,
         `Running it has LeadSync tag those domains for ${p.tag}, point their redirect at ${p.redirect || "the client's website"}, attach them to ${p.tag}'s campaigns, add them to the client's sheet, queue the whitelist email (6:30 AM PT) and set every sender to ${DAILY_LIMIT} a day.`,
         `It works in batches of ${ALLOCATION_BATCH} domains${left ? ` (${Math.ceil(left / ALLOCATION_BATCH)} batch${Math.ceil(left / ALLOCATION_BATCH) === 1 ? "" : "es"} for this client)` : ""} and marks this step Done when nothing is left to add.`,
       ],
@@ -790,20 +833,21 @@ const allocateDomains: Automation = {
     const heldBy = await takeLock(allocationLock(group), p.tag, ALLOCATION_LOCK_MS);
     if (heldBy) {
       // The plan in hand will be out of date by the time the other client is done.
-      rememberAllocationPlan(p.tag, group, p.tier, null);
+      rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
       return { ok: false, summary: groupBusy(group, heldBy) };
     }
 
     const domains = side.picking.slice(0, ALLOCATION_BATCH);
+    // The same go-live date the plan was made with: LeadSync rebuilds the plan with it and refuses any domain it wouldn't give.
     const r = await runOnboardingAllocation({
-      clientTag: p.tag, group, tier: p.tier, instance: side.instance,
+      clientTag: p.tag, group, tier: p.tier, goLiveDate: p.goLiveDate, instance: side.instance,
       domains, redirectUrl: p.redirect, campaignIds: side.campaignIds, dailyLimit: DAILY_LIMIT,
     });
     // The group's reserve just changed: plans kept for its other clients would offer domains that are gone.
     forgetAllocationPlans(group);
     // Whatever went wrong, the kept plan is no longer trusted — the next try asks again.
     if (!r.ok) {
-      rememberAllocationPlan(p.tag, group, p.tier, null);
+      rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
       // A plain refusal means nothing was touched, so the group needn't wait for this
       // client. No answer at all is different: the batch may be under way — keep the hold.
       if (r.status !== 0) await releaseLock(allocationLock(group), p.tag);
@@ -825,7 +869,7 @@ const allocateDomains: Automation = {
       : !res.limit.updated ? "daily limit: no sender was updated" : "";
     const count = res.added === domains.length ? "" : `${res.added} of ${domains.length} domains were added`;
     if (!res.ok || bad.length || limit || count) {
-      rememberAllocationPlan(p.tag, group, p.tier, null);
+      rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
       // LeadSync's own list (when it checks the batch itself) says more than the step states do.
       const found = res.problems?.length ? res.problems : [count, ...bad, limit].filter(Boolean);
       return {
@@ -837,11 +881,14 @@ const allocateDomains: Automation = {
     const done = side.alreadyTagged + domains.length;
     const more = p.sides.some((s) => (s === side ? s.need - domains.length : s.need) > 0);
     // The plan, as it stands now: these domains are the client's, the rest are still to come.
-    rememberAllocationPlan(p.tag, group, p.tier, {
+    rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, {
       ...p.plan,
       instances: p.plan.instances.map((s) => s.instance !== side.instance ? s : {
         ...s, alreadyTagged: done, need: s.need - domains.length, reserveAvailable: s.reserveAvailable - domains.length,
+        ...(s.warming === undefined ? {} : { warming: s.warming - domains.filter((d) => d in (s.warmupLeftAtGoLive ?? {})).length }),
         picking: s.picking.filter((d) => !domains.includes(d)),
+        ...(s.warmupLeftAtGoLive ? { warmupLeftAtGoLive: Object.fromEntries(Object.entries(s.warmupLeftAtGoLive).filter(([d]) => !domains.includes(d))) } : {}),
+        ...(s.surblListed ? { surblListed: s.surblListed.filter((d) => !domains.includes(d)) } : {}),
       }),
     });
     if (!more) await releaseLock(allocationLock(group), p.tag);

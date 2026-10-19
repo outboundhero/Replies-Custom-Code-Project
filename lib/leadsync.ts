@@ -33,12 +33,27 @@ export interface AllocationSide {
   need: number;
   /** Ready reserve domains on this instance (LeadSync's rules). */
   reserveAvailable: number;
+  /** Of reserveAvailable, still in their 21-day warm-up (offered only with a go-live date). */
+  warming?: number;
   /** Candidates left out because they already carry another client's tag. */
   setAside?: number;
   /** The domains that would be given, in order. */
   picking: string[];
+  /** Picked domains still warming up → warm-up days left on the go-live date. */
+  warmupLeftAtGoLive?: Record<string, number>;
+  /** Of those, the ones on SURBL (LeadSync gives them only once no clean one is left). */
+  surblListed?: string[];
   short: number;
   note: string | null;
+}
+/** The warm-up window LeadSync used: domains with up to 4 warm-up days left on the go-live date. */
+export interface AllocationWarmup {
+  goLiveDate: string | null;
+  daysToGoLive: number | null;
+  /** The youngest domain offered, in days old today (21 = fully warmed only). */
+  minAgeDays: number;
+  applied: boolean;
+  reason: string | null;
 }
 export interface AllocationPlan {
   clientTag: string;
@@ -53,6 +68,8 @@ export interface AllocationPlan {
   knownRedirect?: string | null;
   /** Why LeadSync would refuse a run right now (not in the tracker, no website, no sheet, group…). */
   runBlockers?: string[];
+  /** Only from a LeadSync that knows the warm-up window. */
+  warmup?: AllocationWarmup;
   instances: AllocationSide[];
 }
 export type AllocationPreview = { ok: true; plan: AllocationPlan } | { ok: false; status: number; error: string };
@@ -60,13 +77,15 @@ export type AllocationPreview = { ok: true; plan: AllocationPlan } | { ok: false
 /**
  * What LeadSync WOULD allocate to a new client — a dry run, nothing changes.
  * `tier` is optional: left out, LeadSync uses the Client Tracker's tier.
+ * `goLiveDate` (YYYY-MM-DD) lets it offer domains with up to 4 warm-up days
+ * left on that date; left out, only fully warmed ones. A run must send the same.
  *
  * The plan is a heavy read on LeadSync's side (it walks every domain, ~10s),
  * so a good answer is kept for 5 minutes — reopening the preview doesn't ask
  * again. Failures are never kept.
  */
-export async function previewOnboardingAllocation(clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2", fresh = false): Promise<AllocationPreview> {
-  const key = planKey(clientTag, group, tier);
+export async function previewOnboardingAllocation(clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2", fresh = false, goLiveDate: string | null = null): Promise<AllocationPreview> {
+  const key = planKey(clientTag, group, tier, goLiveDate);
   // `fresh` skips a plan kept from the last few minutes. A plan LeadSync says it
   // wouldn't run is only kept briefly: whoever is fixing the reason (a missing
   // website, a missing sheet) should see it clear without a five-minute wait.
@@ -77,7 +96,7 @@ export async function previewOnboardingAllocation(clientTag: string, group: 1 | 
     const res = await fetch(`${BASE}/api/external/onboarding-allocate`, {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ clientTag, group, ...(tier ? { tier } : {}), dryRun: true }),
+      body: JSON.stringify({ clientTag, group, ...(tier ? { tier } : {}), ...(goLiveDate ? { goLiveDate } : {}), dryRun: true }),
       cache: "no-store",
       signal: AbortSignal.timeout(110_000),
     });
@@ -95,7 +114,8 @@ export async function previewOnboardingAllocation(clientTag: string, group: 1 | 
   }
 }
 
-const planKey = (clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2") => `leadsync:allocation:${clientTag}:${group}:${tier ?? "tracker"}`;
+const planKey = (clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2", goLiveDate?: string | null) =>
+  `leadsync:allocation:${clientTag}:${group}:${tier ?? "tracker"}:${goLiveDate ?? "no-go-live"}`;
 
 /**
  * Keep the plan as it stands after a batch (or drop it, with null), so the
@@ -103,8 +123,8 @@ const planKey = (clientTag: string, group: 1 | 2, tier?: "0.5" | "1" | "2") => `
  * read on its side, and it re-checks every batch itself anyway.
  */
 const keptPlans = new Map<1 | 2, Set<string>>();
-export function rememberAllocationPlan(clientTag: string, group: 1 | 2, tier: "0.5" | "1" | "2" | undefined, plan: AllocationPlan | null): void {
-  const key = planKey(clientTag, group, tier);
+export function rememberAllocationPlan(clientTag: string, group: 1 | 2, tier: "0.5" | "1" | "2" | undefined, goLiveDate: string | null, plan: AllocationPlan | null): void {
+  const key = planKey(clientTag, group, tier, goLiveDate);
   setCached(key, plan);
   if (plan) { if (!keptPlans.has(group)) keptPlans.set(group, new Set()); keptPlans.get(group)!.add(key); }
 }
@@ -132,14 +152,15 @@ export type AllocationRun = { ok: true; result: AllocationRunResult } | { ok: fa
  * switch is on. One attempt — a repeat is the caller's decision.
  */
 export async function runOnboardingAllocation(input: {
-  clientTag: string; group: 1 | 2; tier?: "0.5" | "1" | "2"; instance: string;
+  clientTag: string; group: 1 | 2; tier?: "0.5" | "1" | "2"; goLiveDate?: string | null; instance: string;
   domains: string[]; redirectUrl: string; campaignIds: number[]; dailyLimit: number;
 }): Promise<AllocationRun> {
+  const { goLiveDate, ...rest } = input;
   try {
     const res = await fetch(`${BASE}/api/external/onboarding-allocate`, {
       method: "POST",
       headers: runHeaders(),
-      body: JSON.stringify({ ...input, dryRun: false }),
+      body: JSON.stringify({ ...rest, ...(goLiveDate ? { goLiveDate } : {}), dryRun: false }),
       cache: "no-store",
       signal: AbortSignal.timeout(285_000),
     });
