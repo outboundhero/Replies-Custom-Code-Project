@@ -220,6 +220,12 @@ export async function onLeadPushedToSheet(clientTag: string, replyId: number): P
   }
 }
 
+/** For the client page before anything was recorded: has Reply Router ever pushed a lead for this client? (read-only) */
+export async function alreadyHadLeads(tagRaw: string): Promise<boolean> {
+  const { data } = await supabase.from("replies").select("id").eq("client_tag", tagRaw.trim().toUpperCase()).eq("pushed_to_sheet", true).limit(1);
+  return !!data?.length;
+}
+
 /** Admin: send it now for real (switch must be on) — e.g. after adding missing contacts. */
 export async function sendFirstLeadNow(tagRaw: string, by: string): Promise<FirstLeadRecord> {
   if (!sendingSwitchedOn()) throw new Error("Sending to clients is switched off (FIRST_LEAD_EMAIL_SEND isn't 1).");

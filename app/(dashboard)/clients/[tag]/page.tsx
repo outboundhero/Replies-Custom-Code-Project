@@ -777,7 +777,7 @@ const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("en-US"
 
 /** "Important: First Set of Leads - Instructions" — sent from madison@ when the client's first lead reaches its sheet. */
 function FirstLeadCard({ tag }: { tag: string }) {
-  const [d, setD] = useState<{ record: FirstLead; switchedOn: boolean; testRecipients: string[] } | null>(null);
+  const [d, setD] = useState<{ record: FirstLead; hadLeads: boolean | null; switchedOn: boolean; testRecipients: string[] } | null>(null);
   const [testTo, setTestTo] = useState("");
   const [busy, setBusy] = useState<"test" | "send" | null>(null);
   const [confirm, setConfirm] = useState(false);
@@ -806,7 +806,7 @@ function FirstLeadCard({ tag }: { tag: string }) {
   }
 
   const rec = d?.record ?? null;
-  const st = rec?.status ?? "waiting";
+  const st = rec?.status ?? (d?.hadLeads ? "existing" : "waiting");
   const head: Record<string, { tone: ChipTone; label: string }> = {
     waiting: { tone: "muted", label: "Waiting for the first lead" },
     checking: { tone: "sky", label: "Checking…" },
@@ -827,6 +827,7 @@ function FirstLeadCard({ tag }: { tag: string }) {
         <div className="space-y-3 text-sm">
           <div className="flex flex-wrap items-center gap-2"><Chip tone={h.tone}>{h.label}</Chip></div>
           {st === "waiting" && <p className="text-xs text-muted-foreground">“Important: First Set of Leads - Instructions” goes to the client automatically when their first lead is pushed to their lead tracking sheet.</p>}
+          {st === "existing" && !rec && <p className="text-xs text-muted-foreground">{tag} already has leads in its sheet, so it never gets this email — it&apos;s only for a client&apos;s very first lead.</p>}
           {rec?.lead_email && <Row label="First lead">{rec.lead_email}</Row>}
           {rec && rec.to.length > 0 && <Row label={st === "sent" ? "Sent to" : "Goes to"}><span className="break-words">{rec.to.join(", ")}</span>{rec.bcc.length > 0 && <div className="text-xs text-muted-foreground">BCC {rec.bcc.join(", ")}</div>}</Row>}
           {st === "sent" && rec?.sent_by && rec.sent_by !== "auto" && <Row label="Sent by">{rec.sent_by === "retry" ? "Automatic retry" : rec.sent_by}</Row>}

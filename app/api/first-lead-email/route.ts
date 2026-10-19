@@ -6,7 +6,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
-import { getFirstLeadRecord, sendFirstLeadNow, sendFirstLeadTest, sendingSwitchedOn } from "@/lib/first-lead-email";
+import { alreadyHadLeads, getFirstLeadRecord, sendFirstLeadNow, sendFirstLeadTest, sendingSwitchedOn } from "@/lib/first-lead-email";
 import { TEST_RECIPIENTS } from "@/lib/gmail-send";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +19,10 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
   const tag = (req.nextUrl.searchParams.get("tag") || "").trim().toUpperCase();
   if (!TAG.test(tag)) return NextResponse.json({ error: "tag required" }, { status: 400 });
-  return NextResponse.json({ ok: true, record: await getFirstLeadRecord(tag), switchedOn: sendingSwitchedOn(), testRecipients: TEST_RECIPIENTS });
+  const record = await getFirstLeadRecord(tag);
+  // Nothing recorded yet: say whether the client already had leads (then it never gets this email).
+  const hadLeads = record ? null : await alreadyHadLeads(tag).catch(() => null);
+  return NextResponse.json({ ok: true, record, hadLeads, switchedOn: sendingSwitchedOn(), testRecipients: TEST_RECIPIENTS });
 }
 
 export async function POST(req: NextRequest) {

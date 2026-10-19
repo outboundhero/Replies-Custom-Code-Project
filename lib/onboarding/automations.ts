@@ -327,12 +327,12 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
       hint: c.plan_type ? `Plan: ${c.plan_type}` : sheet?.plan ? `The sheet's plan: ${sheet.plan}` : undefined },
     { key: "timezone", label: "Time zone the campaigns send in", type: "select", value: timezone, options: CAMPAIGN_TIMEZONES.map((z) => ({ value: z, label: timezoneLabel(z) })),
       hint: c.campaign_timezone ? `The client's time zone (set on its page): ${c.campaign_timezone}` : "Not set on the client's page yet — suggested from the office's state." },
-    { key: "city", label: "City", type: "text", value: city, placeholder: "Anaheim", hint: guess && !guess.sure && param("city") === undefined ? `Guessed from the sheet — check it. ${fromSheet}` : fromSheet },
-    { key: "state", label: "State", type: "text", value: state, placeholder: "California" },
-    { key: "abbr", label: "State abbreviation", type: "text", value: abbr, placeholder: "CA" },
-    { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "Orange County",
+    { key: "city", label: "City", type: "text", value: city, placeholder: "e.g. Springfield", hint: guess && !guess.sure && param("city") === undefined ? `Guessed from the sheet — check it. ${fromSheet}` : fromSheet },
+    { key: "state", label: "State", type: "text", value: state, placeholder: "e.g. Illinois" },
+    { key: "abbr", label: "State abbreviation", type: "text", value: abbr, placeholder: "e.g. IL" },
+    { key: "area", label: "Area name", type: "text", value: area, placeholder: defaultArea(city) || "e.g. Greater Springfield",
       hint: `How the area is named in the service-area line. Left empty it is “${defaultArea(city) || "<City> Area"}”.${sheet?.area ? ` The sheet's area: ${sheet.area}` : ""}` },
-    { key: "office_address", label: "Office address", type: "text", value: officeAddress, placeholder: "811 E Chapman Ave, Orange, CA 92866",
+    { key: "office_address", label: "Office address", type: "text", value: officeAddress, placeholder: "e.g. 100 Main St, Suite 200, Springfield, IL 62701",
       hint: form?.address ? "From the Onboarding Form's Company Address (column H)."
         : form ? `${tag}'s Onboarding Form has no Company Address (column H) — type the office address.`
         : `Comes from the Onboarding Form's Company Address (column H) once ${tag}'s form is in.` },
