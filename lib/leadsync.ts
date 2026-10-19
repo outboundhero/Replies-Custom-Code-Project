@@ -172,6 +172,35 @@ export async function runOnboardingAllocation(input: {
   }
 }
 
+/** What LeadSync's current (or, for an hour, last) onboarding batch for a client is doing, step by step. */
+export interface BatchProgress {
+  clientTag: string;
+  instance: string;
+  domains: string[];
+  startedAt: string;
+  updatedAt: string;
+  /** running = the runner's steps; checking = the checks and the daily limit after them; then done, or problems. */
+  phase: "running" | "checking" | "done" | "problems";
+  steps: { label: string; state: string; note?: string }[];
+  problems?: string[];
+}
+
+/** A light read (one Redis key on LeadSync's side) — the checklist polls it while a batch runs. null when there is none or it can't be had. */
+export async function onboardingBatchProgress(clientTag: string): Promise<BatchProgress | null> {
+  try {
+    const res = await fetch(`${BASE}/api/external/onboarding-progress?clientTag=${encodeURIComponent(clientTag)}`, {
+      headers: { Authorization: `Bearer ${TOKEN}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json().catch(() => null)) as { progress?: BatchProgress | null } | null;
+    return j?.progress ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── The whitelisting-domains email ──────────────────────────────────────────
 // LeadSync writes and sends it (its 6:30 AM batch, its "send now"); the
 // checklist asks it for the same email and, when switched on, to send it now.

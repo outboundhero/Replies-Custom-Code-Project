@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, Check, FileClock, Loader2, Lock, Pencil, RefreshCw, Zap } from "lucide-react";
+import { AlertTriangle, Check, Circle, FileClock, Loader2, Lock, Minus, Pencil, RefreshCw, X, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -514,6 +514,30 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
 
   // A step done in batches reports each one here and is sent again until nothing is left.
   const [progress, setProgress] = useState<string[]>([]);
+  // The domains step works through LeadSync, a batch at a time: while it runs, LeadSync's own
+  // progress for the batch in hand is polled, so the screen shows what is happening (tagging,
+  // redirect, each campaign, …) instead of a bare "Running…".
+  const [live, setLive] = useState<LiveBatch | null>(null);
+  const liveRun = useRef<{ since: number; starts: string[] }>({ since: 0, starts: [] });
+  useEffect(() => {
+    if (!running || task.automation !== "allocate_domains") return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/onboarding/progress?taskId=${encodeURIComponent(task.id)}`, { cache: "no-store" });
+        const j = (await res.json().catch(() => null)) as { progress?: Omit<LiveBatch, "n"> | null } | null;
+        const p = j?.progress;
+        // Only this run's batches: LeadSync keeps the last one for an hour (2 minutes' leeway for clocks).
+        if (!alive || !p || Date.parse(p.startedAt) < liveRun.current.since - 120_000) return;
+        const starts = liveRun.current.starts;
+        if (!starts.includes(p.startedAt)) starts.push(p.startedAt);
+        setLive({ ...p, n: starts.indexOf(p.startedAt) + 1 });
+      } catch { /* the next tick tries again */ }
+    };
+    void tick();
+    const id = setInterval(tick, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, [running, task.id, task.automation]);
   const stop = useRef(false);
   const gone = useRef(false);
   // Leaving the page (or closing the dialog) stops a running loop after the request in flight.
@@ -525,6 +549,8 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
   async function runWith(p: Preview | null, values: Record<string, unknown>) {
     setRunning(true); setError(null);
     stop.current = false;
+    liveRun.current = { since: Date.now(), starts: [] };
+    setLive(null);
     // Exactly what's on screen is what runs: every value the preview showed (incl. hidden ones, like
     // which copy version it was), with what was typed on top — nothing is worked out again later.
     const approved = { ...Object.fromEntries((p?.inputs ?? []).map((i) => [i.key, i.value])), ...values };
@@ -575,16 +601,111 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
   }
 
   return {
-    preview, loading, running, error, canRun, drafts, setDrafts, focused, progress, setParam, commitText, run, waiting,
+    preview, loading, running, error, canRun, drafts, setDrafts, focused, progress, live, setParam, commitText, run, waiting,
     stopAfterBatch: () => { stop.current = true; },
     blocked: !preview || preview.blockers.length > 0,
   };
 }
 export type StepRun = ReturnType<typeof useStepRun>;
 
+/** LeadSync's progress for the batch in hand (lib/leadsync BatchProgress), and which batch of this run it is. */
+type LiveBatch = {
+  n: number; clientTag: string; instance: string; domains: string[]; startedAt: string; updatedAt: string;
+  phase: "running" | "checking" | "done" | "problems";
+  steps: { label: string; state: string; note?: string }[];
+  problems?: string[];
+};
+
+const INSTANCE_NAME: Record<string, string> = { outboundhero: "B2B #1", cleaningoutbound: "B2C #1", facilityreach: "B2B #2", outboundclean: "B2C #2" };
+
+/** LeadSync's runner step labels, said plainly. */
+function stepText(label: string): string {
+  let m: RegExpMatchArray | null;
+  if ((m = label.match(/^Tag (\d+) reserve domain\(s\) → (.+)$/))) return `Tag the ${m[1]} domain${m[1] === "1" ? "" : "s"} for ${m[2]}`;
+  if ((m = label.match(/^Set redirect → (.+)$/))) return m[1] === "(none)" ? "Redirect — no website to point at" : `Point their redirect at ${m[1]}`;
+  if ((m = label.match(/^Attach to "(.+)"$/))) return `Attach their inboxes to “${m[1]}”`;
+  if (/^Add to client domains sheet$/.test(label)) return "Add them to the client's sheet (Domains tab)";
+  if (/^Queue whitelist email/.test(label)) return "Queue the whitelisting email (LeadSync sends it at 6:30 AM PT)";
+  return label;
+}
+
+function StepIcon({ state }: { state: string }) {
+  // One fixed box, so every row's text starts at the same place whatever the icon.
+  const icon = state === "running" ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+    : state === "done" ? <Check className="h-3.5 w-3.5 text-green-600" />
+    : state === "failed" ? <X className="h-3.5 w-3.5 text-destructive" />
+    : state === "degraded" ? <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+    : state === "skipped" ? <Minus className="h-3.5 w-3.5 text-muted-foreground" />
+    : <Circle className="h-2.5 w-2.5 text-muted-foreground/50" />; // queued
+  return <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">{icon}</span>;
+}
+
+/** The runner's notes, said plainly ("+245" on an attach is the inboxes it attached). */
+const noteText = (note: string) => (/^\+\d+$/.test(note) ? `${note.slice(1)} inboxes` : note);
+
+const clock = (secs: number) => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+
+/** What LeadSync is doing for the batch in hand, step by step — so a run that takes minutes visibly moves. */
+function LiveBatchPanel({ live, running }: { live: LiveBatch | null; running: boolean }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+  // It opens below a long plan, and grows as the steps come in: bring its top into view once,
+  // when the run starts, so the whole list is on screen.
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => { box.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }, []);
+  const finished = live?.phase === "done" || live?.phase === "problems";
+  const secs = live ? Math.max(0, Math.round(((finished ? Date.parse(live.updatedAt) : now) - Date.parse(live.startedAt)) / 1000)) : 0;
+  const plural = (n: number) => (n === 1 ? "" : "s");
+  return (
+    <div ref={box} className="scroll-mt-6 rounded-lg border border-primary/25 bg-primary/[0.03] px-3 py-2.5 text-sm" aria-live="polite">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5 font-medium">
+          {!live || !finished
+            ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+            : live.phase === "problems" ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" /> : <Check className="h-3.5 w-3.5 shrink-0 text-green-600" />}
+          <span className="truncate">
+            {live ? `Batch ${live.n} · ${live.domains.length} domain${plural(live.domains.length)} on ${INSTANCE_NAME[live.instance] ?? live.instance}` : "Live from LeadSync"}
+          </span>
+        </div>
+        {live && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{clock(secs)}</span>}
+      </div>
+      {live && <div className="mt-0.5 truncate text-xs text-muted-foreground" title={live.domains.join(", ")}>{live.domains.join(", ")}</div>}
+      <ul className="mt-2 space-y-1">
+        {(!live || (live.steps.length === 0 && live.phase === "running")) && (
+          <li className="flex gap-1.5"><StepIcon state="running" />LeadSync is checking the plan and the client&apos;s campaigns before it starts…</li>
+        )}
+        {live?.steps.map((s, i) => (
+          <li key={i} className="flex gap-1.5">
+            <StepIcon state={s.state} />
+            <span>{stepText(s.label)}{s.note && <span className="text-muted-foreground"> — {noteText(s.note)}</span>}</span>
+          </li>
+        ))}
+        {live && live.phase !== "running" && (
+          <li className="flex gap-1.5">
+            <StepIcon state={live.phase === "checking" ? "running" : live.phase === "done" ? "done" : "failed"} />
+            Check every step went through, then set every sender to 3 a day
+          </li>
+        )}
+      </ul>
+      {live?.phase === "problems" && !!live.problems?.length && (
+        <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-destructive">{live.problems.map((p, i) => <li key={i}>{p}</li>)}</ul>
+      )}
+      {running && live?.phase === "done" && (
+        <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" /> Batch {live.n} is in — LeadSync is drawing up the next one…
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** What a step will do: its choices, the plan, the message / tables / notes, and what's in the way. */
 export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
-  const { preview, loading, running, drafts, setDrafts, focused, setParam, commitText, progress, error } = r;
+  const { preview, loading, running, drafts, setDrafts, focused, setParam, commitText, progress, live, error } = r;
   const fields = preview?.inputs.filter((i) => i.type !== "group" && i.type !== "hidden") ?? [];
   // Name / email pairs (CC 1, CC 2, …) sit two to a row so each pair stays together.
   const paired = fields.some((i) => /_name$/.test(i.key)) && fields.some((i) => /_email$/.test(i.key));
@@ -718,6 +839,8 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
           )}
         </div>
       )}
+
+      {task.automation === "allocate_domains" && (running || live?.phase === "problems") && <LiveBatchPanel live={live} running={running} />}
 
       {progress.length > 0 && (
         <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">

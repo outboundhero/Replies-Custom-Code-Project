@@ -787,6 +787,103 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   return { tag, tier, redirect, goLiveDate, plan, inputs, blockers, rows, notes, summary, sides };
 }
 
+/** LeadSync's refusal when the plan sent was behind (it checks before touching anything). */
+const STALE_PLAN = /not among the domains the plan would give|would go over the tier cap/i;
+const STALE = Symbol("stale plan");
+
+/**
+ * ONE batch. The plan may be the one kept from a few minutes ago (each new plan is a
+ * heavy read for LeadSync), unless `fresh`. That is safe: LeadSync rebuilds its own
+ * plan for every batch and refuses anything that no longer holds — which comes back
+ * as STALE, for the caller to ask again.
+ */
+async function allocationBatch(ctx: AutomationContext, fresh: boolean): Promise<RunOutcome | typeof STALE> {
+  const p = await planAllocation(ctx, fresh);
+  const group = ctx.client.group_num;
+  if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
+  if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — reload this step to see why." };
+  const total = (s: AllocationSidePlan) => `${s.label} ${s.cap}`;
+  const side = p.sides.find((s) => s.need > 0);
+  if (!side) {
+    await releaseLock(allocationLock(group), p.tag);
+    return { ok: true, summary: `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.` };
+  }
+
+  // One client per group at a time: two clients of a group draw on the same
+  // reserve, and LeadSync would offer both the same domains. The lock is kept
+  // from this client's first batch to its last (renewed by each batch).
+  const heldBy = await takeLock(allocationLock(group), p.tag, ALLOCATION_LOCK_MS);
+  if (heldBy) {
+    // The plan in hand will be out of date by the time the other client is done.
+    rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
+    return { ok: false, summary: groupBusy(group, heldBy) };
+  }
+
+  const domains = side.picking.slice(0, ALLOCATION_BATCH);
+  // The same go-live date the plan was made with: LeadSync rebuilds the plan with it and refuses any domain it wouldn't give.
+  const r = await runOnboardingAllocation({
+    clientTag: p.tag, group, tier: p.tier, goLiveDate: p.goLiveDate, instance: side.instance,
+    domains, redirectUrl: p.redirect, campaignIds: side.campaignIds, dailyLimit: DAILY_LIMIT,
+  });
+  // The group's reserve just changed: plans kept for its other clients would offer domains that are gone.
+  forgetAllocationPlans(group);
+  // Whatever went wrong, the kept plan is no longer trusted — the next try asks again.
+  if (!r.ok) {
+    rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
+    // A plain refusal means nothing was touched, so the group needn't wait for this
+    // client. No answer at all is different: the batch may be under way — keep the hold.
+    if (r.status !== 0) await releaseLock(allocationLock(group), p.tag);
+    if (r.status === 409 && STALE_PLAN.test(r.error)) return STALE;
+    return {
+      ok: false,
+      summary: r.status === 0
+        // No answer is not a "no": LeadSync may still be working through the batch.
+        ? `LeadSync didn't answer for ${side.label} (${r.error}) — it may still be working on this batch. Wait a few minutes, then reload this step: it shows what was added.`
+        : `LeadSync didn't take the batch for ${side.label}: ${leadsyncSays(r.error)}${r.status === 409 ? " Nothing was changed — run it again for a fresh plan." : ""}`,
+      result: { instance: side.instance, domains },
+    };
+  }
+  const res = r.result;
+  // "ok" from LeadSync is not enough: a step can be marked degraded, or a
+  // limit call can "succeed" on zero senders. Everything must have happened.
+  const bad = res.steps.filter((x) => x.state !== "done").map((x) => `${x.label}${x.note ? ` (${x.note})` : ""}${x.state === "done" ? "" : ` — ${x.state}`}`);
+  const limit = res.limit.error ? `daily limit: ${res.limit.error}`
+    : res.limit.failed ? `daily limit not set on ${res.limit.failed} sender(s)`
+    : !res.limit.updated ? "daily limit: no sender was updated" : "";
+  const count = res.added === domains.length ? "" : `${res.added} of ${domains.length} domains were added`;
+  if (!res.ok || bad.length || limit || count) {
+    rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
+    // LeadSync's own list (when it checks the batch itself) says more than the step states do.
+    const found = res.problems?.length ? res.problems : [count, ...bad, limit].filter(Boolean);
+    return {
+      ok: false,
+      summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${found.join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
+      result: { instance: side.instance, domains, leadsync: res },
+    };
+  }
+  const done = side.alreadyTagged + domains.length;
+  const more = p.sides.some((s) => (s === side ? s.need - domains.length : s.need) > 0);
+  // The plan, as it stands now: these domains are the client's, the rest are still to come.
+  rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, {
+    ...p.plan,
+    instances: p.plan.instances.map((s) => s.instance !== side.instance ? s : {
+      ...s, alreadyTagged: done, need: s.need - domains.length, reserveAvailable: s.reserveAvailable - domains.length,
+      ...(s.warming === undefined ? {} : { warming: s.warming - domains.filter((d) => d in (s.warmupLeftAtGoLive ?? {})).length }),
+      picking: s.picking.filter((d) => !domains.includes(d)),
+      ...(s.warmupLeftAtGoLive ? { warmupLeftAtGoLive: Object.fromEntries(Object.entries(s.warmupLeftAtGoLive).filter(([d]) => !domains.includes(d))) } : {}),
+      ...(s.surblListed ? { surblListed: s.surblListed.filter((d) => !domains.includes(d)) } : {}),
+    }),
+  });
+  if (!more) await releaseLock(allocationLock(group), p.tag);
+  return {
+    ok: true, more,
+    summary: more
+      ? `${side.label}: ${domains.length} more domains added — ${done} of ${side.cap}.`
+      : `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.`,
+    result: { instance: side.instance, domains, leadsync: res },
+  };
+}
+
 const allocateDomains: Automation = {
   async preview(ctx) {
     const p = await planAllocation(ctx);
@@ -813,92 +910,15 @@ const allocateDomains: Automation = {
   /** ONE batch. `more` tells the caller to run again; the step is Done when nothing is left. */
   async run(ctx) {
     if (!domainAllocationEnabled()) return { ok: false, summary: ALLOCATION_NOT_SWITCHED_ON };
-    // The plan may be the one kept from a few minutes ago (each new plan is a
-    // heavy read for LeadSync). That is safe: LeadSync rebuilds its own plan
-    // for every batch and refuses anything that no longer holds.
-    const p = await planAllocation(ctx);
-    const group = ctx.client.group_num;
-    if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
-    if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — reload this step to see why." };
-    const total = (s: AllocationSidePlan) => `${s.label} ${s.cap}`;
-    const side = p.sides.find((s) => s.need > 0);
-    if (!side) {
-      await releaseLock(allocationLock(group), p.tag);
-      return { ok: true, summary: `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.` };
-    }
-
-    // One client per group at a time: two clients of a group draw on the same
-    // reserve, and LeadSync would offer both the same domains. The lock is kept
-    // from this client's first batch to its last (renewed by each batch).
-    const heldBy = await takeLock(allocationLock(group), p.tag, ALLOCATION_LOCK_MS);
-    if (heldBy) {
-      // The plan in hand will be out of date by the time the other client is done.
-      rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
-      return { ok: false, summary: groupBusy(group, heldBy) };
-    }
-
-    const domains = side.picking.slice(0, ALLOCATION_BATCH);
-    // The same go-live date the plan was made with: LeadSync rebuilds the plan with it and refuses any domain it wouldn't give.
-    const r = await runOnboardingAllocation({
-      clientTag: p.tag, group, tier: p.tier, goLiveDate: p.goLiveDate, instance: side.instance,
-      domains, redirectUrl: p.redirect, campaignIds: side.campaignIds, dailyLimit: DAILY_LIMIT,
-    });
-    // The group's reserve just changed: plans kept for its other clients would offer domains that are gone.
-    forgetAllocationPlans(group);
-    // Whatever went wrong, the kept plan is no longer trusted — the next try asks again.
-    if (!r.ok) {
-      rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
-      // A plain refusal means nothing was touched, so the group needn't wait for this
-      // client. No answer at all is different: the batch may be under way — keep the hold.
-      if (r.status !== 0) await releaseLock(allocationLock(group), p.tag);
-      return {
-        ok: false,
-        summary: r.status === 0
-          // No answer is not a "no": LeadSync may still be working through the batch.
-          ? `LeadSync didn't answer for ${side.label} (${r.error}) — it may still be working on this batch. Wait a few minutes, then reload this step: it shows what was added.`
-          : `LeadSync didn't take the batch for ${side.label}: ${leadsyncSays(r.error)}${r.status === 409 ? " Nothing was changed — run it again for a fresh plan." : ""}`,
-        result: { instance: side.instance, domains },
-      };
-    }
-    const res = r.result;
-    // "ok" from LeadSync is not enough: a step can be marked degraded, or a
-    // limit call can "succeed" on zero senders. Everything must have happened.
-    const bad = res.steps.filter((x) => x.state !== "done").map((x) => `${x.label}${x.note ? ` (${x.note})` : ""}${x.state === "done" ? "" : ` — ${x.state}`}`);
-    const limit = res.limit.error ? `daily limit: ${res.limit.error}`
-      : res.limit.failed ? `daily limit not set on ${res.limit.failed} sender(s)`
-      : !res.limit.updated ? "daily limit: no sender was updated" : "";
-    const count = res.added === domains.length ? "" : `${res.added} of ${domains.length} domains were added`;
-    if (!res.ok || bad.length || limit || count) {
-      rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, null);
-      // LeadSync's own list (when it checks the batch itself) says more than the step states do.
-      const found = res.problems?.length ? res.problems : [count, ...bad, limit].filter(Boolean);
-      return {
-        ok: false,
-        summary: `${side.label}: ${domains.length} domains were handed to LeadSync but not everything went through — ${found.join("; ") || "see LeadSync"}. Look at LeadSync's Replacement page before running again.`,
-        result: { instance: side.instance, domains, leadsync: res },
-      };
-    }
-    const done = side.alreadyTagged + domains.length;
-    const more = p.sides.some((s) => (s === side ? s.need - domains.length : s.need) > 0);
-    // The plan, as it stands now: these domains are the client's, the rest are still to come.
-    rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, {
-      ...p.plan,
-      instances: p.plan.instances.map((s) => s.instance !== side.instance ? s : {
-        ...s, alreadyTagged: done, need: s.need - domains.length, reserveAvailable: s.reserveAvailable - domains.length,
-        ...(s.warming === undefined ? {} : { warming: s.warming - domains.filter((d) => d in (s.warmupLeftAtGoLive ?? {})).length }),
-        picking: s.picking.filter((d) => !domains.includes(d)),
-        ...(s.warmupLeftAtGoLive ? { warmupLeftAtGoLive: Object.fromEntries(Object.entries(s.warmupLeftAtGoLive).filter(([d]) => !domains.includes(d))) } : {}),
-        ...(s.surblListed ? { surblListed: s.surblListed.filter((d) => !domains.includes(d)) } : {}),
-      }),
-    });
-    if (!more) await releaseLock(allocationLock(group), p.tag);
-    return {
-      ok: true, more,
-      summary: more
-        ? `${side.label}: ${domains.length} more domains added — ${done} of ${side.cap}.`
-        : `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.`,
-      result: { instance: side.instance, domains, leadsync: res },
-    };
+    const outcome = await allocationBatch(ctx, false);
+    if (outcome !== STALE) return outcome;
+    // The kept plan lives in one server copy's memory, and the next batch can land on a copy
+    // whose plan is a batch behind (CVJNWO, 2026-10-19: batch 4 was sent batch 3's domains).
+    // LeadSync refused before touching anything — ask it for the plan as it stands, once.
+    const again = await allocationBatch(ctx, true);
+    return again === STALE
+      ? { ok: false, summary: "LeadSync's reserve changed while this batch was on its way — nothing was changed. Run it again." }
+      : again;
   },
 };
 
