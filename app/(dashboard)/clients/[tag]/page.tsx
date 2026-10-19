@@ -176,6 +176,7 @@ export default function ClientProfilePage() {
         <aside className="min-w-0 space-y-6">
           {p.admin && <CampaignSetupCard p={p} liveTz={liveTz} onSaved={load} />}
           <DetailsCard p={p} company={company} />
+          {p.admin && p.exists && <FirstLeadCard tag={p.storedTag ?? p.tag} />}
           {p.admin && p.onboarding && <OnboardingCard p={p} />}
           {p.exists && <RemoveCard p={p} />}
         </aside>
@@ -762,6 +763,100 @@ function CampaignsCard({ data }: { data: CampaignsData | null | "failed" }) {
           )}
         </div>
       )}
+    </Card>
+  );
+}
+
+// ─────────────────────────── first lead email ───────────────────────────
+
+type FirstLead = {
+  status: string; reason: string | null; lead_email: string | null; first_name: string | null; sheet_url: string | null;
+  to: string[]; bcc: string[]; sent_at: string | null; sent_by: string | null; attempts: number; detected_at: string; updated_at: string;
+} | null;
+const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+
+/** "Important: First Set of Leads - Instructions" — sent from madison@ when the client's first lead reaches its sheet. */
+function FirstLeadCard({ tag }: { tag: string }) {
+  const [d, setD] = useState<{ record: FirstLead; switchedOn: boolean; testRecipients: string[] } | null>(null);
+  const [testTo, setTestTo] = useState("");
+  const [busy, setBusy] = useState<"test" | "send" | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const load = useCallback(() => {
+    fetch(`/api/first-lead-email?tag=${encodeURIComponent(tag)}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => { if (j.ok) { setD(j); setTestTo((t) => t || j.testRecipients[0] || ""); } })
+      .catch(() => {});
+  }, [tag]);
+  useEffect(() => { load(); }, [load]);
+
+  async function sendTest() {
+    setBusy("test");
+    const r = await fetch("/api/first-lead-email", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "test", tag, to: testTo }) });
+    const j = await r.json().catch(() => ({}));
+    setBusy(null);
+    if (j.ok) toast.success(`Test sent to ${testTo}. The real one goes to ${j.to?.length ? j.to.join(", ") : "nobody yet — no CC contacts"}.`);
+    else toast.error(j.error || "The test didn't send.");
+  }
+  async function sendNow() {
+    setBusy("send");
+    const r = await post("/api/first-lead-email", { action: "send", tag });
+    setBusy(null); setConfirm(false);
+    if (r.ok) toast.success(`Sent to ${tag}.`); else toast.error(r.error || "It didn't send.");
+    load();
+  }
+
+  const rec = d?.record ?? null;
+  const st = rec?.status ?? "waiting";
+  const head: Record<string, { tone: ChipTone; label: string }> = {
+    waiting: { tone: "muted", label: "Waiting for the first lead" },
+    checking: { tone: "sky", label: "Checking…" },
+    existing: { tone: "muted", label: "Not needed — already had leads" },
+    dry: { tone: "amber", label: "Would have sent — sending is off" },
+    sending: { tone: "sky", label: "Sending…" },
+    sent: { tone: "green", label: `Sent ${when(rec?.sent_at ?? null)}` },
+    failed: { tone: "red", label: `Didn't send — retrying (${rec?.attempts ?? 0} of 3 tries)` },
+    unsure: { tone: "amber", label: "Unclear whether it went out" },
+    skipped: { tone: "amber", label: "Not sent" },
+  };
+  const h = head[st] ?? head.waiting;
+  const canSendNow = !!d?.switchedOn && ["dry", "skipped", "failed", "unsure"].includes(st);
+
+  return (
+    <Card icon={<Mail className="size-4" />} title="First lead email" sub="Sent from madison@ the moment the first lead reaches its sheet">
+      {!d ? <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Loading…</div> : (
+        <div className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-center gap-2"><Chip tone={h.tone}>{h.label}</Chip></div>
+          {st === "waiting" && <p className="text-xs text-muted-foreground">“Important: First Set of Leads - Instructions” goes to the client automatically when their first lead is pushed to their lead tracking sheet.</p>}
+          {rec?.lead_email && <Row label="First lead">{rec.lead_email}</Row>}
+          {rec && rec.to.length > 0 && <Row label={st === "sent" ? "Sent to" : "Goes to"}><span className="break-words">{rec.to.join(", ")}</span>{rec.bcc.length > 0 && <div className="text-xs text-muted-foreground">BCC {rec.bcc.join(", ")}</div>}</Row>}
+          {st === "sent" && rec?.sent_by && rec.sent_by !== "auto" && <Row label="Sent by">{rec.sent_by === "retry" ? "Automatic retry" : rec.sent_by}</Row>}
+          {rec?.reason && <p className={cn("rounded-lg px-3 py-2 text-xs", st === "failed" ? "bg-destructive/5 text-destructive" : "bg-muted/60 text-muted-foreground")}>{rec.reason}</p>}
+          {!d.switchedOn && st !== "existing" && st !== "sent" && <p className="text-xs text-muted-foreground">Sending to clients is switched off until <span className="font-mono">FIRST_LEAD_EMAIL_SEND=1</span> is set in Vercel. Tests still work.</p>}
+          <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+            <Select value={testTo} onValueChange={setTestTo}>
+              <SelectTrigger className="h-8 w-auto min-w-0 text-xs" aria-label="Test address"><SelectValue /></SelectTrigger>
+              <SelectContent>{d.testRecipients.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+            </Select>
+            <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs" disabled={!testTo || !!busy} onClick={sendTest}>{busy === "test" ? <Loader2 className="size-3.5 animate-spin" /> : <Mail className="size-3.5" />}Send me a test</Button>
+            {canSendNow && <Button size="sm" className="ml-auto h-8 text-xs" disabled={!!busy} onClick={() => setConfirm(true)}>Send now</Button>}
+          </div>
+        </div>
+      )}
+      <Dialog open={confirm} onOpenChange={(o) => { if (!busy) setConfirm(o); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Send the first lead email to {tag}?</DialogTitle>
+            <DialogDescription>
+              “Important: First Set of Leads - Instructions” goes from madison@outboundhero.co to {tag}&apos;s CC contacts{rec?.to.length ? ` (${rec.to.join(", ")})` : ""}{rec?.bcc.length ? `, BCC ${rec.bcc.join(", ")}` : ""}. It can only be sent once.
+              {st === "unsure" ? " Check Madison's Sent folder first — it may already have gone out." : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirm(false)} disabled={!!busy}>Cancel</Button>
+            <Button onClick={sendNow} disabled={!!busy}>{busy === "send" && <Loader2 className="animate-spin" />}Send it</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

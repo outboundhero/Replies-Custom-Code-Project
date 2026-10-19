@@ -15,6 +15,7 @@ import { recordSheetPushFailure, clearSheetPushFailure } from "@/lib/sheet-push-
 import { resolveLeadPhones, phonesForSheet } from "@/lib/processing/resolve-phones";
 import { loadClientContactEmails } from "@/lib/processing/cc-bcc-match";
 import { getReplySheetOverride } from "@/lib/sheet-override";
+import { onLeadPushedToSheet } from "@/lib/first-lead-email";
 
 // Split a raw address cell ("a@x.com, b@y.com; c@z.com") into lowercased emails.
 function splitEmails(raw: unknown): string[] {
@@ -152,6 +153,8 @@ export async function pushReplyToSheet(replyId: number, opts?: { reply?: Reply; 
       } catch { /* sheet_row/sheet_id columns not migrated yet */ }
     }
     await clearSheetPushFailure(replyId);
+    // A client's very first lead → the "First Set of Leads" email (checked once per client, after the response).
+    await onLeadPushedToSheet(clientTag, replyId);
     return { ok: true };
   }
 
