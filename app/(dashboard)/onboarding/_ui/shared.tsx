@@ -430,6 +430,8 @@ type Preview = {
   title: string; lines: string[]; message?: string; inputs: PreviewInput[]; blockers: string[];
   tables?: { title: string; columns: string[]; rows: string[][] }[];
   notes?: { title: string; text: string }[];
+  /** When set, the run is asked first: this title and these lines, then the confirm button. */
+  confirm?: { title: string; lines: string[]; confirmLabel: string };
 };
 
 async function postRun(taskId: string, mode: "preview" | "run", params: Record<string, unknown>) {
@@ -518,6 +520,8 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
   // progress for the batch in hand is polled, so the screen shows what is happening (tagging,
   // redirect, each campaign, …) instead of a bare "Running…".
   const [live, setLive] = useState<LiveBatch | null>(null);
+  // A preview that carries a `confirm` is asked about before it runs (the exact preview and choices it was for).
+  const [confirming, setConfirming] = useState<{ p: Preview; s: Record<string, unknown> } | null>(null);
   const liveRun = useRef<{ since: number; starts: string[] }>({ since: 0, starts: [] });
   useEffect(() => {
     if (!running || task.automation !== "allocate_domains") return;
@@ -593,10 +597,11 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
       setRunning(false);
     }
   }
-  runNext.current = (p, s) => { void runWith(p, s); };
+  runNext.current = (p, s) => { if (p.confirm) setConfirming({ p, s }); else void runWith(p, s); };
   function run() {
     // A preview is being refreshed (a field was just left): run once it's in.
     if (loading) { queued.current = true; setWaiting(true); return; }
+    if (preview?.confirm) { setConfirming({ p: preview, s: shown }); return; }
     void runWith(preview, shown);
   }
 
@@ -604,6 +609,9 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
     preview, loading, running, error, canRun, drafts, setDrafts, focused, progress, live, setParam, commitText, run, waiting,
     stopAfterBatch: () => { stop.current = true; },
     blocked: !preview || preview.blockers.length > 0,
+    confirming: confirming?.p.confirm ?? null,
+    confirmRun: () => { const c = confirming; setConfirming(null); if (c) void runWith(c.p, c.s); },
+    cancelConfirm: () => setConfirming(null),
   };
 }
 export type StepRun = ReturnType<typeof useStepRun>;
@@ -856,6 +864,24 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span>
         </div>
       )}
+
+      <Dialog open={!!r.confirming} onOpenChange={(open) => { if (!open) r.cancelConfirm(); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-600" />{r.confirming?.title}</DialogTitle>
+            <DialogDescription>Nothing has changed yet — check this, then confirm.</DialogDescription>
+          </DialogHeader>
+          <ul className="space-y-2 text-sm">
+            {r.confirming?.lines.map((line, i) => (
+              <li key={i} className="flex gap-2"><span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-primary/70" />{line}</li>
+            ))}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" onClick={r.cancelConfirm}>Cancel</Button>
+            <Button onClick={r.confirmRun} className="gap-1.5"><Zap className="h-4 w-4" />{r.confirming?.confirmLabel}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

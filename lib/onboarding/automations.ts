@@ -61,6 +61,8 @@ export interface AutomationPreview {
   tables?: PreviewTable[];
   /** Longer text shown as written (e.g. the copy lines that change). */
   notes?: PreviewNote[];
+  /** When set, "Approve & run" first asks this, with these lines, before anything happens. */
+  confirm?: { title: string; lines: string[]; confirmLabel: string };
 }
 export interface RunOutcome {
   ok: boolean; summary: string; result?: unknown;
@@ -647,6 +649,8 @@ interface AllocationPlanView {
   /** Where it came from, and whether it has already passed (then it counts as today). */
   goLiveFrom: "tracker" | "typed" | null;
   goLivePassed: boolean;
+  /** Warm-up counted from today instead of the go-live date (goLiveDate is then today). */
+  fromToday: boolean;
   /** LeadSync's plan as received (null when it couldn't be had). */
   plan: AllocationPlan | null;
   inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[];
@@ -670,12 +674,28 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   const goLiveDate = goLiveIso(goLiveText);
   const goLiveFrom: AllocationPlanView["goLiveFrom"] = !goLiveDate ? null
     : typedGoLive !== undefined && goLiveDate !== goLiveIso(goLiveRaw) ? "typed" : "tracker";
-  const todayPt = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
-  const goLiveDays = goLiveDate ? Math.round((Date.parse(goLiveDate) - Date.parse(todayPt)) / 86_400_000) : null;
+  // Or counted from today, whatever the go-live date (OutboundHero 2026-10-20: "one button that adds
+  // domains that has 0-4 days left in warmup without checking the go live date"). Today is LeadSync's
+  // own day (pstDateString, UTC-8), so the two never disagree about which day it is.
+  const fromToday = ctx.params.warmup_from === "today";
+  const todayPst = new Date(Date.now() - 8 * 3_600_000).toISOString().slice(0, 10);
+  const goLiveDays = goLiveDate ? Math.round((Date.parse(goLiveDate) - Date.parse(todayPst)) / 86_400_000) : null;
   const goLivePassed = goLiveDays !== null && goLiveDays < 0;
+  /** The day LeadSync counts the 4 days from (null = fully warmed only). */
+  const windowDate = fromToday ? todayPst : goLiveDate;
+  const warmupInput: AutomationInput = {
+    key: "warmup_from", label: "Warm-up counted from", type: "select", value: fromToday ? "today" : "go_live",
+    options: [
+      { value: "go_live", label: "The go-live date — up to 4 days left on go-live" },
+      { value: "today", label: "Today — up to 4 days left today (go-live date not used)" },
+    ],
+    hint: fromToday
+      ? "Only domains fully warmed or within 4 days of it today, whatever the go-live date. You'll be asked to confirm before it runs."
+      : "Domains that will have at most 4 warm-up days left on the go-live date.",
+  };
   const goLiveInput: AutomationInput = {
     key: "go_live", label: "Go-live date", type: "text", value: goLiveText, placeholder: "e.g. 10/23/2026",
-    hint: [
+    hint: fromToday ? "Not used — warm-up is counted from today (the choice above)." : [
       typedGoLive !== undefined && typedGoLive !== goLiveRaw && goLiveDate !== goLiveIso(goLiveRaw)
         ? `Typed here — the Client Tracker has ${goLiveRaw || "none"}.`
         : goLiveRaw ? "From the Client Tracker's Go Live Date." : "The Client Tracker has no Go Live Date.",
@@ -685,7 +705,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
     ].filter(Boolean).join(" "),
   };
   // Typed but not a date is a stop; the Tracker's own unreadable cell just means "no date", as before.
-  if (typedGoLive && !goLiveDate && typedGoLive !== goLiveRaw) blockers.push(`“${typedGoLive}” isn't a date — write the go-live date like 10/23/2026.`);
+  if (!fromToday && typedGoLive && !goLiveDate && typedGoLive !== goLiveRaw) blockers.push(`“${typedGoLive}” isn't a date — write the go-live date like 10/23/2026.`);
 
   // Redirect = the website LeadSync has for the client (it keeps the domains pointed there), else
   // the client's website on the onboarding form; what is typed here wins.
@@ -703,6 +723,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
     { key: "tier", label: "Tier", type: "select", value: tier ?? "",
       options: [{ value: "0.5", label: "Tier 0.5 · 20 B2B + 5 B2C" }, { value: "1", label: "Tier 1 · 20 B2B + 5 B2C" }, { value: "2", label: "Tier 2 · 40 B2B + 10 B2C" }],
       hint: c.plan_type ? `The client's plan here: ${c.plan_type}` : "No plan on the client — left empty, LeadSync uses the Client Tracker's tier." },
+    warmupInput,
     goLiveInput,
     redirectInput,
   ];
@@ -721,7 +742,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
     blockers.push(groupBusy(c.group_num, busyFor));
     summary = `Group ${c.group_num}'s reserve is in use for ${busyFor} — this client's plan is drawn up once that has finished.`;
   } else {
-    const r = await previewOnboardingAllocation(tag, c.group_num, tier, fresh, goLiveDate);
+    const r = await previewOnboardingAllocation(tag, c.group_num, tier, fresh, windowDate);
     if (!r.ok) {
       blockers.push(`Couldn't get the plan from LeadSync: ${r.error}`);
     } else {
@@ -745,7 +766,9 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
       }
       summary = `LeadSync's plan for ${tag} at Tier ${p.tier} (tier from ${p.tierSource === "request" ? "the choice above" : `the ${p.tierSource}`}), as of ${fmtDate(p.generatedFor)}.`;
       const w = p.warmup;
-      if (!goLiveDate) {
+      if (fromToday) {
+        notes.push({ title: "Warm-up counted from today — the go-live date isn't used", text: `Only domains that are fully warmed, or will be within 4 days from today, are offered${goLiveDate ? ` (${tag}'s go-live date, ${fullDate(goLiveDate)}, is left out of it)` : ""}. Each one below shows its warm-up days left today. Running it asks you to confirm first.` });
+      } else if (!goLiveDate) {
         notes.push({ title: "Only fully warmed domains are offered", text: goLiveText
           ? `The go-live date (“${goLiveText}”) isn't a date this can read, so only domains past their 21-day warm-up are offered. Put the date in the Go-live date field above.`
           : `${tag} has no go-live date, so only domains past their 21-day warm-up are offered. Put it in the Go-live date field above to also get domains with up to 4 warm-up days left on that day.` });
@@ -808,7 +831,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
           const surbl = new Set(s.surblListed ?? []);
           notes.push({
             title: `${s.label} — the ${s.picking.length} domain${s.picking.length === 1 ? "" : "s"} it would give${warm ? ` (${warm} still warming)` : ""}${surbl.size ? ` · ${surbl.size} on SURBL` : ""}`,
-            text: s.picking.map((d) => (d in left ? `${d} — ${left[d] === 0 ? "warmed up by" : `${left[d]} warm-up day${left[d] === 1 ? "" : "s"} left`} ${goLivePassed ? "today" : `${left[d] === 0 ? "" : "on "}go-live, ${fmtDate(w?.goLiveDate ?? goLiveDate)}`}` : d)
+            text: s.picking.map((d) => (d in left ? `${d} — ${left[d] === 0 ? "warmed up by" : `${left[d]} warm-up day${left[d] === 1 ? "" : "s"} left`} ${goLivePassed || fromToday ? "today" : `${left[d] === 0 ? "" : "on "}go-live, ${fmtDate(w?.goLiveDate ?? goLiveDate)}`}` : d)
               + (surbl.has(d) ? " — on SURBL (no clean domain left)" : "")).join("\n"),
           });
         }
@@ -817,7 +840,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
   }
   // While another client holds the group, LeadSync wasn't asked — its website isn't known yet, so no verdict on it.
   if (!redirect && !(busyFor && busyFor !== tag)) blockers.unshift(redirectRaw ? `“${redirectRaw}” isn't a web address the domains can redirect to.` : "There is no website to redirect the domains to.");
-  return { tag, tier, redirect, goLiveDate, goLiveFrom, goLivePassed, plan, inputs, blockers, rows, notes, summary, sides };
+  return { tag, tier, redirect, goLiveDate: windowDate, goLiveFrom, goLivePassed, fromToday, plan, inputs, blockers, rows, notes, summary, sides };
 }
 
 /** LeadSync's refusal when the plan sent was behind (it checks before touching anything). */
@@ -917,6 +940,28 @@ async function allocationBatch(ctx: AutomationContext, fresh: boolean): Promise<
   };
 }
 
+/** What "Approve & run" asks before a run that counts the warm-up from today. */
+function allocationConfirm(p: AllocationPlanView): NonNullable<AutomationPreview["confirm"]> {
+  const giving = p.sides.filter((s) => s.need > 0 && s.picking.length > 0);
+  const total = giving.reduce((n, s) => n + s.picking.length, 0);
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  return {
+    title: `Add ${plural(total, "domain")} to ${p.tag}, counting warm-up from today?`,
+    lines: [
+      ...giving.map((s) => {
+        const left = s.warmupLeftAtGoLive ?? {};
+        const warming = s.picking.filter((d) => d in left);
+        const most = warming.length ? Math.max(...warming.map((d) => left[d])) : 0;
+        const surbl = (s.surblListed ?? []).length;
+        return `${s.label}: ${plural(s.picking.length, "domain")} — ${warming.length ? `${warming.length} still warming, at most ${plural(most, "day")} left today` : "all fully warmed"}${surbl ? `, ${surbl} on SURBL` : ""}.`;
+      }),
+      `The go-live date isn't used — every domain is within 4 days of fully warmed today.`,
+      `LeadSync tags them for ${p.tag}, points their redirect at ${p.redirect}, attaches them to ${p.tag}'s campaigns, adds them to the client's sheet, queues the whitelisting email (6:30 AM PT) and sets every sender to ${DAILY_LIMIT} a day — ${ALLOCATION_BATCH} domains at a time.`,
+    ],
+    confirmLabel: `Yes, add ${plural(total, "domain")}`,
+  };
+}
+
 const allocateDomains: Automation = {
   async preview(ctx) {
     const p = await planAllocation(ctx);
@@ -929,7 +974,9 @@ const allocateDomains: Automation = {
         p.summary,
         `LeadSync only gives domains that no client it knows is using, ${!w?.applied || !w.goLiveDate
           ? "that are at least 21 days old"
-          : p.goLivePassed
+          : p.fromToday
+            ? "that are past their 21-day warm-up or within 4 days of it today — counted from today, not the go-live date — fully warmed ones first"
+            : p.goLivePassed
             ? `that are past their 21-day warm-up or within 4 days of it today (${p.tag}'s go-live date, ${fullDate(w.goLiveDate)}, has passed) — fully warmed ones first`
             : `that are past their 21-day warm-up or will have at most 4 days of it left on ${p.tag}'s go-live (${fullDate(w.goLiveDate)}, ${p.goLiveFrom === "typed" ? "as entered above" : "from the Client Tracker"}) — fully warmed ones first`}, not marked Burnt and not on Spamhaus's list — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.`,
         `Running it has LeadSync tag those domains for ${p.tag}, point their redirect at ${p.redirect || "the client's website"}, attach them to ${p.tag}'s campaigns, add them to the client's sheet, queue the whitelist email (6:30 AM PT) and set every sender to ${DAILY_LIMIT} a day.`,
@@ -939,6 +986,8 @@ const allocateDomains: Automation = {
       blockers: p.blockers,
       tables: p.rows.length ? [{ title: "Domains by instance", columns: ["Instance", "Tier gets", "Already tagged", "To add", "Ready in reserve", "Short", "Attaches to"], rows: p.rows }] : [],
       notes: p.notes,
+      // Counting the warm-up from today sets the go-live date aside, so the run asks first, with the gist.
+      ...(p.fromToday && !p.blockers.length && p.sides.some((s) => s.need > 0 && s.picking.length > 0) ? { confirm: allocationConfirm(p) } : {}),
     };
   },
 
