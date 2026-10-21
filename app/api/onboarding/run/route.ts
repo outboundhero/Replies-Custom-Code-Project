@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
     } else {
       await logError("onboarding", `run:${task.automation}`, outcome.summary, { client_tag: task.client_tag, by: ctx.by });
     }
-    return NextResponse.json({ ok: outcome.ok, more: outcome.ok && !!outcome.more, summary: outcome.summary, error: outcome.ok ? undefined : outcome.summary });
+    return NextResponse.json({ ok: outcome.ok, more: outcome.ok && !!outcome.more, pending: outcome.ok && !!outcome.pending, summary: outcome.summary, error: outcome.ok ? undefined : outcome.summary });
   } catch (e) {
     console.error("[api/onboarding/run]", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

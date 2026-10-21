@@ -439,7 +439,7 @@ async function postRun(taskId: string, mode: "preview" | "run", params: Record<s
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ taskId, mode, params }),
   });
   if (res.status === 401) { window.location.href = "/login"; }
-  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; more?: boolean; preview?: Preview; runnable?: boolean; summary?: string; error?: string };
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; more?: boolean; pending?: boolean; preview?: Preview; runnable?: boolean; summary?: string; error?: string };
   return { status: res.status, data };
 }
 
@@ -450,7 +450,8 @@ const isTyped = (i: PreviewInput) => i.type === "text" || i.type === "textarea";
  * page: loads the preview, re-previews on every change, runs (in batches when
  * the step works in batches) and reports back.
  */
-export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () => void; onSuccess: (summary: string) => void }) {
+/** `onSuccess(summary, open)`: open = it did all it can for now but the step stays open (e.g. too few domains ready). */
+export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () => void; onSuccess: (summary: string, open?: boolean) => void }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [params, setParams] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
@@ -572,7 +573,7 @@ export function useStepRun(task: OnbTask, { onDone, onSuccess }: { onDone: () =>
           if (!gone.current) showFailure(same ? "Can't run yet — see what's in the way." : msg);
           break;
         }
-        if (!data.more) { onSuccess(data.summary || "Done"); return; }
+        if (!data.more) { onSuccess(data.summary || "Done", !!data.pending); return; }
         batches++;
         setProgress((pr) => [...pr, data.summary || "A batch went through."]);
         if (stop.current) {
@@ -894,7 +895,7 @@ export function StepRunBody({ task, r }: { task: OnbTask; r: StepRun }) {
 export function RunDialog({ task, clientLabel, onClose, onDone }: {
   task: OnbTask; clientLabel: string; onClose: () => void; onDone: () => void;
 }) {
-  const r = useStepRun(task, { onDone, onSuccess: (summary) => { toast.success(summary); onClose(); } });
+  const r = useStepRun(task, { onDone, onSuccess: (summary, open) => { if (open) toast.warning(summary, { duration: 15_000 }); else toast.success(summary); onClose(); } });
   const wide = !!r.preview?.tables?.length || !!r.preview?.inputs.some((i) => i.type === "textarea");
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !r.running) onClose(); }}>

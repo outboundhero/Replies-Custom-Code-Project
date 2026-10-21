@@ -1103,7 +1103,7 @@ export async function runResults(taskId: string, limit = 60): Promise<Record<str
  */
 export async function finishRun(
   runId: string, task: OnboardingTaskRow, by: string | null,
-  outcome: { ok: boolean; summary: string; result?: unknown; more?: boolean },
+  outcome: { ok: boolean; summary: string; result?: unknown; more?: boolean; pending?: boolean },
 ): Promise<void> {
   const now = nowIso();
   const last: LastRun = { at: now, by, ok: outcome.ok, summary: outcome.summary.slice(0, 500) };
@@ -1111,11 +1111,11 @@ export async function finishRun(
     [
       { sql: "UPDATE onboarding_task_run SET finished_at=?, ok=?, result=?, error=? WHERE id=?",
         args: [now, outcome.ok ? 1 : 0, JSON.stringify(outcome.result ?? null), outcome.ok ? null : outcome.summary.slice(0, 1000), runId] },
-      outcome.ok && !outcome.more
+      outcome.ok && !outcome.more && !outcome.pending
         ? { sql: "UPDATE onboarding_task SET status='completed', completed_at=?, completed_by=?, last_run=?, updated_at=? WHERE id=?",
             args: [now, by, JSON.stringify(last), now, task.id] }
         : outcome.ok
-          // A batch went through and more remain: the step is under way, not Done.
+          // A batch went through and more remain (or it did all it can for now): under way, not Done.
           ? { sql: "UPDATE onboarding_task SET status='in_progress', last_run=?, updated_at=? WHERE id=?",
               args: [JSON.stringify(last), now, task.id] }
           : { sql: "UPDATE onboarding_task SET last_run=?, updated_at=? WHERE id=?",

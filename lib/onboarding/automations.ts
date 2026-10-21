@@ -68,6 +68,8 @@ export interface RunOutcome {
   ok: boolean; summary: string; result?: unknown;
   /** A batch went through and there is more to do — the caller runs again; the step isn't Done yet. */
   more?: boolean;
+  /** It did all it can for now but the step isn't finished (e.g. too few domains ready) — it stays open, to run again later. */
+  pending?: boolean;
 }
 export interface AutomationContext {
   client: OnboardingClientRow;
@@ -820,7 +822,15 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
         sides.push({ ...s, campaignIds });
         const warming = s.warming ?? 0;
         rows.push([s.label, String(s.cap), String(s.alreadyTagged), String(s.need), `${s.reserveAvailable}${warming ? ` (${warming} still warming)` : ""}`, s.short ? String(s.short) : "—", campaignIds.length ? `${campaignIds.length} campaigns` : "—"]);
-        if (s.short > 0) blockers.push(`${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready in the reserve${warming ? ` (${warming} of them still warming)` : ""}.`);
+        // Short: what's ready is added now and the step stays open for the rest — the run asks first.
+        if (s.short > 0) {
+          notes.push({
+            title: `${s.label}: ${s.short} domain${s.short === 1 ? "" : "s"} short — ${s.need} needed, ${s.reserveAvailable} ready${warming ? ` (${warming} still warming)` : ""}`,
+            text: s.picking.length
+              ? `Running adds the ${s.picking.length} that ${s.picking.length === 1 ? "is" : "are"} ready now and leaves this step open with ${s.short} still to add — run it again when more domains are ready.`
+              : `None is ready on ${s.label} right now, so nothing is added there; the step stays open until more domains are ready.`,
+          });
+        }
         // LeadSync's note is why its OWN automatic top-up leaves this client alone (it does that for
         // every client that isn't sending yet) — true of any new client, so it is shown, not a stop.
         if (s.note) notes.push({ title: `${s.label} — LeadSync's automatic top-up skips ${tag} for now`, text: `Its reason: “${s.note}”. That is about its own top-ups; this step allocates the first domains regardless.` });
@@ -859,9 +869,12 @@ async function allocationBatch(ctx: AutomationContext, fresh: boolean): Promise<
   if (p.blockers.length) return { ok: false, summary: p.blockers.join(" ") };
   if (!group || !p.plan || !p.sides.length) return { ok: false, summary: "LeadSync returned no plan — reload this step to see why." };
   const total = (s: AllocationSidePlan) => `${s.label} ${s.cap}`;
-  const side = p.sides.find((s) => s.need > 0);
+  const side = p.sides.find((s) => s.need > 0 && s.picking.length > 0);
   if (!side) {
     await releaseLock(allocationLock(group), p.tag);
+    const short = p.sides.filter((s) => s.need > 0);
+    // Some still to add but none ready: nothing to do now — the step stays open.
+    if (short.length) return { ok: true, pending: true, summary: `${shortText(p.tag, short)} None is ready in the reserve right now — run this step again when more domains are ready.` };
     return { ok: true, summary: `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.` };
   }
 
@@ -918,7 +931,13 @@ async function allocationBatch(ctx: AutomationContext, fresh: boolean): Promise<
     };
   }
   const done = side.alreadyTagged + domains.length;
-  const more = p.sides.some((s) => (s === side ? s.need - domains.length : s.need) > 0);
+  // After this batch: what each side still needs, and what's still ready to give it.
+  const after = p.sides.map((s) => s === side
+    ? { ...s, alreadyTagged: done, need: s.need - domains.length, picking: s.picking.filter((d) => !domains.includes(d)) }
+    : s);
+  const more = after.some((s) => s.need > 0 && s.picking.length > 0);
+  // Nothing left that can be added now, but domains still to add: the step stays open.
+  const pending = !more && after.some((s) => s.need > 0);
   // The plan, as it stands now: these domains are the client's, the rest are still to come.
   rememberAllocationPlan(p.tag, group, p.tier, p.goLiveDate, {
     ...p.plan,
@@ -932,30 +951,44 @@ async function allocationBatch(ctx: AutomationContext, fresh: boolean): Promise<
   });
   if (!more) await releaseLock(allocationLock(group), p.tag);
   return {
-    ok: true, more,
+    ok: true, more, pending,
     summary: more
       ? `${side.label}: ${domains.length} more domains added — ${done} of ${side.cap}.`
-      : `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.`,
+      : pending
+        ? `${side.label}: ${domains.length} more domains added — ${done} of ${side.cap}. ${shortText(p.tag, after.filter((s) => s.need > 0))} This step stays open — run it again when more domains are ready.`
+        : `All of ${p.tag}'s domains are allocated — ${p.sides.map(total).join(", ")}.`,
     result: { instance: side.instance, domains, leadsync: res },
   };
 }
 
-/** What "Approve & run" asks before a run that counts the warm-up from today. */
+/** "SVCS still needs 1 domain on OutboundHero – B2B #1 (19 of 20)." */
+function shortText(tag: string, sides: Pick<AllocationSidePlan, "label" | "need" | "cap" | "alreadyTagged">[]): string {
+  const plural = (n: number) => `${n} domain${n === 1 ? "" : "s"}`;
+  return `${tag} still needs ${sides.map((s) => `${plural(s.need)} on ${s.label} (${s.alreadyTagged} of ${s.cap})`).join(" and ")}.`;
+}
+
+/**
+ * What "Approve & run" asks before a run that counts the warm-up from today, or
+ * that can't fill every side (it adds what's ready and the step stays open).
+ */
 function allocationConfirm(p: AllocationPlanView): NonNullable<AutomationPreview["confirm"]> {
   const giving = p.sides.filter((s) => s.need > 0 && s.picking.length > 0);
-  const total = giving.reduce((n, s) => n + s.picking.length, 0);
+  const short = p.sides.filter((s) => s.need > s.picking.length);
+  const total = giving.reduce((n, s) => n + Math.min(s.need, s.picking.length), 0);
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
   return {
-    title: `Add ${plural(total, "domain")} to ${p.tag}, counting warm-up from today?`,
+    title: `Add ${plural(total, "domain")} to ${p.tag}${p.fromToday ? ", counting warm-up from today" : ""}${short.length ? ` — ${short.reduce((n, s) => n + s.need - s.picking.length, 0)} short` : ""}?`,
     lines: [
       ...giving.map((s) => {
         const left = s.warmupLeftAtGoLive ?? {};
         const warming = s.picking.filter((d) => d in left);
         const most = warming.length ? Math.max(...warming.map((d) => left[d])) : 0;
         const surbl = (s.surblListed ?? []).length;
-        return `${s.label}: ${plural(s.picking.length, "domain")} — ${warming.length ? `${warming.length} still warming, at most ${plural(most, "day")} left today` : "all fully warmed"}${surbl ? `, ${surbl} on SURBL` : ""}.`;
+        const when = p.fromToday || p.goLivePassed ? "today" : `on go-live, ${fmtDate(p.goLiveDate)}`;
+        return `${s.label}: ${plural(Math.min(s.need, s.picking.length), "domain")} of the ${s.need} needed — ${warming.length ? `${warming.length} still warming, at most ${plural(most, "day")} left ${when}` : "all fully warmed"}${surbl ? `, ${surbl} on SURBL` : ""}.`;
       }),
-      `The go-live date isn't used — every domain is within 4 days of fully warmed today.`,
+      ...short.map((s) => `${s.label} stays ${plural(s.need - s.picking.length, "domain")} short — this step stays open; run it again when more domains are ready.`),
+      ...(p.fromToday ? [`The go-live date isn't used — every domain is within 4 days of fully warmed today.`] : []),
       `LeadSync tags them for ${p.tag}, points their redirect at ${p.redirect}, attaches them to ${p.tag}'s campaigns, adds them to the client's sheet, queues the whitelisting email (6:30 AM PT) and sets every sender to ${DAILY_LIMIT} a day — ${ALLOCATION_BATCH} domains at a time.`,
     ],
     confirmLabel: `Yes, add ${plural(total, "domain")}`,
@@ -966,7 +999,11 @@ const allocateDomains: Automation = {
   async preview(ctx) {
     const p = await planAllocation(ctx);
     if (!domainAllocationEnabled()) p.blockers.push(ALLOCATION_NOT_SWITCHED_ON);
-    const left = p.sides.reduce((n, s) => n + s.need, 0);
+    const left = p.sides.reduce((n, s) => n + Math.min(s.need, s.picking.length), 0);
+    // Short everywhere it's needed — nothing at all can be added now.
+    if (p.plan && p.sides.some((s) => s.need > 0) && !p.sides.some((s) => s.need > 0 && s.picking.length > 0)) {
+      p.blockers.push(`Nothing can be added yet — ${p.sides.filter((s) => s.need > 0).map((s) => `${s.label} needs ${s.need}, none ready in the reserve`).join("; ")}.`);
+    }
     const w = p.plan?.warmup;
     return {
       title: "Attach client tags / redirects / add to campaigns / set 3 per day",
@@ -980,14 +1017,15 @@ const allocateDomains: Automation = {
             ? `that are past their 21-day warm-up or within 4 days of it today (${p.tag}'s go-live date, ${fullDate(w.goLiveDate)}, has passed) — fully warmed ones first`
             : `that are past their 21-day warm-up or will have at most 4 days of it left on ${p.tag}'s go-live (${fullDate(w.goLiveDate)}, ${p.goLiveFrom === "typed" ? "as entered above" : "from the Client Tracker"}) — fully warmed ones first`}, not marked Burnt and not on Spamhaus's list — the same rules as its own top-ups — and leaves out any that already carry a Client Tracker tag.`,
         `Running it has LeadSync tag those domains for ${p.tag}, point their redirect at ${p.redirect || "the client's website"}, attach them to ${p.tag}'s campaigns, add them to the client's sheet, queue the whitelist email (6:30 AM PT) and set every sender to ${DAILY_LIMIT} a day.`,
-        `It works in batches of ${ALLOCATION_BATCH} domains${left ? ` (${Math.ceil(left / ALLOCATION_BATCH)} batch${Math.ceil(left / ALLOCATION_BATCH) === 1 ? "" : "es"} for this client)` : ""} and marks this step Done when nothing is left to add.`,
+        `It works in batches of ${ALLOCATION_BATCH} domains${left ? ` (${Math.ceil(left / ALLOCATION_BATCH)} batch${Math.ceil(left / ALLOCATION_BATCH) === 1 ? "" : "es"} for this client)` : ""} and marks this step Done when nothing is left to add — if the reserve is short, it adds what's ready and the step stays open.`,
       ],
       inputs: p.inputs,
       blockers: p.blockers,
       tables: p.rows.length ? [{ title: "Domains by instance", columns: ["Instance", "Tier gets", "Already tagged", "To add", "Ready in reserve", "Short", "Attaches to"], rows: p.rows }] : [],
       notes: p.notes,
-      // Counting the warm-up from today sets the go-live date aside, so the run asks first, with the gist.
-      ...(p.fromToday && !p.blockers.length && p.sides.some((s) => s.need > 0 && s.picking.length > 0) ? { confirm: allocationConfirm(p) } : {}),
+      // Counting the warm-up from today sets the go-live date aside, and a short plan leaves the
+      // step open — either way the run asks first, with the gist.
+      ...((p.fromToday || p.sides.some((s) => s.need > s.picking.length)) && !p.blockers.length && p.sides.some((s) => s.need > 0 && s.picking.length > 0) ? { confirm: allocationConfirm(p) } : {}),
     };
   },
 

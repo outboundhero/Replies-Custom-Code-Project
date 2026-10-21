@@ -362,7 +362,7 @@ function ManualBody({ task, onFinished, onSkip }: { task: OnbTask; onFinished: (
 function AutoBody({ task, kind, onDone, onFinished, onSkip, onRunning }: {
   task: OnbTask; kind: Kind; onDone: () => void; onFinished: () => void; onSkip: () => void; onRunning: (v: boolean) => void;
 }) {
-  const r = useStepRun(task, { onDone, onSuccess: (summary) => { toast.success(summary); onFinished(); } });
+  const r = useStepRun(task, { onDone, onSuccess: (summary, open) => { if (open) toast.warning(summary, { duration: 15_000 }); else toast.success(summary); onFinished(); } });
   useEffect(() => { onRunning(r.running); }, [r.running, onRunning]);
   useEffect(() => () => onRunning(false), [onRunning]);
   const [marking, setMarking] = useState(false);
