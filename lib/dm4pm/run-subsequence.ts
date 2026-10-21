@@ -19,6 +19,7 @@ import { enrollInNurture } from "@/lib/dm4pm/nurture-enroll";
 import { getSubsequenceConfig } from "@/lib/subsequence/config";
 import { returnReplyToOpenResponse } from "@/lib/dm4pm/reply-sync";
 import { sendReply, sendOneOffReply } from "@/lib/outboundhero-api";
+import { isSuppressed } from "@/lib/service-area-changes/suppression";
 import { reconnectInbox, isReconnectableSendError } from "@/lib/inboxing-upload";
 import { coerceInstance } from "@/lib/bison-instances";
 import { logError, logActivity } from "@/lib/errors";
@@ -193,6 +194,22 @@ export async function processDueStep(row: SubsequenceRow): Promise<ProcessResult
   // §16/§26: meeting gate — pause/stop/route if a meeting exists.
   const meeting = await applyMeetingOutcome(row);
   if (meeting.handled) return { status: "handled", reason: `meeting:${meeting.outcome}` };
+
+  // A lead the client removed for a service-area change gets no more follow-ups.
+  // (If the block list can't be read, try this step again in an hour — never send blind.)
+  if (row.client_tag && row.lead_email) {
+    let removed: boolean;
+    try { removed = await isSuppressed(row.client_tag, row.lead_email); }
+    catch {
+      await store.advanceStep(row.id, row.step, new Date(Date.now() + 3_600_000).toISOString());
+      return { status: "retry", reason: "service-area block list unreadable" };
+    }
+    if (removed) {
+      await store.stop(row.id);
+      await logActivity("dm4pm-subsequence", "stopped-service-area", { lead_email: row.lead_email, details: { subsequence_id: row.id, client_tag: row.client_tag } });
+      return { status: "handled", reason: "removed for a service-area change" };
+    }
+  }
 
   const send = await sendStep(row, targetStep);
   await store.recordSend(row.id, targetStep, {

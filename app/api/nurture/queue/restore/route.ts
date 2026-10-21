@@ -24,6 +24,12 @@ export async function POST(req: NextRequest) {
   try {
     await ensureRemovalsTable();
     const session = await getSession();
+    // A service-area removal is final for the queue: its leads are on the client's
+    // block list. Letting a lead back in is done from the service-area change.
+    const mode = (await db.execute({ sql: "SELECT mode FROM nurture_queue_removals WHERE id = ?", args: [removalId] })).rows[0]?.mode;
+    if (mode === "service-area") {
+      return NextResponse.json({ error: "This was removed for a service-area change — let leads back in from the client's Service area changes instead." }, { status: 409 });
+    }
     // Claim it first (one-shot) so a double-click can't run it twice.
     const claim = await db.execute({
       sql: `UPDATE nurture_queue_removals SET restored_at = ?, restored_by = ?

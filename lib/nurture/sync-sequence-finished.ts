@@ -22,6 +22,7 @@ import { pickEspFromTags, detectEsp } from "@/lib/nurture/esp";
 import { getChurnedTags } from "@/lib/churn";
 import { getAllClientInstances } from "@/lib/nurture/group-routing";
 import { BISON_INSTANCES, type BisonInstanceKey } from "@/lib/bison-instances";
+import { suppressedEmails } from "@/lib/service-area-changes/suppression";
 
 // ── Cursor-based, resumable per-campaign scan state (Turso) ───────────────────
 // Page pagination (listCampaignLeads) hard-caps at ~1000 pages / 15 rows and, in
@@ -523,6 +524,12 @@ async function processLeadWindow(
           for (const r of seq.data || []) known.add(String((r as { email?: string }).email ?? "").toLowerCase());
           for (const r of rep.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
           for (const r of leg.data || []) known.add(String((r as { lead_email?: string }).lead_email ?? "").toLowerCase());
+        }
+        // Leads the client removed for a service-area change never re-enter its queue.
+        try { for (const e of await suppressedEmails(clientTag)) known.add(e); }
+        catch (e) {
+          console.warn(`[nurture-sync] ${instanceKey} ${campaign.name}: service-area block list unreadable (${(e as Error).message}) — window will be retried next run`);
+          return false;
         }
         newCandidates = candidates.filter((l) => !known.has((l.email || "").trim().toLowerCase()));
         skipped = candidates.length - newCandidates.length;

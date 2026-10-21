@@ -107,6 +107,10 @@
       "schedule": "*/2 * * * *"
     },
     {
+      "path": "/api/cron/service-area-jobs",
+      "schedule": "*/2 * * * *"
+    },
+    {
       "path": "/api/cron/nurture-recover-stopped",
       "schedule": "50 2-23/3 * * *"
     },

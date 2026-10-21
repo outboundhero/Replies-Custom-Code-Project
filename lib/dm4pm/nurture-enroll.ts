@@ -12,6 +12,7 @@ import { targetInstanceForLead } from "@/lib/nurture/group-routing";
 import { detectEsp } from "@/lib/nurture/esp";
 import { findLeadByEmail, attachLeadsToCampaign } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
+import { isSuppressed } from "@/lib/service-area-changes/suppression";
 
 export interface NurtureEnrollResult {
   ok: boolean;
@@ -30,6 +31,8 @@ export interface NurtureEnrollResult {
 export async function enrollInNurture(tag: string, email: string): Promise<NurtureEnrollResult> {
   try {
     if (!email?.trim()) return { ok: false, reason: "no email" };
+    // A lead the client removed for a service-area change isn't nurtured again.
+    if (await isSuppressed(tag, email, { fresh: true })) return { ok: false, reason: "removed for a service-area change" };
     const target = await targetInstanceForLead(tag, email);
     if (!target) return { ok: false, reason: `${tag} has no group mapping` };
     const esp = detectEsp(email);

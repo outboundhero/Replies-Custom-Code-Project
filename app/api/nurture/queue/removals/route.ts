@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
         contacts: Number(x.contacts) || 0, rows: Number(x.row_count) || 0, status: x.status ?? "done",
         filters: (() => { try { return x.filters_json ? JSON.parse(String(x.filters_json)) : null; } catch { return null; } })(),
         restoredAt: x.restored_at, restoredBy: x.restored_by,
-        undoable: isUndoable({ status: x.status, ids_json: Number(x.has_ids) ? "1" : null, restored_at: x.restored_at, row_count: x.row_count }),
+        undoable: x.mode !== "service-area" && isUndoable({ status: x.status, ids_json: Number(x.has_ids) ? "1" : null, restored_at: x.restored_at, row_count: x.row_count }),
       })),
     });
   } catch (e) {

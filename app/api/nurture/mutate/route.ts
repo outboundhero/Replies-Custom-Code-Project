@@ -17,6 +17,7 @@ import { classifyNurtureSafety } from "@/lib/nurture/safety-classifier";
 import { classifyOneBatch } from "@/lib/nurture/auto-classify";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
+import { suppressedEmails } from "@/lib/service-area-changes/suppression";
 import { coerceInstance } from "@/lib/bison-instances";
 
 // classify-all-unclassified / classify-reset-safe each run up to 400 GPT
@@ -336,13 +337,13 @@ export async function POST(req: NextRequest) {
               .from("replies")
               // lead_id is the OutboundHero lead id captured from the original
               // webhook; if present we skip the findLeadByEmail round trip.
-              .select("id, lead_email, lead_id, nurture_added_at, nurture_skipped, nurture_safety")
+              .select("id, lead_email, lead_id, nurture_added_at, nurture_skipped, nurture_safety, client_tag")
               .in("id", replyRowIds)
           : Promise.resolve({ data: [], error: null }),
         seqRowIds.length
           ? supabase
               .from("nurture_sequence_finished")
-              .select("id, ob_lead_id, email, added_at, skipped")
+              .select("id, ob_lead_id, email, added_at, skipped, client_tag")
               .in("id", seqRowIds)
           : Promise.resolve({ data: [], error: null }),
         legacyRowIds.length
@@ -351,7 +352,7 @@ export async function POST(req: NextRequest) {
               // ob_lead_id is the OB id resolved by the backfill script
               // (scripts/backfill-ob-lead-id.ts) or written back from a
               // previous push. When present we skip findLeadByEmail.
-              .select("id, lead_email, ob_lead_id, nurture_added_at, nurture_skipped, nurture_safety")
+              .select("id, lead_email, ob_lead_id, nurture_added_at, nurture_skipped, nurture_safety, client_tag")
               .in("id", legacyRowIds)
           : Promise.resolve({ data: [], error: null }),
       ]);
@@ -381,6 +382,19 @@ export async function POST(req: NextRequest) {
       const isSheetMeetingReady = (email: string | null | undefined) =>
         !!email && sheetMRSet.has(email.trim().toLowerCase());
 
+      // Never push back a lead its client removed for a service-area change.
+      // Fail closed if a client's block list can't be read.
+      const blockedByTag = new Map<string, Set<string>>();
+      try {
+        const rowTags = [...replyRowMap.values(), ...seqRowMap.values(), ...legacyRowMap.values()]
+          .map((r) => String((r as { client_tag?: string | null }).client_tag ?? "").trim().toUpperCase()).filter(Boolean);
+        for (const t of new Set(rowTags)) blockedByTag.set(t, await suppressedEmails(t, { fresh: true }));
+      } catch {
+        return NextResponse.json({ error: "The service-area block list couldn't be read — try again shortly." }, { status: 503 });
+      }
+      const isServiceAreaRemoved = (tag: string | null | undefined, email: string | null | undefined) =>
+        !!email && !!blockedByTag.get(String(tag ?? "").trim().toUpperCase())?.has(email.trim().toLowerCase());
+
       // Validate seq rows synchronously (no email lookup needed — ob_lead_id is on the row)
       for (const [rowId, it] of seqItemsByRowId) {
         const row = seqRowMap.get(rowId);
@@ -388,6 +402,7 @@ export async function POST(req: NextRequest) {
         if (row.added_at) { failures.push({ id: it.id, reason: "Already added" }); continue; }
         if (row.skipped) { failures.push({ id: it.id, reason: "Skipped" }); continue; }
         if (isSheetMeetingReady(row.email as string | null)) { failures.push({ id: it.id, reason: "Marked Meeting-Ready in lead sheet" }); continue; }
+        if (isServiceAreaRemoved(row.client_tag as string | null, row.email as string | null)) { failures.push({ id: it.id, reason: "Removed for a service-area change" }); continue; }
         leadIds.push(row.ob_lead_id as number);
         seqIdsBeingAdded.push(rowId);
       }
@@ -414,6 +429,7 @@ export async function POST(req: NextRequest) {
               nurture_added_at: string | null;
               nurture_skipped: boolean | null;
               nurture_safety: string | null;
+              client_tag?: string | null;
             }
           | undefined,
         notFoundReason: string,
@@ -423,6 +439,7 @@ export async function POST(req: NextRequest) {
         if (row.nurture_skipped) { failures.push({ id: it.id, reason: "Skipped" }); return; }
         if (row.nurture_safety !== "safe") { failures.push({ id: it.id, reason: `Not safe (${row.nurture_safety || "unclassified"})` }); return; }
         if (isSheetMeetingReady(row.lead_email)) { failures.push({ id: it.id, reason: "Marked Meeting-Ready in lead sheet" }); return; }
+        if (isServiceAreaRemoved(row.client_tag, row.lead_email)) { failures.push({ id: it.id, reason: "Removed for a service-area change" }); return; }
 
         // Prefer the stored OB lead id from the row itself — replies have
         // it from the original webhook (`lead_id`), legacy rows have it

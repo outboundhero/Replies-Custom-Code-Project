@@ -716,10 +716,11 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
                 <div key={r.id} className="maprow" style={{ padding: "9px 16px" }}>
                   <span className="tnum" style={{ fontWeight: 600, minWidth: 110 }}>{pl(r.contacts, "contact")}</span>
                   <span className="muted" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {r.mode === "all-matching" ? describeFilters(r.filters) : "selected"} · {ago(r.removedAt, now)}{r.removedBy ? ` · ${r.removedBy}` : ""}
+                    {r.mode === "all-matching" ? describeFilters(r.filters) : r.mode === "service-area" ? "service-area change" : "selected"} · {ago(r.removedAt, now)}{r.removedBy ? ` · ${r.removedBy}` : ""}
                   </span>
                   {r.status === "failed" ? <span className="pill p-bad" style={{ fontSize: 10 }}>Failed</span>
                     : r.restoredAt ? <span className="pill p-mute" style={{ fontSize: 10 }}>Undone</span>
+                    : r.mode === "service-area" ? <span className="pill p-mute" style={{ fontSize: 10 }} title="Removed for a service-area change — let leads back in from the client's page">No undo</span>
                     : r.undoable ? <button type="button" className="btn btn-sm" disabled={undoing !== null} onClick={() => void doUndo(r.id)}>{undoing === r.id ? "Undoing…" : "Undo"}</button>
                     : <span className="pill p-mute" style={{ fontSize: 10 }} title="Made before the database update, so the exact rows weren't recorded">No undo</span>}
                 </div>

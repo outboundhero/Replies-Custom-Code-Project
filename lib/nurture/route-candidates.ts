@@ -18,6 +18,7 @@ import {
 import { type Esp } from "@/lib/nurture/esp";
 import { pickFromMap, type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 import { getInstanceLeadIds, recordInstanceLeads } from "@/lib/nurture/instance-leads";
+import { suppressedEmails } from "@/lib/service-area-changes/suppression";
 
 export interface Candidate {
   source: "seq" | "reply" | "legacy" | "campaign";
@@ -48,6 +49,8 @@ export interface BucketResult {
 export interface RouteCandidatesResult {
   perBucket: BucketResult[];
   totalAttached: number;
+  /** Candidates left out because the client removed them for a service-area change. */
+  suppressedExcluded?: number;
 }
 
 export async function routeCandidates(
@@ -57,6 +60,17 @@ export async function routeCandidates(
   opts: { onAttached?: (campaignId: number, resolved: Candidate[]) => Promise<void> } = {},
 ): Promise<RouteCandidatesResult> {
   const result: RouteCandidatesResult = { perBucket: [], totalAttached: 0 };
+
+  // Never put back a lead this client removed for a service-area change. Every
+  // routing path comes through here; if the block list can't be read, this
+  // throws and nothing is routed this run. Read fresh: this is the last check
+  // before the attach.
+  const blocked = await suppressedEmails(clientTag, { fresh: true });
+  if (blocked.size) {
+    const before = candidates.length;
+    candidates = candidates.filter((c) => !blocked.has(String(c.email || "").trim().toLowerCase()));
+    result.suppressedExcluded = before - candidates.length;
+  }
 
   // Partition by (instance, esp) — the routing key. A lead's instance comes from
   // its lane (B2B/B2C) within the client's group.

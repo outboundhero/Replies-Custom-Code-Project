@@ -35,6 +35,7 @@ import { htmlToText } from "@/lib/html-text";
 import { logActivity, logError } from "@/lib/errors";
 import { coerceInstance } from "@/lib/bison-instances";
 import db from "@/lib/db";
+import { isSuppressed } from "@/lib/service-area-changes/suppression";
 
 export const maxDuration = 60;
 
@@ -53,6 +54,7 @@ interface DueRow {
   auto_reply_kind: string | null;
   auto_reply_due_at: string | null;
   bison_instance: string | null;
+  client_tag: string | null;
   cc_name_1: string | null; cc_email_1: string | null;
   cc_name_2: string | null; cc_email_2: string | null;
   cc_name_3: string | null; cc_email_3: string | null;
@@ -190,7 +192,7 @@ export async function GET(req: NextRequest) {
     .from("replies")
     .select(
       "id, reply_id, sender_id, lead_id, campaign_id, lead_email, lead_name, from_name, reply_we_got, sender_name, " +
-      "lead_category, auto_reply_kind, auto_reply_due_at, bison_instance, email_subject, " +
+      "lead_category, auto_reply_kind, auto_reply_due_at, bison_instance, email_subject, client_tag, " +
       "cc_name_1, cc_email_1, cc_name_2, cc_email_2, cc_name_3, cc_email_3, " +
       "cc_name_4, cc_email_4, cc_name_5, cc_email_5, cc_name_6, cc_email_6, " +
       "bcc_name_1, bcc_email_1, bcc_name_2, bcc_email_2"
@@ -231,6 +233,21 @@ export async function GET(req: NextRequest) {
         .eq("id", row.id);
       skipped++;
       continue;
+    }
+
+    // The out-of-office re-send is a fresh pitch for the client — not for a lead
+    // the client removed for a service-area change. (Leave it queued if the
+    // block list can't be read; the next run tries again.)
+    if (kind === "out_of_office" && row.client_tag && row.lead_email) {
+      let removed: boolean;
+      try { removed = await isSuppressed(row.client_tag, row.lead_email); }
+      catch { skipped++; continue; }
+      if (removed) {
+        await supabase.from("replies").update({ auto_reply_sent_at: new Date().toISOString() }).eq("id", row.id);
+        await logActivity("inbox", "out_of_office-auto-reply-skipped", { client_tag: row.client_tag, lead_email: row.lead_email, details: { row_id: row.id, reason: "removed for a service-area change" } });
+        skipped++;
+        continue;
+      }
     }
 
     if (!row.reply_id || !row.sender_id || !row.lead_email) {

@@ -826,11 +826,14 @@ export async function sweepCampaignLeadsCursor(
   instanceKey: string,
   campaignId: number,
   startCursor: string | null,
-  opts: { maxLeads?: number; maxMs?: number; leadCampaignStatus?: string } = {},
+  // search: Bison's lead search (also matches custom-variable values such as city
+  // or an address's ZIP) — a sweep of only the matching leads.
+  opts: { maxLeads?: number; maxMs?: number; leadCampaignStatus?: string; search?: string } = {},
 ): Promise<{ leads: OutboundLead[]; nextCursor: string | null; done: boolean }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
-  const filter = opts.leadCampaignStatus ? `&filters[lead_campaign_status]=${opts.leadCampaignStatus}` : "";
+  const filter = (opts.leadCampaignStatus ? `&filters[lead_campaign_status]=${opts.leadCampaignStatus}` : "")
+    + (opts.search ? `&search=${encodeURIComponent(opts.search)}` : "");
   const maxLeads = opts.maxLeads ?? 5000;
   const deadline = Date.now() + (opts.maxMs ?? 220_000);
   const out: OutboundLead[] = [];
@@ -854,9 +857,14 @@ export async function sweepCampaignLeadsCursor(
       }
       return { leads: out, nextCursor: cursor, done: false };
     }
-    retries = 0;
     const data = await res.json().catch(() => null);
-    const rows = (data?.data ?? []) as OutboundLead[];
+    // An answer that isn't a page of leads is a failed read, never "the end".
+    if (!data || !Array.isArray(data.data)) {
+      if (canRetry()) { await new Promise((r) => setTimeout(r, 1500 * Math.min(retries, 4))); continue; }
+      return { leads: out, nextCursor: cursor, done: false };
+    }
+    retries = 0;
+    const rows = data.data as OutboundLead[];
     if (rows.length) out.push(...rows);
     const next = (data?.meta?.next_cursor as string | null | undefined) ?? null;
     if (!next || rows.length === 0) return { leads: out, nextCursor: null, done: true }; // fully drained
@@ -1254,6 +1262,53 @@ export async function findLeadByEmail(instanceKey: string, email: string): Promi
   // Never another lead's record.
   if (String(lead.email ?? "").trim().toLowerCase() !== addr) return null;
   return lead;
+}
+
+export interface LeadCampaigns {
+  leadId: number;
+  email: string;
+  customVariables: Array<{ name: string; value: string }>;
+  campaigns: Array<{ campaignId: number; status: string | null }>;
+}
+
+/**
+ * A lead as Bison has it right now in one instance — its id, custom variables
+ * and EVERY campaign it's in (`lead_campaign_data`). Looked up by email (Bison
+ * matches it case-insensitively) or by the lead's id; with an id, `email` is
+ * the lead it must be. null ONLY for Bison's "lead not found" 404. Anything
+ * else unexpected — an error status, a body that isn't the lead, a missing
+ * campaign list, another lead's record — THROWS: a caller deciding whether a
+ * lead is still in a campaign must never read a bad answer as "not there".
+ */
+export async function getLeadCampaigns(instanceKey: string, emailOrId: string | number, email?: string): Promise<LeadCampaigns | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const expect = String(email ?? (typeof emailOrId === "string" ? emailOrId : "")).trim().toLowerCase();
+  let key = typeof emailOrId === "number" ? String(emailOrId) : encodeURIComponent(emailOrId);
+  // An address starting with a digit would be read as a lead id — find its id through the search.
+  if (typeof emailOrId === "string" && /^\d/.test(expect)) {
+    const id = await leadIdBySearch(instanceKey, expect);
+    if (id == null) return null;
+    key = String(id);
+  }
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${key}`, { headers: buildHeaders(token), timeoutMs: 20_000 });
+  const text = await res.text();
+  if (res.status === 404 && /not found/i.test(text)) return null;
+  if (!res.ok) throw new Error(`lead lookup ${res.status}: ${text.slice(0, 160)}`);
+  let body: { data?: unknown } | null;
+  try { body = JSON.parse(text); } catch { throw new Error(`lead lookup: not JSON (${text.slice(0, 80)})`); }
+  const lead = (body?.data ?? body) as { id?: unknown; email?: unknown; custom_variables?: unknown; lead_campaign_data?: unknown } | null;
+  if (!lead || typeof lead.id !== "number") throw new Error(`lead lookup: no lead in the answer (${text.slice(0, 80)})`);
+  const got = String(lead.email ?? "").trim().toLowerCase();
+  if (!expect || got !== expect) throw new Error(`lead lookup returned ${got || "another lead"}, not ${expect || "the lead asked for"}`);
+  if (!Array.isArray(lead.lead_campaign_data)) throw new Error("lead lookup: no campaign list in the answer");
+  const rows = lead.lead_campaign_data as Array<{ campaign_id?: unknown; status?: unknown }>;
+  if (rows.some((r) => typeof r?.campaign_id !== "number")) throw new Error("lead lookup: a campaign entry without an id");
+  return {
+    leadId: lead.id,
+    email: got,
+    customVariables: Array.isArray(lead.custom_variables) ? (lead.custom_variables as Array<{ name: string; value: string }>) : [],
+    campaigns: rows.map((r) => ({ campaignId: r.campaign_id as number, status: r.status == null ? null : String(r.status) })),
+  };
 }
 
 // Per-process cache of known custom-variable names per instance, so a routing

@@ -25,6 +25,7 @@ import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate, type BucketResult } from "@/lib/nurture/route-candidates";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
+import { suppressedEmails } from "@/lib/service-area-changes/suppression";
 import { logActivity, logError } from "@/lib/errors";
 import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 
@@ -71,6 +72,9 @@ export interface AutoPushResult {
   // Candidates dropped this batch because the client's lead-tracking sheet marks
   // them "Meeting-Ready Lead" (delivered to the client — never re-nurture).
   sheetMeetingReadyExcluded?: number;
+  // Candidates dropped (and taken off the queue) because the client removed them
+  // for a service-area change.
+  suppressedExcluded?: number;
 }
 
 export async function runAutoPushForClient(
@@ -284,6 +288,23 @@ export async function runAutoPushForClient(
     routable = candidates.filter((c) => !sheetMR.emails.has((c.email || "").trim().toLowerCase()));
     result.sheetMeetingReadyExcluded = candidates.length - routable.length;
   }
+
+  // Leads the client removed for a service-area change never route again —
+  // and leave the queue (the queue's own skip flag) so they aren't re-read.
+  let blocked: Set<string>;
+  try { blocked = await suppressedEmails(clientTag); }
+  catch (e) { result.error = `service-area block list unreadable — skipped this run: ${(e as Error).message}`; result.errorKind = "failure"; return result; }
+  if (blocked.size) {
+    const out = routable.filter((c) => blocked.has((c.email || "").trim().toLowerCase()));
+    if (out.length) {
+      routable = routable.filter((c) => !blocked.has((c.email || "").trim().toLowerCase()));
+      const ids = (src: Candidate["source"]) => out.filter((c) => c.source === src).map((c) => c.rowId);
+      if (ids("seq").length) await supabase.from("nurture_sequence_finished").update({ skipped: true }).in("id", ids("seq"));
+      if (ids("reply").length) await supabase.from("replies").update({ nurture_skipped: true }).in("id", ids("reply"));
+      if (ids("legacy").length) await supabase.from("nurture_legacy_leads").update({ nurture_skipped: true }).in("id", ids("legacy"));
+      result.suppressedExcluded = out.length;
+    }
+  }
   if (routable.length === 0) return result;
 
   // 4+5. Route via the shared core: partition by (instance, esp) → create in
@@ -310,6 +331,7 @@ export async function runAutoPushForClient(
       scanned: result.scanned,
       total_attached: result.totalAttached,
       sheet_meeting_ready_excluded: result.sheetMeetingReadyExcluded ?? 0,
+      service_area_removed_excluded: result.suppressedExcluded ?? 0,
       per_bucket: result.perBucket.map((b) => ({
         esp: b.esp, instance: b.instance, lane: b.lane,
         requested: b.requested, attached: b.attached,

@@ -10,6 +10,7 @@
 import supabase from "@/lib/supabase";
 import db from "@/lib/db";
 import { fetchClientGroupRecords, fetchChurnedFromGroups, fetchOnboardingForm } from "@/lib/google-sheets";
+import { recordServiceAreaTexts } from "@/lib/service-area-changes/text-versions";
 
 interface SyncResult {
   statusCount: number;
@@ -86,6 +87,8 @@ export async function syncAll(): Promise<SyncResult> {
       .upsert(qualRecords, { onConflict: "client_abbreviation" });
 
     if (qualError) throw new Error(`Failed to sync client_qualifications: ${qualError.message}`);
+    // Keep each edit of the service-area text (the upsert above overwrites it).
+    await recordServiceAreaTexts(qualRecords.map((q) => ({ tag: q.client_abbreviation, text: q.inclusion_locations })));
   }
 
   // 3. Sync onboarding Status + Client Type into Turso client_meta. The
