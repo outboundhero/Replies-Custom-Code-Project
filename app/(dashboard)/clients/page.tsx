@@ -166,7 +166,7 @@ export default function ClientsPage() {
 
       {!clients && !fetchError ? (
         <div className="grid gap-4 lg:grid-cols-2">
-          {[0, 1, 2, 3].map((i) => <div key={i} className="h-56 animate-pulse rounded-2xl border bg-muted/30" />)}
+          {[0, 1, 2, 3].map((i) => <div key={i} className="h-[30rem] animate-pulse rounded-2xl border bg-muted/30" />)}
         </div>
       ) : clients && filtered.length === 0 ? (
         <div className="rounded-2xl border border-dashed px-6 py-14 text-center">
@@ -175,15 +175,16 @@ export default function ClientsPage() {
           <p className="mt-1 text-sm text-muted-foreground">{q ? "Try the tag (e.g. JPSCAL) or a section name." : "Add one to start routing its replies."}</p>
         </div>
       ) : (
-        <div className="grid items-start gap-4 lg:grid-cols-2">
+        // Every section box is the same height; a long section scrolls inside its box.
+        <div className="grid gap-4 lg:grid-cols-2">
           {bySection.map(([sectionName, rows]) => (
-            <section key={sectionName} className="overflow-hidden rounded-2xl border bg-card">
-              <header className="flex items-center gap-2 border-b px-4 py-3">
+            <section key={sectionName} className="flex h-[30rem] flex-col overflow-hidden rounded-2xl border bg-card">
+              <header className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
                 <h3 className="text-sm font-semibold">{sectionName}</h3>
                 <span className="font-mono text-[11px] text-muted-foreground">{rows[0].airtable_base_id}</span>
                 <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">{rows.length} client{rows.length === 1 ? "" : "s"}</span>
               </header>
-              <ul className="divide-y">
+              <ul className="min-h-0 flex-1 divide-y overflow-y-auto overscroll-contain [scrollbar-width:thin]">
                 {rows.map((c) => {
                   const cc = ccCount(c), bcc = bccCount(c);
                   return (
