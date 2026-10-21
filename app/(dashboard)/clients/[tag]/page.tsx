@@ -13,7 +13,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
-  ArrowLeft, Building2, CalendarClock, Check, ChevronDown, Clock3, ExternalLink, FileText, Globe, Layers, Loader2, Mail, MapPin, Megaphone,
+  ArrowLeft, Building2, CalendarClock, Check, ChevronDown, Clock3, Copy, ExternalLink, FileText, Globe, Layers, Loader2, Mail, MapPin, Megaphone,
   Phone, RotateCcw, Route, Save, ShieldCheck, Sparkles, Tag, Trash2, UserRound, Users, Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -22,7 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { BISON_INSTANCES, DEFAULT_INSTANCE } from "@/lib/bison-instances-shared";
+import { BISON_INSTANCES, DEFAULT_INSTANCE, getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { CAMPAIGN_TIMEZONES, timezoneLabel } from "@/lib/onboarding/campaign-plan";
 import { clientTypeLabel, type ClientTypeKey } from "@/lib/onboarding/copy-model";
 import { GROUP_META, fmtDate } from "@/lib/onboarding/ui";
@@ -46,8 +46,8 @@ type Profile = {
   qualification: { inclusion: string | null; exclusion: string | null; hq: string | null } | null;
   readErrors: string[];
 };
-type Campaign = { id: number; name: string; status: string; leads: number | null; sent: number | null };
-type CampaignsData = { instances: { key: string; label: string; campaigns: Campaign[]; schedule: { timezone: string; start: string; end: string } | null; error: string | null }[] };
+type Campaign = { id: number; uuid: string | null; name: string; status: string; leads: number | null; sent: number | null };
+type CampaignsData = { instances: { key: string; label: string; role: string; current: boolean | null; campaigns: Campaign[]; schedule: { timezone: string; start: string; end: string } | null; error: string | null }[] };
 
 /** A date from the API (YYYY-MM-DD, or a sheet's raw text) for display. */
 const showDate = (v: string | null | undefined) => (v ? (/^\d{4}-\d{2}-\d{2}$/.test(v) ? fmtDate(v) : v) : null);
@@ -714,10 +714,14 @@ function CampaignsCard({ data }: { data: CampaignsData | null | "failed" }) {
   const archived = counts.archived ?? 0;
   const summary = Object.entries(counts).filter(([k]) => k !== "archived").sort((a, b) => statusRank(a[0]) - statusRank(b[0]));
   const leads = all.filter((c) => c.status.toLowerCase() !== "archived").reduce((n, c) => n + (c.leads ?? 0), 0);
+  const copy = async (text: string, what: string) => {
+    try { await navigator.clipboard.writeText(text); toast.success(`Copied ${what}`); }
+    catch { toast.error("Couldn't copy — select it instead."); }
+  };
 
   return (
     <Card icon={<Mail className="size-4" />} title="Campaigns in Email Bison"
-      sub={data && data !== "failed" && all.length ? `${all.length - archived} current${archived ? ` · ${archived} archived` : ""} · ${leads.toLocaleString()} leads in current campaigns` : "Read live from Email Bison"}
+      sub={data && data !== "failed" && all.length ? `${all.length - archived} current${archived ? ` · ${archived} archived` : ""} · ${leads.toLocaleString()} leads in current campaigns · click an ID to copy it` : "Read live from Email Bison"}
       action={summary.length ? <div className="flex flex-wrap items-center gap-1.5">{summary.map(([k, n]) => <Chip key={k} tone={statusTone(k)}>{n} {k}</Chip>)}</div> : null}>
       {data === null ? (
         <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading Email Bison…</div>
@@ -730,22 +734,51 @@ function CampaignsCard({ data }: { data: CampaignsData | null | "failed" }) {
           {data.instances.filter((i) => i.campaigns.length || i.error).map((inst) => {
             const rows = inst.campaigns.filter((c) => showArchived || c.status.toLowerCase() !== "archived")
               .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
+            const base = getInstanceBaseUrl(inst.key);
             return (
               <div key={inst.key}>
-                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-                  <div className="text-sm font-semibold">{inst.label}</div>
-                  {inst.schedule && <div className="text-xs text-muted-foreground">Sends Mon–Fri {inst.schedule.start}–{inst.schedule.end} · {timezoneLabel(inst.schedule.timezone)}</div>}
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold">{inst.role}</span>
+                    <span className="text-sm text-muted-foreground">{inst.label}</span>
+                    {inst.current === true ? <Chip tone="green">Current group</Chip> : inst.current === false ? <Chip tone="muted">Not its group now</Chip> : null}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {inst.schedule && <span className="text-xs text-muted-foreground">Sends Mon–Fri {inst.schedule.start}–{inst.schedule.end} · {timezoneLabel(inst.schedule.timezone)}</span>}
+                    {rows.length > 0 && (
+                      <button type="button" onClick={() => void copy(rows.map((c) => `${c.name}\t${c.id}`).join("\n"), `${inst.role} campaign IDs`)}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"><Copy className="size-3.5" />Copy all IDs</button>
+                    )}
+                  </div>
                 </div>
                 {inst.error ? <p className="text-xs text-destructive">Couldn&apos;t read it: {inst.error}</p> : (
                   <div className="overflow-hidden rounded-xl border">
                     {rows.length ? (
                       <table className="w-full text-[13px]">
+                        <thead>
+                          <tr className="border-b bg-muted/30 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                            <th className="px-3.5 py-1.5 font-medium">Campaign</th>
+                            <th className="w-32 px-3 py-1.5 font-medium">ID</th>
+                            <th className="w-24 px-3 py-1.5 text-right font-medium">Status</th>
+                            <th className="w-32 px-3.5 py-1.5 text-right font-medium">Leads</th>
+                          </tr>
+                        </thead>
                         <tbody className="divide-y">
                           {rows.map((c) => (
                             <tr key={c.id} className={cn("transition-colors hover:bg-muted/30", c.status.toLowerCase() === "archived" && "text-muted-foreground")}>
                               <td className="px-3.5 py-2 font-medium">{c.name}</td>
-                              <td className="w-24 px-3 py-2 text-right"><Chip tone={statusTone(c.status)}>{c.status}</Chip></td>
-                              <td className="w-32 px-3.5 py-2 text-right tabular-nums text-muted-foreground">{c.leads != null ? `${c.leads.toLocaleString()} leads` : ""}</td>
+                              <td className="px-3 py-2">
+                                <span className="inline-flex items-center gap-1.5">
+                                  <button type="button" onClick={() => void copy(String(c.id), `ID ${c.id}`)} title="Copy the ID"
+                                    className="inline-flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5 font-mono text-xs tabular-nums transition-colors hover:border-primary/40 hover:text-primary">
+                                    {c.id}<Copy className="size-3 opacity-60" />
+                                  </button>
+                                  <a href={c.uuid ? `${base}/campaigns/${c.uuid}` : `${base}/campaigns/${c.id}/leads`} target="_blank" rel="noreferrer"
+                                    title="Open in Email Bison" className="text-muted-foreground transition-colors hover:text-primary"><ExternalLink className="size-3.5" /></a>
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-right"><Chip tone={statusTone(c.status)}>{c.status}</Chip></td>
+                              <td className="px-3.5 py-2 text-right tabular-nums text-muted-foreground">{c.leads != null ? `${c.leads.toLocaleString()} leads` : ""}</td>
                             </tr>
                           ))}
                         </tbody>
