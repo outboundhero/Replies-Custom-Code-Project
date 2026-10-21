@@ -147,6 +147,17 @@ export async function extractRedirectEmails(
   }
 }
 
+/**
+ * Looks like a mailbox someone can be written to. Outlook pastes inline images as
+ * "cid:image001.png@01DB70C3.1239E7C0" — address-shaped, but a content id: it was
+ * offered as the new contact and refused at send ("Invalid recipient address",
+ * 2026-10-09). A real address ends in a letters-only TLD.
+ */
+function isRealAddress(email: string): boolean {
+  if (/^image\d*\.(png|jpe?g|gif|bmp|webp)@/i.test(email)) return false;
+  return /\.[a-z]{2,24}$/i.test(email);
+}
+
 function regexFallbackAll(replyBody: string, originalLeadEmail: string): RedirectCandidate[] {
   const liveBody = replyBody
     .split(/\n/).filter((line) => !line.trim().startsWith(">")).join("\n")
@@ -156,7 +167,7 @@ function regexFallbackAll(replyBody: string, originalLeadEmail: string): Redirec
   const out: RedirectCandidate[] = [];
   for (const m of matches) {
     const e = m.toLowerCase();
-    if (e !== originalLeadEmail.toLowerCase() && !seen.has(e)) { seen.add(e); out.push({ email: e, name: null }); }
+    if (e !== originalLeadEmail.toLowerCase() && isRealAddress(e) && !seen.has(e)) { seen.add(e); out.push({ email: e, name: null }); }
   }
   return out;
 }
@@ -164,7 +175,7 @@ function regexFallbackAll(replyBody: string, originalLeadEmail: string): Redirec
 function sanitize(raw: string | null | undefined, originalLeadEmail: string): string | null {
   if (!raw) return null;
   const candidate = raw.trim().toLowerCase();
-  if (!EMAIL_RE.test(candidate)) return null;
+  if (!EMAIL_RE.test(candidate) || !isRealAddress(candidate)) return null;
   if (candidate === originalLeadEmail.toLowerCase()) return null;
   return candidate;
 }
@@ -178,9 +189,8 @@ function regexFallback(replyBody: string, originalLeadEmail: string): ExtractRes
     .join("\n")
     .split(/-----\s*Original Message\s*-----/i)[0];
 
-  const match = liveBody.match(EMAIL_RE);
-  if (!match) return { email: null, name: null };
-  const found = match[0].toLowerCase();
+  const found = (liveBody.match(new RegExp(EMAIL_RE, "gi")) || []).map((m) => m.toLowerCase()).find(isRealAddress);
+  if (!found) return { email: null, name: null };
   if (found === originalLeadEmail.toLowerCase()) return { email: null, name: null };
   return { email: found, name: null };
 }

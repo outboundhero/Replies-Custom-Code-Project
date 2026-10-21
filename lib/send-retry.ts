@@ -133,10 +133,13 @@ export async function processSendRetries(): Promise<{ processed: number; sent: n
     // invalid"). Using the live id makes the retry self-healing; fall back to the
     // stored id if the lookup fails or the inbox isn't back in the instance yet.
     let senderEmailId = r.sender_email_id as number;
+    // Not found by its address = not in this instance any more (a moved inbox IS found).
+    let senderGone = false;
     if (r.sender_email) {
       try {
         const live = await findSenderEmailByAddress(String(r.bison_instance), String(r.sender_email));
         if (live) senderEmailId = live.id;
+        else senderGone = true;
       } catch { /* keep the stored id */ }
     }
 
@@ -172,6 +175,23 @@ export async function processSendRetries(): Promise<{ processed: number; sent: n
         details: { reply_row_id: r.reply_row_id, attempt: r.attempt + 1 },
       });
       sent++;
+      continue;
+    }
+
+    // The inbox the lead wrote to is gone for good: not found by its address, and
+    // Bison still says the sender id is invalid — its domain was retired or
+    // replaced (JPCO, HS, 2026-10-20). Retrying can't help; say so plainly, once.
+    if (senderGone && /sender email id is invalid/i.test(result.error ?? "")) {
+      const why = `The inbox this lead wrote to (${r.sender_email}) no longer exists in Email Bison — its domain was retired or replaced — so the reply can't be sent from it.`;
+      await supabase.from("replies")
+        .update({ send_error: why, send_error_at: new Date().toISOString() })
+        .eq("id", r.reply_row_id)
+        .then(() => {}, () => {});
+      await setStatus(r.id, "exhausted", why);
+      await logError("inbox", "send-reply-inbox-gone", why, {
+        reply_row_id: r.reply_row_id, client_tag: r.client_tag, lead_email: r.to_email, sender_email: r.sender_email,
+      });
+      exhausted++;
       continue;
     }
 

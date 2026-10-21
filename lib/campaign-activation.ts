@@ -35,6 +35,39 @@ async function hasConnectedInbox(inst: string, campaignId: number): Promise<bool
   return ((d?.data ?? []) as Array<{ status?: string }>).some((s) => String(s.status).toLowerCase() === "connected");
 }
 
+// ── campaigns Email Bison refuses to launch ──────────────────────────────────
+// "This campaign is incomplete and cannot be launched" (no finished sequence /
+// schedule, no leads left to send to, or no senders) won't change by asking again
+// every 3 hours — BAJFI's SEGs pair was retried and logged 28 times from Oct 9.
+// Such a campaign is set aside for a week with ONE clear Error Log entry; it is
+// tried again after that (or sooner if the row is deleted), in case it was fixed.
+const INCOMPLETE_RE = /incomplete and cannot be launched/i;
+const SKIP_DAYS = 7;
+let skipReady: Promise<void> | null = null;
+function ensureSkip(): Promise<void> {
+  if (!skipReady) {
+    skipReady = db.execute(
+      "CREATE TABLE IF NOT EXISTS campaign_activation_skip (instance TEXT NOT NULL, campaign_id INTEGER NOT NULL, reason TEXT, until TEXT NOT NULL, PRIMARY KEY (instance, campaign_id))",
+    ).then(() => undefined).catch((e) => { skipReady = null; throw e; });
+  }
+  return skipReady;
+}
+async function skippedCampaigns(): Promise<Set<string>> {
+  await ensureSkip();
+  const r = await db.execute({ sql: "SELECT instance, campaign_id FROM campaign_activation_skip WHERE until > ?", args: [new Date().toISOString()] });
+  return new Set((r.rows as unknown as Array<{ instance: string; campaign_id: number }>).map((x) => `${x.instance}:${Number(x.campaign_id)}`));
+}
+async function setAsideIncomplete(tag: string, inst: string, c: { id: number; name?: string }, detail: string): Promise<void> {
+  await ensureSkip();
+  const until = new Date(Date.now() + SKIP_DAYS * 86_400_000).toISOString();
+  await db.execute({
+    sql: "INSERT INTO campaign_activation_skip (instance, campaign_id, reason, until) VALUES (?, ?, ?, ?) ON CONFLICT (instance, campaign_id) DO UPDATE SET reason = excluded.reason, until = excluded.until",
+    args: [inst, c.id, detail.slice(0, 300), until],
+  });
+  await logError("campaign-activation", `${tag}/${inst}/${c.id}`,
+    `"${c.name ?? c.id}" can't be launched — Email Bison says it's incomplete (it needs a finished sequence and schedule, leads still to send to, and sender inboxes). Not retried for ${SKIP_DAYS} days; open it in Email Bison to see what's missing.`);
+}
+
 export interface ActivateClientResult {
   tag: string;
   activated: number;
@@ -63,6 +96,7 @@ export async function activateSendableForClient(
   const out: ActivateClientResult = { tag: TAG, activated: 0, alreadyActiveOrNoop: 0, blocked: 0, failed: 0 };
   const re = new RegExp(`^${esc(TAG)}\\s*:`, "i");
   const instances = Array.from(new Set([ci.b2b, ci.b2c]));
+  const setAside = await skippedCampaigns().catch(() => new Set<string>());
 
   for (const inst of instances) {
     let all;
@@ -75,6 +109,7 @@ export async function activateSendableForClient(
     for (const c of sendable) {
       const leads = c.total_leads ?? 0;
       if (leads <= 0) { out.blocked++; continue; }
+      if (setAside.has(`${inst}:${c.id}`)) { out.blocked++; continue; }
       if (inboxOk === null) { try { inboxOk = await hasConnectedInbox(inst, c.id); } catch { inboxOk = false; } }
       if (!inboxOk) { out.blocked++; continue; }
       if (dry) { out.activated++; continue; }
@@ -82,6 +117,7 @@ export async function activateSendableForClient(
         const r = await resumeCampaign(inst, c.id);
         if (r.ok) out.activated++;
         else if (/not paused|already (active|running|launched)|only paused or draft/i.test(`${r.error ?? ""} ${JSON.stringify(r.raw ?? "")}`)) out.alreadyActiveOrNoop++;
+        else if (INCOMPLETE_RE.test(`${r.error ?? ""} ${JSON.stringify(r.raw ?? "")}`)) { out.blocked++; await setAsideIncomplete(TAG, inst, c, r.error ?? "incomplete"); }
         else { out.failed++; await logError("campaign-activation", `${TAG}/${inst}/${c.id}`, r.error ?? "resume failed"); }
       } catch (e) { out.failed++; await logError("campaign-activation", `${TAG}/${inst}/${c.id}`, (e as Error).message); }
     }

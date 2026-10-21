@@ -17,6 +17,7 @@ import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import { logActivity } from "@/lib/errors";
 import { zipInfo, stateCode } from "@/lib/qualification/zip-audit";
+import { openAIFetch } from "@/lib/openai-fetch";
 
 export const BBS_TAGS = ["BBS"];
 export const isBbsTag = (tag: string | null | undefined) => BBS_TAGS.includes(String(tag ?? "").trim().toUpperCase());
@@ -214,7 +215,7 @@ Lead's reply text (analyze first part for office location mentions):
 ${input.replyText.slice(0, 2000)}
 """`;
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await openAIFetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

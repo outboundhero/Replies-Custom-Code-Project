@@ -17,6 +17,8 @@
  * the result is discarded and the caller falls back to the CRM.
  */
 
+import { openAIFetch } from "@/lib/openai-fetch";
+
 export interface ReplyLocation {
   city: string | null;
   state: string | null;     // 2-letter US state, else region / county / province
@@ -62,7 +64,7 @@ export async function extractReplyLocation(
   if (!text) return null;
   if (!process.env.OPENAI_API_KEY) return null;
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await openAIFetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

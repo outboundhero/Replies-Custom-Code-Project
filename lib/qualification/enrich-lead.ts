@@ -10,6 +10,7 @@
  * silently fell back to CRM-only data from 2026-04-17 until it was removed.
  */
 import { logError } from "@/lib/errors";
+import { openAIFetch } from "@/lib/openai-fetch";
 
 /** Personal/free email domains — don't extract website from these */
 const PERSONAL_DOMAINS = new Set([
@@ -141,7 +142,7 @@ export async function enrichLead(input: EnrichInput): Promise<EnrichedLeadData> 
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await openAIFetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
