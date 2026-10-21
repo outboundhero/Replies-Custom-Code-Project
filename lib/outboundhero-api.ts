@@ -1598,11 +1598,14 @@ export async function getSenderEmail(instanceKey: string, senderEmailId: number)
 
 /**
  * Find a sender inbox by its email ADDRESS within an instance —
- * GET /api/sender-emails?filters[email]=. Used to RE-RESOLVE a sender's current
- * id after the inbox was removed + re-added (which changes the id), so a resend
+ * GET /api/sender-emails?search=. Used to RE-RESOLVE a sender's current id
+ * after the inbox was removed + re-added (which changes the id), so a resend
  * uses the live id instead of a stale one ("The selected sender email id is
- * invalid"). Prefers a Connected match. Returns null if the address isn't in the
- * instance (→ the inbox needs reconnecting first).
+ * invalid"). Prefers a Connected match.
+ * null = Bison answered and the address isn't in the instance. A failed or odd
+ * answer THROWS — "couldn't check" must never read as "the inbox is gone".
+ * (Bison ignores `filters[email]` here — it returns the whole inbox list — so
+ * the address goes in `search` and only an exact match counts.)
  */
 export async function findSenderEmailByAddress(
   instanceKey: string,
@@ -1611,16 +1614,19 @@ export async function findSenderEmailByAddress(
   const addr = (email || "").trim().toLowerCase();
   if (!addr) return null;
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetchWithTimeout(
-    `${baseUrl}/api/sender-emails?filters[email]=${encodeURIComponent(addr)}&per_page=25`,
-    { headers: buildHeaders(token), timeoutMs: 15_000 },
-  );
-  if (!res.ok) return null;
-  const body = await res.json().catch(() => null);
-  const rows = (body?.data ?? []) as Array<{ id?: number; name?: string; email?: string; status?: string }>;
-  const matches = rows.filter(
-    (r) => typeof r.id === "number" && String(r.email ?? "").trim().toLowerCase() === addr,
-  );
+  type Row = { id?: number; name?: string; email?: string; status?: string };
+  const matches: Row[] = [];
+  for (let page = 1; page <= 5; page++) {
+    const res = await fetchWithTimeout(
+      `${baseUrl}/api/sender-emails?search=${encodeURIComponent(addr)}&page=${page}`,
+      { headers: buildHeaders(token), timeoutMs: 15_000 },
+    );
+    if (!res.ok) throw new Error(`sender lookup ${res.status}`);
+    const body = await res.json().catch(() => null);
+    if (!body || !Array.isArray(body.data)) throw new Error("sender lookup: not a list");
+    matches.push(...(body.data as Row[]).filter((r) => typeof r.id === "number" && String(r.email ?? "").trim().toLowerCase() === addr));
+    if (matches.length || page >= (Number(body.meta?.last_page) || 1)) break;
+  }
   if (!matches.length) return null;
   const pick = matches.find((r) => /connect/i.test(String(r.status ?? ""))) ?? matches[0];
   return { id: pick.id as number, name: String(pick.name ?? ""), email: String(pick.email ?? ""), status: String(pick.status ?? "") };
