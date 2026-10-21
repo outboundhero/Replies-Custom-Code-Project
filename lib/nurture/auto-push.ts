@@ -31,6 +31,21 @@ import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/
 const NURTURE_DAYS = 45;
 const PER_CLIENT_CAP = 200;
 
+/** A page cursor: the last row read, as "<time>|<id>" — the order every source is read in. */
+function pageCursor(row: Record<string, unknown>, timeCol: string): string {
+  return `${String(row[timeCol])}|${Number(row.id)}`;
+}
+function parseCursor(raw: string | undefined): { ts: string; id: number } | null {
+  const i = (raw ?? "").lastIndexOf("|");
+  if (i <= 0) return null;
+  const ts = raw!.slice(0, i), id = Number(raw!.slice(i + 1));
+  return ts && Number.isFinite(id) && !Number.isNaN(Date.parse(ts)) ? { ts, id } : null;
+}
+/** Rows after the cursor in (time, id) order — PostgREST's `or` for (time > ts) OR (time = ts AND id > id). */
+function afterFilter(timeCol: string, c: { ts: string; id: number }): string {
+  return `${timeCol}.gt."${c.ts}",and(${timeCol}.eq."${c.ts}",id.gt.${c.id})`;
+}
+
 // Candidate + BucketResult now live in lib/nurture/route-candidates.ts (shared
 // with the source-campaign routing flow).
 
@@ -39,16 +54,20 @@ export interface AutoPushResult {
   scanned: number;
   perBucket: BucketResult[];
   totalAttached: number;
-  // Id cursors so the caller can page through the ENTIRE pool without the
+  // Cursors so the caller can page through the ENTIRE pool without the
   // head-of-line block that unmappable-lane leads (e.g. B2C when only B2B is
   // mapped) used to cause: those rows keep added_at=null and, ordered oldest-
   // first, would jam the window forever. The cursor advances past everything
-  // scanned, mappable or not.
-  nextSeqAfterId: number;
-  nextRepAfterId: number;
-  nextLegAfterId: number;
+  // scanned, mappable or not. Each is "<time>|<id>" of the last row read (""
+  // = from the start) — see pageCursor.
+  nextSeqAfter: string;
+  nextRepAfter: string;
+  nextLegAfter: string;
   exhausted: boolean; // no rows scanned this batch from any source
   error?: string;
+  /** "gate": a setup state that keeps this client out (map not confirmed, not live yet…) — expected.
+   *  "failure": something broke (a read failed, the sheet couldn't be read) — it must be seen. */
+  errorKind?: "gate" | "failure";
   // Candidates dropped this batch because the client's lead-tracking sheet marks
   // them "Meeting-Ready Lead" (delivered to the client — never re-nurture).
   sheetMeetingReadyExcluded?: number;
@@ -56,38 +75,38 @@ export interface AutoPushResult {
 
 export async function runAutoPushForClient(
   clientTag: string,
-  opts: { cap?: number; seqAfterId?: number; repAfterId?: number; legAfterId?: number } = {},
+  opts: { cap?: number; seqAfter?: string; repAfter?: string; legAfter?: string } = {},
 ): Promise<AutoPushResult> {
   // Cron uses the conservative PER_CLIENT_CAP safety belt; the on-demand
   // "Route all ready" action passes a larger cap and loops until drained.
   const cap = Math.max(1, opts.cap ?? PER_CLIENT_CAP);
-  const seqAfterId = Math.max(0, opts.seqAfterId ?? 0);
-  const repAfterId = Math.max(0, opts.repAfterId ?? 0);
-  const legAfterId = Math.max(0, opts.legAfterId ?? 0);
+  const seqAfter = parseCursor(opts.seqAfter);
+  const repAfter = parseCursor(opts.repAfter);
+  const legAfter = parseCursor(opts.legAfter);
   const cutoffIso = new Date(Date.now() - NURTURE_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0, nextSeqAfterId: seqAfterId, nextRepAfterId: repAfterId, nextLegAfterId: legAfterId, exhausted: true };
+  const result: AutoPushResult = { clientTag, scanned: 0, perBucket: [], totalAttached: 0, nextSeqAfter: opts.seqAfter ?? "", nextRepAfter: opts.repAfter ?? "", nextLegAfter: opts.legAfter ?? "", exhausted: true };
 
   // GATE 1: the operator must have confirmed this client's target-campaign map.
   // Nothing is auto-picked — we send ONLY to campaigns chosen in the map.
   const confirmedAt = await getMapConfirmedAt(clientTag);
-  if (!confirmedAt) { result.error = "target-campaign map not confirmed — select & confirm campaigns first"; return result; }
+  if (!confirmedAt) { result.error = "target-campaign map not confirmed — select & confirm campaigns first"; result.errorKind = "gate"; return result; }
 
   // GATE 2: the client must have a group mapping (→ which B2B/B2C instances).
   const instances = await getClientInstances(clientTag);
-  if (!instances) { result.error = "no group mapping — sync the group sheet"; return result; }
+  if (!instances) { result.error = "no group mapping — sync the group sheet"; result.errorKind = "gate"; return result; }
 
   // GATE 2b — NURTURE GO-LIVE GATE: never nurture a client before it has launched
   // (+ the agreed lag). A pre-launch client (Go Live Date in the future) gets ZERO
   // nurture activity. FAIL CLOSED on a sheet-read error (skip, don't risk it).
   try {
     if ((await fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS)).has(clientTag.toUpperCase())) {
-      result.error = "not yet live (before go-live + lag)"; return result;
+      result.error = "not yet live (before go-live + lag)"; result.errorKind = "gate"; return result;
     }
-  } catch (e) { result.error = `go-live check failed — skipped: ${(e as Error).message}`; return result; }
+  } catch (e) { result.error = `go-live check failed — skipped: ${(e as Error).message}`; result.errorKind = "failure"; return result; }
 
   // The confirmed map: (instance, esp) → target campaign.
   const map = await getCampaignMap(clientTag);
-  if (map.length === 0) { result.error = "no campaigns mapped"; return result; }
+  if (map.length === 0) { result.error = "no campaigns mapped"; result.errorKind = "gate"; return result; }
 
   // 1. Pull eligible sequence_finished candidates.
   // ESP guard: only route leads whose mailbox provider is CONFIRMED from
@@ -96,33 +115,42 @@ export async function runAutoPushForClient(
   // heuristic to the Google catch-all — dumping custom-domain Outlook/SEG
   // mailboxes into the Google nurture campaign. Hold them back until the
   // hourly ESP backfill stamps them; they become routable automatically.
-  const { data: seqRows, error: seqErr } = await supabase
+  //
+  // Paged by (sequence_finished_at, id), never by id alone: that walked the
+  // table's ~5.5M rows in id order looking for this client's few pending ones
+  // and timed out for big clients on every run — JPC routed nothing from Aug 14
+  // to Oct 21, JPCI, FSD and CI the same. The time order is the one the
+  // pending-queue index (client_tag, sequence_finished_at) serves.
+  let seqQuery = supabase
     .from("nurture_sequence_finished")
     .select("id, ob_lead_id, bison_instance, email, first_name, last_name, company, custom_variables, esp, sequence_finished_at, added_at, skipped")
     .eq("client_tag", clientTag)
     .is("added_at", null)
     .not("skipped", "is", true)
     .not("esp", "is", null)
-    .lte("sequence_finished_at", cutoffIso)
-    .gt("id", seqAfterId)
+    .lte("sequence_finished_at", cutoffIso);
+  if (seqAfter) seqQuery = seqQuery.or(afterFilter("sequence_finished_at", seqAfter));
+  const { data: seqRows, error: seqErr } = await seqQuery
+    .order("sequence_finished_at", { ascending: true })
     .order("id", { ascending: true })
     .limit(cap);
   if (seqErr) {
     result.error = `seq fetch failed: ${seqErr.message}`;
+    result.errorKind = "failure";
     return result;
   }
   // Advance the seq cursor past everything scanned (mappable or not).
-  if (seqRows && seqRows.length) result.nextSeqAfterId = Math.max(...seqRows.map((r) => r.id as number));
+  if (seqRows && seqRows.length) result.nextSeqAfter = pageCursor(seqRows[seqRows.length - 1], "sequence_finished_at");
 
   // 2. Pull eligible reply-based candidates (soft_negative + OOO, safe).
   // Only after the seq source is drained for this page (remaining budget),
-  // paged by its own id cursor.
+  // paged by its own (reply_time, id) cursor — the pending-replies index's order.
   const remaining = Math.max(0, cap - (seqRows?.length ?? 0));
-  let replyRows: Array<{ id: number; lead_id: number | null; bison_instance: string | null; lead_email: string; esp: string | null; first_name: string | null; last_name: string | null; company_name: string | null }> = [];
+  let replyRows: Array<{ id: number; lead_id: number | null; bison_instance: string | null; lead_email: string; esp: string | null; first_name: string | null; last_name: string | null; company_name: string | null; reply_time: string }> = [];
   if (remaining > 0) {
-    const { data, error } = await supabase
+    let repQuery = supabase
       .from("replies")
-      .select("id, lead_id, bison_instance, lead_email, first_name, last_name, company_name, esp")
+      .select("id, lead_id, bison_instance, lead_email, first_name, last_name, company_name, esp, reply_time")
       .eq("client_tag", clientTag)
       .eq("nurture_safety", "safe")
       .is("nurture_added_at", null)
@@ -131,18 +159,21 @@ export async function runAutoPushForClient(
       .not("reply_we_got", "is", null).neq("reply_we_got", "")
       .not("reply_time", "is", null)
       .lte("reply_time", cutoffIso)
-      .gt("id", repAfterId)
       .or(
         `ai_categorized_lead_category.is.null,ai_categorized_lead_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
-      )
+      );
+    if (repAfter) repQuery = repQuery.or(afterFilter("reply_time", repAfter));
+    const { data, error } = await repQuery
+      .order("reply_time", { ascending: true })
       .order("id", { ascending: true })
       .limit(remaining);
     if (error) {
       result.error = `replies fetch failed: ${error.message}`;
+      result.errorKind = "failure";
       return result;
     }
     replyRows = (data || []) as typeof replyRows;
-    if (replyRows.length) result.nextRepAfterId = Math.max(...replyRows.map((r) => r.id));
+    if (replyRows.length) result.nextRepAfter = pageCursor(replyRows[replyRows.length - 1], "reply_time");
   }
 
   // 2b. Pull eligible legacy candidates (historical Airtable-imported
@@ -151,11 +182,11 @@ export async function runAutoPushForClient(
   // sourceInstance is null and the lead is resolved/created in the target
   // instance like any cross-instance lead.
   const remainingLeg = Math.max(0, remaining - replyRows.length);
-  let legacyRows: Array<{ id: number; ob_lead_id: number | null; lead_email: string; esp: string | null; first_name: string | null; last_name: string | null; company: string | null }> = [];
+  let legacyRows: Array<{ id: number; ob_lead_id: number | null; lead_email: string; esp: string | null; first_name: string | null; last_name: string | null; company: string | null; reply_at: string }> = [];
   if (remainingLeg > 0) {
-    const { data, error } = await supabase
+    let legQuery = supabase
       .from("nurture_legacy_leads")
-      .select("id, ob_lead_id, lead_email, esp, first_name, last_name, company")
+      .select("id, ob_lead_id, lead_email, esp, first_name, last_name, company, reply_at")
       .eq("client_tag", clientTag)
       .eq("nurture_safety", "safe")
       .is("nurture_added_at", null)
@@ -163,18 +194,21 @@ export async function runAutoPushForClient(
       .not("esp", "is", null) // confirmed-ESP only — see seq query above
       .not("reply_at", "is", null)
       .lte("reply_at", cutoffIso)
-      .gt("id", legAfterId)
       .or(
         `original_ai_category.is.null,original_ai_category.not.in.(${EXCLUDED_AI_CATEGORIES.map((c) => `"${c}"`).join(",")})`
-      )
+      );
+    if (legAfter) legQuery = legQuery.or(afterFilter("reply_at", legAfter));
+    const { data, error } = await legQuery
+      .order("reply_at", { ascending: true })
       .order("id", { ascending: true })
       .limit(remainingLeg);
     if (error) {
       result.error = `legacy fetch failed: ${error.message}`;
+      result.errorKind = "failure";
       return result;
     }
     legacyRows = (data || []) as typeof legacyRows;
-    if (legacyRows.length) result.nextLegAfterId = Math.max(...legacyRows.map((r) => r.id));
+    if (legacyRows.length) result.nextLegAfter = pageCursor(legacyRows[legacyRows.length - 1], "reply_at");
   }
 
   // Exhausted when no source returned a row this page.
@@ -242,6 +276,7 @@ export async function runAutoPushForClient(
   const sheetMR = await getSheetMeetingReadyEmails(clientTag);
   if (!sheetMR.ok) {
     result.error = "lead-tracking sheet unreadable — skipped this run to avoid re-nurturing Meeting-Ready leads";
+    result.errorKind = "failure";
     return result;
   }
   let routable = candidates;
@@ -295,6 +330,32 @@ export async function runAutoPushForClient(
   });
 
   return result;
+}
+
+/**
+ * After a client's turn in the auto-route cron: keep whether it FAILED (not a
+ * setup gate), so a client that silently routes nothing shows up — on the
+ * Nurture page's Automation tab and, when it starts or the reason changes, in
+ * the Error Log. A good run clears it. (JPC routed nothing from Aug 14 to Oct 21
+ * and nothing anywhere said so.)
+ */
+export async function recordAutoPushHealth(clientTag: string, failure: string | null): Promise<void> {
+  const cur = await db.execute({ sql: "SELECT auto_nurture_last_error, auto_nurture_failing_since FROM client_config WHERE client_tag = ?", args: [clientTag] }).catch(() => null);
+  const row = cur?.rows[0] as { auto_nurture_last_error?: string | null; auto_nurture_failing_since?: string | null } | undefined;
+  if (!failure) {
+    if (row?.auto_nurture_failing_since) {
+      await db.execute({ sql: "UPDATE client_config SET auto_nurture_last_error = NULL, auto_nurture_failing_since = NULL WHERE client_tag = ?", args: [clientTag] });
+    }
+    return;
+  }
+  const text = failure.slice(0, 500);
+  if (!row?.auto_nurture_failing_since || row.auto_nurture_last_error !== text) {
+    await logError("nurture-auto-push", `client:${clientTag}`, `auto-route failed — ${text}`).catch(() => undefined);
+  }
+  await db.execute({
+    sql: "UPDATE client_config SET auto_nurture_last_error = ?, auto_nurture_failing_since = COALESCE(auto_nurture_failing_since, datetime('now')) WHERE client_tag = ?",
+    args: [text, clientTag],
+  });
 }
 
 /** List every client tag that has opted into auto-push. */

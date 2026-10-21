@@ -29,20 +29,22 @@ export async function POST(req: NextRequest) {
   const denied = await requireAdmin();
   if (denied) return denied;
 
-  let body: { clientTag?: string; cap?: number; seqAfterId?: number; repAfterId?: number; legAfterId?: number };
+  let body: { clientTag?: string; cap?: number; seqAfter?: string; repAfter?: string; legAfter?: string };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
   const clientTag = (body.clientTag || "").trim().toUpperCase();
   if (!clientTag) return NextResponse.json({ error: "clientTag required" }, { status: 400 });
   const cap = Math.min(MAX_CAP, Math.max(1, Number(body.cap) || MAX_CAP));
-  const seqAfterId = Math.max(0, Number(body.seqAfterId) || 0);
-  const repAfterId = Math.max(0, Number(body.repAfterId) || 0);
-  const legAfterId = Math.max(0, Number(body.legAfterId) || 0);
+  const cursor = (v: unknown) => (typeof v === "string" ? v.slice(0, 80) : "");
+  const seqAfter = cursor(body.seqAfter), repAfter = cursor(body.repAfter), legAfter = cursor(body.legAfter);
 
   try {
-    const result = await runAutoPushForClient(clientTag, { cap, seqAfterId, repAfterId, legAfterId });
+    const result = await runAutoPushForClient(clientTag, { cap, seqAfter, repAfter, legAfter });
     // done when this page scanned nothing left (cursor past the whole pool).
-    // The caller pages with nextSeqAfterId / nextRepAfterId until done.
+    // The caller pages with nextSeqAfter / nextRepAfter / nextLegAfter until done.
+    // A failure (a read that broke…) is an error, not "nothing left": said as "0 routed" it hid
+    // JPC's stalled routing. Setup gates keep their old answer.
+    if (result.errorKind === "failure") return NextResponse.json({ ...result, error: result.error }, { status: 500 });
     return NextResponse.json({ ...result, batchCap: cap, done: result.exhausted });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

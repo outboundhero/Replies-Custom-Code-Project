@@ -277,6 +277,17 @@ export async function initializeDatabase() {
     }
   }
 
+  // Auto-route health: the last FAILURE (not a setup gate) of the nurture auto-route
+  // for this client and since when it has been failing — cleared on the next good
+  // run. JPC failed silently from Aug 14 to Oct 21; this is what shows it.
+  for (const col of ["auto_nurture_last_error TEXT", "auto_nurture_failing_since TEXT"]) {
+    try {
+      await db.execute(`ALTER TABLE client_config ADD COLUMN ${col}`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
+
   // Per-client GoHighLevel credentials. When both are set, marking a lead with a
   // GHL_PUSH_CATEGORY (in the Reply Router) upserts it into that client's GHL
   // sub-account. Only configured clients push. See lib/push-to-ghl.ts.

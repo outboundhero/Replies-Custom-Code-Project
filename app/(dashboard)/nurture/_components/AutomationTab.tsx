@@ -22,6 +22,8 @@ type StatusFilter = "active" | "churned" | "all";
 interface ClientRow {
   clientTag: string; group: number | null; b2b: string | null; b2c: string | null;
   autoOn: boolean; lastRunAt: string | null; mappingMissing: boolean;
+  /** The auto-route cron has been FAILING for this client since `since` (a broken read, an unreadable sheet…). */
+  failing: { since: string; error: string } | null;
   matrix: Record<string, Record<Esp, Cell>>; configured: boolean;
   missingCells: Array<{ instance: string; esp: Esp }>;
   mapConfirmed: boolean; mapConfirmedAt: string | null;
@@ -121,6 +123,14 @@ export default function AutomationTab() {
       .filter((s) => s.clients.length > 0);
   }, [sections, search, matchesRouting, statusFilter]);
 
+  // Active clients whose auto-route is failing — shown above the list whatever the filters,
+  // so a client that silently routes nothing can't go unnoticed (JPC: Aug 14 → Oct 21).
+  const failingClients = useMemo(() => {
+    const out: ClientRow[] = [];
+    for (const s of sections || []) for (const c of s.clients) if (c.failing && !c.churned) out.push(c);
+    return out.sort((a, b) => a.failing!.since.localeCompare(b.failing!.since));
+  }, [sections]);
+
   // Map tag → row for quick lookups (bulk-enable gating, etc.).
   const clientByTag = useMemo(() => {
     const m = new Map<string, ClientRow>();
@@ -167,24 +177,24 @@ export default function AutomationTab() {
   // Drain /route-all (≤800/batch) until the server reports the whole ready pool
   // is scanned. Returns total routed + whether it errored.
   async function drainRouteAllFor(tag: string, onProgress: (routed: number, batches: number) => void) {
-    let routed = 0, batches = 0, seqAfterId = 0, repAfterId = 0, legAfterId = 0;
+    let routed = 0, batches = 0, seqAfter = "", repAfter = "", legAfter = "";
     const SAFETY = 1000;
     for (;;) {
       if (enableAbortRef.current || batches >= SAFETY) break;
-      let data: { totalAttached?: number; nextSeqAfterId?: number; nextRepAfterId?: number; nextLegAfterId?: number; done?: boolean; error?: string };
+      let data: { totalAttached?: number; nextSeqAfter?: string; nextRepAfter?: string; nextLegAfter?: string; done?: boolean; error?: string };
       try {
         const res = await fetch("/api/nurture/route-all", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientTag: tag, seqAfterId, repAfterId, legAfterId }),
+          body: JSON.stringify({ clientTag: tag, seqAfter, repAfter, legAfter }),
         });
         data = await res.json();
         if (!res.ok) return { routed, batches, errored: true, error: data?.error || `HTTP ${res.status}` };
       } catch (e) { return { routed, batches, errored: true, error: (e as Error).message }; }
       batches++;
       routed += data.totalAttached || 0;
-      seqAfterId = data.nextSeqAfterId ?? seqAfterId;
-      repAfterId = data.nextRepAfterId ?? repAfterId;
-      legAfterId = data.nextLegAfterId ?? legAfterId;
+      seqAfter = data.nextSeqAfter ?? seqAfter;
+      repAfter = data.nextRepAfter ?? repAfter;
+      legAfter = data.nextLegAfter ?? legAfter;
       onProgress(routed, batches);
       if (data.done) break;
     }
@@ -494,6 +504,23 @@ export default function AutomationTab() {
         </div>
       )}
 
+      {failingClients.length > 0 && (
+        <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200">
+          <div className="flex items-center gap-1.5 font-medium">
+            <AlertTriangle className="size-4" />
+            Auto-routing is failing for {failingClients.length} client{failingClients.length === 1 ? "" : "s"} — no ready leads are moving into their nurture campaigns
+          </div>
+          <ul className="mt-1.5 space-y-0.5 pl-6 text-xs">
+            {failingClients.map((c) => (
+              <li key={c.clientTag}>
+                <span className="font-mono font-semibold">{c.clientTag}</span> since {fmtSince(c.failing!.since)} — {c.failing!.error}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-1.5 pl-6 text-[11px] text-rose-700/80 dark:text-rose-300/80">Each run tries again every 2 hours; this clears by itself on the next run that works. Details are in the Error Log.</div>
+        </div>
+      )}
+
       {/* Flat client list (no section grouping) */}
       <div className="rounded-lg border bg-card overflow-hidden">
         <div className="flex items-center gap-2 px-4 py-2 bg-muted/30 border-b text-xs text-muted-foreground">
@@ -519,6 +546,12 @@ export default function AutomationTab() {
       </div>
     </div>
   );
+}
+
+/** "2026-10-21 13:05:04" (UTC, from SQLite) → "Oct 21, 6:05 AM" in the viewer's time. */
+function fmtSince(sqlUtc: string): string {
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(sqlUtc) ? sqlUtc : `${sqlUtc.replace(" ", "T")}Z`);
+  return Number.isNaN(d.getTime()) ? sqlUtc : d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function Tile({ label, value, accent, active, onClick }: { label: string; value: number; accent: string; active?: boolean; onClick?: () => void }) {
@@ -600,6 +633,14 @@ function ClientRowView({ c, autoOn, selected, onDragStart, onDragEnter, onToggle
         {c.group
           ? <span className="text-[9px] font-medium rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">G{c.group}</span>
           : <span className="text-[9px] font-medium rounded bg-amber-100 px-1.5 py-0.5 text-amber-700" title="No group mapping — run the group sheet sync">no group</span>}
+        {c.failing && !c.churned && (
+          <span
+            className="inline-flex items-center gap-0.5 text-[9px] font-medium rounded bg-rose-100 px-1.5 py-0.5 text-rose-700"
+            title={`Auto-routing failing since ${fmtSince(c.failing.since)}: ${c.failing.error}`}
+          >
+            <AlertTriangle className="size-2.5" /> routing failing
+          </span>
+        )}
         {c.churned && (
           <span
             className="inline-flex items-center gap-0.5 text-[9px] font-medium rounded bg-rose-100 px-1.5 py-0.5 text-rose-700"

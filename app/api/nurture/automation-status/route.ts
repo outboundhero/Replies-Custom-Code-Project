@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
 
   const [tagRows, cfgRows, instances, churnedMap, campRows, mapRows, healthRows, expRows] = await Promise.all([
     db.execute("SELECT ct.tag, ct.section_id, s.name AS section_name FROM client_tags ct JOIN sections s ON ct.section_id = s.id"),
-    db.execute("SELECT client_tag, auto_nurture_disabled, auto_nurture_last_run_at, nurture_map_confirmed_at FROM client_config"),
+    db.execute("SELECT client_tag, auto_nurture_disabled, auto_nurture_last_run_at, nurture_map_confirmed_at, auto_nurture_last_error, auto_nurture_failing_since FROM client_config"),
     getAllClientInstances(),
     getChurnedClients(),
     db.execute("SELECT name, status, client_tag, bison_instance, synced_at FROM nurture_campaigns_cache"),
@@ -94,18 +94,22 @@ export async function GET(req: NextRequest) {
     batchByTag.set(String(r.client_tag || "").toUpperCase(), Number(r.batch) || 1);
   }
 
-  const cfgByTag = new Map<string, { disabled: number; lastRun: string | null; mapConfirmedAt: string | null }>();
+  const cfgByTag = new Map<string, { disabled: number; lastRun: string | null; mapConfirmedAt: string | null; failing: { since: string; error: string } | null }>();
   for (const r of cfgRows.rows) {
     cfgByTag.set(String(r.client_tag).toUpperCase(), {
       disabled: Number(r.auto_nurture_disabled) || 0,
       lastRun: (r.auto_nurture_last_run_at as string) ?? null,
       mapConfirmedAt: (r.nurture_map_confirmed_at as string) ?? null,
+      // Set by the auto-route cron when a run FAILS (not a setup gate); cleared on a good run.
+      failing: r.auto_nurture_failing_since ? { since: String(r.auto_nurture_failing_since), error: String(r.auto_nurture_last_error ?? "") } : null,
     });
   }
 
   type ClientOut = {
     clientTag: string; group: number | null; b2b: BisonInstanceKey | null; b2c: BisonInstanceKey | null;
     autoOn: boolean; lastRunAt: string | null; mappingMissing: boolean;
+    /** The auto-route has been failing for this client since `since` (null = fine). */
+    failing: { since: string; error: string } | null;
     matrix: Record<string, Record<Esp, Cell>>; configured: boolean;
     missingCells: Array<{ instance: string; esp: Esp }>;
     mapConfirmed: boolean; mapConfirmedAt: string | null;
@@ -162,7 +166,7 @@ export async function GET(req: NextRequest) {
     if (!sections.has(sid)) sections.set(sid, { id: sid, name: String(r.section_name || "—"), clients: [] });
     sections.get(sid)!.clients.push({
       clientTag: tag, group: inst?.group ?? null, b2b: inst?.b2b ?? null, b2c: inst?.b2c ?? null,
-      autoOn, lastRunAt: cfg?.lastRun ?? null, mappingMissing: !inst,
+      autoOn, lastRunAt: cfg?.lastRun ?? null, mappingMissing: !inst, failing: cfg?.failing ?? null,
       matrix, configured, missingCells,
       mapConfirmed: !!cfg?.mapConfirmedAt, mapConfirmedAt: cfg?.mapConfirmedAt ?? null,
       hasMap: hasMapSet.has(TAG), churned, churnDate,

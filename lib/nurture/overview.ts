@@ -35,7 +35,7 @@ const NO_LEADS_HOURS = 48;
 export type BatchState = "on" | "wait" | "off";
 export type ClientType = "Cleaning" | "Non-Cleaning" | "OS";
 export interface CronState { at?: string; churned?: number; active?: number; manual?: boolean; checked?: number; newlyMapped?: number; remapped?: number }
-export interface StatusBadge { k: "prelaunch" | "map" | "draft" | "archived" | "noleads"; lab: string; tip: string }
+export interface StatusBadge { k: "prelaunch" | "map" | "draft" | "archived" | "noleads" | "routing"; lab: string; tip: string }
 
 export interface TagStats {
   queue: number; eligible: number; ready: number; cooldown: number; esp_unresolved: number;
@@ -205,7 +205,7 @@ export async function buildOverview(): Promise<{
     db.execute(`SELECT id, name, status, client_tag, total_leads, bison_instance, synced_at${extra} FROM nurture_campaigns_cache`),
     db.execute(`SELECT client_tag, status, total_leads${extra} FROM main_campaigns_cache`).catch(() => ({ rows: [] as unknown[] })),
     db.execute("SELECT client_tag, bison_instance, esp, campaign_id, campaign_name FROM nurture_campaign_map"),
-    db.execute("SELECT client_tag, auto_nurture_disabled, nurture_map_confirmed_at FROM client_config"),
+    db.execute("SELECT client_tag, auto_nurture_disabled, nurture_map_confirmed_at, auto_nurture_last_error, auto_nurture_failing_since FROM client_config"),
     db.execute("SELECT client_tag, bison_instance, esp, completion_percentage, total_leads FROM nurture_routing_health").catch(() => ({ rows: [] as unknown[] })),
     db.execute("SELECT client_tag, client_type FROM client_meta").catch(() => ({ rows: [] as unknown[] })),
     db.execute("SELECT client_tag, stats FROM nurture_tag_stats_cache"),
@@ -262,8 +262,12 @@ export async function buildOverview(): Promise<{
     if (!mapByTag.has(T)) mapByTag.set(T, []);
     mapByTag.get(T)!.push({ instance: String(r.bison_instance), esp: String(r.esp) as Esp, id: Number(r.campaign_id), name: (r.campaign_name as string) ?? null });
   }
-  const cfgByTag = new Map<string, { autoOn: boolean; confirmed: boolean }>();
-  for (const r of cfgRows.rows) cfgByTag.set(up(r.client_tag), { autoOn: Number(r.auto_nurture_disabled) !== 1, confirmed: !!r.nurture_map_confirmed_at });
+  const cfgByTag = new Map<string, { autoOn: boolean; confirmed: boolean; failing: { since: string; error: string } | null }>();
+  for (const r of cfgRows.rows) cfgByTag.set(up(r.client_tag), {
+    autoOn: Number(r.auto_nurture_disabled) !== 1, confirmed: !!r.nurture_map_confirmed_at,
+    // Set by the auto-route cron when a run FAILS (not a setup gate); cleared on the next good run.
+    failing: r.auto_nurture_failing_since ? { since: String(r.auto_nurture_failing_since), error: String(r.auto_nurture_last_error ?? "") } : null,
+  });
   const healthByTag = new Map<string, Map<string, Map<Esp, { completion: number; total: number }>>>();
   for (const r of healthRows.rows as Array<Record<string, unknown>>) {
     const T = up(r.client_tag), inst = String(r.bison_instance || ""), esp = String(r.esp || "") as Esp;
@@ -397,6 +401,11 @@ export async function buildOverview(): Promise<{
       else if (mapping === "bad") errors.push({ k: "map", lab: "Mapping issue", tip: mapIssues.join(" ") + " Fix the campaigns in Bison, or edit Target campaigns." });
       if (drafts) errors.push({ k: "draft", lab: "Campaigns in draft", tip: `${drafts} mapped nurture campaign${drafts > 1 ? "s hold" : " holds"} leads but ${drafts > 1 ? "are" : "is"} still in Draft, so nothing sends. Usually no sender inboxes for this client are connected on that instance — auto-launch skips a campaign with no senders. Tag + connect the inboxes, then Target campaigns → Edit → Save & enable sending.` });
       if (archived) errors.push({ k: "archived", lab: "Archived on active", tip: `An archived nurture campaign is still mapped for this active client. Re-point the map to a live campaign (Target campaigns → Edit).` });
+      // The auto-route itself is breaking (JPC routed nothing from Aug 14 to Oct 21 and nothing said so).
+      if (cfg?.failing && cfg.autoOn) {
+        const since = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(cfg.failing.since) ? cfg.failing.since : `${cfg.failing.since.replace(" ", "T")}Z`);
+        errors.push({ k: "routing", lab: "Routing failing", tip: `Auto-routing has failed on every run since ${Number.isNaN(since.getTime()) ? cfg.failing.since : since.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, so ready leads aren't moving into the nurture campaigns. Last error: ${cfg.failing.error}. It retries every 2 hours and clears on the first run that works; the Error Log has the details.` });
+      }
       if (stats && main.active > 0 && hoursAgo(stats.last_new_at) > NO_LEADS_HOURS) {
         const since = stats.last_new_at ? `since ${new Date(stats.last_new_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "at all";
         errors.push({ k: "noleads", lab: "Not receiving leads", tip: `No new leads have entered this tag's queue ${since} despite ${main.active} active main campaign${main.active > 1 ? "s" : ""}. Check ESP tagging + the sequence-finished sync.` });

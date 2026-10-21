@@ -463,7 +463,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
         {c && (c.prelaunch ? (
           <div className="banner info">{Ico.info}Pre-launch — the go-live date is in the future. Campaigns stay paused and nurture is held until launch.</div>
         ) : c.errors.length ? (
-          <div className={`banner ${c.errors.some((e) => e.k === "noleads" || e.k === "map") ? "bad" : "warn"}`}>{Ico.warnTri}{c.errors.map((e) => e.lab).join(" · ")} — hover the status badge{c.errors.length === 1 ? "" : "s"} above for the fix.</div>
+          <div className={`banner ${c.errors.some((e) => e.k === "noleads" || e.k === "map" || e.k === "routing") ? "bad" : "warn"}`}>{Ico.warnTri}{c.errors.map((e) => e.lab).join(" · ")} — hover the status badge{c.errors.length === 1 ? "" : "s"} above for the fix.</div>
         ) : null)}
         {c && !c.prelaunch && !c.autoOn && (
           <div className="banner info">{Ico.info}Auto-nurture is off for {tag} — ready leads aren&apos;t routed automatically. Turn it on from Actions.</div>

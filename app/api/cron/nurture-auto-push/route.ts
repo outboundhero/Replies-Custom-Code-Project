@@ -16,7 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
-import { listAutoEnabledClients, runAutoPushForClient } from "@/lib/nurture/auto-push";
+import { listAutoEnabledClients, runAutoPushForClient, recordAutoPushHealth } from "@/lib/nurture/auto-push";
 import { autoActivateReadyCampaigns } from "@/lib/nurture/enable-sending";
 import { logActivity, logError } from "@/lib/errors";
 
@@ -54,7 +54,7 @@ export async function GET(req: NextRequest) {
   const tags = start ? [...allTags.slice(start), ...allTags.slice(0, start)] : allTags;
   let lastProcessed: string | null = null;
 
-  const summary: Array<{ tag: string; scanned: number; attached: number; buckets: number; errors: number; activated?: number }> = [];
+  const summary: Array<{ tag: string; scanned: number; attached: number; buckets: number; errors: number; activated?: number; failure?: string }> = [];
   // Auto-activate mapped campaigns once senders + leads are ready (kill-switch:
   // set NURTURE_AUTO_ACTIVATE=off to disable). Runs per client after its push.
   const autoActivateOn = process.env.NURTURE_AUTO_ACTIVATE !== "off";
@@ -77,21 +77,24 @@ export async function GET(req: NextRequest) {
       });
       break;
     }
-    // Page through this client with id cursors so unmappable-lane leads
+    // Page through this client with cursors so unmappable-lane leads
     // (e.g. B2C when only B2B is mapped) are scanned-and-skipped, never jamming
     // the window. Bounded per tick by pages, attach count, and the soft budget.
-    let seqAfterId = 0, repAfterId = 0, legAfterId = 0, scanned = 0, attached = 0, buckets = 0, errors = 0;
+    let seqAfter = "", repAfter = "", legAfter = "", scanned = 0, attached = 0, buckets = 0, errors = 0;
+    // A failure (a read that broke, an unreadable sheet) — not a setup gate like "not live yet".
+    let failure: string | null = null;
     try {
       for (let page = 0; page < PER_CLIENT_PAGES; page++) {
         if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
-        const r = await runAutoPushForClient(tag, { seqAfterId, repAfterId, legAfterId });
+        const r = await runAutoPushForClient(tag, { seqAfter, repAfter, legAfter });
         scanned += r.scanned;
         attached += r.totalAttached;
         buckets = Math.max(buckets, r.perBucket.length);
         errors += r.perBucket.filter((b) => b.error).length + (r.error ? 1 : 0);
-        seqAfterId = r.nextSeqAfterId;
-        repAfterId = r.nextRepAfterId;
-        legAfterId = r.nextLegAfterId;
+        if (r.error && r.errorKind === "failure") failure = r.error;
+        seqAfter = r.nextSeqAfter;
+        repAfter = r.nextRepAfter;
+        legAfter = r.nextLegAfter;
         if (r.error || r.exhausted || attached >= PER_CLIENT_ATTACH) break;
       }
       // Once this tick's ready leads are routed, activate any mapped campaign
@@ -101,10 +104,12 @@ export async function GET(req: NextRequest) {
         try { activated = (await autoActivateReadyCampaigns(tag)).activated.length; }
         catch (e) { await logError("nurture-auto-push", `auto-activate:${tag}`, (e as Error).message); }
       }
-      summary.push({ tag, scanned, attached, buckets, errors, activated });
+      summary.push({ tag, scanned, attached, buckets, errors, activated, ...(failure ? { failure } : {}) });
+      await recordAutoPushHealth(tag, failure);
     } catch (e) {
       await logError("nurture-auto-push", `fatal:${tag}`, (e as Error).message);
-      summary.push({ tag, scanned, attached, buckets, errors: errors + 1 });
+      summary.push({ tag, scanned, attached, buckets, errors: errors + 1, failure: (e as Error).message });
+      await recordAutoPushHealth(tag, (e as Error).message).catch(() => undefined);
     }
     lastProcessed = tag; // advance the rotation cursor past every client we considered
   }

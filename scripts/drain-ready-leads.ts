@@ -28,13 +28,13 @@ const flag = (k: string, d?: string) => { const i = argv.indexOf(k); return i >=
   console.log(`Draining ready leads for ${tags.length} confirmed+enabled clients…\n`);
   let grand = 0;
   for (const tag of tags) {
-    let seqAfterId = 0, repAfterId = 0, legAfterId = 0, attached = 0, pages = 0, err = "";
+    let seqAfter = "", repAfter = "", legAfter = "", attached = 0, pages = 0, err = "";
     for (;;) {
       if (pages++ >= 3000) break; // safety
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const r: any = await runAutoPushForClient(tag, { cap: 1000, seqAfterId, repAfterId, legAfterId });
+      const r: any = await runAutoPushForClient(tag, { cap: 1000, seqAfter, repAfter, legAfter });
       attached += r.totalAttached || 0;
-      seqAfterId = r.nextSeqAfterId; repAfterId = r.nextRepAfterId; legAfterId = r.nextLegAfterId;
+      seqAfter = r.nextSeqAfter; repAfter = r.nextRepAfter; legAfter = r.nextLegAfter;
       if (r.error) { err = r.error; break; }
       if (r.exhausted) break;
     }

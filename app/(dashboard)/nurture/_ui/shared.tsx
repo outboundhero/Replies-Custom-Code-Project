@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 // ── API shapes ───────────────────────────────────────────────────────────────
 export type BatchState = "on" | "wait" | "off";
 export type ClientType = "Cleaning" | "Non-Cleaning" | "OS";
-export interface StatusBadge { k: "prelaunch" | "map" | "draft" | "archived" | "noleads"; lab: string; tip: string }
+export interface StatusBadge { k: "prelaunch" | "map" | "draft" | "archived" | "noleads" | "routing"; lab: string; tip: string }
 export interface TagStats {
   queue: number; ready: number;
   // client page only (the overview payload leaves these out)
@@ -200,7 +200,7 @@ export function HoverTip({ className, tip, children }: { className: string; tip:
   );
 }
 
-const BADGE_CLS: Record<StatusBadge["k"], string> = { archived: "p-warn", noleads: "p-bad", draft: "p-info", map: "p-bad", prelaunch: "p-info" };
+const BADGE_CLS: Record<StatusBadge["k"], string> = { archived: "p-warn", noleads: "p-bad", draft: "p-info", map: "p-bad", prelaunch: "p-info", routing: "p-bad" };
 export function StatusCell({ errors }: { errors: StatusBadge[] }) {
   if (!errors.length) return <span className="pill p-ok">{Ico.healthy}Healthy</span>;
   return (
