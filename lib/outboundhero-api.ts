@@ -1202,6 +1202,27 @@ export async function getReplyConversationThread(instanceKey: string, replyId: n
 }
 
 /**
+ * Bison reads GET /api/leads/{x} as a lead ID when x starts with digits —
+ * "13teebox@gmail.com" comes back as lead #13, someone else entirely. So an
+ * address that starts with a digit is found through the lead search instead,
+ * taking only an exact match. Throws if the search can't be read; null = no
+ * such lead in this instance.
+ */
+async function leadIdBySearch(instanceKey: string, addr: string): Promise<number | null> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  for (let page = 1; page <= 3; page++) {
+    const res = await fetchWithTimeout(`${baseUrl}/api/leads?search=${encodeURIComponent(addr)}&page=${page}`, { headers: buildHeaders(token), timeoutMs: 30_000 });
+    if (!res.ok) throw new Error(`lead search ${res.status}`);
+    const body = await res.json().catch(() => null);
+    if (!body || !Array.isArray(body.data)) throw new Error("lead search: not a list");
+    const hit = (body.data as Array<{ id?: unknown; email?: unknown }>).find((r) => typeof r.id === "number" && String(r.email ?? "").trim().toLowerCase() === addr);
+    if (hit) return hit.id as number;
+    if (page >= (Number(body.meta?.last_page) || 1)) break;
+  }
+  return null;
+}
+
+/**
  * Find a single lead by email. Returns the matching lead or null.
  *
  * Uses the direct path lookup `GET /api/leads/{email}` (Bison resolves the
@@ -1210,15 +1231,28 @@ export async function getReplyConversationThread(instanceKey: string, replyId: n
  * stalled the ESP backfill; the path endpoint returns in ~200-600ms with the
  * same `{ data: {...lead, tags:[…]} }` shape. A missing lead returns 404 (with
  * a `{data:{success:false}}` body), which we map to null via the !res.ok guard.
+ * Only a lead with exactly this address is returned: an address starting with a
+ * digit is looked up through the search (see leadIdBySearch), never by path.
  */
 export async function findLeadByEmail(instanceKey: string, email: string): Promise<OutboundLead | null> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
-  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${encodeURIComponent(email)}`, { headers: buildHeaders(token) });
+  const addr = String(email || "").trim().toLowerCase();
+  if (!addr) return null;
+  let key = encodeURIComponent(email);
+  if (/^\d/.test(addr)) {
+    let id: number | null;
+    try { id = await leadIdBySearch(instanceKey, addr); } catch { return null; }
+    if (id == null) return null;
+    key = String(id);
+  }
+  const res = await fetchWithTimeout(`${baseUrl}/api/leads/${key}`, { headers: buildHeaders(token) });
   if (!res.ok) return null; // 404 = not found, anything else = transient/error
   const data = await res.json();
   const lead = (data?.data ?? data) as OutboundLead | undefined;
   // Guard against the 404-with-200 edge: only treat it as a hit if it has an id.
   if (!lead || typeof lead.id !== "number") return null;
+  // Never another lead's record.
+  if (String(lead.email ?? "").trim().toLowerCase() !== addr) return null;
   return lead;
 }
 
