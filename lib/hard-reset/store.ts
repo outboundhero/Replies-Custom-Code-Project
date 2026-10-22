@@ -22,7 +22,11 @@ export interface OldCampaign { instance: string; id: number; name: string; statu
  * One build result (the same shape onboarding's campaign step records — its planner reads it back).
  * "building" = saved just before a build starts; one still there later was cut off part-way.
  */
-export interface BuildRecord { instance: string; name: string; state: "created" | "failed" | "building"; campaignId: number | null; note: string; unsure: boolean; at: string; lines: Record<string, string> }
+export interface BuildRecord {
+  instance: string; name: string; state: "created" | "failed" | "building"; campaignId: number | null; note: string; unsure: boolean; at: string; lines: Record<string, string>;
+  /** A failed try whose leftover draft has been dealt with (deleted, or none found) — not looked at again. */
+  cleared?: boolean;
+}
 /** Inboxes to attach in one instance, and how far each new campaign has got. */
 export interface AttachState {
   tagId: number | null;

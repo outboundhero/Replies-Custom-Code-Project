@@ -1768,12 +1768,26 @@ export async function getSequenceSteps(instanceKey: string, campaignId: number):
 // ── Writes used by the onboarding "Create email campaigns" step ─────────────
 // Each is ONE attempt (no automatic retry): a repeated create could make a
 // second tag, and the caller verifies every write by reading it back anyway.
+// The one exception is Email Bison's rate limit (429 "Too Many Attempts"): it
+// turns a request away before doing anything with it, so that request is sent
+// again once Email Bison says it may be (its Retry-After), a couple of times.
 
 export interface WriteResult { ok: boolean; status: number; message?: string }
 
+/** How long Email Bison asks to wait after a 429 (its Retry-After, in seconds), capped; a backoff when it doesn't say. */
+export function rateLimitWaitMs(r: Response, attempt: number): number {
+  const s = Number(r.headers.get("retry-after"));
+  return Math.min(65_000, (Number.isFinite(s) && s > 0 ? s * 1000 : backoffMs(attempt)) + 500 + attempt * 250);
+}
+const RATE_LIMITED_TRIES = 3;
+
 async function writeOnce(url: string, method: string, token: string, body: unknown, timeoutMs = 45_000): Promise<{ res: WriteResult; json: unknown }> {
   try {
-    const r = await fetchOnce(url, { method, headers: buildHeaders(token), body: JSON.stringify(body), timeoutMs });
+    let r = await fetchOnce(url, { method, headers: buildHeaders(token), body: JSON.stringify(body), timeoutMs });
+    for (let attempt = 0; r.status === 429 && attempt < RATE_LIMITED_TRIES - 1; attempt++) {
+      await sleep(rateLimitWaitMs(r, attempt));
+      r = await fetchOnce(url, { method, headers: buildHeaders(token), body: JSON.stringify(body), timeoutMs });
+    }
     const json = await r.json().catch(() => null);
     const d = (json as { data?: { success?: unknown; message?: unknown }; message?: unknown } | null);
     // Bison answers some refused writes with HTTP 200 + { data: { success: false } }.
@@ -1988,7 +2002,7 @@ export async function archiveCampaignOnce(instanceKey: string, campaignId: numbe
  * (`record_not_found` set — it's null on every other error); `alreadyPresent`
  * when every inbox was already on it (HTTP 200 + success:false + "already exist").
  */
-export async function attachSendersOnce(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<{ ok: boolean; status: number; alreadyPresent: boolean; campaignMissing: boolean; message: string }> {
+export async function attachSendersOnce(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<{ ok: boolean; status: number; alreadyPresent: boolean; campaignMissing: boolean; message: string; retryAfterMs?: number }> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   try {
     const res = await fetchOnce(`${baseUrl}/api/campaigns/${campaignId}/attach-sender-emails`, {
@@ -2003,6 +2017,7 @@ export async function attachSendersOnce(instanceKey: string, campaignId: number,
       message = String(d?.message ?? message); success = d?.success;
     } catch { /* not JSON */ }
     const campaignMissing = res.status === 404 && /"record_not_found"\s*:\s*(?!null)/.test(text);
+    if (res.status === 429) return { ok: false, status: 429, alreadyPresent: false, campaignMissing: false, message, retryAfterMs: rateLimitWaitMs(res, 0) };
     if (res.ok && success === false) {
       const already = /already exist/i.test(message);
       return { ok: already, status: res.status, alreadyPresent: already, campaignMissing: false, message };

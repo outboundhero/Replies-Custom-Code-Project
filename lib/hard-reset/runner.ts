@@ -13,7 +13,10 @@
  *   cancelling  (before nurture is switched only) the new campaigns are deleted — never one with leads
  *
  * A step that keeps failing (5 tries in a row) stops the reset as "failed"; "Try
- * again" resumes it at that step.
+ * again" resumes it at that step (a campaign build it stopped at is cleaned up and
+ * made again). When Email Bison's per-minute request allowance is used up (another
+ * job, say a big Lead Mover move), writes wait as long as it asks and the reset
+ * waits for the next round rather than counting that as a failure.
  */
 import db from "@/lib/db";
 import {
@@ -36,8 +39,8 @@ import {
 
 const MAX_ATTEMPTS = 5;
 const ATTACH_BATCH = 50;
-/** A build takes up to a minute; one isn't started with less time than this left. */
-const BUILD_MIN_MS = 100_000;
+/** A build takes seconds — or a few minutes when Email Bison makes it wait (rate limit); one isn't started with less time than this left. */
+const BUILD_MIN_MS = 180_000;
 /** No step is started with less time than this left. */
 const STEP_MIN_MS = 35_000;
 /** Cron rounds (~2 min apart) a cancel waits for Email Bison's background deletes. */
@@ -59,6 +62,8 @@ export function triggerHardResetRunner(id?: number): void {
 
 /** A problem that retrying won't fix: the reset stops here until someone looks. */
 class Stop extends Error { constructor(msg: string) { super(msg); this.name = "Stop"; } }
+/** Nothing wrong, just not now (Email Bison's rate limit): carried on next round, not counted as a failure. */
+class Wait extends Error { constructor(msg: string) { super(msg); this.name = "Wait"; } }
 
 const log = (r: HardReset, what: string, details: Record<string, unknown> = {}) =>
   logActivity("hard-reset", what, { client_tag: r.clientTag, details: { reset_id: r.id, ...details } }).catch(() => {});
@@ -111,9 +116,57 @@ async function settleCutOff(r: HardReset, holder: string): Promise<void> {
   await log(r, "build-cut-off", { records: cut });
 }
 
+/**
+ * After "Try again": a draft an earlier try left in Email Bison — parked as "BUILDING — …" /
+ * "CHECK COPY — …", or made by a create that never answered — is this reset's own, so it's
+ * deleted (only under exactly that name, only with no leads) and its campaign built again.
+ * Email Bison deletes in the background; until the draft is gone this says to wait (true).
+ * A draft that isn't plainly ours is left, and onboarding's planner stops on it.
+ */
+async function clearOwnDrafts(r: HardReset, holder: string): Promise<boolean> {
+  let waiting = false, changed = false;
+  const built: BuildRecord[] = [];
+  for (const b of r.built) {
+    if (b.state !== "failed" || b.cleared) { built.push(b); continue; }
+    const names = [`${BUILD_PREFIX}${b.name}`, `${CHECK_PREFIX}${b.name}`];
+    let ids: number[] = [];
+    if (b.campaignId != null) ids = [b.campaignId];
+    else if (b.unsure) {
+      // Email Bison's list lags a new campaign by a minute or two: onboarding's planner waits 10 minutes for these.
+      if (Date.now() - Date.parse(b.at) < 10 * 60_000) { built.push(b); continue; }
+      ids = (await listCampaigns(b.instance, { search: r.clientTag, strict: true }))
+        .filter((c) => names.includes(c.name) && Date.parse(String(c.created_at ?? "")) >= Date.parse(b.at) - 5 * 60_000)
+        .map((c) => c.id);
+    }
+    let left = 0;
+    for (const id of ids) {
+      const c = await lookUpCampaign(b.instance, id);
+      if (c === null) throw new Error(`Couldn't check #${id} in ${instanceName(b.instance)}`);
+      if (c === "gone") continue;
+      if (/delet/i.test(c.status)) { left++; waiting = true; continue; }
+      if (!names.includes(c.name)) { left++; continue; }
+      const raw = await getCampaignRaw(b.instance, id);
+      if (!raw) throw new Error(`Couldn't read #${id} in ${instanceName(b.instance)}`);
+      if (Number(raw.total_leads ?? 0) > 0) { left++; continue; }
+      const d = await deleteCampaign(b.instance, id);
+      if (!d.ok && d.status !== 404) throw new Error(`The unfinished draft #${id} “${c.name}” wasn't deleted (${d.status})`);
+      await log(r, "draft-deleted", { instance: b.instance, campaign_id: id, name: c.name });
+      left++; waiting = true;
+    }
+    if (!left) { built.push({ ...b, cleared: true, note: `${b.note} (Its draft was deleted on “Try again”.)` }); changed = true; }
+    else built.push(b);
+  }
+  if (changed) { r.built = built; await save(r, holder, { built_json: r.built }); }
+  return waiting;
+}
+
 async function createStep(r: HardReset, holder: string, deadline: number): Promise<boolean> {
   if (Date.now() > deadline - BUILD_MIN_MS) return false;
   await settleCutOff(r, holder);
+  if (await clearOwnDrafts(r, holder)) {
+    await save(r, holder, { error: "Waiting for Email Bison to delete the unfinished draft from the earlier try (it deletes in the background) — then that campaign is built again." });
+    return false;
+  }
   const plan = await planNewCampaigns(r.clientTag, r.client, r.params, r.archive, r.built, r.createdBy, true);
   if (plan.blockers.length) {
     if (plan.blockers.some((b) => /email copy changed/i.test(b))) {
@@ -170,7 +223,12 @@ async function createStep(r: HardReset, holder: string, deadline: number): Promi
   const record: BuildRecord = { instance: next.instance, name: res.name, state: res.state, campaignId: res.campaignId, note: res.note, unsure: !!res.unsure, at: nowIso(), lines: plan.pinned };
   r.built = [...r.built.slice(0, -1), record];
   await save(r, holder, { built_json: r.built });
-  if (res.state === "failed") throw new Stop(`Stopped at “${res.name}” (${instanceName(next.instance)}): ${res.note}`);
+  if (res.state === "failed") {
+    const advice = res.unsure
+      ? "“Try again” waits up to 10 minutes for Email Bison to list a draft it may have made, deletes it, and builds this campaign again."
+      : res.campaignId != null ? "“Try again” deletes that draft and builds this campaign again." : "“Try again” builds it again.";
+    throw new Stop(`Stopped at “${res.name}” (${instanceName(next.instance)}): ${res.why ?? res.note} ${advice}`);
+  }
   await log(r, "campaign-created", { instance: next.instance, name: res.name, campaign_id: res.campaignId });
   return true;
 }
@@ -182,11 +240,14 @@ async function createStep(r: HardReset, holder: string, deadline: number): Promi
  * round); a batch Bison refuses for good is split until the refused inboxes
  * (usually disconnected ones) are found — the rest still attach.
  */
-async function attachIds(instance: string, campaignId: number, ids: number[]): Promise<{ refused: number[] }> {
+async function attachIds(instance: string, campaignId: number, ids: number[], deadline: number): Promise<{ refused: number[] }> {
   if (!ids.length) return { refused: [] };
   let res = await attachSendersOnce(instance, campaignId, ids);
-  for (let attempt = 0; attempt < 3 && (res.status === 0 || res.status === 429 || res.status >= 500); attempt++) {
-    await new Promise((x) => setTimeout(x, 800 * 2 ** attempt));
+  for (let attempt = 0; attempt < 4 && (res.status === 0 || res.status === 429 || res.status >= 500); attempt++) {
+    // Rate limited: wait as long as Email Bison asks — or, if that would run past this round, carry on next round.
+    const wait = res.status === 429 ? (res.retryAfterMs ?? 30_000) : 800 * 2 ** attempt;
+    if (Date.now() + wait > deadline - 20_000) throw new Wait(`Waiting for Email Bison — ${instanceName(instance)}'s request allowance is used up right now (another job is using it); carrying on in a moment.`);
+    await new Promise((x) => setTimeout(x, wait));
     res = await attachSendersOnce(instance, campaignId, ids);
   }
   if (res.ok) return { refused: [] };
@@ -194,8 +255,8 @@ async function attachIds(instance: string, campaignId: number, ids: number[]): P
   if (res.campaignMissing) throw new Stop(`Campaign #${campaignId} is gone from ${instanceName(instance)}.`);
   if (ids.length === 1) return { refused: ids };
   const mid = ids.length >> 1;
-  const a = await attachIds(instance, campaignId, ids.slice(0, mid));
-  const b = await attachIds(instance, campaignId, ids.slice(mid));
+  const a = await attachIds(instance, campaignId, ids.slice(0, mid), deadline);
+  const b = await attachIds(instance, campaignId, ids.slice(mid), deadline);
   return { refused: [...a.refused, ...b.refused] };
 }
 
@@ -236,7 +297,7 @@ async function attachStep(r: HardReset, holder: string, deadline: number): Promi
       const missing = senders.filter((x) => !on.has(x) && !refused.has(x));
       for (let i = 0; i < missing.length; i += ATTACH_BATCH) {
         const batch = missing.slice(i, i + ATTACH_BATCH);
-        const out = await attachIds(inst, id, batch);
+        const out = await attachIds(inst, id, batch, deadline);
         cs.refused.push(...out.refused);
         cs.attached += batch.length - out.refused.length;
         if ((i / ATTACH_BATCH) % 4 === 3) { await persist(); await heartbeat(r.id, holder); }
@@ -468,6 +529,7 @@ export async function runHardResetJobs(deadlineMs: number, id?: number): Promise
       } catch (e) {
         if ((e as Error).name === "LeaseLost") break;
         const msg = ((e as Error).message || "failed").slice(0, 800);
+        if ((e as Error).name === "Wait") { await patchReset(rid, { error: msg }, { holder }); break; }
         const stop = (e as Error).name === "Stop" || r.attempts + 1 >= MAX_ATTEMPTS;
         if (stop) {
           // Only from the step it was in (a cancel that came in meanwhile wins).

@@ -201,6 +201,8 @@ export interface BuildResult {
   name: string;
   campaignId: number | null;
   note: string;
+  /** Why it failed, without the advice on what to do (a caller can give its own). */
+  why?: string;
   /** Bison didn't answer the create — a "BUILDING — …" campaign may exist that nobody knows the id of. */
   unsure?: boolean;
 }
@@ -234,19 +236,18 @@ export async function buildCampaign(job: BuildJob, ops: BisonOps): Promise<Build
   if (created === "unsure") {
     return {
       state: "failed", name, campaignId: null, unsure: true,
+      why: `Email Bison didn't answer when asked to make it, so it may have been made anyway as “${working}”.`,
       note: `Email Bison didn't answer when asked to make it, so it may have been made anyway as “${working}”. Look for it in Email Bison (delete it if it's there) before running again.`,
     };
   }
-  if (!created) return { state: "failed", name, campaignId: null, note: "Email Bison didn't create the campaign — nothing was made." };
+  if (!created) return { state: "failed", name, campaignId: null, why: "Email Bison didn't create the campaign — nothing was made.", note: "Email Bison didn't create the campaign — nothing was made." };
   const id = created.id;
 
   // Anything that goes wrong after this keeps the campaign aside under a name nobody can mistake.
   const park = async (why: string): Promise<BuildResult> => {
     const r = await ops.updateCampaign(instance, id, { name: `${CHECK_PREFIX}${name}` }).catch(() => ({ ok: false, status: 0 }));
-    return {
-      state: "failed", name, campaignId: id,
-      note: `${why} It was kept as “${r.ok ? CHECK_PREFIX : BUILD_PREFIX}${name}” (#${id}) — look at it in Email Bison and delete it, then run again.`,
-    };
+    const kept = `${why} It was kept as “${r.ok ? CHECK_PREFIX : BUILD_PREFIX}${name}” (#${id})`;
+    return { state: "failed", name, campaignId: id, why: `${kept}.`, note: `${kept} — look at it in Email Bison and delete it, then run again.` };
   };
 
   try {
@@ -296,7 +297,8 @@ export async function buildCampaign(job: BuildJob, ops: BisonOps): Promise<Build
     // 5. Everything checked out — now it gets its real name.
     const n = await ops.updateCampaign(instance, id, { name });
     const after = n.ok ? await ops.getCampaign(instance, id) : null;
-    if (!n.ok || String(after?.name ?? "") !== name) return park("It couldn't be given its real name.");
+    if (!n.ok) return park(`It couldn't be given its real name (${n.status || "no answer"}${n.message ? `: ${n.message}` : ""}).`);
+    if (String(after?.name ?? "") !== name) return park(after ? `It couldn't be given its real name (it reads back as “${String(after.name ?? "")}”).` : "It couldn't be read back after being given its real name.");
     return { state: "created", name, campaignId: id, note: "" };
   } catch (e) {
     return park(`Something went wrong part-way (${(e as Error).message}).`);
