@@ -318,11 +318,31 @@ export function searchTermFor(p: Place): string {
   return words.sort((a, b) => b.length - a.length)[0] || String(p.city);
 }
 
-/** Removal day: the 6th calendar day counting the notice day as day 1 (notice Oct 1 → Oct 6), from 00:00 Pacific. */
+/** The default removal day: the 6th calendar day counting the notice day as day 1 (notice Oct 1 → Oct 6), from 00:00 Pacific. */
 export function removalDate(noticeDate: string): string {
   const [y, m, d] = noticeDate.split("-").map(Number);
   const t = new Date(Date.UTC(y, m - 1, d + 5));
   return t.toISOString().slice(0, 10);
+}
+
+/** Days from one YYYY-MM-DD date to another. */
+export function daysBetween(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+}
+
+export const MAX_REMOVAL_DAYS = 90;
+
+/**
+ * Why a chosen removal day can't be used ("" when it can): a real date, not in
+ * the past (Pacific), not before the notice, at most 90 days after it. Today is
+ * allowed — the removal then runs as soon as the list is approved.
+ */
+export function removalDateProblem(date: string, noticeDate: string | null, today: string): string {
+  if (!isIsoDate(date)) return "Pick the removal day.";
+  if (date < today) return "The removal day can't be in the past.";
+  if (noticeDate && date < noticeDate) return "The removal day can't be before the notice date.";
+  if (noticeDate && daysBetween(noticeDate, date) > MAX_REMOVAL_DAYS) return `The removal day is more than ${MAX_REMOVAL_DAYS} days after the notice — check it.`;
+  return "";
 }
 
 const LA = "America/Los_Angeles";

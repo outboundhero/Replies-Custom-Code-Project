@@ -4,7 +4,7 @@
  */
 import {
   parsePlaces, parseAddress, signalsOf, classify, normCity, usStateCode, searchTermFor, removalDate, pacificMidnight,
-  inputFromCustomVars, mergeSignals, isIsoDate, type Place, type ZipFacts, type CityStates,
+  inputFromCustomVars, mergeSignals, isIsoDate, removalDateProblem, daysBetween, type Place, type ZipFacts, type CityStates,
 } from "../../lib/service-area-changes/places";
 
 let pass = 0, fail = 0;
@@ -164,6 +164,18 @@ console.log("search terms + dates");
   eq(pacificMidnight("2026-11-01").toISOString(), "2026-11-01T07:00:00.000Z", "the day DST ends starts in PDT");
   eq(pacificMidnight("2027-03-14").toISOString(), "2027-03-14T08:00:00.000Z", "the day DST starts begins in PST");
   ok(isIsoDate("2026-10-21") && !isIsoDate("2026-02-31") && !isIsoDate("2026-13-01") && !isIsoDate("10/21/2026"), "only real YYYY-MM-DD dates");
+  // A chosen removal day (notice Oct 21, today Oct 22).
+  eq(removalDateProblem("2026-10-26", "2026-10-21", "2026-10-22"), "", "the default day 6 is fine");
+  eq(removalDateProblem("2026-10-23", "2026-10-21", "2026-10-22"), "", "an earlier day (day 3) can be chosen");
+  eq(removalDateProblem("2026-10-22", "2026-10-21", "2026-10-22"), "", "today can be chosen (runs once approved)");
+  eq(removalDateProblem("2026-11-20", "2026-10-21", "2026-10-22"), "", "a later day can be chosen");
+  ok(/past/.test(removalDateProblem("2026-10-21", "2026-10-21", "2026-10-22")), "not a day in the past");
+  ok(/before the notice/.test(removalDateProblem("2026-10-24", "2026-10-25", "2026-10-22")), "not before the notice date");
+  ok(/90 days/.test(removalDateProblem("2027-01-20", "2026-10-21", "2026-10-22")), "not more than 90 days after the notice");
+  ok(/Pick/.test(removalDateProblem("2026-02-31", "2026-10-21", "2026-10-22")) && /Pick/.test(removalDateProblem("", null, "2026-10-22")), "a real date is needed");
+  eq(daysBetween("2026-10-21", "2026-10-26"), 5, "Oct 21 → Oct 26 is 5 days (day 6)");
+  eq(daysBetween("2026-10-29", "2026-11-03"), 5, "across a month end");
+  eq(daysBetween("2027-03-12", "2027-03-15"), 3, "across the DST change");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

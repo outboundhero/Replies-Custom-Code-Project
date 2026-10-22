@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { prefetchDataView, dataViewDefaultCategory } from "@/lib/data-view-prefetch";
 
@@ -96,6 +96,24 @@ export function Nav({
     Array.isArray(initialAllowedClientTags) && initialAllowedClientTags.length > 0
   );
 
+  // Clients whose service area changed on the Onboarding Form and nobody has looked at yet.
+  const [areaAlerts, setAreaAlerts] = useState(0);
+  const team = role === "admin" || (role === "inbox_manager" && !isScoped);
+  useEffect(() => {
+    if (!team) return;
+    let live = true;
+    const load = () => fetch("/api/service-area/alerts?count=1", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null)).then((j) => { if (live && typeof j?.count === "number") setAreaAlerts(j.count); }).catch(() => {});
+    void load();
+    const t = setInterval(load, 5 * 60_000);
+    // An alert closed on a client page: refresh the count now.
+    window.addEventListener("service-area-alerts-changed", load);
+    return () => { live = false; clearInterval(t); window.removeEventListener("service-area-alerts-changed", load); };
+  }, [team]);
+  const badges: Record<string, { n: number; title: string }> = areaAlerts
+    ? { "/clients": { n: areaAlerts, title: `${areaAlerts} client${areaAlerts === 1 ? "" : "s"} with a service-area change on the Onboarding Form to look at` } }
+    : {};
+
   async function handleLogout() {
     await fetch("/api/auth", {
       method: "POST",
@@ -160,7 +178,7 @@ export function Nav({
           if (isGroup(item)) {
             const kids = item.children.filter(canSee);
             if (!kids.length) return null;
-            return <NavGroupEl key={item.label} label={item.label} kids={kids} pathname={pathname} linkClass={linkClass} defaultOpen={item.defaultOpen} onWarm={warmHref} />;
+            return <NavGroupEl key={item.label} label={item.label} kids={kids} pathname={pathname} linkClass={linkClass} defaultOpen={item.defaultOpen} onWarm={warmHref} badges={badges} />;
           }
           if (!canSee(item)) return null;
           return (
@@ -189,7 +207,7 @@ export function Nav({
 }
 
 function NavGroupEl({
-  label, kids, pathname, linkClass, defaultOpen = false, onWarm,
+  label, kids, pathname, linkClass, defaultOpen = false, onWarm, badges = {},
 }: {
   label: string;
   kids: NavLink[];
@@ -197,6 +215,7 @@ function NavGroupEl({
   linkClass: (active: boolean) => string;
   defaultOpen?: boolean;
   onWarm?: (href: string) => void;
+  badges?: Record<string, { n: number; title: string }>;
 }) {
   // A child is active on its own page and on pages under it (/clients/JPSCAL → All Clients).
   const isKid = (href: string) => pathname === href || pathname.startsWith(href + "/");
@@ -227,8 +246,11 @@ function NavGroupEl({
         <div className="overflow-hidden">
           <div className="ml-3 mt-1 pl-2 border-l border-border space-y-1">
             {kids.map((k) => (
-              <Link key={k.href} href={k.href} onMouseEnter={() => onWarm?.(k.href)} className={linkClass(isKid(k.href))}>
+              <Link key={k.href} href={k.href} onMouseEnter={() => onWarm?.(k.href)} className={cn(linkClass(isKid(k.href)), badges[k.href] && "flex items-center justify-between gap-2")}>
                 {k.label}
+                {badges[k.href] && (
+                  <span title={badges[k.href].title} className="min-w-5 rounded-full bg-amber-500 px-1.5 text-center text-[11px] font-semibold leading-5 text-white tabular-nums">{badges[k.href].n}</span>
+                )}
               </Link>
             ))}
           </div>

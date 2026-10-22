@@ -7,7 +7,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronRight, Loader2, Plus, Search, Users } from "lucide-react";
+import { ChevronRight, History, Loader2, Plus, Search, Users } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,11 @@ interface Section {
   airtable_base_id: string;
 }
 
+interface AreaAlert {
+  id: number; clientTag: string; updatedAt: string;
+  removed: { key: string; label: string }[]; added: { key: string; label: string }[];
+}
+
 const ccCount = (c: Client) => [c.cc_email_1, c.cc_email_2, c.cc_email_3, c.cc_email_4, c.cc_email_5, c.cc_email_6].filter(Boolean).length;
 const bccCount = (c: Client) => [c.bcc_email_1, c.bcc_email_2].filter(Boolean).length;
 
@@ -55,6 +60,7 @@ export default function ClientsPage() {
   const [adding, setAdding] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [companies, setCompanies] = useState<Record<string, string>>({});
+  const [alerts, setAlerts] = useState<AreaAlert[]>([]);
 
   const loadClients = useCallback(async () => {
     try {
@@ -82,6 +88,8 @@ export default function ClientsPage() {
   useEffect(() => {
     let live = true;
     fetch("/api/clients/companies").then((r) => (r.ok ? r.json() : null)).then((j) => { if (live && j?.companies) setCompanies(j.companies); }).catch(() => {});
+    // Service areas changed on the Onboarding Form (found by the sheet sync).
+    fetch("/api/service-area/alerts", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((j) => { if (live && Array.isArray(j?.alerts)) setAlerts(j.alerts); }).catch(() => {});
     return () => { live = false; };
   }, []);
 
@@ -158,6 +166,36 @@ export default function ClientsPage() {
           </div>
         ))}
       </div>
+
+      {alerts.length > 0 && (
+        <section className="overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-500/[0.04]">
+          <header className="flex flex-wrap items-center gap-2 border-b border-amber-500/20 px-4 py-3">
+            <History className="size-4 text-amber-700 dark:text-amber-400" />
+            <h3 className="text-sm font-semibold">Service area changed on the Onboarding Form</h3>
+            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-300">{alerts.length} client{alerts.length === 1 ? "" : "s"}</span>
+            <span className="ml-auto text-xs text-muted-foreground">Open a client to record the removals, or mark it as looked at.</span>
+          </header>
+          <ul className="max-h-72 divide-y divide-amber-500/10 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
+            {alerts.map((a) => (
+              <li key={a.id}>
+                <Link href={`/clients/${encodeURIComponent(a.clientTag)}`} className="group flex items-center gap-3 px-4 py-2.5 text-sm transition-colors hover:bg-amber-500/[0.06]">
+                  <span className="w-48 min-w-0 shrink-0">
+                    <span className="block truncate font-mono text-[13px] font-semibold">{a.clientTag}</span>
+                    {companies[a.clientTag] && <span className="block truncate text-xs text-muted-foreground">{companies[a.clientTag]}</span>}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {a.removed.length > 0 && <span className="text-destructive">{a.removed.length} taken out: {a.removed.slice(0, 4).map((x) => x.label).join(", ")}{a.removed.length > 4 ? "…" : ""}</span>}
+                    {a.removed.length > 0 && a.added.length > 0 && " · "}
+                    {a.added.length > 0 && <span className="text-emerald-700 dark:text-emerald-400">{a.added.length} added: {a.added.slice(0, 4).map((x) => x.label).join(", ")}{a.added.length > 4 ? "…" : ""}</span>}
+                  </span>
+                  <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">{new Date(a.updatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <div className="relative max-w-sm">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />

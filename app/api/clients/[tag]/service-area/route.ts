@@ -1,20 +1,22 @@
 /**
  * Service-area changes for one client.
  *
- * GET  → the client's changes (newest first) with their counts, plus the last
- *        edit of the Onboarding Form's service-area text.
- * POST { entries: [{ type: "city"|"state"|"zip", text }], noticeDate, note?, preview? }
+ * GET  → the client's changes (newest first) with their counts, plus its
+ *        Onboarding Form service-area alert (places added / taken out).
+ * POST { entries: [{ type: "city"|"state"|"zip", text }], noticeDate, removalDate?, note?, alertId?, alertVersion?, preview? }
  *      → preview: the places as read, the removal date, problems — nothing saved.
  *      → otherwise: records the change and starts the (read-only) scan.
+ * removalDate defaults to the 6th day counting the notice day as day 1; any day
+ * from today (Pacific) and from the notice date on can be chosen instead.
  * One open change per client at a time.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { teamAccess } from "@/lib/service-area-changes/access";
-import { isIsoDate, pacificMidnight, pacificToday, parsePlaces, removalDate, type Place, type PlaceType } from "@/lib/service-area-changes/places";
+import { isIsoDate, pacificMidnight, pacificToday, parsePlaces, removalDate, removalDateProblem, type Place, type PlaceType } from "@/lib/service-area-changes/places";
 import { addTasks, changeSummary, counts, createChange, getChange, listChanges, openChanges, patchChange, zipFactsFor } from "@/lib/service-area-changes/store";
 import { clientCampaigns, scanTasks } from "@/lib/service-area-changes/scan";
 import { triggerServiceAreaRunner } from "@/lib/service-area-changes/runner";
-import { latestTextChange } from "@/lib/service-area-changes/text-versions";
+import { clientAlert, handleAlert } from "@/lib/service-area-changes/text-versions";
 import { logActivity } from "@/lib/errors";
 import { zipsOfCity } from "@/lib/qualification/zip-audit";
 
@@ -27,8 +29,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ tag
   try {
     const changes = await listChanges(a.tag);
     const out = await Promise.all(changes.slice(0, 12).map(async (c) => ({ ...changeSummary(c), counts: await counts(c.id) })));
-    const textChange = await latestTextChange(a.tag).catch(() => null);
-    return NextResponse.json({ ok: true, tag: a.tag, today: pacificToday(), changes: out, textChange });
+    const alert = await clientAlert(a.tag).catch(() => null);
+    return NextResponse.json({ ok: true, tag: a.tag, today: pacificToday(), changes: out, alert });
   } catch (e) {
     console.error("[api/clients/service-area]", e);
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
@@ -78,7 +80,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tag
     if (!isIsoDate(notice)) errors.push("Pick the date the notice was received.");
     else if (notice > today) errors.push("The notice date can't be in the future.");
     else if (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${notice}T00:00:00Z`) > 60 * 86_400_000) errors.push("The notice date is more than 60 days ago — check it.");
-    const rDate = isIsoDate(notice) ? removalDate(notice) : null;
+    // The removal day: the one chosen, else the default (day 6) — the same rules either way.
+    const chosen = body?.removalDate ? String(body.removalDate) : "";
+    let rDate = isIsoDate(notice) ? (chosen || removalDate(notice)) : null;
+    if (rDate) {
+      const bad = removalDateProblem(rDate, notice, today);
+      if (bad) { errors.push(chosen ? bad : `Day 6 after that notice (${rDate}) has passed — pick the removal day.`); rDate = null; }
+    }
     const rAt = rDate ? pacificMidnight(rDate).toISOString() : null;
     const note = String(body?.note ?? "").trim().slice(0, 500) || null;
 
@@ -114,6 +122,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tag
       client_tag: a.tag,
       details: { change_id: id, by: a.email, places: places.map((p) => p.label), notice_date: notice, removal_date: rDate, campaigns: campaigns.length },
     });
+    // Started from an Onboarding Form alert: that alert is dealt with.
+    // (only as it was seen — if a newer edit changed it meanwhile, it stays open with the new places)
+    const alertId = Number(body?.alertId), alertVersion = Number(body?.alertVersion);
+    if (Number.isInteger(alertId) && alertId > 0 && Number.isInteger(alertVersion)) await handleAlert(alertId, a.tag, alertVersion, "recorded", a.email, id).catch(() => {});
     triggerServiceAreaRunner(id);
     return NextResponse.json({ ok: true, id });
   } catch (e) {

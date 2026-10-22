@@ -662,7 +662,7 @@ function QualificationCard({ q }: { q: Profile["qualification"] }) {
   const [open, setOpen] = useState(false);
   const long = (q?.inclusion?.length ?? 0) > 420;
   return (
-    <Card icon={<ShieldCheck className="size-4" />} title="Qualification rules" sub="Who counts as a lead for this client — from the Onboarding Form, synced every hour">
+    <Card icon={<ShieldCheck className="size-4" />} title="Qualification rules" sub="Who counts as a lead for this client — from the Onboarding Form, synced every 6 hours">
       {!q ? (
         <p className="py-1 text-sm text-muted-foreground">No rules yet — they appear once the Onboarding Form has this client and the hourly sync has run.</p>
       ) : (

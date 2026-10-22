@@ -3,9 +3,11 @@
  *
  *   decide       { emails, remove }               tick / untick leads (while scanning or in review)
  *   decide-all   { tab, q?, remove, expected }     tick / untick every lead matching a tab + search
- *   approve      { confirm: TAG }                  approve — removal runs on the removal day
+ *   approve      { confirm: TAG, removalDate }     approve — removal runs on the removal day (the one the approver saw)
  *   unapprove                                      back to review (before the removal day)
  *   cancel                                         stop this change (before removal starts)
+ *   set-removal-date { removalDate }               move the removal day (before the removal starts); an
+ *                                                  approved change moved EARLIER goes back to review
  *   retry-scan                                     re-read the parts of the check that failed
  *   rescan                                         check again for leads added since (keeps the ticks)
  *   retry-removal                                  try the leads whose removal failed again
@@ -22,6 +24,7 @@ import { clientCampaigns, scanTasks } from "@/lib/service-area-changes/scan";
 import { liftSuppressions } from "@/lib/service-area-changes/suppression";
 import { triggerServiceAreaRunner } from "@/lib/service-area-changes/runner";
 import { logActivity } from "@/lib/errors";
+import { pacificMidnight, pacificToday, removalDateProblem } from "@/lib/service-area-changes/places";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -74,8 +77,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tag
         if ((await failedTasks(id)).length) return bad("Part of the check couldn't be read — retry it first.", 409);
         const c = await counts(id);
         if (c.ticked === 0) return bad("Nothing is ticked to remove.", 409);
-        const ok = await patchChange(id, { status: "approved", approved_by: a.email, approved_at: now }, ["review"]);
-        if (!ok) return bad("It changed meanwhile — reload.", 409);
+        // Approved for the removal day the approver saw — if someone moved it meanwhile, look again.
+        const seen = String(body?.removalDate ?? "");
+        if (seen !== change.removalDate) return bad(`The removal day is now ${change.removalDate} — reload and check it before approving.`, 409);
+        const r = await db.execute({
+          sql: "UPDATE sa_change SET status = 'approved', approved_by = ?, approved_at = ?, updated_at = ? WHERE id = ? AND status = 'review' AND removal_date = ?",
+          args: [a.email, now, now, id, seen],
+        });
+        if (!(r.rowsAffected ?? 0)) return bad("It changed meanwhile — reload.", 409);
         await log("approved", { leads: c.ticked, removal_at: change.removalAt });
         if (Date.parse(change.removalAt) <= Date.now()) triggerServiceAreaRunner(id);
         return NextResponse.json({ ok: true });
@@ -96,6 +105,28 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tag
         await db.execute({ sql: "UPDATE sa_task SET status = 'cancelled', updated_at = ? WHERE change_id = ? AND status = 'pending'", args: [now, id] });
         await log("cancelled");
         return NextResponse.json({ ok: true });
+      }
+
+      case "set-removal-date": {
+        const before = ["planning", "scanning", "review", "approved"] as const;
+        if (!(before as readonly string[]).includes(change.status) || (change.status === "approved" && Date.parse(change.removalAt) <= Date.now())) {
+          return bad("The removal has started — its day can't change now.", 409);
+        }
+        const date = String(body?.removalDate ?? "");
+        const problem = removalDateProblem(date, change.noticeDate, pacificToday());
+        if (problem) return bad(problem);
+        if (date === change.removalDate) return NextResponse.json({ ok: true, unchanged: true });
+        const at = pacificMidnight(date).toISOString();
+        // Approved for a later day than the new one: the approval was for that day — back to review.
+        const reapprove = change.status === "approved" && date < change.removalDate;
+        const fields = reapprove ? { removal_date: date, removal_at: at, status: "review", approved_by: null, approved_at: null } : { removal_date: date, removal_at: at };
+        const r = await db.execute({
+          sql: `UPDATE sa_change SET ${Object.keys(fields).map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE id = ? AND status = ? AND removal_date = ?`,
+          args: [...Object.values(fields), now, id, change.status, change.removalDate],
+        });
+        if (!(r.rowsAffected ?? 0)) return bad("It changed meanwhile — reload.", 409);
+        await log("removal-date-changed", { from: change.removalDate, to: date, back_to_review: reapprove });
+        return NextResponse.json({ ok: true, backToReview: reapprove });
       }
 
       case "retry-scan": {

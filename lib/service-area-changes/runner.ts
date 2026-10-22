@@ -125,8 +125,13 @@ async function runScan(change: Change, deadline: number, holder: string): Promis
 /** On the removal day: look again for leads that arrived in the removed places since the check. */
 async function startTopup(change: Change): Promise<boolean> {
   const campaigns = await clientCampaigns(change.clientTag);
-  const ok = await patchChange(change.id, { status: "topup", topup_started_at: new Date().toISOString() }, ["approved"]);
-  if (!ok) return false;
+  // Only while it's still approved AND its day has come (the day may have been moved meanwhile).
+  const now = new Date().toISOString();
+  const r = await db.execute({
+    sql: "UPDATE sa_change SET status = 'topup', topup_started_at = ?, updated_at = ? WHERE id = ? AND status = 'approved' AND removal_at <= ?",
+    args: [now, now, change.id, now],
+  });
+  if (!(r.rowsAffected ?? 0)) return false;
   await addTasks(change.id, scanTasks(change, campaigns, true));
   await logActivity("service-area", "removal-day", { client_tag: change.clientTag, details: { change_id: change.id, campaigns: campaigns.length } });
   return true;

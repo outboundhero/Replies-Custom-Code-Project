@@ -9,7 +9,8 @@
  *   No location     — no city, state or ZIP; kept unless ticked
  *
  * Tick = remove. Click a tick, shift-click for a range, or press and drag down
- * the ticks. Approve once the check has finished; removal runs on the 6th day.
+ * the ticks. Approve once the check has finished; removal runs on the removal
+ * day (day 6 by default — it can be moved until the removal starts).
  * After it runs, the list shows what happened to each lead.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -27,6 +28,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { getInstanceLabel } from "@/lib/bison-instances-shared";
 import { Chip } from "../../_ui";
 import { PlaceChips, STATUS, longDate, type ChangeCounts, type ChangeSummary } from "../../_service-area";
+import { daysBetween, pacificToday, removalDate, removalDateProblem } from "@/lib/service-area-changes/places";
 
 type Tab = "match" | "check" | "noloc" | "ticked";
 type Where = { instance: string; campaignId: number; campaignName: string | null; kind: "main" | "nurture" | "queue"; leadStatus: string | null };
@@ -84,7 +86,8 @@ export default function ServiceAreaChangePage() {
   const [total, setTotal] = useState(0);
   const [loadingRows, setLoadingRows] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<null | "approve" | "cancel" | { bulk: boolean } | { letIn: string[] }>(null);
+  const [dialog, setDialog] = useState<null | "approve" | "cancel" | "date" | { bulk: boolean } | { letIn: string[] }>(null);
+  const [newDate, setNewDate] = useState("");
   const [confirmText, setConfirmText] = useState("");
   const [showCampaigns, setShowCampaigns] = useState(false);
   const lastIdx = useRef<number | null>(null); // the shift-click anchor (reset whenever the list reloads)
@@ -122,7 +125,8 @@ export default function ServiceAreaChangePage() {
   const status = d?.change.status;
   useEffect(() => {
     if (!status) return;
-    const ms = LIVE.includes(status) ? 4000 : status === "approved" ? 30000 : 0;
+    // In review too, so a removal day someone else moved shows before anyone approves.
+    const ms = LIVE.includes(status) ? 4000 : status === "approved" || status === "review" ? 20000 : 0;
     if (!ms) return;
     const t = setInterval(() => { void loadDetail(); }, ms);
     return () => clearInterval(t);
@@ -211,6 +215,10 @@ export default function ServiceAreaChangePage() {
   const removalStarted = Date.parse(c.removalAt) <= Date.parse(d.now);
   const daysLeft = Math.max(0, Math.ceil((Date.parse(c.removalAt) - Date.parse(d.now)) / 86_400_000));
   const tabInfo = TABS.find((t) => t.key === tab)!;
+  // The removal day can move until the removal starts.
+  const dateEditable = ["planning", "scanning", "review"].includes(c.status) || (c.status === "approved" && !removalStarted);
+  const today = pacificToday(new Date(d.now));
+  const dateProblem = removalDateProblem(newDate, c.noticeDate, today);
   const tickedInView = rows?.filter((r) => r.remove).length ?? 0;
 
   return (
@@ -232,6 +240,7 @@ export default function ServiceAreaChangePage() {
             <Meta label="Removal day">
               {longDate(c.removalDate)}
               {!afterRemoval && c.status !== "cancelled" && <span className="ml-1.5 text-xs text-muted-foreground">{!removalStarted ? `(in ${daysLeft} day${daysLeft === 1 ? "" : "s"})` : c.status === "approved" || c.status === "topup" ? "(now)" : "(reached — runs once approved)"}</span>}
+              {dateEditable && <button type="button" className="ml-2 text-xs font-medium text-primary hover:underline" onClick={() => { setNewDate(c.removalDate); setDialog("date"); }}>Change</button>}
             </Meta>
             <Meta label="Recorded">{c.createdBy ?? "—"} · {when(c.createdAt)}</Meta>
             <Meta label={c.status === "cancelled" ? "Cancelled" : "Approved"}>
@@ -419,8 +428,38 @@ export default function ServiceAreaChangePage() {
           <DialogFooter>
             <Button variant="ghost" onClick={() => setDialog(null)} disabled={!!busy}>Not yet</Button>
             <Button disabled={!!busy || confirmText.trim().toUpperCase() !== tag}
-              onClick={async () => { if (await act("approve", { confirm: confirmText }, removalStarted ? "Approved — removing now." : `Approved — removal runs ${longDate(c.removalDate)}.`)) setDialog(null); }}>
+              onClick={async () => { if (await act("approve", { confirm: confirmText, removalDate: c.removalDate }, removalStarted ? "Approved — removing now." : `Approved — removal runs ${longDate(c.removalDate)}.`)) setDialog(null); }}>
               {busy === "approve" && <Loader2 className="animate-spin" />}Approve
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={dialog === "date"} onOpenChange={(o) => { if (!o && !busy) setDialog(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Change the removal day</DialogTitle>
+            <DialogDescription>Notice came in on {longDate(c.noticeDate)}. The default removal day is the 6th, counting the notice day as day 1 ({longDate(removalDate(c.noticeDate))}).</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <label className="block space-y-1.5">
+              <span className="text-xs font-medium text-muted-foreground">Removal day</span>
+              <Input type="date" value={newDate} min={c.noticeDate > today ? c.noticeDate : today} onChange={(e) => setNewDate(e.target.value)} className={cn("h-9", newDate && dateProblem && "border-destructive/60")} />
+            </label>
+            {newDate && dateProblem ? <p className="text-xs text-destructive">{dateProblem}</p> : newDate && (
+              <div className="rounded-lg bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                {newDate <= today
+                  ? <>The removal runs as soon as the list is approved{c.status === "approved" ? <> — <b className="text-foreground">it goes back to review</b>, so someone approves it again for today</> : ""}.</>
+                  : <>Removal runs on <b className="text-foreground">{longDate(newDate)}</b> at 12:00 AM Pacific (day {daysBetween(c.noticeDate, newDate) + 1} counting the notice day as day 1)
+                      {c.status !== "approved" ? ", once approved." : newDate < c.removalDate ? <> — that&apos;s earlier, so <b className="text-foreground">it goes back to review</b> to be approved again for the new day.</> : " — it stays approved."}</>}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setDialog(null)} disabled={!!busy}>Cancel</Button>
+            <Button disabled={!!busy || !newDate || !!dateProblem || newDate === c.removalDate}
+              onClick={async () => { if (await act("set-removal-date", { removalDate: newDate }, c.status === "approved" && newDate < c.removalDate ? `Removal day set to ${longDate(newDate)} — back in review to approve again.` : `Removal day set to ${longDate(newDate)}.`)) setDialog(null); }}>
+              {busy === "set-removal-date" && <Loader2 className="animate-spin" />}Save
             </Button>
           </DialogFooter>
         </DialogContent>
