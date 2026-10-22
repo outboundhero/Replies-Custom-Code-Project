@@ -18,6 +18,7 @@ import { classifyOneBatch } from "@/lib/nurture/auto-classify";
 import { attachLeadsToCampaign, findLeadByEmail } from "@/lib/outboundhero-api";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 import { suppressedEmails } from "@/lib/service-area-changes/suppression";
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 import { coerceInstance } from "@/lib/bison-instances";
 
 // classify-all-unclassified / classify-reset-safe each run up to 400 GPT
@@ -382,13 +383,19 @@ export async function POST(req: NextRequest) {
       const isSheetMeetingReady = (email: string | null | undefined) =>
         !!email && sheetMRSet.has(email.trim().toLowerCase());
 
+      const rowTags = new Set([...replyRowMap.values(), ...seqRowMap.values(), ...legacyRowMap.values()]
+        .map((r) => String((r as { client_tag?: string | null }).client_tag ?? "").trim().toUpperCase()).filter(Boolean));
+
+      // A client mid Hard Reset is switching to new campaigns (the old ones get archived): nothing is pushed until it's done.
+      for (const t of rowTags) {
+        if (await heldByHardReset(t)) return NextResponse.json({ error: `${t} is having a Hard Reset — push these once it's done (its client page shows the progress).` }, { status: 409 });
+      }
+
       // Never push back a lead its client removed for a service-area change.
       // Fail closed if a client's block list can't be read.
       const blockedByTag = new Map<string, Set<string>>();
       try {
-        const rowTags = [...replyRowMap.values(), ...seqRowMap.values(), ...legacyRowMap.values()]
-          .map((r) => String((r as { client_tag?: string | null }).client_tag ?? "").trim().toUpperCase()).filter(Boolean);
-        for (const t of new Set(rowTags)) blockedByTag.set(t, await suppressedEmails(t, { fresh: true }));
+        for (const t of rowTags) blockedByTag.set(t, await suppressedEmails(t, { fresh: true }));
       } catch {
         return NextResponse.json({ error: "The service-area block list couldn't be read — try again shortly." }, { status: 503 });
       }

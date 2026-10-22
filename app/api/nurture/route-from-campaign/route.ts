@@ -23,6 +23,7 @@ import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -50,6 +51,7 @@ export async function POST(req: NextRequest) {
 
   // Gates.
   if (!(await getMapConfirmedAt(clientTag))) return NextResponse.json({ error: "target-campaign map not confirmed" }, { status: 400 });
+  if (await heldByHardReset(clientTag)) return NextResponse.json({ error: `${clientTag} is having a Hard Reset — route its leads once it's done (its client page shows the progress).` }, { status: 409 });
   if ((await getChurnedTags()).has(clientTag)) return NextResponse.json({ error: "client is churned" }, { status: 400 });
   // NURTURE GO-LIVE GATE: don't route nurture for a client before it has launched
   // (+ the agreed lag). Fail closed on a sheet-read error.

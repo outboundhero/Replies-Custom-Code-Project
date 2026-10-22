@@ -18,6 +18,7 @@ import { getInstanceLane } from "@/lib/bison-instances-shared";
 import { createJob, type NewTask } from "@/lib/leads/move-jobs";
 import { triggerRunner } from "@/lib/leads/run-move-job";
 import type { Esp } from "@/lib/nurture/esp";
+import { unfinishedHardReset } from "@/lib/hard-reset/guard";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -28,6 +29,15 @@ const espMap = (o: unknown): Partial<Record<Esp, number>> => {
   for (const e of ESPS) { const v = Number((o as Record<string, unknown> | undefined)?.[e]); if (v) out[e] = v; }
   return out;
 };
+
+/** A client with an unfinished Hard Reset is having its campaigns swapped: no moves for it until that's over. */
+async function resetConflict(tags: string[]): Promise<NextResponse | null> {
+  for (const t of new Set(tags)) {
+    const u = await unfinishedHardReset(t);
+    if (u) return NextResponse.json({ error: `${t} has an unfinished Hard Reset (#${u.id}) — its campaigns are being swapped. Let it finish (or cancel it) on ${t}'s client page first.` }, { status: 409 });
+  }
+  return null;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function POST(req: NextRequest) {
@@ -66,6 +76,8 @@ export async function POST(req: NextRequest) {
       }
     }
     if (!tasks.length) return NextResponse.json({ error: "no source campaigns to move" }, { status: 400 });
+    const held = await resetConflict(tasks.filter((t) => t.status === "pending").map((t) => t.clientTag));
+    if (held) return held;
 
     const jobId = await createJob({
       runId, kind: "cross", createdBy, sourceInstance: from, targetInstance: to, targetLabel: String(body.toLabel || to), targetLane, serviceAreaFilter, tasks,
@@ -100,6 +112,8 @@ export async function POST(req: NextRequest) {
       });
     }
     if (!tasks.length) return NextResponse.json({ error: "no source campaigns to move" }, { status: 400 });
+    const held = await resetConflict([clientTag]);
+    if (held) return held;
 
     const jobId = await createJob({
       runId, kind: "same", createdBy, sourceInstance: b2bInstance, targetInstance: b2cInstance, targetLabel: `${clientTag} — same instance`, targetLane: null, serviceAreaFilter, tasks,

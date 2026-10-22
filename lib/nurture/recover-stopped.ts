@@ -35,6 +35,7 @@ import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 import { logActivity, logError } from "@/lib/errors";
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 
 const ALL_INSTANCES = ["outboundhero", "outboundclean", "cleaningoutbound", "facilityreach"];
 const LIVE_STATUSES = ["active", "paused"];
@@ -220,6 +221,8 @@ export async function recoverStoppedForClient(
   } catch (e) { res.error = `go-live check failed — skipped: ${(e as Error).message}`; return res; }
   const instances = await getClientInstances(TAG);
   if (!instances) { res.error = "no group mapping"; return res; }
+  // A Hard Reset is swapping the client's campaigns — its stopped leads wait for it.
+  if (await heldByHardReset(TAG)) { res.error = "hard reset not finished"; return res; }
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { res.error = "no campaigns mapped"; res.noMap = true; return res; }
 

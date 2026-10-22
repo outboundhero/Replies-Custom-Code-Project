@@ -28,6 +28,7 @@ import { clientTypeLabel, type ClientTypeKey } from "@/lib/onboarding/copy-model
 import { GROUP_META, fmtDate } from "@/lib/onboarding/ui";
 import { Card, Chip, type ChipTone } from "./_ui";
 import { ServiceAreaCard } from "./_service-area";
+import { HardResetCard } from "./_hard-reset";
 
 type Person = { name: string; email: string };
 type Profile = {
@@ -175,6 +176,7 @@ export default function ClientProfilePage() {
           <CampaignsCard data={camps} />
           <QualificationCard q={p.qualification} />
           <ServiceAreaCard tag={p.storedTag ?? p.tag} />
+          {p.admin && p.exists && <HardResetCard tag={p.storedTag ?? p.tag} />}
         </div>
         <aside className="min-w-0 space-y-6">
           {p.admin && <CampaignSetupCard p={p} liveTz={liveTz} onSaved={load} />}

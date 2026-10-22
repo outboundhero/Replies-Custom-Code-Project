@@ -13,6 +13,7 @@ import { detectEsp } from "@/lib/nurture/esp";
 import { findLeadByEmail, attachLeadsToCampaign } from "@/lib/outboundhero-api";
 import { logActivity, logError } from "@/lib/errors";
 import { isSuppressed } from "@/lib/service-area-changes/suppression";
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 
 export interface NurtureEnrollResult {
   ok: boolean;
@@ -33,6 +34,11 @@ export async function enrollInNurture(tag: string, email: string): Promise<Nurtu
     if (!email?.trim()) return { ok: false, reason: "no email" };
     // A lead the client removed for a service-area change isn't nurtured again.
     if (await isSuppressed(tag, email, { fresh: true })) return { ok: false, reason: "removed for a service-area change" };
+    // Mid Hard Reset the old nurture campaigns are about to be archived: logged so it can be pushed after.
+    if (await heldByHardReset(tag)) {
+      await logError("subsequence", "nurture-enroll", "not nurtured: the client's Hard Reset is under way — push this lead from Nurture once it's done", { tag, lead_email: email });
+      return { ok: false, reason: "hard reset in progress" };
+    }
     const target = await targetInstanceForLead(tag, email);
     if (!target) return { ok: false, reason: `${tag} has no group mapping` };
     const esp = detectEsp(email);

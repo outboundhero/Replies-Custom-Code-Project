@@ -18,6 +18,7 @@
  *   • ALREADY-CONFIRMED clients are left completely untouched (no gap-fill, no
  *     re-confirm), so manual/confirmed choices are preserved.
  */
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 import db from "@/lib/db";
 import supabase from "@/lib/supabase";
 import { getCampaignMap, getMapConfirmedAt } from "@/lib/nurture/campaign-map";
@@ -301,6 +302,8 @@ export async function refreshMapForClient(
   const report: RefreshReport = { tag: TAG, checked: 0, remapped: [] };
   if (!instances) return report;
 
+  // A Hard Reset sets this client's map itself; its campaign list here may be up to 10 minutes old.
+  if (await heldByHardReset(TAG)) return report;
   const existing = await getCampaignMap(TAG);
   if (existing.length === 0) return report;
 

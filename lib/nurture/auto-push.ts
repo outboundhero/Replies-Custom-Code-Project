@@ -26,6 +26,7 @@ import { isPersonalDomain } from "@/lib/processing/personal-domains";
 import { routeCandidates, type Candidate, type BucketResult } from "@/lib/nurture/route-candidates";
 import { getSheetMeetingReadyEmails } from "@/lib/nurture/sheet-meeting-ready";
 import { suppressedEmails } from "@/lib/service-area-changes/suppression";
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 import { logActivity, logError } from "@/lib/errors";
 import { NURTURE_EXCLUDED_AI_CATEGORIES as EXCLUDED_AI_CATEGORIES } from "@/lib/nurture/excluded-categories";
 
@@ -107,6 +108,9 @@ export async function runAutoPushForClient(
       result.error = "not yet live (before go-live + lag)"; result.errorKind = "gate"; return result;
     }
   } catch (e) { result.error = `go-live check failed — skipped: ${(e as Error).message}`; result.errorKind = "failure"; return result; }
+
+  // GATE 3: a Hard Reset is swapping the client's campaigns — its leads wait for it.
+  if (await heldByHardReset(clientTag)) { result.error = "hard reset not finished — nurture waits for it"; result.errorKind = "gate"; return result; }
 
   // The confirmed map: (instance, esp) → target campaign.
   const map = await getCampaignMap(clientTag);

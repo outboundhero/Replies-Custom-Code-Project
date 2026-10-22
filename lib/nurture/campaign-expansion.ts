@@ -23,6 +23,7 @@ import {
 import { logActivity, logError } from "@/lib/errors";
 import { detectCampaignEsp, type Esp } from "@/lib/nurture/esp";
 import { isFired } from "@/lib/nurture/activation-state";
+import { heldByHardReset } from "@/lib/hard-reset/guard";
 import { applyOffsetToClone } from "@/lib/nurture/nurture-schedule";
 import { listMainCampaigns, type InstanceCampaign } from "@/lib/nurture/campaign-inventory";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
@@ -120,6 +121,8 @@ export async function expandCampaignsForClient(
   const result: ExpansionResult = { clientTag: TAG, instances: [] };
 
   if (!(await getMapConfirmedAt(TAG))) { result.error = "map not confirmed"; return result; }
+  // Never clone a client's campaigns while its Hard Reset swaps them out.
+  if (await heldByHardReset(TAG)) { result.error = "hard reset not finished"; return result; }
   if ((await getChurnedTags()).has(TAG)) { result.error = "churned"; return result; }
   const map = await getCampaignMap(TAG);
   if (map.length === 0) { result.error = "no map"; return result; }

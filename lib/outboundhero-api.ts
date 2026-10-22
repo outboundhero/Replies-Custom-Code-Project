@@ -1905,3 +1905,105 @@ export async function createScheduleOnce(instanceKey: string, campaignId: number
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   return (await writeOnce(`${baseUrl}/api/campaigns/${campaignId}/schedule`, "POST", token, schedule)).res;
 }
+
+// ── Used by a client's Hard Reset (lib/hard-reset) ───────────────────────────
+// Strict reads: they throw unless every page was read (a partial list must never
+// pass for the whole one), and single-attempt writes the caller verifies.
+
+export interface PagedSender { id: number; email: string; status: string; tags: Array<{ id: number; name: string }> }
+
+/** Read every page of a 15-per-page sender list; throws on any page that doesn't come back. */
+async function readAllSenderPages(instanceKey: string, path: string): Promise<{ rows: PagedSender[]; total: number }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const headers = buildHeaders(token);
+  const sep = path.includes("?") ? "&" : "?";
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const page = async (n: number): Promise<{ rows: PagedSender[]; last: number; total: number }> => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const res = await fetchWithTimeout(`${baseUrl}${path}${sep}page=${n}`, { headers, timeoutMs: 25_000 }).catch(() => null);
+      if (!res || res.status === 429 || res.status >= 500) { await sleep(1500 * (attempt + 1)); continue; }
+      if (!res.ok) throw new Error(`sender list ${res.status} on page ${n}`);
+      const body = await res.json().catch(() => null) as { data?: unknown; meta?: { last_page?: unknown; total?: unknown } } | null;
+      if (!body || !Array.isArray(body.data)) throw new Error(`sender list: page ${n} wasn't a list`);
+      const rows = (body.data as Array<{ id?: unknown; email?: unknown; status?: unknown; tags?: unknown }>).filter((r) => typeof r.id === "number")
+        .map((r) => ({
+          id: r.id as number, email: String(r.email ?? ""), status: String(r.status ?? ""),
+          tags: (Array.isArray(r.tags) ? r.tags as Array<{ id?: unknown; name?: unknown }> : []).filter((t) => typeof t?.id === "number").map((t) => ({ id: t.id as number, name: String(t.name ?? "") })),
+        }));
+      return { rows, last: Number(body.meta?.last_page) || n, total: Number(body.meta?.total) || 0 };
+    }
+    throw new Error(`sender list: page ${n} didn't answer after 4 tries`);
+  };
+  const first = await page(1);
+  const out = new Map<number, PagedSender>(first.rows.map((r) => [r.id, r]));
+  const rest = Array.from({ length: Math.max(0, first.last - 1) }, (_, i) => i + 2);
+  for (let i = 0; i < rest.length; i += 6) {
+    const got = await Promise.all(rest.slice(i, i + 6).map(page));
+    for (const g of got) for (const r of g.rows) out.set(r.id, r);
+  }
+  // Every row Bison counted must have come back.
+  if (first.total && out.size < first.total) throw new Error(`sender list: read ${out.size} of ${first.total}`);
+  return { rows: [...out.values()], total: first.total || out.size };
+}
+
+/** Every inbox carrying a tag in an instance (GET /api/sender-emails?tag_ids[]=…). */
+export async function listSenderEmailsByTag(instanceKey: string, tagId: number): Promise<PagedSender[]> {
+  return (await readAllSenderPages(instanceKey, `/api/sender-emails?tag_ids[]=${tagId}`)).rows;
+}
+
+/** The inboxes attached to a campaign. */
+export async function listCampaignSenders(instanceKey: string, campaignId: number): Promise<PagedSender[]> {
+  return (await readAllSenderPages(instanceKey, `/api/campaigns/${campaignId}/sender-emails`)).rows;
+}
+
+/** How many inboxes Bison counts on a list (page 1's total) — a cheap count; throws when unread. */
+async function senderTotal(instanceKey: string, path: string): Promise<number> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const res = await fetchWithTimeout(`${baseUrl}${path}`, { headers: buildHeaders(token), timeoutMs: 25_000 });
+  if (!res.ok) throw new Error(`sender count ${res.status}`);
+  const body = await res.json().catch(() => null) as { data?: unknown; meta?: { total?: unknown } } | null;
+  if (!body || !Array.isArray(body.data)) throw new Error("sender count: not a list");
+  return Number(body.meta?.total ?? (body.data as unknown[]).length) || 0;
+}
+export const countSendersByTag = (instanceKey: string, tagId: number) => senderTotal(instanceKey, `/api/sender-emails?tag_ids[]=${tagId}&page=1`);
+export const countCampaignSenders = (instanceKey: string, campaignId: number) => senderTotal(instanceKey, `/api/campaigns/${campaignId}/sender-emails?page=1`);
+
+/** Archive a campaign (PATCH /api/campaigns/{id}/archive) with ONE attempt. Bison has no way back through the API. */
+export async function archiveCampaignOnce(instanceKey: string, campaignId: number): Promise<WriteResult & { campaignStatus: string | null }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  const { res, json } = await writeOnce(`${baseUrl}/api/campaigns/${campaignId}/archive`, "PATCH", token, {});
+  const raw = (json as { data?: unknown } | null)?.data;
+  const d = (Array.isArray(raw) ? raw[0] : raw) as { id?: unknown; status?: unknown } | undefined;
+  return { ...res, campaignStatus: d && Number(d.id) === campaignId ? String(d.status ?? "") : null };
+}
+
+/**
+ * Attach inboxes to a campaign with ONE call, reporting exactly how Bison
+ * answered. `campaignMissing` only when Bison says the campaign itself is gone
+ * (`record_not_found` set — it's null on every other error); `alreadyPresent`
+ * when every inbox was already on it (HTTP 200 + success:false + "already exist").
+ */
+export async function attachSendersOnce(instanceKey: string, campaignId: number, senderEmailIds: number[]): Promise<{ ok: boolean; status: number; alreadyPresent: boolean; campaignMissing: boolean; message: string }> {
+  const { baseUrl, token } = getInstanceConfig(instanceKey);
+  try {
+    const res = await fetchOnce(`${baseUrl}/api/campaigns/${campaignId}/attach-sender-emails`, {
+      method: "POST", headers: buildHeaders(token), body: JSON.stringify({ sender_email_ids: senderEmailIds }), timeoutMs: 45_000,
+    });
+    const text = await res.text().catch(() => "");
+    let message = text.slice(0, 200);
+    let success: unknown;
+    try {
+      const j = JSON.parse(text) as { data?: unknown } | null;
+      const d = (Array.isArray(j?.data) ? j.data[0] : j?.data) as { message?: unknown; success?: unknown } | undefined;
+      message = String(d?.message ?? message); success = d?.success;
+    } catch { /* not JSON */ }
+    const campaignMissing = res.status === 404 && /"record_not_found"\s*:\s*(?!null)/.test(text);
+    if (res.ok && success === false) {
+      const already = /already exist/i.test(message);
+      return { ok: already, status: res.status, alreadyPresent: already, campaignMissing: false, message };
+    }
+    return { ok: res.ok, status: res.status, alreadyPresent: false, campaignMissing, message };
+  } catch (e) {
+    return { ok: false, status: 0, alreadyPresent: false, campaignMissing: false, message: (e as Error).message };
+  }
+}

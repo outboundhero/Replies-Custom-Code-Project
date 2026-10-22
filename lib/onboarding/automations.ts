@@ -223,14 +223,14 @@ function clientTypeFromSheet(text: string | null | undefined): ClientTypeKey {
 }
 
 /** One campaign the step would make. */
-interface PlannedCampaign {
+export interface PlannedCampaign {
   instance: BisonInstanceKey; kind: InstanceKind; label: string; slot: CampaignSlot; name: string;
   existingIds: number[];
   limits: { max_emails_per_day: number; max_new_leads_per_day: number };
   schedule: CampaignScheduleBody;
   modeTag: { id: number; name: string } | null;
 }
-interface CampaignPlan {
+export interface CampaignPlan {
   tag: string; group: 1 | 2 | null; timezone: string; clientType: ClientTypeKey;
   inputs: AutomationInput[]; blockers: string[]; rows: string[][]; notes: PreviewNote[]; lines: string[];
   /** All 12 when nothing blocks. */
@@ -250,11 +250,27 @@ const PINNED_LABEL: Record<string, string> = {
 };
 
 /**
+ * Options for a caller other than this onboarding step (a client's Hard Reset):
+ *   ignoreIds — "instance:id" of campaigns to plan as if they weren't there
+ *               (the ones the reset archives once the new 12 are ready)
+ *   history   — the earlier tries' results, instead of this step's run records
+ *   formOptional — a client with no Onboarding Form row isn't held up (one onboarded before the
+ *               form existed): its details come from what's typed; an unreadable form still stops
+ * Left out, the plan is exactly this step's.
+ */
+export interface PlanOptions {
+  ignoreIds?: ReadonlySet<string>;
+  history?: () => Promise<Record<string, unknown>[]>;
+  formOptional?: boolean;
+}
+
+/**
  * Everything the preview shows and the run acts on — built the same way for
  * both. `fresh` (the run) asks Email Bison now instead of using a recent answer:
  * acting on a stale list could create duplicates.
  */
-async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<CampaignPlan> {
+export async function planCampaigns(ctx: AutomationContext, fresh = false, opts: PlanOptions = {}): Promise<CampaignPlan> {
+  const history = (limit?: number) => (opts.history ? opts.history() : runResults(ctx.task.id, limit));
   const search = (instance: BisonInstanceKey, q: string) =>
     fresh ? listCampaigns(instance, { search: q, strict: true })
       : withCache(`onboarding:existing:${instance}:${q}:v${nsVersion("onboarding")}`, 30_000, () => listCampaigns(instance, { search: q, strict: true }));
@@ -267,7 +283,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   // Campaigns this step already made carry the client details they were made with. A retry starts
   // from those (and is held to them below), so all 12 say the same thing.
   let madeWith: Record<string, string> | null = null, madeCount = 0;
-  for (const res of await runResults(ctx.task.id)) {
+  for (const res of await history()) {
     for (const x of (Array.isArray(res.results) ? res.results : []) as { state?: unknown; lines?: unknown }[]) {
       if (x.state !== "created") continue;
       madeCount++;
@@ -285,7 +301,9 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
   // The client's Onboarding Form, once it's in (a row with the tag in column A and the Onboarding
   // Call date in column D — see form-gate.ts). Until then this step waits for it.
   const gate = await onboardingFormGate(tag);
+  const noForm = !!opts.formOptional && gate.state === "no-row";
   if (gate.state === "unread") unread = true;
+  else if (noForm) notes.push({ title: "No Onboarding Form", text: `${tag} has no row on the Onboarding Form Responses tab, so nothing below comes from it — check each detail and type what's missing.` });
   else if (!gate.ready) blockers.push(gate.message!);
   const form = gate.form;
   // Right before a run nothing may quietly fall back to a default because a sheet didn't answer.
@@ -339,6 +357,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
     { key: "office_address", label: "Office address", type: "text", value: officeAddress, placeholder: "e.g. 100 Main St, Suite 200, Springfield, IL 62701",
       hint: form?.address ? "From the Onboarding Form's Company Address (column H)."
         : form ? `${tag}'s Onboarding Form has no Company Address (column H) — type the office address.`
+        : noForm ? `${tag} has no Onboarding Form row — type the office address.`
         : `Comes from the Onboarding Form's Company Address (column H) once ${tag}'s form is in.` },
     { key: "company_name", label: "Company name", type: "text", value: companyName, hint: "Fills [[COMPANY_NAME]] wherever the copy uses it." },
     { key: "service_area", label: "Service-area line ([[SERVICE_AREA]])", type: "textarea", value: serviceArea,
@@ -397,7 +416,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
 
   // An earlier try that stopped part-way: its campaign must be gone before another is made for that slot
   // (asked by id — Email Bison's search can lag), and an unanswered create gets time to show up.
-  for (const res of await runResults(ctx.task.id, 20)) {
+  for (const res of await history(20)) {
     for (const x of (Array.isArray(res.results) ? res.results : []) as { instance?: unknown; name?: unknown; state?: unknown; campaignId?: unknown; unsure?: unknown; at?: unknown }[]) {
       if (x.state !== "failed") continue;
       if (typeof x.campaignId === "number" && typeof x.instance === "string") {
@@ -429,7 +448,7 @@ async function planCampaigns(ctx: AutomationContext, fresh = false): Promise<Cam
         blockers.push(`Couldn't read ${label} in Email Bison: ${(e as Error).message}`);
         continue;
       }
-      const live = mine.filter((x) => !gone(x.status));
+      const live = mine.filter((x) => !gone(x.status) && !opts.ignoreIds?.has(`${instance}:${x.id}`));
       const prefix = `${tag}:`.toLowerCase();
       for (const x of live) {
         const n = x.name.trim();
