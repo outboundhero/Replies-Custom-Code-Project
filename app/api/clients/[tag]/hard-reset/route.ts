@@ -87,7 +87,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tag
   try {
     if (action === "preview") {
       const pr = await previewReset(a.tag, p, a.email, false);
-      return NextResponse.json({ ok: true, preview: { tag: pr.tag, lines: pr.lines, inputs: pr.inputs, blockers: pr.blockers, tables: pr.tables, notes: pr.notes } });
+      return NextResponse.json({ ok: true, preview: { tag: pr.tag, inputs: pr.inputs, blockers: pr.blockers, tables: pr.tables, notes: pr.notes } });
     }
 
     if (action === "start") {

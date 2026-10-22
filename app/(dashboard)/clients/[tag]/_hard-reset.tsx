@@ -1,11 +1,13 @@
 "use client";
 
 /**
- * Client page → "Hard reset" (admins): start a stalled client over on fresh
- * campaigns. The preview shows exactly what happens — the campaigns archived,
- * the 12 created (as a new client gets them), the inboxes attached and the
- * nurture switch-over — and the reset runs in the background once confirmed by
- * typing the client tag, with its progress here.
+ * Client page → "Hard reset" button (admins, top of the page): start a stalled
+ * client over on fresh campaigns. It opens a dialog that says what happens right
+ * away, then fills in exactly what it would do for this client — the campaigns
+ * archived, the 12 created (as a new client gets them), the inboxes attached and
+ * the nurture switch-over. Typing the client tag starts it; it runs in the
+ * background, and while it does (or when it stops) the button shows that and
+ * opens its progress instead.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -16,7 +18,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Card } from "./_ui";
 
 type Status = "creating" | "attaching" | "repointing" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
 interface ResetView {
@@ -29,7 +30,7 @@ interface ResetView {
   archive: { total: number; done: number; rows: { instance: string; label: string; id: number; name: string; leads: number; late: boolean; result: string | null; note: string | null }[] };
 }
 interface Input_ { key: string; label: string; type: "group" | "text" | "select" | "textarea" | "hidden"; value: number | string | null; hint?: string; placeholder?: string; options?: { value: string; label: string }[] }
-interface Preview { tag: string; lines: string[]; inputs: Input_[]; blockers: string[]; tables: { title: string; columns: string[]; rows: string[][] }[]; notes: { title: string; text: string }[] }
+interface Preview { tag: string; inputs: Input_[]; blockers: string[]; tables: { title: string; columns: string[]; rows: string[][] }[]; notes: { title: string; text: string }[] }
 
 const WORKING: Status[] = ["creating", "attaching", "repointing", "archiving", "cancelling"];
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
@@ -42,17 +43,17 @@ async function call(url: string, body?: Record<string, unknown>): Promise<{ ok: 
   } catch (e) { return { ok: false, data: { error: (e as Error).message } }; }
 }
 
-export function HardResetCard({ tag: raw }: { tag: string }) {
+export function HardResetButton({ tag: raw }: { tag: string }) {
   const tag = raw.toUpperCase();
   const base = `/api/clients/${encodeURIComponent(tag)}/hard-reset`;
   const [reset, setReset] = useState<ResetView | null | undefined>(undefined);
-  const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(false);
+  // What the dialog shows: a running / stopped reset's progress (kept to the end), or the preview.
+  const [view, setView] = useState<"progress" | "preview">("preview");
   const [busy, setBusy] = useState<string | null>(null);
-  const [confirmCancel, setConfirmCancel] = useState(false);
 
   const apply = useCallback((r: { ok: boolean; data: Record<string, unknown> }) => {
-    if (r.ok) { setReset((r.data.reset as ResetView | null) ?? null); setFailed(false); } else setFailed(true);
+    if (r.ok) setReset((r.data.reset as ResetView | null) ?? null);
   }, []);
   const load = useCallback(async () => apply(await call(base)), [base, apply]);
   useEffect(() => {
@@ -74,60 +75,65 @@ export function HardResetCard({ tag: raw }: { tag: string }) {
     setBusy(null);
     if (!r.ok) toast.error(String(r.data.error ?? "That didn't work."));
     else toast.success(action === "retry" ? "Carrying on." : "Cancelling — the new campaigns are being deleted.");
-    setConfirmCancel(false);
     void load();
   }
 
-  const active = reset && (WORKING.includes(reset.status) || reset.status === "failed");
+  const active = !!reset && (working || reset.status === "failed");
+  const stopped = reset?.status === "failed";
   return (
-    <Card icon={<RotateCcw className="size-4" />} title="Hard reset"
-      sub={`Start ${tag} over on fresh campaigns — for a client that has stalled`}
-      action={!active && reset !== undefined && !failed ? (
-        <Button size="sm" variant="outline" className="gap-1.5 text-destructive hover:bg-destructive/5 hover:text-destructive" onClick={() => setOpen(true)}>
-          <RotateCcw className="size-3.5" />Hard reset…
-        </Button>
-      ) : undefined}>
-      {reset === undefined ? (
-        <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading…</div>
-      ) : failed ? (
-        <p className="py-2 text-sm text-destructive">Couldn&apos;t load it — reload to try again.</p>
-      ) : active ? (
-        <Progress r={reset!} busy={busy} onRetry={() => void act("retry")} onCancel={() => setConfirmCancel(true)} />
-      ) : (
-        <div className="space-y-4">
-          <ol className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-2">
-            {[
-              [Mail, "12 fresh campaigns", "Made the way a new client gets them today — current copy, settings and limits."],
-              [Inbox, "Its domains move over", `Every inbox tagged ${tag} goes on the new campaigns.`],
-              [Sprout, "Nurture starts again", "Sends to the new nurture campaigns; batch count restarts. Leads aren't nurtured twice."],
-              [Archive, "Old campaigns archived", "Last, once everything new is ready. Leads mid-sequence stop."],
-            ].map(([Icon, t, d]) => {
-              const I = Icon as typeof Mail;
-              return (
-                <li key={t as string} className="flex gap-2.5">
-                  <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-foreground/70"><I className="size-3.5" /></span>
-                  <span><span className="block font-medium text-foreground">{t as string}</span>{d as string}</span>
-                </li>
-              );
-            })}
-          </ol>
-          {reset && <LastReset r={reset} />}
-        </div>
-      )}
-      {open && <ResetDialog tag={tag} base={base} onClose={() => setOpen(false)} onStarted={() => { setOpen(false); void load(); }} />}
-      <Dialog open={confirmCancel} onOpenChange={(o) => { if (!busy) setConfirmCancel(o); }}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Cancel the hard reset?</DialogTitle>
-            <DialogDescription>The new campaigns it has made so far are deleted (never one with leads in it). {tag}&apos;s current campaigns, their inboxes and nurture stay exactly as they are — nothing of them has been changed yet.</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setConfirmCancel(false)} disabled={!!busy}>Keep going</Button>
-            <Button variant="destructive" onClick={() => void act("cancel")} disabled={!!busy}>{busy === "cancel" && <Loader2 className="animate-spin" />}Cancel the reset</Button>
-          </DialogFooter>
+    <>
+      <Button variant="outline" disabled={reset === undefined} onClick={() => { setView(active ? "progress" : "preview"); setOpen(true); }}
+        className={cn("gap-1.5",
+          stopped ? "border-destructive/40 text-destructive hover:bg-destructive/5 hover:text-destructive"
+            : active ? "border-sky-500/30 text-sky-700 hover:bg-sky-500/5 hover:text-sky-700 dark:text-sky-300"
+            : "text-destructive hover:bg-destructive/5 hover:text-destructive")}>
+        {stopped ? <AlertTriangle className="size-4" /> : active ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+        {stopped ? "Hard reset stopped" : reset?.status === "cancelling" ? "Cancelling hard reset" : active ? "Hard reset running" : "Hard reset"}
+      </Button>
+      <Dialog open={open} onOpenChange={(o) => { if (!busy) setOpen(o); }}>
+        <DialogContent className={cn("max-h-[90vh] overflow-y-auto", view === "progress" ? "sm:max-w-2xl" : "sm:max-w-4xl")}>
+          {view === "progress" && reset ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Hard reset {tag}</DialogTitle>
+                <DialogDescription>{active ? "It runs in the background — you can close this and come back." : "It has finished."}</DialogDescription>
+              </DialogHeader>
+              {active ? <Progress r={reset} busy={busy} onRetry={() => void act("retry")} onCancel={() => void act("cancel")} tag={tag} />
+                : <div className="space-y-4"><LastReset r={reset} /><div className="flex justify-end"><Button variant="ghost" onClick={() => setOpen(false)}>Close</Button></div></div>}
+            </>
+          ) : open && (
+            <ResetPreview tag={tag} base={base} last={reset ?? null} onClose={() => setOpen(false)} onStarted={async () => { await load(); setView("progress"); }} />
+          )}
         </DialogContent>
       </Dialog>
-    </Card>
+    </>
+  );
+}
+
+// ── what happens (shown straight away) ─────────────────────────────────────
+
+function Overview({ tag }: { tag: string }) {
+  const items: [typeof Mail, string, string][] = [
+    [Mail, "12 fresh campaigns", "Made exactly as a new client's are today — the current copy for its type, the standard settings and limits, Mon–Fri in its time zone. Drafts until they have leads."],
+    [Inbox, "Its domains move over", `Every inbox tagged ${tag} goes on all 6 new campaigns in each of its two instances (any marked Reserve or Burnt are left out). Domains, redirects and whitelisting don't change.`],
+    [Sprout, "Nurture starts again", "Nurture sends to the 6 new nurture campaigns and its batch count restarts. The 45-day wait stays, and leads nurtured before aren't nurtured again."],
+    [Archive, "Old campaigns archived", `Last, once everything new is ready — ${tag} keeps sending until then. Leads still in their sequences stop. Email Bison can't un-archive.`],
+  ];
+  return (
+    <section className="space-y-3">
+      <ol className="grid gap-3 sm:grid-cols-2">
+        {items.map(([I, t, d], i) => (
+          <li key={t} className="flex gap-3 rounded-xl border bg-muted/20 p-3.5">
+            <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-background text-foreground/70 ring-1 ring-border"><I className="size-4" /></span>
+            <span className="min-w-0 text-sm">
+              <span className="block font-medium"><span className="mr-1.5 text-muted-foreground">{i + 1}.</span>{t}</span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">{d}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      <p className="text-xs text-muted-foreground">Then load leads into the new campaigns as usual — they start once they have leads and inboxes (the Go Live Date still applies).</p>
+    </section>
   );
 }
 
@@ -146,7 +152,7 @@ function LastReset({ r }: { r: ResetView }) {
       {done && left.length > 0 && <p className="mt-1.5 text-muted-foreground">Not archived: {left.map((x) => `#${x.id} “${x.name}” (${x.note})`).join("; ")}.</p>}
       {done && r.created.length > 0 && (
         <details className="mt-1.5">
-          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">The {r.created.length} new campaigns (load leads into these)</summary>
+          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">The {r.created.length} new campaigns it made</summary>
           <ul className="mt-1.5 grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
             {r.created.map((c) => <li key={`${c.instance}:${c.id}`} className="truncate" title={`#${c.id} ${c.name}`}><span className="text-muted-foreground">{c.label} · #{c.id}</span> {c.name}</li>)}
           </ul>
@@ -170,13 +176,14 @@ function stepState(r: ResetView, step: Status): StepState {
   return r.status === "failed" ? "failed" : "now";
 }
 
-function Progress({ r, busy, onRetry, onCancel }: { r: ResetView; busy: string | null; onRetry: () => void; onCancel: () => void }) {
+function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: string | null; onRetry: () => void; onCancel: () => void; tag: string }) {
+  const [asking, setAsking] = useState(false);
   const archivePct = r.archive.total ? Math.round((r.archive.done / r.archive.total) * 100) : 100;
   // Waiting on Email Bison (its background deletes, or a few minutes for an unanswered create) isn't a problem.
   const waiting = r.status !== "failed" && /^Waiting|can run again in about/.test(r.error ?? "");
-  const steps: { key: Status; icon: typeof Mail; title: string; detail: React.ReactNode }[] = [
-    { key: "creating", icon: Mail, title: "Make the 12 new campaigns", detail: `${r.create.done} of ${r.create.total} made${r.create.lastFailed ? ` — stopped at “${r.create.lastFailed.name}”` : ""}` },
-    { key: "attaching", icon: Inbox, title: "Attach the inboxes", detail: (
+  const steps: { key: Status; title: string; detail: React.ReactNode }[] = [
+    { key: "creating", title: "Make the 12 new campaigns", detail: `${r.create.done} of ${r.create.total} made${r.create.lastFailed ? ` — stopped at “${r.create.lastFailed.name}”` : ""}` },
+    { key: "attaching", title: "Attach the inboxes", detail: (
       <span className="block space-y-0.5">
         {r.attach.map((a) => (
           <span key={a.instance} className="block">
@@ -188,8 +195,8 @@ function Progress({ r, busy, onRetry, onCancel }: { r: ResetView; busy: string |
         ))}
       </span>
     ) },
-    { key: "repointing", icon: Sprout, title: "Switch nurture to the new campaigns", detail: r.nurture.done ? `Done${r.nurture.batchesCleared ? ` — ${r.nurture.batchesCleared} batch record${r.nurture.batchesCleared === 1 ? "" : "s"} cleared` : ""}` : "Nurture map → the 6 new nurture campaigns; batch count restarts" },
-    { key: "archiving", icon: Archive, title: "Archive the old campaigns", detail: (
+    { key: "repointing", title: "Switch nurture to the new campaigns", detail: r.nurture.done ? `Done${r.nurture.batchesCleared ? ` — ${r.nurture.batchesCleared} batch record${r.nurture.batchesCleared === 1 ? "" : "s"} cleared` : ""}` : "Nurture map → the 6 new nurture campaigns; batch count restarts" },
+    { key: "archiving", title: "Archive the old campaigns", detail: (
       <span className="block space-y-1.5">
         <span className="block">{r.archive.done} of {r.archive.total} done{r.archive.rows.some((x) => x.late) ? ` (incl. ${r.archive.rows.filter((x) => x.late).length} made after the reset started)` : ""}</span>
         {r.archive.total > 0 && <span className="block h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-muted"><span className="block h-full rounded-full bg-sky-500 transition-all" style={{ width: `${archivePct}%` }} /></span>}
@@ -203,7 +210,7 @@ function Progress({ r, busy, onRetry, onCancel }: { r: ResetView; busy: string |
           {r.status === "failed" ? <AlertTriangle className="size-4 text-destructive" /> : <Loader2 className="size-4 animate-spin text-sky-600" />}
           {r.status === "failed" ? `Hard reset #${r.id} stopped` : r.status === "cancelling" ? `Cancelling hard reset #${r.id} — deleting the new campaigns` : `Hard reset #${r.id} is running`}
         </div>
-        <span className="text-xs text-muted-foreground">Started {when(r.createdAt)} by {r.createdBy ?? "—"} · runs in the background</span>
+        <span className="text-xs text-muted-foreground">Started {when(r.createdAt)} by {r.createdBy ?? "—"}</span>
       </div>
       {r.status !== "cancelling" && (
         <ol className="divide-y rounded-xl border">
@@ -232,10 +239,19 @@ function Progress({ r, busy, onRetry, onCancel }: { r: ResetView; busy: string |
           {r.status === "failed" && r.failedStep === "archiving" && <span className="mt-1 block text-xs text-muted-foreground">The new campaigns are ready and nurture already uses them. If an old campaign won&apos;t archive, archive it by hand in Email Bison, then Try again.</span>}
         </div>
       )}
-      {(r.status === "failed" || r.canCancel) && (
+      {asking ? (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/[0.04] px-4 py-3 text-sm">
+          <p className="font-medium">Cancel the hard reset?</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">The new campaigns it has made so far are deleted (never one with leads in it). {tag}&apos;s current campaigns, their inboxes and nurture stay exactly as they are — nothing of them has been changed yet.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" variant="destructive" className="gap-1.5" disabled={!!busy} onClick={() => { onCancel(); setAsking(false); }}>{busy === "cancel" ? <Loader2 className="size-3.5 animate-spin" /> : <Ban className="size-3.5" />}Cancel the reset</Button>
+            <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => setAsking(false)}>Keep going</Button>
+          </div>
+        </div>
+      ) : (r.status === "failed" || r.canCancel) && (
         <div className="flex flex-wrap items-center gap-2">
           {r.status === "failed" && <Button size="sm" className="gap-1.5" disabled={!!busy} onClick={onRetry}>{busy === "retry" ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}Try again</Button>}
-          {r.canCancel && <Button size="sm" variant="ghost" className="gap-1.5 text-destructive hover:text-destructive" disabled={!!busy} onClick={onCancel}><Ban className="size-3.5" />Cancel the reset</Button>}
+          {r.canCancel && <Button size="sm" variant="ghost" className="gap-1.5 text-destructive hover:text-destructive" disabled={!!busy} onClick={() => setAsking(true)}><Ban className="size-3.5" />Cancel the reset</Button>}
           {!r.canCancel && r.status === "failed" && <span className="text-xs text-muted-foreground">It can&apos;t be cancelled now — nurture already uses the new campaigns, so Try again finishes it.</span>}
         </div>
       )}
@@ -245,7 +261,7 @@ function Progress({ r, busy, onRetry, onCancel }: { r: ResetView; busy: string |
 
 // ── the preview + confirm ──────────────────────────────────────────────────
 
-function ResetDialog({ tag, base, onClose, onStarted }: { tag: string; base: string; onClose: () => void; onStarted: () => void }) {
+function ResetPreview({ tag, base, last, onClose, onStarted }: { tag: string; base: string; last: ResetView | null; onClose: () => void; onStarted: () => Promise<void> }) {
   const [pv, setPv] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
@@ -253,6 +269,14 @@ function ResetDialog({ tag, base, onClose, onStarted }: { tag: string; base: str
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [confirm, setConfirm] = useState("");
+  // Email Bison limits how many requests a minute it answers; when something else is using that up, this waits.
+  const [slow, setSlow] = useState(false);
+  const waitingFirst = !pv && loading;
+  useEffect(() => {
+    if (!waitingFirst) return;
+    const t = setTimeout(() => setSlow(true), 8000);
+    return () => clearTimeout(t);
+  }, [waitingFirst]);
 
   const show = useCallback((r: { ok: boolean; data: Record<string, unknown> }) => {
     setLoading(false);
@@ -281,30 +305,33 @@ function ResetDialog({ tag, base, onClose, onStarted }: { tag: string; base: str
     setStarting(false);
     if (!r.ok) { toast.error(String(r.data.error ?? "It didn't start.")); void preview(values); return; }
     toast.success(`Hard reset of ${tag} started — it runs in the background.`);
-    onStarted();
+    await onStarted();
   }
 
   const visible = pv?.inputs.filter((i) => i.type !== "hidden" && i.type !== "group") ?? [];
   return (
-    <Dialog open onOpenChange={(o) => { if (!o && !starting) onClose(); }}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>Hard reset {tag}?</DialogTitle>
-          <DialogDescription>Nothing changes until you confirm below. This is everything it would do.</DialogDescription>
-        </DialogHeader>
+    <>
+      <DialogHeader>
+        <DialogTitle>Hard reset {tag}?</DialogTitle>
+        <DialogDescription>Starts {tag} over on fresh campaigns — for a client that has stalled. Nothing changes until you confirm below.</DialogDescription>
+      </DialogHeader>
+
+      <div className="space-y-5 text-sm">
+        <Overview tag={tag} />
+        {last && (last.status === "done" || last.status === "cancelled") && <LastReset r={last} />}
 
         {!pv && loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading {tag}&apos;s campaigns, inboxes and details…</div>
+          <div className="flex items-start gap-2.5 rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
+            <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" />
+            <span>
+              Reading {tag}&apos;s campaigns, inboxes and details in Email Bison…
+              {slow && <span className="mt-1 block text-xs">Email Bison is answering slowly right now — it limits how many requests it takes a minute, and something else (a Lead Mover job, say) may be using them up. This can take up to a minute.</span>}
+            </span>
+          </div>
         ) : error && !pv ? (
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">{error}</div>
         ) : pv && (
-          <div className={cn("space-y-5 text-sm", loading && "pointer-events-none opacity-60")}>
-            <ol className="space-y-2">
-              {pv.lines.map((l, i) => (
-                <li key={i} className="flex gap-2.5"><span className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold text-foreground/70">{i + 1}</span><span className="leading-relaxed">{l}</span></li>
-              ))}
-            </ol>
-
+          <div className={cn("space-y-5", loading && "pointer-events-none opacity-60")}>
             {pv.blockers.length > 0 && (
               <div className="rounded-xl border border-destructive/30 bg-destructive/[0.05] px-4 py-3">
                 <div className="mb-1 flex items-center gap-1.5 font-medium text-destructive"><AlertTriangle className="size-4" />It can&apos;t run yet</div>
@@ -359,23 +386,20 @@ function ResetDialog({ tag, base, onClose, onStarted }: { tag: string; base: str
             ))}
           </div>
         )}
+      </div>
 
-        {pv && (
-          <DialogFooter className="flex-col items-stretch gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
-            <label className="flex flex-1 items-center gap-2 text-sm">
-              <span className="shrink-0 text-muted-foreground">Type <b className="text-foreground">{tag}</b> to start</span>
-              <Input value={confirm} onChange={(e) => setConfirm(e.target.value)} className="h-9 max-w-[12rem]" disabled={!!pv.blockers.length || dirty} />
-            </label>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" onClick={onClose} disabled={starting}>Close</Button>
-              <Button variant="destructive" onClick={() => void start()} disabled={!canStart || starting} title={dirty ? "Update the preview first" : undefined}>
-                {starting ? <Loader2 className="animate-spin" /> : <RotateCcw className="size-3.5" />}Start the hard reset
-              </Button>
-            </div>
-          </DialogFooter>
-        )}
-      </DialogContent>
-    </Dialog>
+      <DialogFooter className="flex-col items-stretch gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <label className="flex flex-1 items-center gap-2 text-sm">
+          <span className="shrink-0 text-muted-foreground">Type <b className="text-foreground">{tag}</b> to start</span>
+          <Input value={confirm} onChange={(e) => setConfirm(e.target.value)} className="h-9 max-w-[12rem]" disabled={!pv || !!pv.blockers.length || dirty} />
+        </label>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={starting}>Close</Button>
+          <Button variant="destructive" onClick={() => void start()} disabled={!canStart || starting} title={dirty ? "Update the preview first" : undefined}>
+            {starting ? <Loader2 className="animate-spin" /> : <RotateCcw className="size-3.5" />}Start the hard reset
+          </Button>
+        </div>
+      </DialogFooter>
+    </>
   );
 }
-

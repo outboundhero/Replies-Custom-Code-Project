@@ -249,6 +249,11 @@ const PINNED_LABEL: Record<string, string> = {
   office_address: "office address", company_name: "company name", service_area: "service-area line", office_line: "office line",
 };
 
+/** Where a recent read of a client's campaigns in an instance is kept (a Hard Reset's preview fills it too). */
+export const existingCampaignsKey = (instance: string, tag: string) => `onboarding:existing:${instance}:${tag}:v${nsVersion("onboarding")}`;
+/** Where a recent read of an instance's tags is kept (shared with a Hard Reset's preview). */
+export const instanceTagsKey = (instance: string) => `onboarding:tags:${instance}:v${nsVersion("onboarding")}`;
+
 /**
  * Options for a caller other than this onboarding step (a client's Hard Reset):
  *   ignoreIds — "instance:id" of campaigns to plan as if they weren't there
@@ -273,9 +278,9 @@ export async function planCampaigns(ctx: AutomationContext, fresh = false, opts:
   const history = (limit?: number) => (opts.history ? opts.history() : runResults(ctx.task.id, limit));
   const search = (instance: BisonInstanceKey, q: string) =>
     fresh ? listCampaigns(instance, { search: q, strict: true })
-      : withCache(`onboarding:existing:${instance}:${q}:v${nsVersion("onboarding")}`, 30_000, () => listCampaigns(instance, { search: q, strict: true }));
+      : withCache(existingCampaignsKey(instance, q), 30_000, () => listCampaigns(instance, { search: q, strict: true }));
   const tagsOf = (instance: BisonInstanceKey) =>
-    fresh ? listTags(instance) : withCache(`onboarding:tags:${instance}:v${nsVersion("onboarding")}`, 60_000, () => listTags(instance));
+    fresh ? listTags(instance) : withCache(instanceTagsKey(instance), 60_000, () => listTags(instance));
   const c = ctx.client;
   const tag = c.client_tag.toUpperCase();
   const blockers: string[] = [];
@@ -817,7 +822,7 @@ async function planAllocation(ctx: AutomationContext, fresh = false): Promise<Al
         try {
           const found = (await (fresh
             ? listCampaigns(s.instance, { search: tag, strict: true })
-            : withCache(`onboarding:existing:${s.instance}:${tag}:v${nsVersion("onboarding")}`, 30_000, () => listCampaigns(s.instance, { search: tag, strict: true }))))
+            : withCache(existingCampaignsKey(s.instance, tag), 30_000, () => listCampaigns(s.instance, { search: tag, strict: true }))))
             .filter((x) => !gone(x.status));
           const missing: string[] = [];
           for (const slot of CAMPAIGN_SLOTS) {

@@ -28,7 +28,7 @@ import { clientTypeLabel, type ClientTypeKey } from "@/lib/onboarding/copy-model
 import { GROUP_META, fmtDate } from "@/lib/onboarding/ui";
 import { Card, Chip, type ChipTone } from "./_ui";
 import { ServiceAreaCard } from "./_service-area";
-import { HardResetCard } from "./_hard-reset";
+import { HardResetButton } from "./_hard-reset";
 
 type Person = { name: string; email: string };
 type Profile = {
@@ -176,7 +176,6 @@ export default function ClientProfilePage() {
           <CampaignsCard data={camps} />
           <QualificationCard q={p.qualification} />
           <ServiceAreaCard tag={p.storedTag ?? p.tag} />
-          {p.admin && p.exists && <HardResetCard tag={p.storedTag ?? p.tag} />}
         </div>
         <aside className="min-w-0 space-y-6">
           {p.admin && <CampaignSetupCard p={p} liveTz={liveTz} onSaved={load} />}
@@ -253,10 +252,13 @@ function Hero({ p, company, camps, liveTz }: { p: Profile; company: string | nul
             </div>
           </div>
         </div>
-        {p.admin && p.onboarding && (
-          <div className="flex shrink-0 items-center gap-2">
-            <Button asChild variant="outline"><Link href={`/onboarding/${encodeURIComponent(p.onboarding.tag)}`}>Checklist</Link></Button>
-            <Button asChild className="gap-1.5"><Link href={`/onboarding/${encodeURIComponent(p.onboarding.tag)}/run`}><Sparkles className="h-4 w-4" /> Guided onboarding</Link></Button>
+        {p.admin && (p.exists || p.onboarding) && (
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {p.exists && <HardResetButton tag={p.storedTag ?? p.tag} />}
+            {p.onboarding && <>
+              <Button asChild variant="outline"><Link href={`/onboarding/${encodeURIComponent(p.onboarding.tag)}`}>Checklist</Link></Button>
+              <Button asChild className="gap-1.5"><Link href={`/onboarding/${encodeURIComponent(p.onboarding.tag)}/run`}><Sparkles className="h-4 w-4" /> Guided onboarding</Link></Button>
+            </>}
           </div>
         )}
       </div>

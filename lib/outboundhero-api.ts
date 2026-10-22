@@ -523,7 +523,9 @@ export async function listCampaigns(
   // strict: retry a failed page once, then THROW instead of returning a
   // silently partial list — for callers that write caches or re-point maps
   // from the result (a missing page would look like "campaign gone").
-  opts?: { nameContains?: string; statuses?: string[]; search?: string; strict?: boolean },
+  // pageTimeoutMs: a shorter wait per page for a small list (one client's search), so a stalled
+  // answer is retried sooner.
+  opts?: { nameContains?: string; statuses?: string[]; search?: string; strict?: boolean; pageTimeoutMs?: number },
 ): Promise<OutboundCampaign[]> {
   // Bison rejects multi-status in one call ("The selected status is
   // invalid."), so fan out — one status-scoped paginated call per status,
@@ -557,7 +559,7 @@ export function listCampaignsCached(
 async function listCampaignsForStatus(
   instanceKey: string,
   status: string | undefined,
-  opts?: { nameContains?: string; search?: string; strict?: boolean },
+  opts?: { nameContains?: string; search?: string; strict?: boolean; pageTimeoutMs?: number },
 ): Promise<OutboundCampaign[]> {
   const { baseUrl, token } = getInstanceConfig(instanceKey);
   const headers = buildHeaders(token);
@@ -567,7 +569,7 @@ async function listCampaignsForStatus(
   // 3-min instance budget. With outboundhero hanging 45 s per page at
   // CONCURRENCY=6, the math couldn't fit.
   const CONCURRENCY = 12;
-  const PAGE_TIMEOUT_MS = 20_000;
+  const PAGE_TIMEOUT_MS = opts?.pageTimeoutMs ?? 20_000;
 
   function buildUrl(page: number) {
     const params = new URLSearchParams({ page: String(page), per_page: String(PER_PAGE) });
@@ -1966,6 +1968,9 @@ async function senderTotal(instanceKey: string, path: string): Promise<number> {
   return Number(body.meta?.total ?? (body.data as unknown[]).length) || 0;
 }
 export const countSendersByTag = (instanceKey: string, tagId: number) => senderTotal(instanceKey, `/api/sender-emails?tag_ids[]=${tagId}&page=1`);
+/** Inboxes carrying ALL of these tags (several tag_ids[] = all of them — checked live), optionally only Connected ones. */
+export const countSenders = (instanceKey: string, tagIds: number[], opts: { connected?: boolean } = {}) =>
+  senderTotal(instanceKey, `/api/sender-emails?${tagIds.map((id) => `tag_ids[]=${id}`).join("&")}${opts.connected ? "&status=connected" : ""}&page=1`);
 export const countCampaignSenders = (instanceKey: string, campaignId: number) => senderTotal(instanceKey, `/api/campaigns/${campaignId}/sender-emails?page=1`);
 
 /** Archive a campaign (PATCH /api/campaigns/{id}/archive) with ONE attempt. Bison has no way back through the API. */
