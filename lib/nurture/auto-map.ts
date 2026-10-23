@@ -28,6 +28,7 @@ import { listCampaigns } from "@/lib/outboundhero-api";
 import { detectCampaignEsp, isCanonicalNurtureCampaign, isBatchTwoPlus, type Esp } from "@/lib/nurture/esp";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { logActivity, logError } from "@/lib/errors";
+import { resetRetiredCampaigns } from "@/lib/hard-reset/retired";
 
 const ESPS: Esp[] = ["google", "outlook", "segs"];
 
@@ -148,8 +149,12 @@ export async function listInstanceNurtureCampaignsCached(instance: string): Prom
 
   // strict: an incomplete list would make a mapped campaign look "gone" and get re-pointed.
   const all = await listCampaigns(instance, { strict: true });
+  // A campaign a reset archived is never a candidate, whatever Bison shows for it now (it carries the
+  // same name as the new campaign that replaced it, and usually far more leads).
+  const retired = await resetRetiredCampaigns();
   const canonical: CanonicalCampaign[] = [];
   for (const c of all) {
+    if (retired.has(`${instance}:${c.id}`)) continue;
     if (!isCanonicalNurtureCampaign(c.name)) continue;
     if (isBatchTwoPlus(c.name)) continue;
     const esp = detectCampaignEsp(c.name);

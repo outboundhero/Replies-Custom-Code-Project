@@ -1,14 +1,15 @@
 /**
  * A client's Hard Reset or Nurture reset — durable state (Turso `hard_reset`, one row per reset).
  *
- *   kind "hard"     all 12 campaigns made fresh; every current campaign archived
+ *   kind "hard"     all 12 campaigns made fresh; the client's queue emptied ("emptying"); every current
+ *                   campaign archived
  *   kind "nurture"  only the 6 nurture campaigns made fresh (main campaigns untouched); the client's
  *                   queue emptied ("emptying"); the old nurture campaigns archived
  *
  * Status flow (the order matters: the client keeps running on its old
  * campaigns until the new ones are fully set up, and archiving — which Email
  * Bison can't undo — comes last):
- *   creating → attaching → repointing → [emptying →] archiving → done
+ *   creating → attaching → repointing → emptying → archiving → done
  *   failed      stopped in a step (`failed_step`); "Try again" resumes it there
  *   cancelling → cancelled   (only before archiving starts: the new campaigns are deleted)
  * One open reset per client (a partial unique index); one runs at a time (a lease).

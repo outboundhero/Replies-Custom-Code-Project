@@ -6,7 +6,8 @@
  * new campaigns are exactly what a new client gets today: the current copy for
  * its type, Clay's settings, limits for its tier, Mon–Fri in its time zone.
  * The campaigns it archives are planned as if already gone, so the new ones get
- * the standard names.
+ * the standard names. Nurture starts over on the 6 new nurture campaigns: the map points at them,
+ * the batch count restarts and the client's queue is emptied (leads nurtured before stay out).
  *
  * A Nurture reset is the same with only the 6 nurture campaigns: the main campaigns stay as
  * they are, the client's queue is emptied (leads nurtured before stay out), and the old
@@ -324,8 +325,8 @@ export async function previewReset(tag: string, params: Record<string, unknown>,
     if (elsewhere) notes.push({ title: "Nurture map", text: `${elsewhere} of ${T}'s nurture map entries point at an instance outside its group — they're replaced by the 6 above.` });
   }
 
-  // A Nurture reset empties the queue (the queue numbers the Nurture page shows, as last counted).
-  if (nurtureOnly && client) {
+  // Either reset empties the queue (the queue numbers the Nurture page shows, as last counted).
+  if (client) {
     const stats = await db.execute({ sql: "SELECT stats, computed_at FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [T] })
       .then((r) => { try { return r.rows[0] ? { s: JSON.parse(String(r.rows[0].stats)) as { queue?: number }, at: String(r.rows[0].computed_at ?? "") } : null; } catch { return null; } }, () => null);
     const when = (iso: string) => (iso ? ` (as of ${new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })})` : "");

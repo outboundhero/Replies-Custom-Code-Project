@@ -27,6 +27,7 @@ import { toQueueContact } from "@/lib/nurture/queue-filters";
 import { acquireHeavyLease, renewHeavyLease, releaseHeavyLease, leaseHolder } from "@/lib/nurture/heavy-lease";
 import { ensureStageColumns, hasStageColumns } from "@/lib/nurture/stage-columns";
 import { deliveredByTag } from "@/lib/nurture/results";
+import { resetRetiredCampaigns } from "@/lib/hard-reset/retired";
 
 export const ESPS: Esp[] = ["google", "outlook", "segs"];
 const ON = new Set(["active", "queued"]);
@@ -199,7 +200,7 @@ export async function buildOverview(): Promise<{
   const { tags: allTags, churned } = await activeClientTags();
   const wanted = allTags;
 
-  const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows, expRows, delivered] = await Promise.all([
+  const [instances, notLive, nurtRows, mainRows, mapRows, cfgRows, healthRows, metaRows, statRows, lastRows, summaryRows, churnState, refreshState, recRows, expRows, delivered, retired] = await Promise.all([
     getAllClientInstances(),
     fetchNotYetLiveTags(NURTURE_GOLIVE_LAG_DAYS).catch(() => new Set<string>()),
     db.execute(`SELECT id, name, status, client_tag, total_leads, bison_instance, synced_at${extra} FROM nurture_campaigns_cache`),
@@ -216,6 +217,7 @@ export async function buildOverview(): Promise<{
     db.execute("SELECT UPPER(client_tag) AS t, COUNT(*) AS n FROM nurture_stopped_recovered WHERE added_at IS NOT NULL GROUP BY 1").catch(() => ({ rows: [] as unknown[] })),
     db.execute("SELECT DISTINCT UPPER(client_tag) AS t, bison_instance AS i, old_campaign_id AS id FROM nurture_campaign_expansions").catch(() => ({ rows: [] as unknown[] })),
     deliveredByTag(new Date(Date.now() - 90 * 86_400_000).toISOString()),
+    resetRetiredCampaigns(),
   ]);
   const numOrNull = (v: unknown) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Number(v) : null);
   // Campaigns that were already duplicated into a newer batch, per tag + instance.
@@ -230,8 +232,10 @@ export async function buildOverview(): Promise<{
   for (const r of nurtRows.rows) {
     if (r.synced_at && (!campaignsSyncedAt || String(r.synced_at) > campaignsSyncedAt)) campaignsSyncedAt = String(r.synced_at);
     const name = String(r.name || "");
+    // A campaign a reset archived stays archived here, even if Bison has turned it back to "completed".
+    const retiredByReset = retired.has(`${String(r.bison_instance)}:${Number(r.id)}`);
     const ref: NurtureCampaignRef = {
-      id: Number(r.id), instance: String(r.bison_instance), name, status: String(r.status || "").toLowerCase(),
+      id: Number(r.id), instance: String(r.bison_instance), name, status: retiredByReset ? "archived" : String(r.status || "").toLowerCase(),
       esp: detectCampaignEsp(name), batch: nurtureBatchOf(name), totalLeads: Number(r.total_leads) || 0,
       contacted: numOrNull(r.contacted), completion: numOrNull(r.completion), replied: numOrNull(r.replied),
     };

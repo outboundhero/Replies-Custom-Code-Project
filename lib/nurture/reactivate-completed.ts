@@ -18,6 +18,12 @@
  * Scope: only LIVE (go-live passed), non-churned clients — a pre-launch or
  * churned client's nurture must stay off. Fails CLOSED on a go-live read error
  * (skips the sweep that tick) so we never revive a pre-launch client's nurture.
+ *
+ * And only campaigns in a client's nurture map — the ones nurture routes leads to
+ * (the map follows each new batch). A completed campaign outside it gets no new
+ * leads, so reviving it does nothing; it also brought back campaigns a reset had
+ * archived (Bison turned those "completed" again — JPLV/FSD, 2026-10-23). Fails
+ * CLOSED on a map read error too.
  */
 import { listCampaigns, pauseCampaign, resumeCampaign } from "@/lib/outboundhero-api";
 import { BISON_INSTANCES } from "@/lib/bison-instances";
@@ -26,6 +32,7 @@ import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
 import { getChurnedTags } from "@/lib/churn";
 import { fetchNotYetLiveTags, NURTURE_GOLIVE_LAG_DAYS } from "@/lib/google-sheets";
 import { logActivity, logError } from "@/lib/errors";
+import db from "@/lib/db";
 
 type Camp = { id: number; name?: string | null; status?: string | null };
 
@@ -94,12 +101,25 @@ export async function reactivateCompletedNurture(opts?: {
     return res;
   }
 
+  let mapped: Set<string>;
+  try {
+    mapped = new Set((await db.execute("SELECT bison_instance, campaign_id FROM nurture_campaign_map")).rows.map((r) => `${r.bison_instance}:${r.campaign_id}`));
+  } catch (e) {
+    await logError("nurture-reactivate", "map", `skipping revive this tick — ${(e as Error).message}`);
+    return res;
+  }
+
   for (const [instance, camps] of Object.entries(byInstance)) {
     for (const c of camps) {
       if (!isCanonicalNurtureCampaign(c.name || "")) continue;
       res.scanned++;
       if (String(c.status).toLowerCase() !== "completed") continue;
       res.completed++;
+      if (!mapped.has(`${instance}:${c.id}`)) {
+        res.skipped++;
+        res.details.push({ instance, id: c.id, name: c.name || "", tag: ((extractTagFromCampaignName(c.name) || "").toUpperCase()) || null, outcome: "skip-not-mapped" });
+        continue;
+      }
 
       const tag = ((extractTagFromCampaignName(c.name) || "").toUpperCase()) || null;
       if (tag && (churned.has(tag) || notLive.has(tag))) {

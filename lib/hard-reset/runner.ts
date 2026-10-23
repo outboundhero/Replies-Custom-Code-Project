@@ -8,7 +8,8 @@
  *   creating    the 12 new campaigns, one at a time, each read back (onboarding's builder)
  *   attaching   every inbox tagged with the client's tag (less Reserve / Burnt ones) → all 6 new campaigns per instance, verified by count
  *   repointing  the nurture map → the 6 new nurture campaigns; batch records cleared
- *   emptying    (Nurture reset) the client's nurture queue emptied — the Nurture page's "Remove all", undoable
+ *   emptying    the client's nurture queue emptied — the Nurture page's "Remove all", undoable (both kinds:
+ *               a Hard reset starts nurture over too, on the nurture campaigns it just made)
  *   archiving   a last check that everything new is in place (and campaigns made since the start are added),
  *               then each old campaign — checked by id and name, paused, archived, verified
  *   cancelling  (before nurture is switched only) the new campaigns are deleted — never one with leads
@@ -380,13 +381,13 @@ async function repointStep(r: HardReset, holder: string): Promise<boolean> {
     { sql: "DELETE FROM nurture_routing_health WHERE UPPER(client_tag) = ?", args: [T] },
   ], "write");
   r.nurture = { ...r.nurture, after };
-  await moveTo(r, holder, "repointing", isNurtureReset(r) ? "emptying" : "archiving", { nurture_json: r.nurture });
+  await moveTo(r, holder, "repointing", "emptying", { nurture_json: r.nurture });
   await markTagStatsDirty(T).catch(() => {});
   await rebuildOverviewSnapshot({ force: true }).catch(() => {});
   return true;
 }
 
-// ── emptying the queue (Nurture reset) ─────────────────────────────────────
+// ── emptying the queue (both kinds) ────────────────────────────────────────
 
 /** The most contacts one removal takes (as the Nurture page's "Remove all"); a bigger queue is removed source by source. */
 const REMOVE_MAX = Number(process.env.HARD_RESET_REMOVE_MAX) || 20_000; // (smaller for a test run, to exercise the split)

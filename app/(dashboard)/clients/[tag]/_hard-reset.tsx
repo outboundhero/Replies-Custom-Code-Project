@@ -3,7 +3,8 @@
 /**
  * "Hard reset" (client page, top) and "Reset nurture" (the client's Nurture pages) — admins.
  *
- * Hard reset: start a stalled client over on 12 fresh campaigns. Nurture reset: only the 6
+ * Hard reset: start a stalled client over on 12 fresh campaigns — nurture included: it moves to
+ * the 6 new nurture campaigns and the queue is emptied, so no Nurture reset is needed after it. Nurture reset: only the 6
  * nurture campaigns made fresh (Nurture 1), the client's queue emptied (leads nurtured before stay
  * out) and the old nurture campaigns archived; the main campaigns aren't touched.
  *
@@ -141,7 +142,7 @@ function Overview({ tag, kind }: { tag: string; kind: Kind }) {
   ] : [
     [Mail, "12 fresh campaigns", "Made exactly as a new client's are today — the current copy for its type, the standard settings and limits, Mon–Fri in its time zone. Drafts until they have leads."],
     [Inbox, "Its domains move over", `Every inbox tagged ${tag} goes on all 6 new campaigns in each of its two instances (any marked Reserve or Burnt are left out). Domains, redirects and whitelisting don't change.`],
-    [Sprout, "Nurture starts again", "Nurture sends to the 6 new nurture campaigns and its batch count restarts. The 45-day wait stays, and leads nurtured before aren't nurtured again."],
+    [Sprout, "Nurture starts over", "Nurture sends to the 6 new nurture campaigns (no Nurture reset needed after this) and its batch count restarts. The queue is emptied — what's waiting now is removed (it can be undone) and leads nurtured before aren't nurtured again."],
     [Archive, "Old campaigns archived", `Last, once everything new is ready — ${tag} keeps sending until then. Leads still in their sequences stop. Email Bison can't un-archive.`],
   ];
   return (
@@ -159,7 +160,7 @@ function Overview({ tag, kind }: { tag: string; kind: Kind }) {
       </ol>
       <p className="text-xs text-muted-foreground">{kind === "nurture"
         ? "Then the queue fills again with new leads as they finish their sequences and pass their 45 days."
-        : "Then load leads into the new campaigns as usual — they start once they have leads and inboxes (the Go Live Date still applies)."}</p>
+        : "Then load leads into the new campaigns as usual — they start once they have leads and inboxes (the Go Live Date still applies). The queue fills again with new leads as they finish their sequences and pass their 45 days."}</p>
     </section>
   );
 }
@@ -224,7 +225,8 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
       </span>
     ) },
     { key: "repointing", title: "Switch nurture to the new campaigns", detail: r.nurture.done ? `Done${r.nurture.batchesCleared ? ` — ${r.nurture.batchesCleared} batch record${r.nurture.batchesCleared === 1 ? "" : "s"} cleared` : ""}` : "Nurture map → the 6 new nurture campaigns; batch count restarts" },
-    ...(nurture ? [{ key: "emptying" as Status, title: "Empty the queue", detail: r.emptied
+    // (A Hard reset from before 2026-10-24 went straight from nurture to archiving: no queue step to show.)
+    ...(r.emptied || !(r.status === "done" || r.status === "archiving" || r.failedStep === "archiving") ? [{ key: "emptying" as Status, title: "Empty the queue", detail: r.emptied
       ? `${r.emptied.contacts.toLocaleString()} contacts removed from the queue${r.emptied.done ? " — undo from the client's Nurture page (Removals) if ever needed" : " so far"}${r.emptied.interrupted ? ` · ${r.emptied.interrupted} removal${r.emptied.interrupted === 1 ? " was" : "s were"} interrupted (no Undo for those)` : ""}`
       : "What's waiting now is removed; leads nurtured before stay out" }] : []),
     { key: "archiving", title: nurture ? "Archive the old nurture campaigns" : "Archive the old campaigns", detail: (
