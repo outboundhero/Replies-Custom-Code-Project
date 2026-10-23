@@ -163,8 +163,9 @@ export default function SameInstanceTab({ onEnqueued }: { onEnqueued?: () => voi
     if (!plan.jobs.length) { toast.error("Select at least one source campaign that has a matching-ESP destination."); return; }
 
     const dest = { b2b: {} as Partial<Record<Esp, number>>, b2c: {} as Partial<Record<Esp, number>> };
-    for (const [key, c] of plan.destByKey) { const [lane, esp] = key.split(":") as [Lane, Esp]; dest[lane][esp] = c.id; }
-    const jobs = plan.jobs.map((j) => ({ sourceInstance: j.sourceInstance, sourceCampaignId: j.campaignId, sourceCampaignName: j.name, totalLeads: j.totalLeads, dest }));
+    const destNames = { b2b: {} as Partial<Record<Esp, string>>, b2c: {} as Partial<Record<Esp, string>> };
+    for (const [key, c] of plan.destByKey) { const [lane, esp] = key.split(":") as [Lane, Esp]; dest[lane][esp] = c.id; destNames[lane][esp] = c.name; }
+    const jobs = plan.jobs.map((j) => ({ sourceInstance: j.sourceInstance, sourceCampaignId: j.campaignId, sourceCampaignName: j.name, totalLeads: j.totalLeads, dest, destNames }));
     const skipped = plan.skipped.map((c) => ({ sourceCampaignName: c.name, reason: "no matching-ESP destination" }));
     const runId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 

@@ -11,11 +11,10 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, Download, ChevronDown, UserX, Plus, RefreshCw } from "lucide-react";
+import { Search, ArrowRight, Loader2, Sparkles, Zap, Check, AlertTriangle, MapPin, UserX, Plus, RefreshCw } from "lucide-react";
 import { BISON_INSTANCES, getInstanceLane } from "@/lib/bison-instances-shared";
-import MigrationPanel from "./_components/MigrationPanel";
 import SameInstanceTab from "./_components/SameInstanceTab";
-import { useMoveJobs } from "./_components/useMoveJobs";
+import { useMoveJobs, MoveJobsCardView } from "@/components/jobs/move-jobs-card";
 
 type Esp = "google" | "outlook" | "segs";
 type PlanStatus = "ready" | "partial" | "blocked" | "empty";
@@ -55,13 +54,9 @@ export default function MigratePage() {
   const [syncingSheet, setSyncingSheet] = useState(false);
   const [enqueuing, setEnqueuing] = useState(false);
 
-  // The move now runs server-side; this hook just polls status + drives controls.
-  const { entries, cancel, retry, dismiss, refresh } = useMoveJobs();
-
-  const exportSkipped = useCallback((runId: string) => {
-    if (!runId) return;
-    window.open(`/api/leads/move/skipped/export?runId=${encodeURIComponent(runId)}`, "_blank");
-  }, []);
+  // The moves run server-side; this polls their state (the same list as the Jobs page).
+  const moves = useMoveJobs();
+  const refresh = moves.refresh;
 
   const loadClients = useCallback(() => {
     return fetch("/api/config/clients").then((r) => (r.ok ? r.json() : [])).then((rows) => {
@@ -161,6 +156,7 @@ export default function MigratePage() {
     const clients = planned.map((p) => ({
       tag: p.tag,
       dest: Object.fromEntries(ESPS.flatMap((e) => { const m = p.match[e]; return m ? [[e, m.campaignId]] : []; })),
+      destNames: Object.fromEntries(ESPS.flatMap((e) => { const m = p.match[e]; return m ? [[e, m.name]] : []; })),
       sourceCampaigns: p.sourceCampaigns.map((c) => ({ id: c.id, name: c.name, totalLeads: c.total_leads })),
     }));
     const runId = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `run-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -181,13 +177,7 @@ export default function MigratePage() {
   const toLabel = useMemo(() => BISON_INSTANCES.find((i) => i.key === to)?.label || to, [to]);
   const targetLane = useMemo(() => getInstanceLane(to), [to]);
   const laneLabel = targetLane === "b2b" ? "B2B" : "B2C";
-  const anyActive = entries.some((m) => m.status === "running" || m.status === "queued");
-
-  // Running first, then queued, then done — active work stays on top.
-  const orderedMoves = useMemo(() => {
-    const rank = (s: string) => (s === "running" ? 0 : s === "queued" ? 1 : 2);
-    return [...entries].sort((a, b) => rank(a.status) - rank(b.status));
-  }, [entries]);
+  const anyActive = moves.jobs.some((m) => m.status === "running" || m.status === "pending");
 
   const summary = useMemo(() => {
     const rows = [...selected].map((t) => plan.get(t)).filter(Boolean) as ClientPlan[];
@@ -218,22 +208,9 @@ export default function MigratePage() {
         </button>
       </div>
 
-      {/* Persistent progress panels — server-driven, so they show every active/
-          recent move (cross or same) regardless of which tab is open, and rehydrate
-          after a tab close. */}
-      {orderedMoves.map((m) => (
-        <div key={m.jobId} className="space-y-2">
-          <MigrationPanel
-            state={m.state}
-            running={m.status === "running"}
-            onStop={() => cancel(m.jobId)}
-            onClose={() => dismiss(m.jobId)}
-            onRetry={() => retry(m.jobId)}
-            onExportSkipped={() => exportSkipped(m.runId)}
-          />
-          {m.status !== "queued" && <SkippedViewer runId={m.runId} onExport={() => exportSkipped(m.runId)} />}
-        </div>
-      ))}
+      {/* The moves (cross or same), server-driven: running ones with their progress, finished ones with what
+          happened (kept 30 days) — the same card as the Jobs page. */}
+      <MoveJobsCardView s={moves} limit={3} showAllLink />
 
       {/* Tabs */}
       <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
@@ -406,76 +383,6 @@ const STATUS_BADGE: Record<PlanStatus, { label: string; cls: string }> = {
 function StatusBadge({ status }: { status: PlanStatus }) {
   const b = STATUS_BADGE[status];
   return <span className={`px-1.5 h-5 grid place-items-center rounded text-[10px] font-semibold uppercase tracking-wide shrink-0 ${b.cls}`}>{b.label}</span>;
-}
-
-interface SkippedRow { client_tag: string; email: string; city: string | null; state: string | null; source_campaign_name: string; reason: string }
-function SkippedViewer({ runId, onExport }: { runId: string | null; onExport: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [rows, setRows] = useState<SkippedRow[]>([]);
-  const [total, setTotal] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async () => {
-    if (!runId) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/leads/move/skipped?runId=${encodeURIComponent(runId)}&limit=500`);
-      const d = await res.json();
-      if (res.ok) { setRows((d.rows as SkippedRow[]) || []); setTotal(d.total ?? 0); }
-    } catch { /* ignore */ } finally { setLoading(false); }
-  }, [runId]);
-
-  useEffect(() => { if (open) load(); }, [open, load]);
-  if (!runId) return null;
-
-  return (
-    <div className="rounded-xl border bg-card overflow-hidden">
-      <button onClick={() => setOpen((o) => !o)} className="w-full flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-muted/30">
-        <MapPin className="size-4 text-amber-600" />
-        <span className="font-medium">Skipped — out of service area</span>
-        {total != null && <span className="text-xs text-muted-foreground tabular-nums">{total.toLocaleString()} lead{total === 1 ? "" : "s"}</span>}
-        <span className="ml-auto flex items-center gap-2">
-          {!!total && (
-            <span onClick={(e) => { e.stopPropagation(); onExport(); }} className="inline-flex items-center gap-1 px-2 h-7 text-xs rounded border hover:bg-muted/50"><Download className="size-3" /> Export CSV</span>
-          )}
-          <ChevronDown className={`size-4 transition-transform ${open ? "rotate-180" : ""}`} />
-        </span>
-      </button>
-      {open && (
-        <div className="border-t">
-          <div className="flex items-center justify-between px-4 py-1.5 text-xs text-muted-foreground">
-            <span>{loading ? "Loading…" : `Showing ${rows.length}${total != null && total > rows.length ? ` of ${total.toLocaleString()}` : ""}`}</span>
-            <button onClick={load} className="hover:text-foreground">Refresh</button>
-          </div>
-          <div className="max-h-[40vh] overflow-auto">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-card border-y text-muted-foreground">
-                <tr className="text-left">
-                  <th className="px-3 py-1.5 font-medium">Client</th>
-                  <th className="px-3 py-1.5 font-medium">Email</th>
-                  <th className="px-3 py-1.5 font-medium">City</th>
-                  <th className="px-3 py-1.5 font-medium">State</th>
-                  <th className="px-3 py-1.5 font-medium">Campaign</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {rows.map((r, i) => (
-                  <tr key={i} className="hover:bg-muted/30">
-                    <td className="px-3 py-1 font-mono">{r.client_tag}</td>
-                    <td className="px-3 py-1">{r.email}</td>
-                    <td className="px-3 py-1">{r.city || <span className="text-muted-foreground/50">—</span>}</td>
-                    <td className="px-3 py-1">{r.state || <span className="text-muted-foreground/50">—</span>}</td>
-                    <td className="px-3 py-1 text-muted-foreground truncate max-w-[240px]" title={r.source_campaign_name}>{r.source_campaign_name}</td>
-                  </tr>
-                ))}
-                {!loading && rows.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">No leads skipped by the service-area filter yet.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function InstancePick({ label, value, onChange, disabledKey }: { label: string; value: string; onChange: (v: string) => void; disabledKey?: string }) {

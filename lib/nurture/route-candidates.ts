@@ -46,11 +46,19 @@ export interface BucketResult {
   error?: string;
 }
 
+/**
+ * A candidate that didn't reach its campaign, and why. `retryable` is false only when there's nowhere to send it.
+ * `batch`: the whole request failed (Bison error, dropped connection) — not something about this lead.
+ */
+export interface FailedCandidate { candidate: Candidate; reason: string; campaignId: number; retryable: boolean; batch: boolean }
+
 export interface RouteCandidatesResult {
   perBucket: BucketResult[];
   totalAttached: number;
   /** Candidates left out because the client removed them for a service-area change. */
   suppressedExcluded?: number;
+  /** Every candidate that wasn't attached (callers that only count can ignore it). */
+  failed: FailedCandidate[];
 }
 
 export async function routeCandidates(
@@ -59,7 +67,10 @@ export async function routeCandidates(
   map: CampaignMapEntry[],
   opts: { onAttached?: (campaignId: number, resolved: Candidate[]) => Promise<void> } = {},
 ): Promise<RouteCandidatesResult> {
-  const result: RouteCandidatesResult = { perBucket: [], totalAttached: 0 };
+  const result: RouteCandidatesResult = { perBucket: [], totalAttached: 0, failed: [] };
+  const fail = (items: Candidate[], reason: (c: Candidate) => string, campaignId: number, o: { retryable?: boolean; batch?: boolean } = {}) => {
+    for (const c of items) result.failed.push({ candidate: c, reason: reason(c), campaignId, retryable: o.retryable ?? true, batch: o.batch ?? false });
+  };
 
   // Never put back a lead this client removed for a service-area change. Every
   // routing path comes through here; if the block list can't be read, this
@@ -93,11 +104,14 @@ export async function routeCandidates(
         requested: items.length, attached: 0,
         error: `no campaign mapped for ${esp} in ${instance} — pick one in Target Campaigns`,
       });
+      fail(items, () => `no ${esp} campaign to send it to in ${instance}`, 0, { retryable: false });
       continue;
     }
     const cName = target.campaign_name ?? "(mapped)";
 
     const emailToId = new Map<string, number>();
+    // Bison's reason per email, when creating it failed ("HTTP 422 (a@b.com): …").
+    const createErr = new Map<string, string>();
 
     // Same-instance shortcut: leads already in the target instance keep their id.
     for (const i of items) if (i.sourceInstance === instance && i.obLeadId) emailToId.set(i.email.toLowerCase(), i.obLeadId);
@@ -135,16 +149,23 @@ export async function routeCandidates(
         }
         if (newlyResolved.length) await recordInstanceLeads(instance, clientTag, newlyResolved);
         if (cr.errors.length) console.warn(`[route-candidates:${clientTag}] create errors in ${instance}/${esp}:`, cr.errors);
+        for (const er of cr.errors) {
+          const m = /^HTTP (\d+) \(([^)]+)\): ([\s\S]*)$/.exec(er);
+          if (m) createErr.set(m[2].toLowerCase(), `Bison refused to create it in ${instance} (${m[1]}): ${m[3].slice(0, 160)}`);
+        }
       }
     } catch (e) {
       result.perBucket.push({
         esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
         requested: items.length, attached: 0, error: `create failed: ${(e as Error).message}`,
       });
+      fail(items, () => `creating it in ${instance} failed: ${(e as Error).message}`, target.campaign_id, { batch: true });
       continue;
     }
 
     const resolved = items.filter((i) => emailToId.has(i.email.toLowerCase()));
+    const unresolvedReason = (c: Candidate) => createErr.get(c.email.toLowerCase()) ?? `Bison didn't give back a lead id for it in ${instance}`;
+    fail(items.filter((i) => !emailToId.has(i.email.toLowerCase())), unresolvedReason, target.campaign_id);
     if (resolved.length === 0) {
       result.perBucket.push({
         esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
@@ -162,6 +183,7 @@ export async function routeCandidates(
           esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
           requested: items.length, attached: 0, error: `attach failed: ${r.error}`,
         });
+        fail(resolved, () => `adding it to the campaign failed: ${String(r.error).slice(0, 200)}`, target.campaign_id, { batch: true });
         continue;
       }
     } catch (e) {
@@ -169,6 +191,7 @@ export async function routeCandidates(
         esp, instance, lane, campaign: { id: target.campaign_id, name: cName, bison_instance: instance },
         requested: items.length, attached: 0, error: `attach failed: ${(e as Error).message}`,
       });
+      fail(resolved, () => `adding it to the campaign failed: ${(e as Error).message}`, target.campaign_id, { batch: true });
       continue;
     }
 

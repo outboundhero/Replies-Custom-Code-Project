@@ -4,8 +4,8 @@
  * App-wide progress strip for the durable Lead Mover. Polls active move jobs and
  * shows a compact bar per job from ANY dashboard page — so an operator who
  * started a move and navigated away (or reopened the app) still sees it running
- * to completion. Hidden on /migrate itself (the full panels live there). Reads
- * shared server state, so every operator sees the same jobs.
+ * to completion. Hidden on /migrate and /jobs (the full card lives there); a click
+ * opens the Jobs page. Reads shared server state, so every operator sees the same jobs.
  */
 import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
@@ -14,7 +14,7 @@ import { Loader2, Clock } from "lucide-react";
 
 interface ActiveJob {
   id: string; status: string; targetLabel: string | null; targetInstance: string | null;
-  leadsTotal: number; movedTotal: number; tasksTotal: number; tasksDone: number;
+  leadsTotal: number; processedTotal: number; movedTotal: number; tasksTotal: number; tasksDone: number;
 }
 
 export function MoveJobsBanner() {
@@ -41,7 +41,7 @@ export function MoveJobsBanner() {
     return () => { stopped = true; if (timer.current) clearTimeout(timer.current); };
   }, []);
 
-  if (pathname?.startsWith("/migrate")) return null; // full panels shown there
+  if (pathname?.startsWith("/migrate") || pathname?.startsWith("/jobs")) return null; // the full card is there
   if (!jobs.length) return null;
 
   return (
@@ -49,16 +49,16 @@ export function MoveJobsBanner() {
       {jobs.map((j) => {
         const running = j.status === "running";
         const pct = j.leadsTotal > 0
-          ? Math.min(100, Math.round((j.movedTotal / j.leadsTotal) * 100))
+          ? Math.min(100, Math.round((j.processedTotal / j.leadsTotal) * 100))
           : (j.tasksTotal > 0 ? Math.round((j.tasksDone / j.tasksTotal) * 100) : 0);
         return (
-          <Link key={j.id} href="/migrate" className="block rounded-lg border bg-card px-3 py-2 hover:bg-muted/40 transition-colors">
+          <Link key={j.id} href="/jobs" className="block rounded-lg border bg-card px-3 py-2 hover:bg-muted/40 transition-colors">
             <div className="flex items-center gap-2 text-xs">
               {running ? <Loader2 className="size-3.5 animate-spin text-emerald-600" /> : <Clock className="size-3.5 text-slate-500" />}
               <span className="font-medium">{running ? "Moving leads" : "Move queued"}</span>
               {j.targetLabel && <span className="text-muted-foreground truncate">→ {j.targetLabel}</span>}
               <span className="ml-auto tabular-nums text-muted-foreground">
-                {j.movedTotal.toLocaleString()}{j.leadsTotal ? ` / ${j.leadsTotal.toLocaleString()}` : ""} leads · {j.tasksDone}/{j.tasksTotal} campaigns
+                {j.processedTotal.toLocaleString()}{j.leadsTotal ? ` / ${j.leadsTotal.toLocaleString()}` : ""} processed · {j.movedTotal.toLocaleString()} moved · {j.tasksDone}/{j.tasksTotal} campaigns
               </span>
             </div>
             <div className="h-1 bg-muted rounded mt-1.5 overflow-hidden">

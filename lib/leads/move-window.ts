@@ -10,12 +10,14 @@
  * present" as success, lead_move_log uses INSERT OR IGNORE, lead_move_skipped
  * uses INSERT OR REPLACE — so re-running a window (after an interruption) never
  * double-moves. `error` is set ONLY on a hard failure (fetch failed with nothing
- * fetched, or a create/attach failure); a mid-window read error with partial
- * progress returns the current cursor with no error so the caller resumes.
+ * fetched, or a chunk that threw — then `nextCursor` is that chunk's START, so it's
+ * done again, never skipped); a mid-window read error with partial progress returns
+ * the current cursor with no error so the caller resumes. Leads Bison refused one by
+ * one come back in `failed` (with the reason) for the caller to record and retry.
  */
 import db from "@/lib/db";
 import { sweepCampaignLeadsCursor, findLeadByEmail, type OutboundLead } from "@/lib/outboundhero-api";
-import { routeCandidates, type Candidate } from "@/lib/nurture/route-candidates";
+import { routeCandidates, type Candidate, type RouteCandidatesResult } from "@/lib/nurture/route-candidates";
 import { detectCampaignEsp, bucketEsp, detectEsp, pickEspFromTags, type Esp } from "@/lib/nurture/esp";
 import { type CampaignMapEntry } from "@/lib/nurture/campaign-map";
 import { getInstanceLane } from "@/lib/bison-instances-shared";
@@ -88,6 +90,70 @@ async function logMoved(clientTag: string, sourceInstance: string, sourceCampaig
   }
 }
 
+// ── Each lead's ESP (shared) ─────────────────────────────────────────────────
+
+/**
+ * Each lead's ESP from its Bison ESP tag (Bison's campaign lead list doesn't carry tags, so each lead is looked up).
+ * A lead without an ESP tag goes by its email domain. A lookup that fails (Bison busy — rate limit) gets one more
+ * try after a pause; one that fails twice also goes by its domain, and is counted (`guessed`) so it shows on the job.
+ */
+async function resolveEsps(instance: string, leads: OutboundLead[], campaignEsp: Esp | null): Promise<{ espByEmail: Map<string, Esp>; guessed: number }> {
+  const espByEmail = new Map<string, Esp>();
+  if (campaignEsp) {
+    for (const l of leads) espByEmail.set(l.email, campaignEsp);
+    return { espByEmail, guessed: 0 };
+  }
+  const missed: OutboundLead[] = [];
+  const look = async (l: OutboundLead): Promise<boolean> => {
+    try {
+      const full = await findLeadByEmail(instance, l.email);
+      if (!full) return false;
+      const tag = pickEspFromTags(full.tags);
+      espByEmail.set(l.email, tag ? bucketEsp(tag) : detectEsp(l.email));
+      return true;
+    } catch { return false; }
+  };
+  await parallelForEach(leads, 8, async (l) => { if (!(await look(l))) missed.push(l); });
+  let guessed = 0;
+  if (missed.length) {
+    await new Promise((r) => setTimeout(r, 1500));
+    for (const l of missed) {
+      if (await look(l)) continue;
+      espByEmail.set(l.email, detectEsp(l.email));
+      guessed++;
+    }
+  }
+  return { espByEmail, guessed };
+}
+
+// ── Failed leads (shared) ────────────────────────────────────────────────────
+
+/** A lead that didn't reach its campaign — kept with everything needed to send it again. */
+export interface FailedLead { obLeadId: number; email: string; reason: string; campaignId: number; retryable: boolean; candidate: Candidate }
+
+/** Below this many leads, a chunk where every lead failed is still read as per-lead trouble, not Bison being down. */
+const WHOLE_CHUNK_FAIL_MIN = 20;
+
+/**
+ * routeCandidates' failures → FailedLead[]. A request that failed as a whole (Bison error, dropped connection —
+ * `batch`), or EVERY candidate of a chunk failing (and enough of them), is Bison or the connection failing, not
+ * the leads: that throws, so the window stops at this chunk and the runner does it again (a campaign that keeps
+ * failing ends up failed, with the reason) — instead of filing a campaign's leads as errors one by one.
+ */
+function toFailed(rc: RouteCandidatesResult, candidates: number): FailedLead[] {
+  const batch = rc.failed.find((f) => f.batch);
+  if (batch) throw new Error(batch.reason);
+  const failed = rc.failed.map((f) => ({
+    obLeadId: Number(f.candidate.obLeadId ?? f.candidate.rowId), email: f.candidate.email, reason: f.reason,
+    campaignId: f.campaignId, retryable: f.retryable, candidate: f.candidate,
+  }));
+  const retryable = failed.filter((f) => f.retryable).length;
+  if (retryable >= WHOLE_CHUNK_FAIL_MIN && retryable === candidates - (rc.suppressedExcluded ?? 0)) {
+    throw new Error(`every lead in this batch failed — ${failed[0].reason}`);
+  }
+  return failed;
+}
+
 // ── Cross-instance window ────────────────────────────────────────────────────
 
 export interface MoveCrossParams {
@@ -104,8 +170,16 @@ export interface MoveCrossParams {
   windowLeads?: number;
   subWindow?: number;
 }
+/**
+ * Every lead `processed` (read AND handled) is exactly one of: moved, skippedArea, skippedLane, skippedNoDest,
+ * noEmail, suppressed or failed. `fetched` counts reads, including a chunk that wasn't handled.
+ */
 export interface MoveCrossResult {
-  fetched: number; moved: number; skippedArea: number; skippedLane: number; skippedNoDest: number;
+  fetched: number; processed: number; moved: number; movedByKey: Record<string, number>;
+  skippedArea: number; skippedLane: number; skippedNoDest: number; noEmail: number; suppressed: number;
+  /** Routed by email domain because Bison didn't answer their ESP lookup (twice). */
+  espGuessed: number;
+  failed: FailedLead[];
   nextCursor: string | null; done: boolean; error?: string;
 }
 
@@ -129,24 +203,31 @@ export async function moveCrossWindow(p: MoveCrossParams): Promise<MoveCrossResu
   const SUB_WINDOW = p.subWindow ?? (needsLookup ? 400 : 800);
   const WINDOW_MS = p.windowMs ?? DEFAULT_CROSS_WINDOW_MS;
 
-  let moved = 0, skippedArea = 0, skippedLane = 0, skippedNoDest = 0, fetched = 0;
+  const t = { processed: 0, moved: 0, skippedArea: 0, skippedLane: 0, skippedNoDest: 0, noEmail: 0, suppressed: 0, espGuessed: 0 };
+  const movedByKey: Record<string, number> = {};
+  const failed: FailedLead[] = [];
+  let fetched = 0;
   let cursor: string | null = p.cursor;
   let done = false;
-  const w: { error: Error | null } = { error: null };
+  // A chunk that throws stops the window at that chunk's START, so it's done again (never skipped).
+  const w: { error: Error | null; at: string | null } = { error: null, at: null };
   let writeChain: Promise<void> = Promise.resolve();
   const deadline = Date.now() + WINDOW_MS;
+  const out = (nextCursor: string | null, isDone: boolean, error?: string): MoveCrossResult =>
+    ({ fetched, ...t, movedByKey, failed, nextCursor, done: isDone, ...(error ? { error } : {}) });
 
   for (;;) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
+    const chunkStart = cursor;
     let s: { leads: OutboundLead[]; nextCursor: string | null; done: boolean };
     try {
       s = await sweepCampaignLeadsCursor(p.sourceInstance, p.sourceCampaignId, cursor, { maxLeads: SUB_WINDOW, maxMs: Math.min(remainingMs, 60_000) });
     } catch (e) {
       await writeChain;
-      if (w.error) return { fetched, moved, skippedArea, skippedLane, skippedNoDest, nextCursor: cursor, done: false, error: `move failed: ${w.error.message}` };
-      if (fetched === 0) return { fetched, moved, skippedArea, skippedLane, skippedNoDest, nextCursor: cursor, done: false, error: `fetch failed: ${(e as Error).message}` };
-      return { fetched, moved, skippedArea, skippedLane, skippedNoDest, nextCursor: cursor, done: false }; // partial → resume
+      if (w.error) return out(w.at, false, `move failed: ${w.error.message}`);
+      if (fetched === 0) return out(cursor, false, `fetch failed: ${(e as Error).message}`);
+      return out(cursor, false); // partial → resume
     }
     fetched += s.leads.length;
     cursor = s.nextCursor;
@@ -159,19 +240,25 @@ export async function moveCrossWindow(p: MoveCrossParams): Promise<MoveCrossResu
       if (w.error) return;
       try {
         const r = await routeAndLog(chunk, ctx);
-        moved += r.moved; skippedArea += r.skippedArea; skippedLane += r.skippedLane; skippedNoDest += r.skippedNoDest;
-      } catch (e) { w.error = e as Error; }
+        t.moved += r.moved; t.skippedArea += r.skippedArea; t.skippedLane += r.skippedLane; t.skippedNoDest += r.skippedNoDest;
+        t.noEmail += r.noEmail; t.suppressed += r.suppressed; t.espGuessed += r.espGuessed;
+        for (const [k, n] of Object.entries(r.movedByKey)) movedByKey[k] = (movedByKey[k] || 0) + n;
+        failed.push(...r.failed);
+        t.processed += chunk.length;
+      } catch (e) { w.error = e as Error; w.at = chunkStart; }
     })();
 
     if (done || !cursor || fetched >= WINDOW) break;
   }
 
   await writeChain;
-  if (w.error) return { fetched, moved, skippedArea, skippedLane, skippedNoDest, nextCursor: cursor, done: false, error: `move failed: ${w.error.message}` };
-  return { fetched, moved, skippedArea, skippedLane, skippedNoDest, nextCursor: done ? null : cursor, done };
+  if (w.error) return out(w.at, false, `move failed: ${w.error.message}`);
+  return out(done ? null : cursor, done);
 }
 
-async function routeAndLog(leads: OutboundLead[], ctx: CrossCtx): Promise<{ moved: number; skippedArea: number; skippedLane: number; skippedNoDest: number }> {
+interface CrossChunk { moved: number; movedByKey: Record<string, number>; skippedArea: number; skippedLane: number; skippedNoDest: number; noEmail: number; suppressed: number; espGuessed: number; failed: FailedLead[] }
+
+async function routeAndLog(leads: OutboundLead[], ctx: CrossCtx): Promise<CrossChunk> {
   let gated = leads;
   let skippedArea = 0;
   if (ctx.area) {
@@ -194,21 +281,9 @@ async function routeAndLog(leads: OutboundLead[], ctx: CrossCtx): Promise<{ move
     else skippedLane++;
   }
   const withEmail = laneMatched.filter((l) => (l.email || "").trim());
+  const noEmail = laneMatched.length - withEmail.length;
 
-  const espByEmail = new Map<string, Esp>();
-  if (!ctx.needsLookup && ctx.campaignEsp) {
-    for (const l of withEmail) espByEmail.set(l.email, ctx.campaignEsp);
-  } else {
-    await parallelForEach(withEmail, 8, async (l) => {
-      let esp: Esp;
-      try {
-        const full = await findLeadByEmail(ctx.sourceInstance, l.email);
-        const tag = pickEspFromTags(full?.tags);
-        esp = tag ? bucketEsp(tag) : detectEsp(l.email);
-      } catch { esp = detectEsp(l.email); }
-      espByEmail.set(l.email, esp);
-    });
-  }
+  const { espByEmail, guessed: espGuessed } = await resolveEsps(ctx.sourceInstance, withEmail, ctx.needsLookup ? null : ctx.campaignEsp);
 
   const candidates: Candidate[] = [];
   let skippedNoDest = 0;
@@ -232,17 +307,21 @@ async function routeAndLog(leads: OutboundLead[], ctx: CrossCtx): Promise<{ move
     const cid = ctx.dest[esp];
     if (cid && usedEsps.has(esp)) map.push({ bison_instance: ctx.targetInstance, esp, campaign_id: cid, campaign_name: null, lane: ctx.targetLane });
   }
-  if (!candidates.length || !map.length) return { moved: 0, skippedArea, skippedLane, skippedNoDest };
+  const none = { moved: 0, movedByKey: {}, skippedArea, skippedLane, skippedNoDest, noEmail, suppressed: 0, espGuessed, failed: [] };
+  if (!candidates.length || !map.length) return none;
 
   let moved = 0;
+  const movedByKey: Record<string, number> = {};
   const nowIso = new Date().toISOString();
-  await routeCandidates(ctx.clientTag, candidates, map, {
+  const rc = await routeCandidates(ctx.clientTag, candidates, map, {
     onAttached: async (campaignId, resolved) => {
       moved += resolved.length;
+      const key = `${ctx.targetLane}:${resolved[0]?.esp || "google"}`;
+      movedByKey[key] = (movedByKey[key] || 0) + resolved.length;
       await logMoved(ctx.clientTag, ctx.sourceInstance, ctx.sourceCampaignId, ctx.targetInstance, campaignId, resolved, nowIso);
     },
   });
-  return { moved, skippedArea, skippedLane, skippedNoDest };
+  return { moved, movedByKey, skippedArea, skippedLane, skippedNoDest, noEmail, suppressed: rc.suppressedExcluded ?? 0, espGuessed, failed: toFailed(rc, candidates.length) };
 }
 
 // ── Same-instance (lane-aware) window ────────────────────────────────────────
@@ -262,8 +341,10 @@ export interface MoveSameParams {
   windowLeads?: number;
   subWindow?: number;
 }
+/** As MoveCrossResult; `skipped` = no destination for the lead's (lane, ESP). */
 export interface MoveSameResult {
-  fetched: number; movedByKey: Record<string, number>; skipped: number; skippedArea: number;
+  fetched: number; processed: number; movedByKey: Record<string, number>; skipped: number; skippedArea: number;
+  noEmail: number; suppressed: number; espGuessed: number; failed: FailedLead[];
   nextCursor: string | null; done: boolean; error?: string;
 }
 
@@ -287,23 +368,28 @@ export async function moveSameWindow(p: MoveSameParams): Promise<MoveSameResult>
   const WINDOW_MS = p.windowMs ?? DEFAULT_SAME_WINDOW_MS;
 
   const movedByKey: Record<string, number> = {};
-  let skipped = 0, skippedArea = 0, fetched = 0;
+  const t = { processed: 0, skipped: 0, skippedArea: 0, noEmail: 0, suppressed: 0, espGuessed: 0 };
+  const failed: FailedLead[] = [];
+  let fetched = 0;
   let cursor: string | null = p.cursor;
   let done = false;
-  const w: { error: Error | null } = { error: null };
+  const w: { error: Error | null; at: string | null } = { error: null, at: null };
   let writeChain: Promise<void> = Promise.resolve();
   const deadline = Date.now() + WINDOW_MS;
+  const out = (nextCursor: string | null, isDone: boolean, error?: string): MoveSameResult =>
+    ({ fetched, ...t, movedByKey, failed, nextCursor, done: isDone, ...(error ? { error } : {}) });
 
   for (;;) {
     if (deadline - Date.now() <= 0) break;
+    const chunkStart = cursor;
     let s: { leads: OutboundLead[]; nextCursor: string | null; done: boolean };
     try {
       s = await sweepCampaignLeadsCursor(p.sourceInstance, p.sourceCampaignId, cursor, { maxLeads: SUB_WINDOW, maxMs: Math.min(deadline - Date.now(), 60_000) });
     } catch (e) {
       await writeChain;
-      if (w.error) return { fetched, movedByKey, skipped, skippedArea, nextCursor: cursor, done: false, error: `move failed: ${w.error.message}` };
-      if (fetched === 0) return { fetched, movedByKey, skipped, skippedArea, nextCursor: cursor, done: false, error: `fetch failed: ${(e as Error).message}` };
-      return { fetched, movedByKey, skipped, skippedArea, nextCursor: cursor, done: false };
+      if (w.error) return out(w.at, false, `move failed: ${w.error.message}`);
+      if (fetched === 0) return out(cursor, false, `fetch failed: ${(e as Error).message}`);
+      return out(cursor, false);
     }
     fetched += s.leads.length;
     cursor = s.nextCursor;
@@ -317,19 +403,21 @@ export async function moveSameWindow(p: MoveSameParams): Promise<MoveSameResult>
       try {
         const r = await routeAndLogLane(chunk, ctx);
         for (const [k, n] of Object.entries(r.movedByKey)) movedByKey[k] = (movedByKey[k] || 0) + n;
-        skipped += r.skipped; skippedArea += r.skippedArea;
-      } catch (e) { w.error = e as Error; }
+        t.skipped += r.skipped; t.skippedArea += r.skippedArea; t.noEmail += r.noEmail; t.suppressed += r.suppressed; t.espGuessed += r.espGuessed;
+        failed.push(...r.failed);
+        t.processed += chunk.length;
+      } catch (e) { w.error = e as Error; w.at = chunkStart; }
     })();
 
     if (done || !cursor || fetched >= WINDOW) break;
   }
 
   await writeChain;
-  if (w.error) return { fetched, movedByKey, skipped, skippedArea, nextCursor: cursor, done: false, error: `move failed: ${w.error.message}` };
-  return { fetched, movedByKey, skipped, skippedArea, nextCursor: done ? null : cursor, done };
+  if (w.error) return out(w.at, false, `move failed: ${w.error.message}`);
+  return out(done ? null : cursor, done);
 }
 
-async function routeAndLogLane(leads: OutboundLead[], ctx: SameCtx): Promise<{ movedByKey: Record<string, number>; skipped: number; skippedArea: number }> {
+async function routeAndLogLane(leads: OutboundLead[], ctx: SameCtx): Promise<{ movedByKey: Record<string, number>; skipped: number; skippedArea: number; noEmail: number; suppressed: number; espGuessed: number; failed: FailedLead[] }> {
   let gated = leads;
   let skippedArea = 0;
   if (ctx.area) {
@@ -344,21 +432,9 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: SameCtx): Promise<{ m
     gated = inArea;
   }
   const withEmail = gated.filter((l) => (l.email || "").trim());
+  const noEmail = gated.length - withEmail.length;
 
-  const espByEmail = new Map<string, Esp>();
-  if (!ctx.needsLookup && ctx.campaignEsp) {
-    for (const l of withEmail) espByEmail.set(l.email, ctx.campaignEsp);
-  } else {
-    await parallelForEach(withEmail, 8, async (l) => {
-      let esp: Esp;
-      try {
-        const full = await findLeadByEmail(ctx.sourceInstance, l.email);
-        const tag = pickEspFromTags(full?.tags);
-        esp = tag ? bucketEsp(tag) : detectEsp(l.email);
-      } catch { esp = detectEsp(l.email); }
-      espByEmail.set(l.email, esp);
-    });
-  }
+  const { espByEmail, guessed: espGuessed } = await resolveEsps(ctx.sourceInstance, withEmail, ctx.needsLookup ? null : ctx.campaignEsp);
 
   const candidates: Candidate[] = [];
   let skipped = 0;
@@ -386,11 +462,11 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: SameCtx): Promise<{ m
       if (cid && usedKeys.has(`${lane}:${esp}`)) map.push({ bison_instance: inst, esp, campaign_id: cid, campaign_name: null, lane });
     }
   }
-  if (!candidates.length || !map.length) return { movedByKey: {}, skipped, skippedArea };
+  if (!candidates.length || !map.length) return { movedByKey: {}, skipped, skippedArea, noEmail, suppressed: 0, espGuessed, failed: [] };
 
   const movedByKey: Record<string, number> = {};
   const nowIso = new Date().toISOString();
-  await routeCandidates(ctx.clientTag, candidates, map, {
+  const rc = await routeCandidates(ctx.clientTag, candidates, map, {
     onAttached: async (campaignId, resolved) => {
       const lane = resolved[0]?.lane || "b2b";
       const esp = resolved[0]?.esp || "google";
@@ -399,5 +475,59 @@ async function routeAndLogLane(leads: OutboundLead[], ctx: SameCtx): Promise<{ m
       await logMoved(ctx.clientTag, ctx.sourceInstance, ctx.sourceCampaignId, targetInstance, campaignId, resolved, nowIso);
     },
   });
-  return { movedByKey, skipped, skippedArea };
+  return { movedByKey, skipped, skippedArea, noEmail, suppressed: rc.suppressedExcluded ?? 0, espGuessed, failed: toFailed(rc, candidates.length) };
+}
+
+// ── Sending failed leads again ───────────────────────────────────────────────
+
+export interface RetryLead { key: string; clientTag: string; sourceInstance: string; sourceCampaignId: number; campaignId: number; candidate: Candidate }
+export interface RetryOutcome {
+  /** key → lane:esp of the campaign it reached. */
+  moved: Map<string, string>;
+  /** key → why it failed again. */
+  failed: Map<string, string>;
+  /** Neither — left out because the client removed it for a service-area change since. */
+  left: Set<string>;
+}
+
+/**
+ * Sends leads that failed earlier to the campaign they were bound for — the same route as the window (create
+ * in the target instance if needed, then attach), one routeCandidates call per client and source campaign.
+ * A whole group failing doesn't throw here: each lead just stays failed, with the new reason.
+ */
+export async function retryFailedLeads(rows: RetryLead[]): Promise<RetryOutcome> {
+  const res: RetryOutcome = { moved: new Map(), failed: new Map(), left: new Set() };
+  const groups = new Map<string, RetryLead[]>();
+  for (const r of rows) {
+    const g = `${r.clientTag}|${r.sourceInstance}|${r.sourceCampaignId}`;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g)!.push(r);
+  }
+  for (const list of groups.values()) {
+    const { clientTag, sourceInstance, sourceCampaignId } = list[0];
+    const byEmail = new Map(list.map((r) => [r.candidate.email.toLowerCase(), r]));
+    const map: CampaignMapEntry[] = [];
+    const seen = new Set<string>();
+    for (const r of list) {
+      const c = r.candidate;
+      const k = `${c.instance}|${c.esp}`;
+      if (!c.instance || !r.campaignId || seen.has(k)) continue;
+      seen.add(k);
+      map.push({ bison_instance: c.instance, esp: c.esp, campaign_id: r.campaignId, campaign_name: null, lane: c.lane ?? "b2b" });
+    }
+    const nowIso = new Date().toISOString();
+    try {
+      const rc = await routeCandidates(clientTag, list.map((r) => r.candidate), map, {
+        onAttached: async (campaignId, resolved) => {
+          for (const c of resolved) { const r = byEmail.get(c.email.toLowerCase()); if (r) res.moved.set(r.key, `${c.lane ?? "b2b"}:${c.esp}`); }
+          await logMoved(clientTag, sourceInstance, sourceCampaignId, String(resolved[0]?.instance || ""), campaignId, resolved, nowIso);
+        },
+      });
+      for (const f of rc.failed) { const r = byEmail.get(f.candidate.email.toLowerCase()); if (r) res.failed.set(r.key, f.reason); }
+    } catch (e) {
+      for (const r of list) if (!res.moved.has(r.key)) res.failed.set(r.key, `sending it again failed: ${(e as Error).message}`);
+    }
+    for (const r of list) if (!res.moved.has(r.key) && !res.failed.has(r.key)) res.left.add(r.key);
+  }
+  return res;
 }

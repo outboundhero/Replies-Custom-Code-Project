@@ -7,10 +7,11 @@
  * `runId` (double-submit returns the existing job). Admin-gated.
  *
  * Body (cross): { kind:"cross", from, to, toLabel?, serviceAreaFilter?, runId?,
- *   clients:[{ tag, dest:{google?,outlook?,segs?}, sourceCampaigns:[{id,name,totalLeads}] }] }
+ *   clients:[{ tag, dest:{google?,outlook?,segs?}, destNames?:{google?,…}, sourceCampaigns:[{id,name,totalLeads}] }] }
  * Body (same):  { kind:"same", clientTag, b2bInstance, b2cInstance, serviceAreaFilter?, runId?,
- *   jobs:[{ sourceInstance, sourceCampaignId, sourceCampaignName, totalLeads, dest:{b2b:{…},b2c:{…}} }],
+ *   jobs:[{ sourceInstance, sourceCampaignId, sourceCampaignName, totalLeads, dest:{b2b:{…},b2c:{…}}, destNames?:{b2b:{…},b2c:{…}} }],
  *   skipped?:[{ sourceCampaignName, reason }] }
+ * destNames (optional) are the destination campaigns' names, shown where the leads went.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, getSession } from "@/lib/auth";
@@ -28,6 +29,14 @@ const espMap = (o: unknown): Partial<Record<Esp, number>> => {
   const out: Partial<Record<Esp, number>> = {};
   for (const e of ESPS) { const v = Number((o as Record<string, unknown> | undefined)?.[e]); if (v) out[e] = v; }
   return out;
+};
+/** Destination campaign id → its name (from the page's `destNames`, keyed like `dest`). */
+const nameMap = (dest: Partial<Record<Esp, number>>, names: unknown, into: Record<string, string> = {}): Record<string, string> => {
+  for (const e of ESPS) {
+    const n = (names as Record<string, unknown> | undefined)?.[e];
+    if (dest[e] && typeof n === "string" && n.trim()) into[String(dest[e])] = n.trim().slice(0, 200);
+  }
+  return into;
 };
 
 /** A client with an unfinished Hard Reset is having its campaigns swapped: no moves for it until that's over. */
@@ -64,13 +73,14 @@ export async function POST(req: NextRequest) {
       const tag = String(c.tag || "").trim().toUpperCase();
       if (!tag) continue;
       const dest = espMap(c.dest);
+      const destNames = nameMap(dest, c.destNames);
       const hasDest = Object.keys(dest).length > 0;
       for (const sc of c.sourceCampaigns || []) {
         const id = Number(sc.id);
         if (!id) continue;
         tasks.push({
           clientTag: tag, sourceInstance: from, sourceCampaignId: id, sourceCampaignName: String(sc.name || ""),
-          targetInstance: to, dest, serviceAreaFilter, totalLeads: Number(sc.totalLeads) || 0,
+          targetInstance: to, dest, destNames, serviceAreaFilter, totalLeads: Number(sc.totalLeads) || 0,
           status: hasDest ? "pending" : "skipped", error: hasDest ? null : "no destination campaign for this client",
         });
       }
@@ -97,10 +107,11 @@ export async function POST(req: NextRequest) {
       const id = Number(j.sourceCampaignId);
       if (!id) continue;
       const dest = { b2b: espMap(j.dest?.b2b), b2c: espMap(j.dest?.b2c) };
+      const destNames = nameMap(dest.b2c, j.destNames?.b2c, nameMap(dest.b2b, j.destNames?.b2b));
       const hasDest = ESPS.some((e) => dest.b2b[e] || dest.b2c[e]);
       tasks.push({
         clientTag, sourceInstance: String(j.sourceInstance || "").trim(), sourceCampaignId: id, sourceCampaignName: String(j.sourceCampaignName || ""),
-        b2bInstance, b2cInstance, dest, serviceAreaFilter, totalLeads: Number(j.totalLeads) || 0,
+        b2bInstance, b2cInstance, dest, destNames, serviceAreaFilter, totalLeads: Number(j.totalLeads) || 0,
         status: hasDest ? "pending" : "skipped", error: hasDest ? null : "no destination for this (lane, ESP)",
       });
     }
