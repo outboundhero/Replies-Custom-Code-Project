@@ -1,7 +1,7 @@
 /**
  * The client go-live email (onboarding checklist, "Send client go-live email").
  *
- * Who it's from depends on the day it's sent (OutboundHero, 2026-10-23): nick@outreachify.io until
+ * Who it's from depends on the day it's sent (OutboundHero, 2026-10-23): nick@outboundhero.co until
  * Oct 31, madison@outboundhero.co from Nov 1 on. It goes out from that mailbox through Gmail
  * (lib/gmail-send.ts), signed by the sender, to the client's contacts — the same people as every client
  * email: Reply Router's CC people (To) and BCC — with Spencer and Madison in CC.
@@ -14,7 +14,7 @@ import db from "@/lib/db";
 export const goLiveSendEnabled = () => process.env.GO_LIVE_EMAIL_SEND === "1";
 
 export interface Sender { email: string; name: string }
-const NICK: Sender = { email: "nick@outreachify.io", name: "Nick Mekeel" };
+const NICK: Sender = { email: "nick@outboundhero.co", name: "Nick Mekeel" };
 const MADISON: Sender = { email: "madison@outboundhero.co", name: "Madison Herzog" };
 /** The first day (Pacific time) it goes out from Madison (GO_LIVE_MADISON_FROM, YYYY-MM-DD, can move it). */
 export const madisonFrom = () => (/^\d{4}-\d{2}-\d{2}$/.test(process.env.GO_LIVE_MADISON_FROM ?? "") ? process.env.GO_LIVE_MADISON_FROM! : "2026-11-01");

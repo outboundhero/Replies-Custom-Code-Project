@@ -1212,7 +1212,7 @@ const whitelistEmail: Automation = {
 // ── 6. Send client go-live email ────────────────────────────────────────────
 // The email is fixed (requirements of 2026-09-21): to the client's contacts —
 // the same people the whitelist email goes to — with Spencer and Madison in CC.
-// It goes out from nick@outreachify.io until Oct 31 and madison@outboundhero.co
+// It goes out from nick@outboundhero.co until Oct 31 and madison@outboundhero.co
 // from Nov 1 (lib/onboarding/go-live-email.ts), once per client, and only when
 // GO_LIVE_EMAIL_SEND=1 — until then this is a preview, sent by hand.
 
@@ -1254,7 +1254,7 @@ const goLiveEmail: Automation = {
       title: "Send client go-live email",
       lines: [
         `The go-live email for ${v.tag}, from ${v.sender.name} (${v.sender.email}): to its contacts — the same people LeadSync's whitelist email goes to — with Spencer and Madison in CC.`,
-        `It goes out from nick@outreachify.io until Oct 31 and from madison@outboundhero.co from Nov 1 — it lands in that mailbox's Sent folder, like one sent by hand.`,
+        `It goes out from nick@outboundhero.co until Oct 31 and from madison@outboundhero.co from Nov 1 — it lands in that mailbox's Sent folder, like one sent by hand.`,
         "It says the campaigns go live “tomorrow morning”, so it goes out the day before go-live. Once per client.",
       ],
       message: `Subject: ${GO_LIVE_SUBJECT}\n\n${goLiveText(v.sender)}`,
