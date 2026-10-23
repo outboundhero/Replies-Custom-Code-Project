@@ -4,7 +4,7 @@
  * GET  → the client's latest reset (either kind) with its progress
  * POST { action: "preview", kind?, params }            → what it would do (nothing changes)
  * POST { action: "start", kind?, params, confirm: TAG } → starts it (the preview is rebuilt fresh first; any blocker refuses)
- *      kind: "hard" (default — all 12 campaigns) or "nurture" (the 6 nurture campaigns + the queue re-opened)
+ *      kind: "hard" (default — all 12 campaigns) or "nurture" (the 6 nurture campaigns + the queue emptied)
  * POST { action: "retry", id }                   → a failed reset carries on from the step it stopped in
  * POST { action: "cancel", id }                  → before nurture is switched only: the new campaigns are deleted
  */
@@ -56,10 +56,9 @@ function view(r: HardReset) {
       };
     }),
     nurture: { done: !!r.nurture?.after?.length, batchesCleared: r.nurture?.batches.length ?? 0, after: r.nurture?.after ?? [] },
-    requeue: r.requeue ? {
-      cleared: r.requeue.seq.cleared + r.requeue.replies.cleared + r.requeue.legacy.cleared,
-      scanned: r.requeue.seq.scanned, done: !!r.requeue.ledgers && r.status !== "requeueing",
-      recovered: r.requeue.ledgers?.recovered ?? null,
+    emptied: r.emptied ? {
+      contacts: r.emptied.removals.reduce((n, x) => n + x.contacts, 0), rows: r.emptied.removals.reduce((n, x) => n + x.rows, 0),
+      done: r.emptied.done, interrupted: r.emptied.interrupted ?? 0,
     } : null,
     archive: {
       total: r.archive.length,

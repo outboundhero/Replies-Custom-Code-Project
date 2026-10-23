@@ -8,7 +8,7 @@
  *   creating    the 12 new campaigns, one at a time, each read back (onboarding's builder)
  *   attaching   every inbox tagged with the client's tag (less Reserve / Burnt ones) → all 6 new campaigns per instance, verified by count
  *   repointing  the nurture map → the 6 new nurture campaigns; batch records cleared
- *   requeueing  (Nurture reset) every "already nurtured" mark of the client cleared, in chunks — each backed up first
+ *   emptying    (Nurture reset) the client's nurture queue emptied — the Nurture page's "Remove all", undoable
  *   archiving   a last check that everything new is in place (and campaigns made since the start are added),
  *               then each old campaign — checked by id and name, paused, archived, verified
  *   cancelling  (before nurture is switched only) the new campaigns are deleted — never one with leads
@@ -30,7 +30,9 @@ import { realBisonOps } from "@/lib/onboarding/bison-ops";
 import { getCampaignMap } from "@/lib/nurture/campaign-map";
 import { detectCampaignEsp } from "@/lib/nurture/esp";
 import { markTagStatsDirty } from "@/lib/nurture/overview";
-import { dropFirstPageCache } from "@/lib/nurture/queue-removals";
+import { dropFirstPageCache, ensureRemovalsTable } from "@/lib/nurture/queue-removals";
+import { activeClientTags } from "@/lib/nurture/overview";
+import { QUEUE_SOURCES, toRpcArgs, type QueueFilters, type QueueSource } from "@/lib/nurture/queue-filters";
 import { acquireHeavyLease, renewHeavyLease, releaseHeavyLease } from "@/lib/nurture/heavy-lease";
 import { rebuildOverviewSnapshot } from "@/lib/nurture/overview-snapshot";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
@@ -38,8 +40,10 @@ import { logActivity, logError } from "@/lib/errors";
 import { planNewCampaigns, instanceName, clientInboxes, oldCampaignInboxes, currentCampaigns, isNurtureCampaign } from "@/lib/hard-reset/plan";
 import {
   getReset, heartbeat, leaseReset, patchReset, releaseLease, LeaseLost,
-  type ArchiveRecord, type AttachState, type BuildRecord, type HardReset, type RequeueState, type ResetStatus,
+  type ArchiveRecord, type AttachState, type BuildRecord, type EmptyQueueState, type HardReset, type ResetStatus,
 } from "@/lib/hard-reset/store";
+
+const NO_FILTERS: QueueFilters = { search: null, emailSuffix: null, webSuffix: null, source: null, tld: null, overlapOnly: false };
 
 /** A Nurture reset makes only the 6 nurture campaigns (3 per instance); a Hard Reset all 12. */
 const isNurtureReset = (r: HardReset) => r.kind === "nurture";
@@ -376,178 +380,129 @@ async function repointStep(r: HardReset, holder: string): Promise<boolean> {
     { sql: "DELETE FROM nurture_routing_health WHERE UPPER(client_tag) = ?", args: [T] },
   ], "write");
   r.nurture = { ...r.nurture, after };
-  await moveTo(r, holder, "repointing", isNurtureReset(r) ? "requeueing" : "archiving", { nurture_json: r.nurture });
+  await moveTo(r, holder, "repointing", isNurtureReset(r) ? "emptying" : "archiving", { nurture_json: r.nurture });
   await markTagStatsDirty(T).catch(() => {});
   await rebuildOverviewSnapshot({ force: true }).catch(() => {});
   return true;
 }
 
-// ── requeueing (Nurture reset) ──────────────────────────────────────────────
+// ── emptying the queue (Nurture reset) ─────────────────────────────────────
 
-// (Smaller chunks can be set for a test run, to walk several pages over a few rows.)
-// (Never above 1000: Supabase answers at most 1000 rows, and a "short" page means the walk is done.)
-const REQUEUE_PAGE = Math.min(1000, Number(process.env.HARD_RESET_REQUEUE_PAGE) || 1000);
-const REQUEUE_UPDATE = Math.min(500, Number(process.env.HARD_RESET_REQUEUE_UPDATE) || 500);
-/**
- * Replies and legacy leads have no index for "this client's nurtured rows": they're walked by id range instead (the
- * primary key). Each range reads every row in it, which is slow when those rows aren't in the database's memory —
- * a range that runs out of time is halved (down to 1,000 ids) and tried again, not counted as a failure.
- */
-const REQUEUE_RANGE = Number(process.env.HARD_RESET_REQUEUE_RANGE) || 20_000;
-/** Turso's stopped-lead ledger, a page at a time (one client can have ~100k rows). */
-const LEDGER_PAGE = Number(process.env.HARD_RESET_LEDGER_PAGE) || 2000;
-// Every marked row is cleared — including the "(stopped-recovery)" copies of recovered stopped leads and rows
-// from old nurture campaigns: for many leads those are their only row (the sync never adds a second row for a
-// lead it knows; on JPC 36k leads had no other). A lead with two rows is simply attached twice — Email Bison
-// keeps one. Leads finishing the new nurture campaigns don't come back (the sync skips "[Nurture]" campaigns).
-const pgQuote = (v: string) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-
-/** Keep each cleared "already nurtured" mark (when, which campaign) before clearing it — one round trip. */
-async function backupMarks(resetId: number, source: string, rows: Array<{ id: number; at: string | null; campaign: number | null }>): Promise<void> {
-  if (!rows.length) return;
-  const stmts = [];
-  for (let i = 0; i < rows.length; i += 100) {
-    const chunk = rows.slice(i, i + 100);
-    stmts.push({
-      sql: `INSERT OR IGNORE INTO hard_reset_requeue_rows (reset_id, source, row_id, added_at, campaign_id) VALUES ${chunk.map(() => "(?, ?, ?, ?, ?)").join(", ")}`,
-      args: chunk.flatMap((x) => [resetId, source, x.id, x.at, x.campaign]),
-    });
-  }
-  await db.batch(stmts, "write");
-}
-
-/** Clear the mark on exactly these rows; every row must come back changed. */
-async function clearMarks(table: string, column: string, ids: number[]): Promise<void> {
-  for (let i = 0; i < ids.length; i += REQUEUE_UPDATE) {
-    const chunk = ids.slice(i, i + REQUEUE_UPDATE);
-    const { data, error } = await supabase.from(table).update({ [column]: null, nurture_campaign_id: null }).in("id", chunk).select("id");
-    if (error) throw new Error(`Couldn't update ${table} (${error.message})`);
-    if ((data?.length ?? 0) !== chunk.length) throw new Error(`${table}: ${data?.length ?? 0} of ${chunk.length} rows changed`);
-  }
-}
+/** The most contacts one removal takes (as the Nurture page's "Remove all"); a bigger queue is removed source by source. */
+const REMOVE_MAX = Number(process.env.HARD_RESET_REMOVE_MAX) || 20_000; // (smaller for a test run, to exercise the split)
+/** A count can take a minute and a removal two (its statement limit): neither is started with less time than this left. */
+const EMPTY_MIN_MS = 200_000;
+/** The heavy-query lease outlasts a count + removal. */
+const EMPTY_LEASE_MS = 240_000;
+const SOURCE_LABEL: Record<QueueSource, string> = { seq: "sequence-finished", soft: "soft no", ooo: "out of office", other: "other replies", legacy: "legacy" };
 
 /**
- * Every lead of the client may be nurtured again: the "already nurtured" mark is cleared on its
- * sequence-finished leads, replies and legacy leads, and the stopped-lead recovery's ledger is
- * reset. Skips (removed, unsafe) and service-area removals stay. Works in chunks under the
- * system-wide heavy-query lease, saving where it got to; each mark is backed up first.
+ * The client's nurture queue is emptied: every contact waiting now is removed — the same removal as the
+ * Nurture page's "Remove all" (the skip flag on exactly those rows, recorded with their ids, so it shows in
+ * the client's removals with Undo). Leads nurtured before stay as they are (not nurtured again). Afterwards
+ * the queue fills only with new leads as they finish their sequences and pass their 45 days.
+ *
+ * One piece of work a round, each saved before the next: the size (decides one removal or one per source),
+ * then each removal. A run that died mid-way is picked up from the removal records it left.
  */
-async function requeueStep(r: HardReset, holder: string, deadline: number): Promise<boolean> {
+async function emptyQueueStep(r: HardReset, holder: string, deadline: number): Promise<boolean> {
+  if (Date.now() > deadline - EMPTY_MIN_MS) return false; // next round, with a full budget
   const T = r.clientTag;
-  const st: RequeueState = r.requeue ?? {
-    seq: { after: null, scanned: 0, cleared: 0, done: false },
-    replies: { after: 0, cleared: 0, done: false },
-    legacy: { after: 0, cleared: 0, done: false },
-    ledgers: null,
-  };
+  const st: EmptyQueueState = r.emptied ?? { total: null, split: null, removals: [], interrupted: 0, done: false };
+  const persist = async () => { r.emptied = st; await save(r, holder, { requeue_json: st, heartbeat_at: nowIso() }); };
   const lease = `hard-reset:${r.id}`;
-  if (!(await acquireHeavyLease(lease, 120_000))) throw new Wait("Waiting for another heavy Nurture job on the database to finish (one runs at a time) — carrying on in a moment.");
-  let renewedAt = Date.now();
-  const persist = async () => {
-    r.requeue = st;
-    // Where it got to + the runner's heartbeat, in one write; the heavy-query lease renewed every 30s (it lasts 120s).
-    await save(r, holder, { requeue_json: st, heartbeat_at: nowIso() });
-    if (Date.now() - renewedAt > 30_000) {
-      if (!(await renewHeavyLease(lease, 120_000))) throw new Wait("The database's heavy-job turn moved on — carrying on in a moment.");
-      renewedAt = Date.now();
-    }
-  };
+  if (!(await acquireHeavyLease(lease, EMPTY_LEASE_MS))) throw new Wait("Waiting for another heavy Nurture job on the database to finish (one runs at a time) — carrying on in a moment.");
   try {
-    // Same limit as the runner's own loop, so running out of time here ends the round (no idle spins).
-    while (Date.now() < deadline - STEP_MIN_MS) {
-      if (!st.seq.done) {
-        // Walked in (email, id) order on the (client_tag, email) index — one pass over the client's rows. The
-        // plain "email >= …" lets the index start each page where the last ended (the OR alone can't);
-        // rows with no email can't be nurtured and are left out.
-        let q = supabase.from("nurture_sequence_finished").select("id, email, added_at, nurture_campaign_id")
-          .eq("client_tag", T).not("email", "is", null).order("email").order("id").limit(REQUEUE_PAGE);
-        if (st.seq.after) {
-          q = q.gte("email", st.seq.after.email)
-            .or(`email.gt.${pgQuote(st.seq.after.email)},and(email.eq.${pgQuote(st.seq.after.email)},id.gt.${st.seq.after.id})`);
-        }
-        const { data, error } = await q;
-        if (error) throw new Error(`Couldn't read ${T}'s sequence-finished leads (${error.message})`);
-        const rows = (data ?? []) as Array<{ id: number; email: string; added_at: string | null; nurture_campaign_id: number | null }>;
-        const clear = rows.filter((x) => x.added_at != null);
-        await backupMarks(r.id, "seq", clear.map((x) => ({ id: x.id, at: x.added_at, campaign: x.nurture_campaign_id })));
-        await clearMarks("nurture_sequence_finished", "added_at", clear.map((x) => x.id));
-        st.seq.scanned += rows.length;
-        st.seq.cleared += clear.length;
-        if (rows.length) st.seq.after = { email: rows[rows.length - 1].email, id: rows[rows.length - 1].id };
-        if (rows.length < REQUEUE_PAGE) st.seq.done = true;
-        await persist();
-        continue;
+    // A run that died mid-way: a removal it recorded as done is taken over; one left "pending" may or may not
+    // have gone through (its rows weren't recorded, so it has no Undo) — it's marked so, and its source is counted again.
+    await ensureRemovalsTable();
+    const mine = (await db.execute({
+      sql: "SELECT id, status, contacts, row_count, filters_json FROM nurture_queue_removals WHERE mode = 'nurture-reset' AND UPPER(client_tag) = ? AND (filters_json LIKE ? OR filters_json LIKE ?)",
+      args: [T, `%"reset_id":${r.id},%`, `%"reset_id":${r.id}}%`],
+    })).rows;
+    let changed = false;
+    for (const x of mine) {
+      const id = Number(x.id);
+      if (st.removals.some((y) => y.removalId === id)) continue;
+      let source: string | null = null;
+      try { source = (JSON.parse(String(x.filters_json)) as { source?: string }).source ?? null; } catch { /* none */ }
+      if (x.status === "done") { st.removals.push({ source, removalId: id, contacts: Number(x.contacts) || 0, rows: Number(x.row_count) || 0 }); changed = true; }
+      else if (x.status === "pending") {
+        await db.execute({ sql: "UPDATE nurture_queue_removals SET status = 'failed', error = ? WHERE id = ? AND status = 'pending'", args: ["Interrupted — it may have gone through, but its rows weren't recorded, so it can't be undone here.", id] });
+        st.interrupted = (st.interrupted ?? 0) + 1;
+        changed = true;
       }
-      const other = !st.replies.done ? { key: "replies" as const, table: "replies" } : !st.legacy.done ? { key: "legacy" as const, table: "nurture_legacy_leads" } : null;
-      if (other) {
-        const o = st[other.key];
-        if (o.max == null) {
-          // Walked by id up to the table's newest row now (rows added later aren't anyone's "already nurtured").
-          const { data, error } = await supabase.from(other.table).select("id").order("id", { ascending: false }).limit(1);
-          if (error) throw new Error(`Couldn't read ${other.table} (${error.message})`);
-          o.max = Number(data?.[0]?.id) || 0;
-          await persist();
-          continue;
-        }
-        const hi = Math.min(o.after + (o.range ?? REQUEUE_RANGE), o.max);
-        const { data, error } = await supabase.from(other.table).select("id, nurture_added_at, nurture_campaign_id")
-          .eq("client_tag", T).not("nurture_added_at", "is", null).gt("id", o.after).lte("id", hi).order("id").limit(REQUEUE_PAGE);
-        if (error && /statement timeout/i.test(error.message) && (o.range ?? REQUEUE_RANGE) > 1000) {
-          o.range = Math.max(1000, Math.floor((o.range ?? REQUEUE_RANGE) / 2));
-          await persist();
-          throw new Wait(`The database is slow right now — reading ${other.key === "replies" ? "replies" : "legacy leads"} in smaller pieces (${o.range.toLocaleString()} at a time); carrying on in a moment.`);
-        }
-        if (error) throw new Error(`Couldn't read ${T}'s ${other.key} (${error.message})`);
-        const rows = (data ?? []) as Array<{ id: number; nurture_added_at: string | null; nurture_campaign_id: number | null }>;
-        await backupMarks(r.id, other.key, rows.map((x) => ({ id: x.id, at: x.nurture_added_at, campaign: x.nurture_campaign_id })));
-        await clearMarks(other.table, "nurture_added_at", rows.map((x) => x.id));
-        o.cleared += rows.length;
-        // A full page may not be the whole range: carry on from its last row; otherwise the range is done.
-        o.after = rows.length === REQUEUE_PAGE ? rows[rows.length - 1].id : hi;
-        if (o.after >= o.max) o.done = true;
-        await persist();
-        continue;
-      }
-      // (A Turso table that was never made has nothing in it; any other error is retried.)
-      const none = (e: unknown) => { if (/no such table/i.test((e as Error).message)) return null; throw e; };
-      const rec = st.recovered ?? { cleared: 0, done: false };
-      if (!rec.done) {
-        // Stopped leads recovered into nurture (up to ~100k a client): their ledger marks cleared a page at a time — the
-        // recovery may pick them up again from the main campaigns too. Cleared rows drop out of the next page's read.
-        const page = (await db.execute({
-          sql: "SELECT rowid AS id, added_at, nurture_campaign_id FROM nurture_stopped_recovered WHERE client_tag = ? AND added_at IS NOT NULL ORDER BY rowid LIMIT ?",
-          args: [T, LEDGER_PAGE],
-        }).catch(none)) ?? { rows: [] as Record<string, unknown>[] };
-        const rows = page.rows.map((x) => ({ id: Number(x.id), at: (x.added_at as string) ?? null, campaign: x.nurture_campaign_id == null ? null : Number(x.nurture_campaign_id) }));
-        await backupMarks(r.id, "recovered", rows);
-        if (rows.length) {
-          const stmts = [];
-          for (let i = 0; i < rows.length; i += 500) {
-            const chunk = rows.slice(i, i + 500);
-            stmts.push({ sql: `UPDATE nurture_stopped_recovered SET added_at = NULL WHERE client_tag = ? AND rowid IN (${chunk.map(() => "?").join(",")})`, args: [T, ...chunk.map((x) => x.id)] });
-          }
-          await db.batch(stmts, "write");
-        }
-        rec.cleared += rows.length;
-        if (rows.length < LEDGER_PAGE) rec.done = true;
-        st.recovered = rec;
-        await persist();
-        continue;
-      }
-      if (!st.ledgers) {
-        // The "already routed from this campaign" counts start over too.
-        const routed = (await db.execute({ sql: "DELETE FROM nurture_source_routed WHERE UPPER(client_tag) = ?", args: [T] }).catch(none)) ?? { rowsAffected: 0 };
-        st.ledgers = { recovered: rec.cleared, routed: routed.rowsAffected ?? 0 };
-        await persist();
-        continue;
-      }
-      await markTagStatsDirty(T).catch(() => {});
-      await dropFirstPageCache(T).catch(() => {});
-      await moveTo(r, holder, "requeueing", "archiving", { requeue_json: st });
-      await log(r, "requeued", { seq: st.seq.cleared, replies: st.replies.cleared, legacy: st.legacy.cleared, ...st.ledgers });
+    }
+    if (changed) { await persist(); return true; }
+
+    // The queue as the Nurture page has it: the tag exactly as stored, churned clients' overlaps ignored.
+    const { tags, churned } = await activeClientTags();
+    const tag = tags.find((t) => t.toUpperCase() === T) ?? T;
+    const count = async (source: QueueSource | null) => {
+      const { data, error } = await supabase.rpc("nurture_queue_page", {
+        p_tag: tag, ...toRpcArgs({ ...NO_FILTERS, source }), p_ignore_tags: churned, p_limit: 1, p_offset: 0,
+      });
+      if (error) throw new Error(`Couldn't count ${T}'s queue (${error.message})`);
+      return data?.length ? Number(data[0].total_count) : 0;
+    };
+
+    // 1. How big — one removal for the whole queue when it fits, else one per source.
+    if (st.split == null) {
+      st.total = await count(null);
+      st.split = st.total > REMOVE_MAX;
+      await persist();
       return true;
     }
-    return true; // out of time this round — the runner re-triggers itself and carries on
+
+    // 2. The next removal.
+    const sources: (QueueSource | null)[] = st.split ? [...QUEUE_SOURCES] : [null];
+    const source = sources.find((s) => !st.removals.some((x) => x.source === s));
+    if (source !== undefined) {
+      const waiting = source === null && st.removals.length === 0 && st.total != null ? st.total : await count(source);
+      if (waiting > REMOVE_MAX) {
+        throw new Stop(`${T}'s queue has ${waiting.toLocaleString()} ${source ? `${SOURCE_LABEL[source]} ` : ""}contacts waiting — more than ${REMOVE_MAX.toLocaleString()} can't be removed in one go. Remove some from the client's Nurture queue first (e.g. by email ending), then Try again.`);
+      }
+      if (waiting === 0) {
+        st.removals.push({ source, removalId: null, contacts: 0, rows: 0 });
+        await persist();
+        return true;
+      }
+      if (!(await renewHeavyLease(lease, EMPTY_LEASE_MS))) throw new Wait("The database's heavy-job turn moved on — carrying on in a moment.");
+      // Recorded first (pending), so the change can never exist without a record — as the Nurture page does it.
+      const ins = await db.execute({
+        sql: `INSERT INTO nurture_queue_removals (client_tag, removed_at, removed_by, mode, filters_json, status) VALUES (?, ?, ?, 'nurture-reset', ?, 'pending') RETURNING id`,
+        args: [tag, nowIso(), r.createdBy, JSON.stringify({ reset_id: r.id, ...(source ? { source } : {}) })],
+      });
+      const removalId = Number(ins.rows[0]?.id);
+      const { data, error } = await supabase.rpc("nurture_queue_remove", {
+        p_tag: tag, p_emails: null, p_all_matching: true, ...toRpcArgs({ ...NO_FILTERS, source }), p_ignore_tags: churned,
+      });
+      if (error) {
+        await db.execute({ sql: "UPDATE nurture_queue_removals SET status = 'failed', error = ? WHERE id = ?", args: [error.message.slice(0, 300), removalId] });
+        throw new Error(`Couldn't empty ${T}'s queue (${error.message})`);
+      }
+      const contacts = Number(data?.contacts ?? 0), rows = Number(data?.rows ?? 0);
+      const ids = Array.isArray(data?.reply_ids) ? { reply: data.reply_ids as number[], seq: data.seq_ids as number[], legacy: data.legacy_ids as number[] } : null;
+      // The exact rows → Undo. Retried: without this record the removal can't be undone.
+      const done = {
+        sql: "UPDATE nurture_queue_removals SET status = 'done', contacts = ?, row_count = ?, ids_json = ?, emails_json = ? WHERE id = ?",
+        args: [contacts, rows, ids ? JSON.stringify(ids) : null, Array.isArray(data?.emails) ? JSON.stringify(data.emails) : null, removalId],
+      };
+      for (let attempt = 0; ; attempt++) {
+        try { await db.execute(done); break; } catch (e) { if (attempt >= 3) throw e; await new Promise((x) => setTimeout(x, 500 * 2 ** attempt)); }
+      }
+      st.removals.push({ source, removalId, contacts, rows });
+      await persist();
+      await log(r, "queue-emptied", { removal_id: removalId, source, contacts, rows });
+      return true;
+    }
+
+    // 3. Done.
+    st.done = true;
+    await markTagStatsDirty(T).catch(() => {});
+    await dropFirstPageCache(T).catch(() => {});
+    await moveTo(r, holder, "emptying", "archiving", { requeue_json: st });
+    return true;
   } finally {
     await releaseHeavyLease(lease).catch(() => {});
   }
@@ -689,7 +644,7 @@ async function step(r: HardReset, holder: string, deadline: number): Promise<boo
     case "creating": return createStep(r, holder, deadline);
     case "attaching": return attachStep(r, holder, deadline);
     case "repointing": return repointStep(r, holder);
-    case "requeueing": return requeueStep(r, holder, deadline);
+    case "emptying": return emptyQueueStep(r, holder, deadline);
     case "archiving": return archiveStep(r, holder, deadline);
     case "cancelling": return cancelStep(r, holder, deadline);
     default: return false;
@@ -736,6 +691,6 @@ export async function runHardResetJobs(deadlineMs: number, id?: number): Promise
   }
   const after = await getReset(rid);
   // Straight on while it's making progress; a cancel waiting on Email Bison's background deletes is left to the cron.
-  if (after && more && ["creating", "attaching", "repointing", "requeueing", "archiving"].includes(after.status)) triggerHardResetRunner(rid);
+  if (after && more && ["creating", "attaching", "repointing", "emptying", "archiving"].includes(after.status)) triggerHardResetRunner(rid);
   return { ran: rid };
 }

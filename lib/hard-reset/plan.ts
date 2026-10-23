@@ -9,12 +9,12 @@
  * the standard names.
  *
  * A Nurture reset is the same with only the 6 nurture campaigns: the main campaigns stay as
- * they are, the old nurture campaigns are archived, and every lead may be nurtured again.
+ * they are, the client's queue is emptied (leads nurtured before stay out), and the old
+ * nurture campaigns are archived.
  *
  * Active clients only (Client Tracker "Active", not on the churned list).
  */
 import db from "@/lib/db";
-import supabase from "@/lib/supabase";
 import { listCampaigns, listTags, listSenderEmailsByTag, countCampaignSenders, countSenders, getCampaignSchedule } from "@/lib/outboundhero-api";
 import { withCache, setCached } from "@/lib/server-cache";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
@@ -324,20 +324,18 @@ export async function previewReset(tag: string, params: Record<string, unknown>,
     if (elsewhere) notes.push({ title: "Nurture map", text: `${elsewhere} of ${T}'s nurture map entries point at an instance outside its group — they're replaced by the 6 above.` });
   }
 
-  // A Nurture reset re-opens the queue: everyone nurtured before can be nurtured again.
+  // A Nurture reset empties the queue (the queue numbers the Nurture page shows, as last counted).
   if (nurtureOnly && client) {
-    const [summary, recovered] = await Promise.all([
-      supabase.from("nurture_summary_cache").select("added, updated_at").eq("client_tag", T).maybeSingle().then((r) => r.data, () => null),
-      db.execute({ sql: "SELECT COUNT(*) AS n FROM nurture_stopped_recovered WHERE client_tag = ? AND added_at IS NOT NULL", args: [T] }).then((r) => Number(r.rows[0]?.n) || 0, () => null),
-    ]);
-    const asOf = summary?.updated_at ? ` (as of ${new Date(String(summary.updated_at)).toLocaleDateString("en-US", { month: "short", day: "numeric" })})` : "";
+    const stats = await db.execute({ sql: "SELECT stats, computed_at FROM nurture_tag_stats_cache WHERE client_tag = ?", args: [T] })
+      .then((r) => { try { return r.rows[0] ? { s: JSON.parse(String(r.rows[0].stats)) as { queue?: number }, at: String(r.rows[0].computed_at ?? "") } : null; } catch { return null; } }, () => null);
+    const when = (iso: string) => (iso ? ` (as of ${new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })})` : "");
     tables.push({
-      title: "Queue — everyone nurtured before can be nurtured again",
+      title: "Queue — emptied; leads nurtured before stay out",
       columns: ["", "Contacts", "After the reset"],
       rows: [
-        ["Already nurtured", summary?.added != null ? `about ${Number(summary.added).toLocaleString()}${asOf}` : "—", "back in the queue — sent to the new Nurture 1 once past their 45 days"],
-        ["Stopped leads already recovered", recovered != null ? recovered.toLocaleString() : "—", "back in the queue too (and the stopped-lead recovery may pick them up again)"],
-        ["Skipped / removed, service-area removals", "—", "stay out, as now"],
+        ["Waiting in the queue now", stats?.s.queue != null ? `${Number(stats.s.queue).toLocaleString()}${when(stats.at)}` : "—", "removed — undo from the client's Nurture page (Removals) if ever needed"],
+        ["Nurtured before", "—", "stay out — not nurtured again"],
+        ["New leads", "—", "join the queue as they finish their sequences and pass their 45 days"],
       ],
     });
   }

@@ -11,7 +11,7 @@
  */
 import db from "@/lib/db";
 
-const OPEN = "status IN ('creating', 'attaching', 'repointing', 'requeueing', 'archiving', 'cancelling', 'failed')";
+const OPEN = "status IN ('creating', 'attaching', 'repointing', 'emptying', 'archiving', 'cancelling', 'failed')";
 const HOLD_AFTER_MS = 15 * 60_000;
 const CACHE_MS = 30_000;
 let cache: { at: number; tags: Set<string> } | null = null;

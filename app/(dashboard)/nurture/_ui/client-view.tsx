@@ -731,7 +731,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
                 <div key={r.id} className="maprow" style={{ padding: "9px 16px" }}>
                   <span className="tnum" style={{ fontWeight: 600, minWidth: 110 }}>{pl(r.contacts, "contact")}</span>
                   <span className="muted" style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {r.mode === "all-matching" ? describeFilters(r.filters) : r.mode === "service-area" ? "service-area change" : "selected"} · {ago(r.removedAt, now)}{r.removedBy ? ` · ${r.removedBy}` : ""}
+                    {r.mode === "all-matching" ? describeFilters(r.filters) : r.mode === "service-area" ? "service-area change" : r.mode === "nurture-reset" ? `nurture reset (${({ seq: "sequence-finished", soft: "soft no", ooo: "out of office", other: "other replies", legacy: "legacy" } as Record<string, string>)[String(r.filters?.source ?? "")] ?? "whole queue"})` : "selected"} · {ago(r.removedAt, now)}{r.removedBy ? ` · ${r.removedBy}` : ""}
                   </span>
                   {r.status === "failed" ? <span className="pill p-bad" style={{ fontSize: 10 }}>Failed</span>
                     : r.restoredAt ? <span className="pill p-mute" style={{ fontSize: 10 }}>Undone</span>

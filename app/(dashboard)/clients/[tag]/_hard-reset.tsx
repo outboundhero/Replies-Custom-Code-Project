@@ -4,8 +4,8 @@
  * "Hard reset" (client page, top) and "Reset nurture" (the client's Nurture pages) — admins.
  *
  * Hard reset: start a stalled client over on 12 fresh campaigns. Nurture reset: only the 6
- * nurture campaigns made fresh (Nurture 1), the old nurture campaigns archived, and every lead
- * may be nurtured again; the main campaigns aren't touched.
+ * nurture campaigns made fresh (Nurture 1), the client's queue emptied (leads nurtured before stay
+ * out) and the old nurture campaigns archived; the main campaigns aren't touched.
  *
  * The button opens a dialog that says what happens right away, then fills in exactly what it
  * would do for this client. Typing the client tag starts it; it runs in the background, and
@@ -21,7 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-type Status = "creating" | "attaching" | "repointing" | "requeueing" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
+type Status = "creating" | "attaching" | "repointing" | "emptying" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
 type Kind = "hard" | "nurture";
 interface ResetView {
   id: number; kind: Kind; status: Status; failedStep: Status | null; error: string | null; attempts: number;
@@ -30,13 +30,13 @@ interface ResetView {
   created: { instance: string; label: string; name: string; id: number }[];
   attach: { instance: string; label: string; inboxes: number | null; verified: number; total: number; refused: number; notConnected: number; setAside: number }[];
   nurture: { done: boolean; batchesCleared: number };
-  requeue: { cleared: number; scanned: number; done: boolean; recovered: number | null } | null;
+  emptied: { contacts: number; rows: number; done: boolean; interrupted: number } | null;
   archive: { total: number; done: number; rows: { instance: string; label: string; id: number; name: string; leads: number; late: boolean; result: string | null; note: string | null }[] };
 }
 interface Input_ { key: string; label: string; type: "group" | "text" | "select" | "textarea" | "hidden"; value: number | string | null; hint?: string; placeholder?: string; options?: { value: string; label: string }[] }
 interface Preview { tag: string; inputs: Input_[]; blockers: string[]; tables: { title: string; columns: string[]; rows: string[][] }[]; notes: { title: string; text: string }[] }
 
-const WORKING: Status[] = ["creating", "attaching", "repointing", "requeueing", "archiving", "cancelling"];
+const WORKING: Status[] = ["creating", "attaching", "repointing", "emptying", "archiving", "cancelling"];
 const NAME: Record<Kind, string> = { hard: "Hard reset", nurture: "Nurture reset" };
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
 
@@ -136,7 +136,7 @@ function Overview({ tag, kind }: { tag: string; kind: Kind }) {
   const items: [typeof Mail, string, string][] = kind === "nurture" ? [
     [Mail, "6 fresh Nurture 1 campaigns", "Google + Custom, Outlook and SEGs in each of its two instances, made exactly as a new client's are today — empty. Its main campaigns aren't touched."],
     [Inbox, "Its inboxes go on them", `Every inbox tagged ${tag} goes on the 3 new campaigns in each instance (any marked Reserve or Burnt are left out).`],
-    [Sprout, "Nurture starts over", "Nurture sends to the new campaigns, the batch count starts at 1 again (Nurture 2 follows when Nurture 1 fills), and every lead can be nurtured again — including ones nurtured before. The 45-day wait stays."],
+    [Sprout, "Nurture starts over", "Nurture sends to the new campaigns and the batch count starts at 1 again (Nurture 2 follows when Nurture 1 fills). The queue is emptied — what's waiting now is removed (it can be undone) and leads nurtured before aren't nurtured again."],
     [Archive, "Old nurture campaigns archived", `Last, once everything new is ready: ${tag}'s Nurture 1, 2, 3… campaigns. Leads still in them stop. Email Bison can't un-archive.`],
   ] : [
     [Mail, "12 fresh campaigns", "Made exactly as a new client's are today — the current copy for its type, the standard settings and limits, Mon–Fri in its time zone. Drafts until they have leads."],
@@ -158,7 +158,7 @@ function Overview({ tag, kind }: { tag: string; kind: Kind }) {
         ))}
       </ol>
       <p className="text-xs text-muted-foreground">{kind === "nurture"
-        ? "Then the usual nurture routing fills the new campaigns — leads already past their 45 days go first."
+        ? "Then the queue fills again with new leads as they finish their sequences and pass their 45 days."
         : "Then load leads into the new campaigns as usual — they start once they have leads and inboxes (the Go Live Date still applies)."}</p>
     </section>
   );
@@ -173,7 +173,7 @@ function LastReset({ r }: { r: ResetView }) {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {done ? <CheckCircle2 className="size-4 text-emerald-600" /> : <XCircle className="size-4 text-muted-foreground" />}
         <span className="font-medium text-foreground">Last {NAME[r.kind].toLowerCase()} #{r.id} — {done ? "done" : "cancelled"} {when(r.finishedAt ?? r.updatedAt)}</span>
-        <span className="text-muted-foreground">by {r.createdBy ?? "—"}{done ? ` · ${r.create.done} campaigns made · ${archived} archived${r.requeue ? ` · ${r.requeue.cleared.toLocaleString()} leads back in the queue` : ""}` : ""}</span>
+        <span className="text-muted-foreground">by {r.createdBy ?? "—"}{done ? ` · ${r.create.done} campaigns made · ${archived} archived${r.emptied ? ` · ${r.emptied.contacts.toLocaleString()} queued contacts removed` : ""}` : ""}</span>
       </div>
       {!done && r.error && <p className="mt-1.5 text-muted-foreground">{r.error}</p>}
       {done && left.length > 0 && <p className="mt-1.5 text-muted-foreground">Not archived: {left.map((x) => `#${x.id} “${x.name}” (${x.note})`).join("; ")}.</p>}
@@ -193,7 +193,7 @@ function LastReset({ r }: { r: ResetView }) {
 
 type StepState = "done" | "now" | "todo" | "failed";
 function stepState(r: ResetView, step: Status): StepState {
-  const order: Status[] = ["creating", "attaching", "repointing", "requeueing", "archiving"];
+  const order: Status[] = ["creating", "attaching", "repointing", "emptying", "archiving"];
   const cur = r.status === "failed" ? r.failedStep : r.status === "done" ? null : r.status;
   if (r.status === "done") return "done";
   if (!cur || cur === "cancelling") return "todo";
@@ -224,9 +224,9 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
       </span>
     ) },
     { key: "repointing", title: "Switch nurture to the new campaigns", detail: r.nurture.done ? `Done${r.nurture.batchesCleared ? ` — ${r.nurture.batchesCleared} batch record${r.nurture.batchesCleared === 1 ? "" : "s"} cleared` : ""}` : "Nurture map → the 6 new nurture campaigns; batch count restarts" },
-    ...(nurture ? [{ key: "requeueing" as Status, title: "Re-open the queue", detail: r.requeue
-      ? `${r.requeue.cleared.toLocaleString()} leads back in the queue${r.requeue.done ? "" : ` so far (${r.requeue.scanned.toLocaleString()} sequence-finished rows looked at)`}${r.requeue.recovered != null ? ` · ${r.requeue.recovered.toLocaleString()} recovered stopped leads to recover again` : ""}`
-      : "Every lead can be nurtured again — the “already nurtured” marks are cleared" }] : []),
+    ...(nurture ? [{ key: "emptying" as Status, title: "Empty the queue", detail: r.emptied
+      ? `${r.emptied.contacts.toLocaleString()} contacts removed from the queue${r.emptied.done ? " — undo from the client's Nurture page (Removals) if ever needed" : " so far"}${r.emptied.interrupted ? ` · ${r.emptied.interrupted} removal${r.emptied.interrupted === 1 ? " was" : "s were"} interrupted (no Undo for those)` : ""}`
+      : "What's waiting now is removed; leads nurtured before stay out" }] : []),
     { key: "archiving", title: nurture ? "Archive the old nurture campaigns" : "Archive the old campaigns", detail: (
       <span className="block space-y-1.5">
         <span className="block">{r.archive.done} of {r.archive.total} done{r.archive.rows.some((x) => x.late) ? ` (incl. ${r.archive.rows.filter((x) => x.late).length} made after the reset started)` : ""}</span>

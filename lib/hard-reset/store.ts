@@ -2,13 +2,13 @@
  * A client's Hard Reset or Nurture reset — durable state (Turso `hard_reset`, one row per reset).
  *
  *   kind "hard"     all 12 campaigns made fresh; every current campaign archived
- *   kind "nurture"  only the 6 nurture campaigns made fresh (main campaigns untouched); the old
- *                   nurture campaigns archived; and every lead may be nurtured again ("requeueing")
+ *   kind "nurture"  only the 6 nurture campaigns made fresh (main campaigns untouched); the client's
+ *                   queue emptied ("emptying"); the old nurture campaigns archived
  *
  * Status flow (the order matters: the client keeps running on its old
  * campaigns until the new ones are fully set up, and archiving — which Email
  * Bison can't undo — comes last):
- *   creating → attaching → repointing → [requeueing →] archiving → done
+ *   creating → attaching → repointing → [emptying →] archiving → done
  *   failed      stopped in a step (`failed_step`); "Try again" resumes it there
  *   cancelling → cancelled   (only before archiving starts: the new campaigns are deleted)
  * One open reset per client (a partial unique index); one runs at a time (a lease).
@@ -16,8 +16,8 @@
 import db from "@/lib/db";
 
 export type ResetKind = "hard" | "nurture";
-export type ResetStatus = "creating" | "attaching" | "repointing" | "requeueing" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
-export const WORKING: ResetStatus[] = ["creating", "attaching", "repointing", "requeueing", "archiving", "cancelling"];
+export type ResetStatus = "creating" | "attaching" | "repointing" | "emptying" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
+export const WORKING: ResetStatus[] = ["creating", "attaching", "repointing", "emptying", "archiving", "cancelling"];
 /** Steps a reset can still be cancelled in: before nurture is switched (nothing of the client's has changed yet). */
 export const CANCELLABLE: ResetStatus[] = ["creating", "attaching"];
 
@@ -43,20 +43,16 @@ export interface AttachState {
   setAside?: number;
 }
 export interface ArchiveRecord { instance: string; id: number; name: string; result: "archived" | "already" | "gone" | "skipped"; note?: string; at: string }
-/**
- * A Nurture reset re-opening the client's queue: every "already nurtured" mark cleared, walked in
- * chunks (each cleared mark backed up first in `hard_reset_requeue_rows`).
- */
-export interface RequeueState {
-  /** Sequence-finished leads — walked by (email, id) on the (client_tag, email) index. */
-  seq: { after: { email: string; id: number } | null; scanned: number; cleared: number; done: boolean };
-  /** Replies and legacy leads — walked by id range (after → max, the newest row when it started). */
-  replies: { after: number; max?: number; range?: number; cleared: number; done: boolean };
-  legacy: { after: number; max?: number; range?: number; cleared: number; done: boolean };
-  /** The stopped-lead ledger's marks, cleared a page at a time. */
-  recovered?: { cleared: number; done: boolean };
-  /** Turso ledgers done: stopped leads already recovered (marks cleared), leads already routed from a campaign (deleted). */
-  ledgers: { recovered: number; routed: number } | null;
+/** A Nurture reset emptying the client's queue: one removal ("Remove all") — or one per source when it's very big. */
+export interface EmptyQueueState {
+  /** Contacts waiting when it started. */
+  total: number | null;
+  /** Over the per-removal limit, so removed source by source (decided once). */
+  split: boolean | null;
+  removals: Array<{ source: string | null; removalId: number | null; contacts: number; rows: number }>;
+  /** Removals a run that died mid-way left unrecorded (they may have gone through, without Undo). */
+  interrupted?: number;
+  done: boolean;
 }
 
 export interface HardReset {
@@ -74,7 +70,8 @@ export interface HardReset {
   attach: Record<string, AttachState>;
   nurture: { before: unknown[]; batches: unknown[]; after: unknown[] } | null;
   archived: ArchiveRecord[];
-  requeue: RequeueState | null;
+  /** Nurture reset: how the queue was emptied (kept in the requeue_json column). */
+  emptied: EmptyQueueState | null;
   /** Set once the last check before archiving passed (new campaigns + inboxes + nurture in place, late campaigns added). */
   precheckedAt: string | null;
   attempts: number; error: string | null;
@@ -111,11 +108,6 @@ export function ensureTables(): Promise<void> {
       for (const col of ["prechecked_at TEXT", "kind TEXT NOT NULL DEFAULT 'hard'", "requeue_json TEXT"]) {
         try { await db.execute(`ALTER TABLE hard_reset ADD COLUMN ${col}`); } catch { /* already there */ }
       }
-      // A Nurture reset's backup of every "already nurtured" mark it cleared (row, when, which campaign).
-      await db.execute(`CREATE TABLE IF NOT EXISTS hard_reset_requeue_rows (
-        reset_id INTEGER NOT NULL, source TEXT NOT NULL, row_id INTEGER NOT NULL, added_at TEXT, campaign_id INTEGER,
-        PRIMARY KEY (reset_id, source, row_id)
-      )`);
       await db.execute("CREATE INDEX IF NOT EXISTS idx_hard_reset_tag ON hard_reset(client_tag, id)");
       // One open reset per client, even if two people start one at the same moment.
       await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hard_reset_one_open ON hard_reset(client_tag) WHERE status NOT IN ('done', 'cancelled')");
@@ -129,7 +121,7 @@ function toReset(r: Row): HardReset {
     id: Number(r.id), clientTag: String(r.client_tag), kind: r.kind === "nurture" ? "nurture" : "hard", status: String(r.status) as ResetStatus, failedStep: (r.failed_step as ResetStatus) ?? null,
     params: json(r.params_json, {}), client: json(r.client_json, { group: 1, b2b: "", b2c: "", plan: null, name: null, timezone: null }),
     archive: json(r.archive_json, []), built: json(r.built_json, []), attach: json(r.attach_json, {}),
-    nurture: json(r.nurture_json, null), archived: json(r.archived_json, []), requeue: json(r.requeue_json, null), precheckedAt: r.prechecked_at ?? null,
+    nurture: json(r.nurture_json, null), archived: json(r.archived_json, []), emptied: json(r.requeue_json, null), precheckedAt: r.prechecked_at ?? null,
     attempts: Number(r.attempts) || 0, error: r.error ?? null,
     createdBy: r.created_by ?? null, createdAt: String(r.created_at), updatedAt: String(r.updated_at), finishedAt: r.finished_at ?? null,
     leaseHolder: r.lease_holder ?? null, heartbeatAt: r.heartbeat_at ?? null,
