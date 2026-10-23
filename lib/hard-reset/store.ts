@@ -135,6 +135,19 @@ export async function getReset(id: number): Promise<HardReset | null> {
   return r.rows.length ? toReset(r.rows[0] as Row) : null;
 }
 
+/** Every reset started since `sinceIso` (any status), newest first — for the Jobs page. */
+export async function listResets(sinceIso: string, limit = 50): Promise<HardReset[]> {
+  await ensureTables();
+  const r = await db.execute({ sql: "SELECT * FROM hard_reset WHERE created_at > ? OR status NOT IN ('done', 'cancelled') ORDER BY id DESC LIMIT ?", args: [sinceIso, limit] });
+  return r.rows.map((x) => toReset(x as Row));
+}
+
+/** Whether it may still be cancelled: before nurture is switched (in a step that may be cancelled, or stopped in one). */
+export function canCancelReset(r: HardReset): boolean {
+  if ((r.nurture?.after ?? []).length) return false;
+  return CANCELLABLE.includes(r.status) || (r.status === "failed" && !!r.failedStep && CANCELLABLE.includes(r.failedStep));
+}
+
 /** The client's latest reset (any status). */
 export async function latestReset(clientTag: string): Promise<HardReset | null> {
   await ensureTables();

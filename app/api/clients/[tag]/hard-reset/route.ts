@@ -13,7 +13,7 @@ import { getSession } from "@/lib/auth";
 import { normClientTag } from "@/lib/onboarding/copy-model";
 import { logActivity } from "@/lib/errors";
 import { previewReset, instanceName } from "@/lib/hard-reset/plan";
-import { createReset, getReset, latestReset, patchReset, CANCELLABLE, type HardReset, type ResetKind } from "@/lib/hard-reset/store";
+import { createReset, getReset, latestReset, patchReset, canCancelReset, type HardReset, type ResetKind } from "@/lib/hard-reset/store";
 import { triggerHardResetRunner } from "@/lib/hard-reset/runner";
 
 export const dynamic = "force-dynamic";
@@ -29,11 +29,7 @@ async function admin(raw: string): Promise<{ ok: true; tag: string; email: strin
   return { ok: true, tag, email: s.email ?? null };
 }
 
-/** Before nurture is switched (in a step that may be cancelled, or stopped in one). */
-function cancellable(r: HardReset): boolean {
-  if ((r.nurture?.after ?? []).length) return false;
-  return CANCELLABLE.includes(r.status) || (r.status === "failed" && !!r.failedStep && CANCELLABLE.includes(r.failedStep));
-}
+const cancellable = canCancelReset;
 
 /** What the page shows of a reset. */
 function view(r: HardReset) {
