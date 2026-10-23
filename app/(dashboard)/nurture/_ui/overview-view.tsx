@@ -14,6 +14,7 @@ import {
   StatusCell, Skel, BarRow, ESP_ROWS, sourceValues, useToast, Toast, ActionsMenu,
 } from "./shared";
 import { ResultsCard, DeliveredCell, StageSummary } from "./results";
+import { useCampaignRefresh } from "../_components/use-campaign-refresh";
 
 interface CronInfo { at?: string; churned?: number; active?: number; manual?: boolean; checked?: number; newlyMapped?: number; remapped?: number }
 export interface OverviewResp {
@@ -154,6 +155,13 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
   useEffect(() => () => { if (hoverTimer.current) clearTimeout(hoverTimer.current); }, []);
 
   // ── actions
+  const camps = useCampaignRefresh();
+  async function refreshCampaigns() {
+    show("Refreshing campaigns from all 4 Email Bison instances… (usually under a minute)", { ms: 300_000 });
+    const r = await camps.run();
+    if (r.ok) await load(); // the refresh rebuilt the overview
+    show(r.text, { bad: !r.ok, ms: 9000 });
+  }
   const [churnBusy, setChurnBusy] = useState(false);
   async function syncChurnNow() {
     setChurnBusy(true);
@@ -189,6 +197,10 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
           <h2>Nurture System</h2>
           <div className="sub">Re-engage soft-negative, out-of-office and sequence-finished leads across every client.</div>
         </div>
+        <div className="hd-actions">
+        <button type="button" className="btn" disabled={camps.busy} onClick={() => void refreshCampaigns()} title={camps.title}>
+          {camps.busy ? Ico.spinner : Ico.sync}{camps.busy ? "Refreshing campaigns…" : "Refresh campaigns"}
+        </button>
         <ActionsMenu>
           {(close) => (
             <>
@@ -205,6 +217,7 @@ export default function NurtureOverview({ initial, initialError, serverNow }: { 
             </>
           )}
         </ActionsMenu>
+        </div>
       </div>
 
       <div className="content">

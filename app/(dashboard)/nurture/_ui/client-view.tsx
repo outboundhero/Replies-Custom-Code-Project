@@ -19,6 +19,7 @@ import {
   Skel, BarRow, ESP_ROWS, SOURCE_ROWS, sourceValues, useToast, Toast, ConfirmDialog, ActionsMenu,
 } from "./shared";
 import { ResultsCard, WhereContactsCard } from "./results";
+import { useCampaignRefresh } from "../_components/use-campaign-refresh";
 import { type QueueResult, type QueueContact, QUEUE_PAGE, queueQuery, getCachedQueue, isFresh, fetchQueue, prefetchQueuePage, dropQueueCache } from "./queue-cache";
 
 interface Slot {
@@ -355,6 +356,13 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
     } catch (e) { show(`Couldn't change auto-nurture: ${(e as Error).message}`, { bad: true }); }
     setActBusy(false);
   }
+  const campRefresh = useCampaignRefresh();
+  async function refreshCampaigns() {
+    show("Refreshing campaigns from all 4 Email Bison instances… (usually under a minute)", { ms: 300_000 });
+    const r = await campRefresh.run();
+    if (r.ok) { await loadClient(); if (mapCampaigns) loadMapCampaigns(); }
+    show(r.text, { bad: !r.ok, ms: 9000 });
+  }
   async function refreshNumbers() {
     setActBusy(true);
     show("Recomputing this client's numbers…", { ms: 300_000 });
@@ -419,6 +427,10 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
     <div className="nx -m-6">
       <div className="hd">
         <div><h2>Nurture System</h2><div className="sub">Re-engage soft-negative, out-of-office and sequence-finished leads across every client.</div></div>
+        <div className="hd-actions">
+        <button type="button" className="btn" disabled={campRefresh.busy} onClick={() => void refreshCampaigns()} title={campRefresh.title}>
+          {campRefresh.busy ? Ico.spinner : Ico.sync}{campRefresh.busy ? "Refreshing campaigns…" : "Refresh campaigns"}
+        </button>
         <ActionsMenu>
           {(close) => (
             <>
@@ -438,6 +450,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
             </>
           )}
         </ActionsMenu>
+        </div>
       </div>
 
       <div className="content">

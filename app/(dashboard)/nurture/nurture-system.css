@@ -184,6 +184,8 @@
 .nx .skel{display:inline-block;height:1em;min-width:2.5em;border-radius:6px;background:linear-gradient(90deg,var(--muted) 25%,#ececef 37%,var(--muted) 63%);background-size:400% 100%;animation:nx-shimmer 1.3s ease infinite;vertical-align:middle}
 @keyframes nx-shimmer{0%{background-position:100% 50%}100%{background-position:0 50%}}
 .nx .menu-wrap{position:relative;margin-left:auto}
+.nx .hd-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nx .hd-actions .menu-wrap{margin-left:0}
+.nx .btn:disabled{opacity:.6;cursor:default}
 .nx .menu{position:absolute;right:0;top:calc(100% + 6px);min-width:250px;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--sh-lg);padding:6px;z-index:50}
 .nx .menu button,.nx .menu a{display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;border:none;background:none;padding:8px 10px;border-radius:8px;font-size:13px;color:var(--foreground);text-decoration:none}
 .nx .menu button:hover:not(:disabled),.nx .menu a:hover{background:var(--muted)}

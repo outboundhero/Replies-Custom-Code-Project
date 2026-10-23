@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search, ArrowLeft, X, Rocket, CheckCircle2, AlertCircle, Loader2, Circle } from "lucide-react";
 import { toast } from "sonner";
+import { useCampaignRefresh } from "../../../_components/use-campaign-refresh";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
 import TargetCampaigns from "../../../_components/TargetCampaigns";
@@ -512,6 +513,17 @@ export default function NurturePage() {
 
   useEffect(() => { loadCounts(); }, [loadCounts]);
 
+  // "Refresh campaigns": pull every campaign from all 4 Email Bison instances now, then re-read them here.
+  const campRefresh = useCampaignRefresh();
+  const [campaignsVersion, setCampaignsVersion] = useState(0);
+  async function refreshCampaigns() {
+    const id = toast.loading("Refreshing campaigns from all 4 Email Bison instances… (usually under a minute)");
+    const r = await campRefresh.run();
+    toast.dismiss(id);
+    if (r.ok) { toast.success(r.text, { duration: 9000 }); setCampaignsVersion((v) => v + 1); }
+    else toast.error(r.text);
+  }
+
   useEffect(() => {
     // Pass the client tag so the API only hits THIS client's Bison
     // instance (fast path — one fetch instead of fanning out across
@@ -521,7 +533,7 @@ export default function NurturePage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d?.campaigns) setCampaigns(d.campaigns); })
       .catch(() => {});
-  }, [lockedClientTag]);
+  }, [lockedClientTag, campaignsVersion]);
 
   // Pull the full client list once on mount so the filter dropdown is
   // complete regardless of which leads happen to be on the current page.
@@ -1649,6 +1661,10 @@ export default function NurturePage() {
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
+          <Button size="sm" variant="outline" onClick={() => void refreshCampaigns()} disabled={campRefresh.busy} title={campRefresh.title} className="gap-1.5">
+            <RefreshCw className={`size-3.5 ${campRefresh.busy ? "animate-spin" : ""}`} />
+            {campRefresh.busy ? "Refreshing campaigns…" : "Refresh campaigns"}
+          </Button>
           <Button
             size="sm"
             variant="outline"

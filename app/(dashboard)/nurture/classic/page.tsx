@@ -18,6 +18,8 @@ import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowRight, Search, RefreshCw, Zap } from "lucide-react";
+import { toast } from "sonner";
+import { useCampaignRefresh } from "../_components/use-campaign-refresh";
 import AutomationTab from "../_components/AutomationTab";
 import CampaignsTab from "../_components/CampaignsTab";
 
@@ -68,6 +70,16 @@ export default function NurtureHub() {
   }, []);
 
   // Phase 2: kick off the slow summary fetch. Don't block UI.
+  // "Refresh campaigns": pull every campaign from all 4 Email Bison instances now, then reload the tabs that show them.
+  const camps = useCampaignRefresh();
+  const [tabsVersion, setTabsVersion] = useState(0);
+  async function refreshCampaigns() {
+    const id = toast.loading("Refreshing campaigns from all 4 Email Bison instances… (usually under a minute)");
+    const r = await camps.run();
+    toast.dismiss(id);
+    if (r.ok) { toast.success(r.text, { duration: 9000 }); setTabsVersion((v) => v + 1); }
+    else toast.error(r.text);
+  }
   function loadSummary(fresh = false) {
     setSummaryLoading(true);
     setSummaryError(null);
@@ -139,6 +151,17 @@ export default function NurtureHub() {
             Re-engage soft-negative, out-of-office, and sequence-finished leads after the 45-day cooldown. Pick a client below to drill into their lead list, ESP routing, and nurture campaign options.
           </p>
         </div>
+        <div className="flex shrink-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void refreshCampaigns()}
+          disabled={camps.busy}
+          className="flex items-center gap-2 px-3 h-9 text-sm rounded-md border bg-white hover:bg-muted/50 disabled:opacity-50"
+          title={camps.title}
+        >
+          <RefreshCw className={`size-3.5 ${camps.busy ? "animate-spin" : ""}`} />
+          {camps.busy ? "Refreshing campaigns…" : "Refresh campaigns"}
+        </button>
         <button
           type="button"
           onClick={() => loadSummary(true)}
@@ -149,6 +172,7 @@ export default function NurtureHub() {
           <RefreshCw className={`size-3.5 ${summaryLoading ? "animate-spin" : ""}`} />
           Refresh
         </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -176,8 +200,8 @@ export default function NurtureHub() {
         </button>
       </div>
 
-      {tab === "automation" && <AutomationTab />}
-      {tab === "campaigns" && <CampaignsTab />}
+      {tab === "automation" && <AutomationTab key={`a${tabsVersion}`} />}
+      {tab === "campaigns" && <CampaignsTab key={`c${tabsVersion}`} />}
 
       {tab === "overview" && (<>
 
