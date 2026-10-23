@@ -388,7 +388,7 @@ export async function POST(req: NextRequest) {
 
       // A client mid Hard Reset is switching to new campaigns (the old ones get archived): nothing is pushed until it's done.
       for (const t of rowTags) {
-        if (await heldByHardReset(t)) return NextResponse.json({ error: `${t} is having a Hard Reset — push these once it's done (its client page shows the progress).` }, { status: 409 });
+        if (await heldByHardReset(t)) return NextResponse.json({ error: `${t} has a reset under way (Hard reset or Nurture reset) — push these once it's done (its page shows the progress).` }, { status: 409 });
       }
 
       // Never push back a lead its client removed for a service-area change.

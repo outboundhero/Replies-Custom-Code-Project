@@ -11,6 +11,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { ArrowUpDown, ArrowUp, ArrowDown, ChevronDown, ChevronRight, RefreshCw, Search, ArrowLeft, X, Rocket, CheckCircle2, AlertCircle, Loader2, Circle } from "lucide-react";
 import { toast } from "sonner";
 import { useCampaignRefresh } from "../../../_components/use-campaign-refresh";
+import { HardResetButton } from "@/app/(dashboard)/clients/[tag]/_hard-reset";
 import { getInstanceBaseUrl } from "@/lib/bison-instances-shared";
 import { InstanceBadge } from "@/components/instance-badge";
 import TargetCampaigns from "../../../_components/TargetCampaigns";
@@ -1661,6 +1662,7 @@ export default function NurturePage() {
           </p>
         </div>
         <div className="flex gap-2 shrink-0">
+          {lockedClientTag && <HardResetButton tag={lockedClientTag} kind="nurture" small />}
           <Button size="sm" variant="outline" onClick={() => void refreshCampaigns()} disabled={campRefresh.busy} title={campRefresh.title} className="gap-1.5">
             <RefreshCw className={`size-3.5 ${campRefresh.busy ? "animate-spin" : ""}`} />
             {campRefresh.busy ? "Refreshing campaigns…" : "Refresh campaigns"}

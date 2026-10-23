@@ -20,6 +20,7 @@ import {
 } from "./shared";
 import { ResultsCard, WhereContactsCard } from "./results";
 import { useCampaignRefresh } from "../_components/use-campaign-refresh";
+import { HardResetButton } from "@/app/(dashboard)/clients/[tag]/_hard-reset";
 import { type QueueResult, type QueueContact, QUEUE_PAGE, queueQuery, getCachedQueue, isFresh, fetchQueue, prefetchQueuePage, dropQueueCache } from "./queue-cache";
 
 interface Slot {
@@ -428,6 +429,7 @@ export default function NurtureClientView({ tag, initial, initialError, initialQ
       <div className="hd">
         <div><h2>Nurture System</h2><div className="sub">Re-engage soft-negative, out-of-office and sequence-finished leads across every client.</div></div>
         <div className="hd-actions">
+        <HardResetButton tag={tag} kind="nurture" look="nx" />
         <button type="button" className="btn" disabled={campRefresh.busy} onClick={() => void refreshCampaigns()} title={campRefresh.title}>
           {campRefresh.busy ? Ico.spinner : Ico.sync}{campRefresh.busy ? "Refreshing campaigns…" : "Refresh campaigns"}
         </button>

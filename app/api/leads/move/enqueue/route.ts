@@ -34,7 +34,7 @@ const espMap = (o: unknown): Partial<Record<Esp, number>> => {
 async function resetConflict(tags: string[]): Promise<NextResponse | null> {
   for (const t of new Set(tags)) {
     const u = await unfinishedHardReset(t);
-    if (u) return NextResponse.json({ error: `${t} has an unfinished Hard Reset (#${u.id}) — its campaigns are being swapped. Let it finish (or cancel it) on ${t}'s client page first.` }, { status: 409 });
+    if (u) return NextResponse.json({ error: `${t} has an unfinished reset (#${u.id}, Hard reset or Nurture reset) — its campaigns are being swapped. Let it finish (or cancel it) first.` }, { status: 409 });
   }
   return null;
 }

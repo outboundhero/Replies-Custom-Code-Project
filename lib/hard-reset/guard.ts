@@ -1,5 +1,5 @@
 /**
- * What waits for a client's Hard Reset.
+ * What waits for a client's Hard Reset or Nurture reset (both are rows in `hard_reset`).
  *
  * Nurture (routing, the batch cloner, the map refresh, the DM4PM hand-off, a manual
  * push) holds while a reset is unfinished — under way, or stopped part-way — and
@@ -11,7 +11,7 @@
  */
 import db from "@/lib/db";
 
-const OPEN = "status IN ('creating', 'attaching', 'repointing', 'archiving', 'cancelling', 'failed')";
+const OPEN = "status IN ('creating', 'attaching', 'repointing', 'requeueing', 'archiving', 'cancelling', 'failed')";
 const HOLD_AFTER_MS = 15 * 60_000;
 const CACHE_MS = 30_000;
 let cache: { at: number; tags: Set<string> } | null = null;

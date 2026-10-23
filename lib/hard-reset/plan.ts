@@ -8,9 +8,13 @@
  * The campaigns it archives are planned as if already gone, so the new ones get
  * the standard names.
  *
+ * A Nurture reset is the same with only the 6 nurture campaigns: the main campaigns stay as
+ * they are, the old nurture campaigns are archived, and every lead may be nurtured again.
+ *
  * Active clients only (Client Tracker "Active", not on the churned list).
  */
 import db from "@/lib/db";
+import supabase from "@/lib/supabase";
 import { listCampaigns, listTags, listSenderEmailsByTag, countCampaignSenders, countSenders, getCampaignSchedule } from "@/lib/outboundhero-api";
 import { withCache, setCached } from "@/lib/server-cache";
 import { extractTagFromCampaignName } from "@/lib/processing/tag-resolver";
@@ -24,7 +28,7 @@ import { planCampaigns, existingCampaignsKey, instanceTagsKey, type AutomationCo
 import { isCampaignTimezone } from "@/lib/onboarding/campaign-plan";
 import type { OnboardingTaskRow } from "@/lib/onboarding/store";
 import { openChanges } from "@/lib/service-area-changes/store";
-import { WORKING, latestReset, type HardReset, type OldCampaign } from "@/lib/hard-reset/store";
+import { WORKING, latestReset, type HardReset, type OldCampaign, type ResetKind } from "@/lib/hard-reset/store";
 
 const gone = (status: string) => /archiv|delet/i.test(status);
 const ROLE: Record<string, string> = { outboundhero: "B2B #1", cleaningoutbound: "B2C #1", facilityreach: "B2B #2", outboundclean: "B2C #2" };
@@ -45,6 +49,9 @@ export interface ResetPreview {
   client: HardReset["client"] | null;
   plan: CampaignPlan | null;
 }
+
+/** A nurture campaign ("[Nurture]", "[Nurture 2]", older "(Nurture)" names). */
+export const isNurtureCampaign = (name: string) => /\bnurture\b/i.test(name);
 
 /**
  * Every campaign of the client that isn't archived yet, in all four instances (any name "TAG: …").
@@ -139,9 +146,12 @@ export function plannerContext(tag: string, client: HardReset["client"], params:
   };
 }
 
-/** The 12-campaign plan for a reset: the old campaigns planned as gone; earlier tries from the reset's own records. */
+/**
+ * The 12-campaign plan for a reset: the old campaigns planned as gone (and, for a Nurture reset, the
+ * main campaigns it keeps — only its 6 nurture campaigns are made); earlier tries from the reset's own records.
+ */
 export function planNewCampaigns(tag: string, client: HardReset["client"], params: Record<string, unknown>, archive: OldCampaign[], built: HardReset["built"], by: string | null, fresh: boolean) {
-  const ignoreIds = new Set(archive.map((c) => `${c.instance}:${c.id}`));
+  const ignoreIds = new Set([...archive.map((c) => `${c.instance}:${c.id}`), ...(client.keep ?? [])]);
   // Newest first, the way onboarding's run records come back (its planner relies on that order).
   const history = async () => (built.length ? [{ results: [...built].reverse() }] : []);
   // Active clients onboarded before the Onboarding Form existed have no row there: their details are typed.
@@ -203,7 +213,8 @@ async function busyElsewhere(tag: string): Promise<string[]> {
 }
 
 /** The preview. `fresh` (right before starting) reads Email Bison and the sheets now, not from recent answers. */
-export async function previewReset(tag: string, params: Record<string, unknown>, by: string | null, fresh = false): Promise<ResetPreview> {
+export async function previewReset(tag: string, params: Record<string, unknown>, by: string | null, fresh = false, kind: ResetKind = "hard"): Promise<ResetPreview> {
+  const nurtureOnly = kind === "nurture";
   const T = tag.toUpperCase();
   const blockers: string[] = [];
   const tables: PreviewTable[] = [];
@@ -218,12 +229,15 @@ export async function previewReset(tag: string, params: Record<string, unknown>,
     getCampaignMap(T).catch(() => []),
     db.execute({ sql: "SELECT COUNT(*) AS n FROM nurture_campaign_expansions WHERE UPPER(client_tag) = ?", args: [T] }).then((r) => Number(r.rows[0]?.n) || 0, () => 0),
   ]);
-  if (open && (WORKING.includes(open.status) || open.status === "failed")) blockers.push(`Hard reset #${open.id} for ${T} isn't finished — finish or cancel it first.`);
-  const archive = campaigns.list;
+  if (open && (WORKING.includes(open.status) || open.status === "failed")) blockers.push(`${open.kind === "nurture" ? "Nurture reset" : "Hard reset"} #${open.id} for ${T} isn't finished — finish or cancel it first.`);
+  // A Nurture reset archives only the nurture campaigns; the main ones are kept (and planned around).
+  const archive = nurtureOnly ? campaigns.list.filter((c) => isNurtureCampaign(c.name)) : campaigns.list;
+  const kept = nurtureOnly ? campaigns.list.filter((c) => !isNurtureCampaign(c.name)) : [];
   if (campaigns.error) blockers.push(`Couldn't read ${T}'s campaigns in Email Bison (${campaigns.error}) — try again.`);
   blockers.push(...det.blockers, ...busy);
   const client = det.client;
-  if (client && !client.timezone) client.timezone = await liveTimezone(client, archive);
+  if (client && !client.timezone) client.timezone = await liveTimezone(client, campaigns.list);
+  if (client && nurtureOnly) client.keep = kept.map((c) => `${c.instance}:${c.id}`);
 
   // Each instance's tags, read once: the inbox counts use them, and (for the preview) onboarding's planner finds them in its cache.
   const tagLists = new Map<string, { id: number; name: string }[]>();
@@ -249,13 +263,21 @@ export async function previewReset(tag: string, params: Record<string, unknown>,
 
   // The campaigns it archives.
   tables.push({
-    title: `Archived — ${archive.length} current campaign${archive.length === 1 ? "" : "s"}`,
+    title: `Archived — ${archive.length} current ${nurtureOnly ? "nurture " : ""}campaign${archive.length === 1 ? "" : "s"}`,
     columns: ["Instance", "Campaign", "ID", "Status", "Leads"],
     rows: archive.length
       ? [...archive].sort((a, b) => a.instance.localeCompare(b.instance) || a.name.localeCompare(b.name)).map((c) => [instanceName(c.instance), c.name, `#${c.id}`, c.status, c.leads.toLocaleString()])
-      : [["—", `${T} has no campaigns that aren't archived`, "", "", ""]],
+      : [["—", `${T} has no ${nurtureOnly ? "nurture " : ""}campaigns that aren't archived`, "", "", ""]],
   });
-  if (plan?.rows.length) tables.push({ title: "Created — 12 new campaigns", columns: ["", "New campaign", "Per day (emails / leads)", "Mon–Fri", "Tags"], rows: plan.rows });
+  const newRows = plan ? plan.rows.filter((_, i) => !nurtureOnly || plan.items[i]?.slot.nurture) : [];
+  if (newRows.length) tables.push({ title: nurtureOnly ? "Created — 6 new Nurture 1 campaigns" : "Created — 12 new campaigns", columns: ["", "New campaign", "Per day (emails / leads)", "Mon–Fri", "Tags"], rows: newRows });
+  if (nurtureOnly) {
+    tables.push({
+      title: `Kept as they are — ${kept.length} main campaign${kept.length === 1 ? "" : "s"}`,
+      columns: ["Instance", "Campaign", "ID", "Status", "Leads"],
+      rows: kept.length ? [...kept].sort((a, b) => a.instance.localeCompare(b.instance) || a.name.localeCompare(b.name)).map((c) => [instanceName(c.instance), c.name, `#${c.id}`, c.status, c.leads.toLocaleString()]) : [["—", "no main campaigns", "", "", ""]],
+    });
+  }
 
   // The inboxes that go on the new campaigns: everything tagged with the client's tag (LeadSync's rule), less released ones.
   if (client) {
@@ -272,13 +294,13 @@ export async function previewReset(tag: string, params: Record<string, unknown>,
       inboxRows.push([
         instanceName(inst),
         got.tagId == null ? `no ${T} tag` : `${n.toLocaleString()} inbox${n === 1 ? "" : "es"} tagged ${T}${extra ? ` (${extra})` : ""}`,
-        n ? "all 6 new campaigns there" : "—",
+        n ? (nurtureOnly ? "the 3 new nurture campaigns there" : "all 6 new campaigns there") : "—",
       ]);
       if (!n) {
         const had = await oldCampaignInboxes(inst, archive).catch(() => null);
         if (had === null) blockers.push(`Couldn't read the inboxes on ${T}'s current campaigns in ${instanceName(inst)} — try again.`);
         else if (had) blockers.push(`No inbox in ${instanceName(inst)} carries the ${T} tag${got.setAside ? " (except ones marked Reserve / Burnt)" : ""}, but ${T}'s current campaigns there send from ${had.toLocaleString()} — the new ones would have none. Tag ${T}'s inboxes there first.`);
-        else notes.push({ title: `${instanceName(inst)}: no inboxes`, text: `No inbox there carries the ${T} tag (and ${T}'s current campaigns there have none either), so its 6 new campaigns start without senders — they can't send until LeadSync adds domains.` });
+        else notes.push({ title: `${instanceName(inst)}: no inboxes`, text: `No inbox there carries the ${T} tag (and ${T}'s current campaigns there have none either), so its ${nurtureOnly ? 3 : 6} new campaigns start without senders — they can't send until LeadSync adds domains.` });
       }
       if (got.setAside) notes.push({ title: `${instanceName(inst)}: Reserve / Burnt inboxes`, text: `${got.setAside.toLocaleString()} inbox${got.setAside === 1 ? "" : "es"} there still carry the ${T} tag but are marked Reserve or Burnt (released domains keep their old client tag) — they aren't put on the new campaigns.` });
     }
@@ -300,6 +322,24 @@ export async function previewReset(tag: string, params: Record<string, unknown>,
     const elsewhere = map.filter((m) => m.bison_instance !== client.b2b && m.bison_instance !== client.b2c).length;
     tables.push({ title: `Nurture — sends to the new nurture campaigns${batches ? `; ${batches} extra batch record${batches === 1 ? "" : "s"} cleared` : ""}`, columns: ["Instance", "Lane", "Now", "After the reset"], rows });
     if (elsewhere) notes.push({ title: "Nurture map", text: `${elsewhere} of ${T}'s nurture map entries point at an instance outside its group — they're replaced by the 6 above.` });
+  }
+
+  // A Nurture reset re-opens the queue: everyone nurtured before can be nurtured again.
+  if (nurtureOnly && client) {
+    const [summary, recovered] = await Promise.all([
+      supabase.from("nurture_summary_cache").select("added, updated_at").eq("client_tag", T).maybeSingle().then((r) => r.data, () => null),
+      db.execute({ sql: "SELECT COUNT(*) AS n FROM nurture_stopped_recovered WHERE client_tag = ? AND added_at IS NOT NULL", args: [T] }).then((r) => Number(r.rows[0]?.n) || 0, () => null),
+    ]);
+    const asOf = summary?.updated_at ? ` (as of ${new Date(String(summary.updated_at)).toLocaleDateString("en-US", { month: "short", day: "numeric" })})` : "";
+    tables.push({
+      title: "Queue — everyone nurtured before can be nurtured again",
+      columns: ["", "Contacts", "After the reset"],
+      rows: [
+        ["Already nurtured", summary?.added != null ? `about ${Number(summary.added).toLocaleString()}${asOf}` : "—", "back in the queue — sent to the new Nurture 1 once past their 45 days"],
+        ["Stopped leads already recovered", recovered != null ? recovered.toLocaleString() : "—", "back in the queue too (and the stopped-lead recovery may pick them up again)"],
+        ["Skipped / removed, service-area removals", "—", "stay out, as now"],
+      ],
+    });
   }
 
   return { tag: T, inputs: plan?.inputs ?? [], blockers: [...new Set(blockers)], tables, notes, archive, client, plan };

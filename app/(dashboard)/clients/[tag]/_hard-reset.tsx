@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * Client page → "Hard reset" button (admins, top of the page): start a stalled
- * client over on fresh campaigns. It opens a dialog that says what happens right
- * away, then fills in exactly what it would do for this client — the campaigns
- * archived, the 12 created (as a new client gets them), the inboxes attached and
- * the nurture switch-over. Typing the client tag starts it; it runs in the
- * background, and while it does (or when it stops) the button shows that and
- * opens its progress instead.
+ * "Hard reset" (client page, top) and "Reset nurture" (the client's Nurture pages) — admins.
+ *
+ * Hard reset: start a stalled client over on 12 fresh campaigns. Nurture reset: only the 6
+ * nurture campaigns made fresh (Nurture 1), the old nurture campaigns archived, and every lead
+ * may be nurtured again; the main campaigns aren't touched.
+ *
+ * The button opens a dialog that says what happens right away, then fills in exactly what it
+ * would do for this client. Typing the client tag starts it; it runs in the background, and
+ * while it does (or when it stops) the button shows that and opens its progress instead.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -19,20 +21,23 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-type Status = "creating" | "attaching" | "repointing" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
+type Status = "creating" | "attaching" | "repointing" | "requeueing" | "archiving" | "done" | "failed" | "cancelling" | "cancelled";
+type Kind = "hard" | "nurture";
 interface ResetView {
-  id: number; status: Status; failedStep: Status | null; error: string | null; attempts: number;
+  id: number; kind: Kind; status: Status; failedStep: Status | null; error: string | null; attempts: number;
   createdBy: string | null; createdAt: string; updatedAt: string; finishedAt: string | null; canCancel: boolean;
   create: { done: number; total: number; lastFailed: { name: string; note: string } | null };
   created: { instance: string; label: string; name: string; id: number }[];
   attach: { instance: string; label: string; inboxes: number | null; verified: number; total: number; refused: number; notConnected: number; setAside: number }[];
   nurture: { done: boolean; batchesCleared: number };
+  requeue: { cleared: number; scanned: number; done: boolean; recovered: number | null } | null;
   archive: { total: number; done: number; rows: { instance: string; label: string; id: number; name: string; leads: number; late: boolean; result: string | null; note: string | null }[] };
 }
 interface Input_ { key: string; label: string; type: "group" | "text" | "select" | "textarea" | "hidden"; value: number | string | null; hint?: string; placeholder?: string; options?: { value: string; label: string }[] }
 interface Preview { tag: string; inputs: Input_[]; blockers: string[]; tables: { title: string; columns: string[]; rows: string[][] }[]; notes: { title: string; text: string }[] }
 
-const WORKING: Status[] = ["creating", "attaching", "repointing", "archiving", "cancelling"];
+const WORKING: Status[] = ["creating", "attaching", "repointing", "requeueing", "archiving", "cancelling"];
+const NAME: Record<Kind, string> = { hard: "Hard reset", nurture: "Nurture reset" };
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
 
 async function call(url: string, body?: Record<string, unknown>): Promise<{ ok: boolean; data: Record<string, unknown> }> {
@@ -43,7 +48,11 @@ async function call(url: string, body?: Record<string, unknown>): Promise<{ ok: 
   } catch (e) { return { ok: false, data: { error: (e as Error).message } }; }
 }
 
-export function HardResetButton({ tag: raw }: { tag: string }) {
+/**
+ * kind: which reset the button starts ("hard" on the client page, "nurture" on its Nurture pages).
+ * look: "nx" draws it as the Nurture pages' own button.
+ */
+export function HardResetButton({ tag: raw, kind = "hard", look = "page", small = false }: { tag: string; kind?: Kind; look?: "page" | "nx"; small?: boolean }) {
   const tag = raw.toUpperCase();
   const base = `/api/clients/${encodeURIComponent(tag)}/hard-reset`;
   const [reset, setReset] = useState<ResetView | null | undefined>(undefined);
@@ -80,29 +89,40 @@ export function HardResetButton({ tag: raw }: { tag: string }) {
 
   const active = !!reset && (working || reset.status === "failed");
   const stopped = reset?.status === "failed";
+  // While either kind of reset is unfinished, the button shows that one (only one runs per client).
+  const name = active && reset ? NAME[reset.kind] : NAME[kind];
+  const label = stopped ? `${name} stopped` : reset?.status === "cancelling" ? `Cancelling ${name.toLowerCase()}` : active ? `${name} running` : kind === "nurture" ? "Reset nurture" : "Hard reset";
+  const icon = stopped ? <AlertTriangle className="size-4" /> : active ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />;
+  const openIt = () => { setView(active ? "progress" : "preview"); setOpen(true); };
   return (
     <>
-      <Button variant="outline" disabled={reset === undefined} onClick={() => { setView(active ? "progress" : "preview"); setOpen(true); }}
-        className={cn("gap-1.5",
-          stopped ? "border-destructive/40 text-destructive hover:bg-destructive/5 hover:text-destructive"
-            : active ? "border-sky-500/30 text-sky-700 hover:bg-sky-500/5 hover:text-sky-700 dark:text-sky-300"
-            : "text-destructive hover:bg-destructive/5 hover:text-destructive")}>
-        {stopped ? <AlertTriangle className="size-4" /> : active ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
-        {stopped ? "Hard reset stopped" : reset?.status === "cancelling" ? "Cancelling hard reset" : active ? "Hard reset running" : "Hard reset"}
-      </Button>
+      {look === "nx" ? (
+        <button type="button" className="btn" disabled={reset === undefined} onClick={openIt}
+          style={{ color: stopped || !active ? "var(--red-fg)" : "var(--blue-fg)" }}>
+          {icon}{label}
+        </button>
+      ) : (
+        <Button variant="outline" size={small ? "sm" : "default"} disabled={reset === undefined} onClick={openIt}
+          className={cn("gap-1.5",
+            stopped ? "border-destructive/40 text-destructive hover:bg-destructive/5 hover:text-destructive"
+              : active ? "border-sky-500/30 text-sky-700 hover:bg-sky-500/5 hover:text-sky-700 dark:text-sky-300"
+              : "text-destructive hover:bg-destructive/5 hover:text-destructive")}>
+          {icon}{label}
+        </Button>
+      )}
       <Dialog open={open} onOpenChange={(o) => { if (!busy) setOpen(o); }}>
         <DialogContent className={cn("max-h-[90vh] overflow-y-auto", view === "progress" ? "sm:max-w-2xl" : "sm:max-w-4xl")}>
           {view === "progress" && reset ? (
             <>
               <DialogHeader>
-                <DialogTitle>Hard reset {tag}</DialogTitle>
+                <DialogTitle>{NAME[reset.kind]} {tag}</DialogTitle>
                 <DialogDescription>{active ? "It runs in the background — you can close this and come back." : "It has finished."}</DialogDescription>
               </DialogHeader>
               {active ? <Progress r={reset} busy={busy} onRetry={() => void act("retry")} onCancel={() => void act("cancel")} tag={tag} />
                 : <div className="space-y-4"><LastReset r={reset} /><div className="flex justify-end"><Button variant="ghost" onClick={() => setOpen(false)}>Close</Button></div></div>}
             </>
           ) : open && (
-            <ResetPreview tag={tag} base={base} last={reset ?? null} onClose={() => setOpen(false)} onStarted={async () => { await load(); setView("progress"); }} />
+            <ResetPreview tag={tag} kind={kind} base={base} last={reset ?? null} onClose={() => setOpen(false)} onStarted={async () => { await load(); setView("progress"); }} />
           )}
         </DialogContent>
       </Dialog>
@@ -112,8 +132,13 @@ export function HardResetButton({ tag: raw }: { tag: string }) {
 
 // ── what happens (shown straight away) ─────────────────────────────────────
 
-function Overview({ tag }: { tag: string }) {
-  const items: [typeof Mail, string, string][] = [
+function Overview({ tag, kind }: { tag: string; kind: Kind }) {
+  const items: [typeof Mail, string, string][] = kind === "nurture" ? [
+    [Mail, "6 fresh Nurture 1 campaigns", "Google + Custom, Outlook and SEGs in each of its two instances, made exactly as a new client's are today — empty. Its main campaigns aren't touched."],
+    [Inbox, "Its inboxes go on them", `Every inbox tagged ${tag} goes on the 3 new campaigns in each instance (any marked Reserve or Burnt are left out).`],
+    [Sprout, "Nurture starts over", "Nurture sends to the new campaigns, the batch count starts at 1 again (Nurture 2 follows when Nurture 1 fills), and every lead can be nurtured again — including ones nurtured before. The 45-day wait stays."],
+    [Archive, "Old nurture campaigns archived", `Last, once everything new is ready: ${tag}'s Nurture 1, 2, 3… campaigns. Leads still in them stop. Email Bison can't un-archive.`],
+  ] : [
     [Mail, "12 fresh campaigns", "Made exactly as a new client's are today — the current copy for its type, the standard settings and limits, Mon–Fri in its time zone. Drafts until they have leads."],
     [Inbox, "Its domains move over", `Every inbox tagged ${tag} goes on all 6 new campaigns in each of its two instances (any marked Reserve or Burnt are left out). Domains, redirects and whitelisting don't change.`],
     [Sprout, "Nurture starts again", "Nurture sends to the 6 new nurture campaigns and its batch count restarts. The 45-day wait stays, and leads nurtured before aren't nurtured again."],
@@ -132,7 +157,9 @@ function Overview({ tag }: { tag: string }) {
           </li>
         ))}
       </ol>
-      <p className="text-xs text-muted-foreground">Then load leads into the new campaigns as usual — they start once they have leads and inboxes (the Go Live Date still applies).</p>
+      <p className="text-xs text-muted-foreground">{kind === "nurture"
+        ? "Then the usual nurture routing fills the new campaigns — leads already past their 45 days go first."
+        : "Then load leads into the new campaigns as usual — they start once they have leads and inboxes (the Go Live Date still applies)."}</p>
     </section>
   );
 }
@@ -145,8 +172,8 @@ function LastReset({ r }: { r: ResetView }) {
     <div className={cn("rounded-xl border px-4 py-2.5 text-xs", done ? "border-emerald-600/20 bg-emerald-500/[0.05]" : "bg-muted/20")}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {done ? <CheckCircle2 className="size-4 text-emerald-600" /> : <XCircle className="size-4 text-muted-foreground" />}
-        <span className="font-medium text-foreground">Last reset #{r.id} — {done ? "done" : "cancelled"} {when(r.finishedAt ?? r.updatedAt)}</span>
-        <span className="text-muted-foreground">by {r.createdBy ?? "—"}{done ? ` · ${r.create.done} campaigns made · ${archived} archived` : ""}</span>
+        <span className="font-medium text-foreground">Last {NAME[r.kind].toLowerCase()} #{r.id} — {done ? "done" : "cancelled"} {when(r.finishedAt ?? r.updatedAt)}</span>
+        <span className="text-muted-foreground">by {r.createdBy ?? "—"}{done ? ` · ${r.create.done} campaigns made · ${archived} archived${r.requeue ? ` · ${r.requeue.cleared.toLocaleString()} leads back in the queue` : ""}` : ""}</span>
       </div>
       {!done && r.error && <p className="mt-1.5 text-muted-foreground">{r.error}</p>}
       {done && left.length > 0 && <p className="mt-1.5 text-muted-foreground">Not archived: {left.map((x) => `#${x.id} “${x.name}” (${x.note})`).join("; ")}.</p>}
@@ -166,7 +193,7 @@ function LastReset({ r }: { r: ResetView }) {
 
 type StepState = "done" | "now" | "todo" | "failed";
 function stepState(r: ResetView, step: Status): StepState {
-  const order: Status[] = ["creating", "attaching", "repointing", "archiving"];
+  const order: Status[] = ["creating", "attaching", "repointing", "requeueing", "archiving"];
   const cur = r.status === "failed" ? r.failedStep : r.status === "done" ? null : r.status;
   if (r.status === "done") return "done";
   if (!cur || cur === "cancelling") return "todo";
@@ -181,8 +208,9 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
   const archivePct = r.archive.total ? Math.round((r.archive.done / r.archive.total) * 100) : 100;
   // Waiting on Email Bison (its background deletes, or a few minutes for an unanswered create) isn't a problem.
   const waiting = r.status !== "failed" && /^Waiting|can run again in about/.test(r.error ?? "");
+  const nurture = r.kind === "nurture";
   const steps: { key: Status; title: string; detail: React.ReactNode }[] = [
-    { key: "creating", title: "Make the 12 new campaigns", detail: `${r.create.done} of ${r.create.total} made${r.create.lastFailed ? ` — stopped at “${r.create.lastFailed.name}”` : ""}` },
+    { key: "creating", title: nurture ? "Make the 6 new Nurture 1 campaigns" : "Make the 12 new campaigns", detail: `${r.create.done} of ${r.create.total} made${r.create.lastFailed ? ` — stopped at “${r.create.lastFailed.name}”` : ""}` },
     { key: "attaching", title: "Attach the inboxes", detail: (
       <span className="block space-y-0.5">
         {r.attach.map((a) => (
@@ -196,7 +224,10 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
       </span>
     ) },
     { key: "repointing", title: "Switch nurture to the new campaigns", detail: r.nurture.done ? `Done${r.nurture.batchesCleared ? ` — ${r.nurture.batchesCleared} batch record${r.nurture.batchesCleared === 1 ? "" : "s"} cleared` : ""}` : "Nurture map → the 6 new nurture campaigns; batch count restarts" },
-    { key: "archiving", title: "Archive the old campaigns", detail: (
+    ...(nurture ? [{ key: "requeueing" as Status, title: "Re-open the queue", detail: r.requeue
+      ? `${r.requeue.cleared.toLocaleString()} leads back in the queue${r.requeue.done ? "" : ` so far (${r.requeue.scanned.toLocaleString()} sequence-finished rows looked at)`}${r.requeue.recovered != null ? ` · ${r.requeue.recovered.toLocaleString()} recovered stopped leads to recover again` : ""}`
+      : "Every lead can be nurtured again — the “already nurtured” marks are cleared" }] : []),
+    { key: "archiving", title: nurture ? "Archive the old nurture campaigns" : "Archive the old campaigns", detail: (
       <span className="block space-y-1.5">
         <span className="block">{r.archive.done} of {r.archive.total} done{r.archive.rows.some((x) => x.late) ? ` (incl. ${r.archive.rows.filter((x) => x.late).length} made after the reset started)` : ""}</span>
         {r.archive.total > 0 && <span className="block h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-muted"><span className="block h-full rounded-full bg-sky-500 transition-all" style={{ width: `${archivePct}%` }} /></span>}
@@ -208,7 +239,7 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm font-medium">
           {r.status === "failed" ? <AlertTriangle className="size-4 text-destructive" /> : <Loader2 className="size-4 animate-spin text-sky-600" />}
-          {r.status === "failed" ? `Hard reset #${r.id} stopped` : r.status === "cancelling" ? `Cancelling hard reset #${r.id} — deleting the new campaigns` : `Hard reset #${r.id} is running`}
+          {r.status === "failed" ? `${NAME[r.kind]} #${r.id} stopped` : r.status === "cancelling" ? `Cancelling ${NAME[r.kind].toLowerCase()} #${r.id} — deleting the new campaigns` : `${NAME[r.kind]} #${r.id} is running`}
         </div>
         <span className="text-xs text-muted-foreground">Started {when(r.createdAt)} by {r.createdBy ?? "—"}</span>
       </div>
@@ -241,7 +272,7 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
       )}
       {asking ? (
         <div className="rounded-xl border border-destructive/30 bg-destructive/[0.04] px-4 py-3 text-sm">
-          <p className="font-medium">Cancel the hard reset?</p>
+          <p className="font-medium">Cancel the {NAME[r.kind].toLowerCase()}?</p>
           <p className="mt-0.5 text-xs text-muted-foreground">The new campaigns it has made so far are deleted (never one with leads in it). {tag}&apos;s current campaigns, their inboxes and nurture stay exactly as they are — nothing of them has been changed yet.</p>
           <div className="mt-3 flex flex-wrap gap-2">
             <Button size="sm" variant="destructive" className="gap-1.5" disabled={!!busy} onClick={() => { onCancel(); setAsking(false); }}>{busy === "cancel" ? <Loader2 className="size-3.5 animate-spin" /> : <Ban className="size-3.5" />}Cancel the reset</Button>
@@ -261,7 +292,7 @@ function Progress({ r, busy, onRetry, onCancel, tag }: { r: ResetView; busy: str
 
 // ── the preview + confirm ──────────────────────────────────────────────────
 
-function ResetPreview({ tag, base, last, onClose, onStarted }: { tag: string; base: string; last: ResetView | null; onClose: () => void; onStarted: () => Promise<void> }) {
+function ResetPreview({ tag, kind, base, last, onClose, onStarted }: { tag: string; kind: Kind; base: string; last: ResetView | null; onClose: () => void; onStarted: () => Promise<void> }) {
   const [pv, setPv] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
@@ -288,23 +319,23 @@ function ResetPreview({ tag, base, last, onClose, onStarted }: { tag: string; ba
   }, []);
   const preview = useCallback(async (params: Record<string, string>) => {
     setLoading(true);
-    show(await call(base, { action: "preview", params }));
-  }, [base, show]);
+    show(await call(base, { action: "preview", kind, params }));
+  }, [base, kind, show]);
   useEffect(() => {
     let live = true;
-    call(base, { action: "preview", params: {} }).then((r) => { if (live) show(r); });
+    call(base, { action: "preview", kind, params: {} }).then((r) => { if (live) show(r); });
     return () => { live = false; };
-  }, [base, show]);
+  }, [base, kind, show]);
 
   const dirty = useMemo(() => Object.keys(values).some((k) => values[k] !== shown[k]), [values, shown]);
   const canStart = !!pv && !loading && !dirty && !pv.blockers.length && confirm.trim().toUpperCase() === tag;
 
   async function start() {
     setStarting(true);
-    const r = await call(base, { action: "start", params: values, confirm });
+    const r = await call(base, { action: "start", kind, params: values, confirm });
     setStarting(false);
     if (!r.ok) { toast.error(String(r.data.error ?? "It didn't start.")); void preview(values); return; }
-    toast.success(`Hard reset of ${tag} started — it runs in the background.`);
+    toast.success(`${NAME[kind]} of ${tag} started — it runs in the background.`);
     await onStarted();
   }
 
@@ -312,12 +343,14 @@ function ResetPreview({ tag, base, last, onClose, onStarted }: { tag: string; ba
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Hard reset {tag}?</DialogTitle>
-        <DialogDescription>Starts {tag} over on fresh campaigns — for a client that has stalled. Nothing changes until you confirm below.</DialogDescription>
+        <DialogTitle>{kind === "nurture" ? `Reset ${tag}'s nurture?` : `Hard reset ${tag}?`}</DialogTitle>
+        <DialogDescription>{kind === "nurture"
+          ? `Starts ${tag}'s nurture over on fresh Nurture 1 campaigns — its main campaigns aren't touched. Nothing changes until you confirm below.`
+          : `Starts ${tag} over on fresh campaigns — for a client that has stalled. Nothing changes until you confirm below.`}</DialogDescription>
       </DialogHeader>
 
       <div className="space-y-5 text-sm">
-        <Overview tag={tag} />
+        <Overview tag={tag} kind={kind} />
         {last && (last.status === "done" || last.status === "cancelled") && <LastReset r={last} />}
 
         {!pv && loading ? (
@@ -396,7 +429,7 @@ function ResetPreview({ tag, base, last, onClose, onStarted }: { tag: string; ba
         <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={onClose} disabled={starting}>Close</Button>
           <Button variant="destructive" onClick={() => void start()} disabled={!canStart || starting} title={dirty ? "Update the preview first" : undefined}>
-            {starting ? <Loader2 className="animate-spin" /> : <RotateCcw className="size-3.5" />}Start the hard reset
+            {starting ? <Loader2 className="animate-spin" /> : <RotateCcw className="size-3.5" />}Start the {NAME[kind].toLowerCase()}
           </Button>
         </div>
       </DialogFooter>

@@ -1,9 +1,10 @@
 /**
- * A client's Hard Reset (admin only).
+ * A client's Hard Reset or Nurture reset (admin only).
  *
- * GET  → the client's latest reset with its progress
- * POST { action: "preview", params }            → what it would do (nothing changes)
- * POST { action: "start", params, confirm: TAG } → starts it (the preview is rebuilt fresh first; any blocker refuses)
+ * GET  → the client's latest reset (either kind) with its progress
+ * POST { action: "preview", kind?, params }            → what it would do (nothing changes)
+ * POST { action: "start", kind?, params, confirm: TAG } → starts it (the preview is rebuilt fresh first; any blocker refuses)
+ *      kind: "hard" (default — all 12 campaigns) or "nurture" (the 6 nurture campaigns + the queue re-opened)
  * POST { action: "retry", id }                   → a failed reset carries on from the step it stopped in
  * POST { action: "cancel", id }                  → before nurture is switched only: the new campaigns are deleted
  */
@@ -12,7 +13,7 @@ import { getSession } from "@/lib/auth";
 import { normClientTag } from "@/lib/onboarding/copy-model";
 import { logActivity } from "@/lib/errors";
 import { previewReset, instanceName } from "@/lib/hard-reset/plan";
-import { createReset, getReset, latestReset, patchReset, CANCELLABLE, type HardReset } from "@/lib/hard-reset/store";
+import { createReset, getReset, latestReset, patchReset, CANCELLABLE, type HardReset, type ResetKind } from "@/lib/hard-reset/store";
 import { triggerHardResetRunner } from "@/lib/hard-reset/runner";
 
 export const dynamic = "force-dynamic";
@@ -39,22 +40,27 @@ function view(r: HardReset) {
   const created = r.built.filter((b) => b.state === "created" && b.campaignId != null);
   const failedBuild = [...r.built].reverse().find((b) => b.state === "failed");
   return {
-    id: r.id, status: r.status, failedStep: r.failedStep, error: r.error, attempts: r.attempts,
+    id: r.id, kind: r.kind, status: r.status, failedStep: r.failedStep, error: r.error, attempts: r.attempts,
     createdBy: r.createdBy, createdAt: r.createdAt, updatedAt: r.updatedAt, finishedAt: r.finishedAt,
     canCancel: cancellable(r),
-    create: { done: created.length, total: 12, lastFailed: failedBuild ? { name: failedBuild.name, note: failedBuild.note } : null },
+    create: { done: created.length, total: r.kind === "nurture" ? 6 : 12, lastFailed: failedBuild && !failedBuild.cleared ? { name: failedBuild.name, note: failedBuild.note } : null },
     created: created.map((b) => ({ instance: b.instance, label: instanceName(b.instance), name: b.name, id: b.campaignId })),
     attach: [r.client.b2b, r.client.b2c].map((inst) => {
       const st = r.attach[inst];
       const camps = Object.values(st?.campaigns ?? {});
       return {
         instance: inst, label: instanceName(inst), inboxes: st?.senders?.length ?? null,
-        verified: camps.filter((c) => c.verified).length, total: 6,
+        verified: camps.filter((c) => c.verified).length, total: r.kind === "nurture" ? 3 : 6,
         refused: camps.reduce((n, c) => Math.max(n, c.refused.length), 0),
         notConnected: st?.offline?.length ?? 0, setAside: st?.setAside ?? 0,
       };
     }),
     nurture: { done: !!r.nurture?.after?.length, batchesCleared: r.nurture?.batches.length ?? 0, after: r.nurture?.after ?? [] },
+    requeue: r.requeue ? {
+      cleared: r.requeue.seq.cleared + r.requeue.replies.cleared + r.requeue.legacy.cleared,
+      scanned: r.requeue.seq.scanned, done: !!r.requeue.ledgers && r.status !== "requeueing",
+      recovered: r.requeue.ledgers?.recovered ?? null,
+    } : null,
     archive: {
       total: r.archive.length,
       done: r.archived.length,
@@ -83,28 +89,29 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tag
   const body = await req.json().catch(() => ({}));
   const action = String(body?.action ?? "");
   const p = (body?.params && typeof body.params === "object" ? body.params : {}) as Record<string, unknown>;
+  const kind: ResetKind = body?.kind === "nurture" ? "nurture" : "hard";
   const log = (what: string, details: Record<string, unknown> = {}) => logActivity("hard-reset", what, { client_tag: a.tag, details: { by: a.email, ...details } });
   try {
     if (action === "preview") {
-      const pr = await previewReset(a.tag, p, a.email, false);
+      const pr = await previewReset(a.tag, p, a.email, false, kind);
       return NextResponse.json({ ok: true, preview: { tag: pr.tag, inputs: pr.inputs, blockers: pr.blockers, tables: pr.tables, notes: pr.notes } });
     }
 
     if (action === "start") {
       if (String(body?.confirm ?? "").trim().toUpperCase() !== a.tag) return NextResponse.json({ error: `Type ${a.tag} to confirm.` }, { status: 400 });
       // Built again from fresh reads — never trusted from the preview on screen.
-      const pr = await previewReset(a.tag, p, a.email, true);
+      const pr = await previewReset(a.tag, p, a.email, true, kind);
       if (pr.blockers.length || !pr.client || !pr.plan) return NextResponse.json({ error: pr.blockers.join(" ") || "The reset can't be planned right now.", blockers: pr.blockers }, { status: 409 });
       // The inputs it runs with are the ones the preview showed (the copy version is pinned among them).
       const pinned = Object.fromEntries(pr.inputs.map((i) => [i.key, i.value ?? ""]));
       let id: number;
       try {
-        id = await createReset({ clientTag: a.tag, params: pinned, client: pr.client, archive: pr.archive, by: a.email });
+        id = await createReset({ clientTag: a.tag, kind, params: pinned, client: pr.client, archive: pr.archive, by: a.email });
       } catch (e) {
-        if (/UNIQUE/i.test((e as Error).message)) return NextResponse.json({ error: `A hard reset for ${a.tag} is already under way.` }, { status: 409 });
+        if (/UNIQUE/i.test((e as Error).message)) return NextResponse.json({ error: `A reset for ${a.tag} is already under way.` }, { status: 409 });
         throw e;
       }
-      await log("started", { reset_id: id, archive: pr.archive.map((c) => `${c.instance}:${c.id}`), group: pr.client.group });
+      await log("started", { reset_id: id, kind, archive: pr.archive.map((c) => `${c.instance}:${c.id}`), group: pr.client.group });
       triggerHardResetRunner(id);
       return NextResponse.json({ ok: true, id });
     }
