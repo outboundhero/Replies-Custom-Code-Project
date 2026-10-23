@@ -28,6 +28,11 @@ import {
 } from "@/lib/leadsync";
 import type { BisonInstanceKey } from "@/lib/bison-instances-shared";
 import { clientContacts } from "@/lib/onboarding/contacts";
+import { sendEmailAs, canSendAs } from "@/lib/gmail-send";
+import {
+  goLiveSendEnabled, goLiveSender, goLiveText, goLiveHtml, goLiveCc, getGoLiveRecord, claimGoLive, finishGoLive,
+  GO_LIVE_SUBJECT, type Sender, type GoLiveRecord,
+} from "@/lib/onboarding/go-live-email";
 import { defaultArea } from "@/lib/onboarding/campaign-copy";
 import {
   buildCampaign, campaignLimits, campaignSchedule, serviceAreaLine, addressSpintax, tierOf, tierSupported, unsafeForSpintax,
@@ -1207,62 +1212,96 @@ const whitelistEmail: Automation = {
 // ── 6. Send client go-live email ────────────────────────────────────────────
 // The email is fixed (requirements of 2026-09-21): to the client's contacts —
 // the same people the whitelist email goes to — with Spencer and Madison in CC.
-// This shows it. Sending from here is NOT built: which mailbox it goes out
-// from is still to be decided, so the step is sent by hand and ticked off.
+// It goes out from nick@outreachify.io until Oct 31 and madison@outboundhero.co
+// from Nov 1 (lib/onboarding/go-live-email.ts), once per client, and only when
+// GO_LIVE_EMAIL_SEND=1 — until then this is a preview, sent by hand.
 
-const GO_LIVE_SUBJECT = "OutboundHero Update";
-const GO_LIVE_BODY = [
-  "Hi Team,",
-  "",
-  "Just wanted to let you know we are going live with your campaigns tomorrow morning. You should start to see your first leads come your way in the next couple of days. Spencer will follow up with lead instructions. Let me know if you have any questions.",
-  "",
-  "Cheers,",
-  "Nick Mekeel",
-  "OutboundHero",
-].join("\n");
-const goLiveCc = () =>
-  (process.env.ONBOARDING_GO_LIVE_CC || "spencer@outboundhero.co,madison@outboundhero.co").split(",").map((e) => e.trim()).filter(Boolean);
-const GO_LIVE_NOT_BUILT =
-  "Sending this from the checklist isn't built yet — it waits for the decision on which mailbox it goes out from. Send it by hand for now, then complete the step.";
+const GO_LIVE_NOT_SWITCHED_ON =
+  "Sending the go-live email from here isn't switched on yet (GO_LIVE_EMAIL_SEND) — send it by hand for now, then complete the step.";
+
+interface GoLiveView { tag: string; sender: Sender; to: string[]; cc: string[]; bcc: string[]; blockers: string[]; already: GoLiveRecord | null }
+
+async function planGoLive(ctx: AutomationContext): Promise<GoLiveView> {
+  const tag = ctx.client.client_tag.toUpperCase();
+  const blockers: string[] = [];
+  const sender = goLiveSender();
+  let to: string[] = [], bcc: string[] = [];
+  try {
+    const c = await clientContacts(tag);
+    to = c.to; bcc = c.bcc;
+    if (!c.known) blockers.push(`${tag} isn't set up under Clients yet — its contact emails come from there.`);
+    else if (to.length === 0) blockers.push(`${tag} has no contact emails under Clients (CC) — there is nobody to send this to.`);
+  } catch (e) {
+    blockers.push(`Couldn't read ${tag}'s contact emails: ${(e as Error).message}`);
+  }
+  const already = await getGoLiveRecord(tag).catch(() => null);
+  if (already?.status === "sent") blockers.push(`Already sent ${already.sent_at ? fmtStamp(already.sent_at) : ""} from ${already.from_email} — it goes once per client.`);
+  else if (already?.status === "unsure" || (already?.status === "sending" && Date.now() - Date.parse(already.updated_at) > 10 * 60_000)) {
+    blockers.push(`The last try may have gone out (${already.reason ?? "the connection to Gmail dropped while sending"}) — check ${already.from_email}'s Sent folder; if it isn't there, send it by hand and complete the step.`);
+  } else if (already?.status === "sending") blockers.push("It's being sent right now.");
+  if (!goLiveSendEnabled()) blockers.push(GO_LIVE_NOT_SWITCHED_ON);
+  else {
+    const can = await canSendAs(sender.email);
+    if (!can.ok) blockers.push(can.reason ?? `Can't send as ${sender.email} right now.`);
+  }
+  return { tag, sender, to, cc: goLiveCc(sender, to), bcc, blockers, already };
+}
 
 const goLiveEmail: Automation = {
   async preview(ctx) {
-    const tag = ctx.client.client_tag.toUpperCase();
-    const blockers: string[] = [];
-    let to: string[] = [], bcc: string[] = [];
-    try {
-      const c = await clientContacts(tag);
-      to = c.to; bcc = c.bcc;
-      if (!c.known) blockers.push(`${tag} isn't set up under Clients yet — its contact emails come from there.`);
-      else if (to.length === 0 && bcc.length === 0) blockers.push(`${tag} has no contact emails under Clients (CC / BCC) — there is nobody to send this to.`);
-    } catch (e) {
-      blockers.push(`Couldn't read ${tag}'s contact emails: ${(e as Error).message}`);
-    }
-    const cc = goLiveCc().filter((e) => !to.some((t) => t.toLowerCase() === e.toLowerCase()));
-    blockers.push(GO_LIVE_NOT_BUILT);
+    const v = await planGoLive(ctx);
     return {
       title: "Send client go-live email",
       lines: [
-        `The go-live email for ${tag}: to its contacts — the same people LeadSync's whitelist email goes to — with Spencer and Madison in CC.`,
-        "It says the campaigns go live “tomorrow morning”, so it goes out the day before go-live.",
+        `The go-live email for ${v.tag}, from ${v.sender.name} (${v.sender.email}): to its contacts — the same people LeadSync's whitelist email goes to — with Spencer and Madison in CC.`,
+        `It goes out from nick@outreachify.io until Oct 31 and from madison@outboundhero.co from Nov 1 — it lands in that mailbox's Sent folder, like one sent by hand.`,
+        "It says the campaigns go live “tomorrow morning”, so it goes out the day before go-live. Once per client.",
       ],
-      message: `Subject: ${GO_LIVE_SUBJECT}\n\n${GO_LIVE_BODY}`,
+      message: `Subject: ${GO_LIVE_SUBJECT}\n\n${goLiveText(v.sender)}`,
       inputs: [],
-      blockers,
+      blockers: v.blockers,
       tables: [{
         title: "Who gets it",
         columns: ["", "Address"],
         rows: [
-          ["From", "Not decided yet"],
-          ["To", to.join(", ") || "—"],
-          ["CC", cc.join(", ") || "—"],
-          ...(bcc.length ? [["BCC", bcc.join(", ")]] : []),
+          ["From", `${v.sender.name} <${v.sender.email}>`],
+          ["To", v.to.join(", ") || "—"],
+          ["CC", v.cc.join(", ") || "—"],
+          ...(v.bcc.length ? [["BCC", v.bcc.join(", ")]] : []),
         ],
       }],
+      ...(v.blockers.length ? {} : {
+        confirm: {
+          title: `Send the go-live email to ${v.tag}?`,
+          lines: [`From ${v.sender.name} <${v.sender.email}>`, `To ${v.to.join(", ")}`, ...(v.cc.length ? [`CC ${v.cc.join(", ")}`] : []), ...(v.bcc.length ? [`BCC ${v.bcc.join(", ")}`] : []), "It can't be unsent."],
+          confirmLabel: "Send it",
+        },
+      }),
     };
   },
-  async run() {
-    return { ok: false, summary: GO_LIVE_NOT_BUILT };
+  async run(ctx) {
+    const v = await planGoLive(ctx);
+    if (v.blockers.length) return { ok: false, summary: v.blockers.join(" ") };
+    if (!(await claimGoLive(v.tag, { from: v.sender.email, to: v.to, cc: v.cc, bcc: v.bcc, by: ctx.by }))) {
+      return { ok: false, summary: "It was sent (or is being sent) already — it goes once per client." };
+    }
+    try {
+      const sent = await sendEmailAs({
+        fromEmail: v.sender.email, fromName: v.sender.name, to: v.to, cc: v.cc, bcc: v.bcc,
+        subject: GO_LIVE_SUBJECT, text: goLiveText(v.sender), html: goLiveHtml(v.sender),
+        allowAnyRecipient: goLiveSendEnabled(),
+      });
+      await finishGoLive(v.tag, "sent", { message_id: sent.id });
+      return {
+        ok: true,
+        summary: `Go-live email sent from ${v.sender.email} to ${v.to.join(", ")}${v.cc.length ? ` (CC ${v.cc.join(", ")})` : ""}${v.bcc.length ? ` (BCC ${v.bcc.join(", ")})` : ""}.`,
+        result: { from: v.sender.email, to: v.to, cc: v.cc, bcc: v.bcc, messageId: sent.id },
+      };
+    } catch (e) {
+      const err = e as Error & { uncertain?: boolean };
+      await finishGoLive(v.tag, err.uncertain ? "unsure" : "failed", { reason: err.message.slice(0, 500) }).catch(() => {});
+      return { ok: false, summary: err.uncertain ? `${err.message} — it may have gone out; check ${v.sender.email}'s Sent folder before trying again.` : err.message };
+    }
   },
 };
 
@@ -1440,7 +1479,7 @@ const replyRouterSetup: Automation = {
 /** What each automation can do on this server right now: "on" (it runs when approved),
  *  "off" (built, but its switch isn't set — preview only) or "preview" (sending isn't built). */
 export type AutomationState = "on" | "off" | "preview";
-const SWITCHED = new Set(["create_campaigns", "allocate_domains", "whitelist_email"]);
+const SWITCHED = new Set(["create_campaigns", "allocate_domains", "whitelist_email", "go_live_email"]);
 export function automationStates(): Record<string, AutomationState> {
   return Object.fromEntries(Object.keys(AUTOMATION_META).map((k) => [k,
     automationRunnable(k) ? "on" : SWITCHED.has(k) ? "off" : "preview"] as const));
@@ -1451,6 +1490,7 @@ export function automationRunnable(key: string | null | undefined): boolean {
   if (key === "create_campaigns") return campaignCreationEnabled();
   if (key === "allocate_domains") return domainAllocationEnabled();
   if (key === "whitelist_email") return whitelistSendEnabled();
+  if (key === "go_live_email") return goLiveSendEnabled();
   return !!AUTOMATION_META[key]?.built;
 }
 

@@ -87,6 +87,38 @@ export function buildMime(m: OutgoingEmail): string {
   return [...head, "", ...body].join("\r\n");
 }
 
+const canSendCache = new Map<string, { at: number; ok: boolean; reason: string | null }>();
+
+/**
+ * May we send as this address? Asks Google for a send-only token — nothing is sent. A "no" from the
+ * Workspace is remembered for 10 minutes (a passing failure isn't); `reason` says what to do about it.
+ */
+export async function canSendAs(address: string): Promise<{ ok: boolean; reason: string | null }> {
+  const key = address.trim().toLowerCase();
+  const hit = canSendCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return { ok: hit.ok, reason: hit.reason };
+  const jwt = new google.auth.JWT({
+    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key: (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+    scopes: ["https://www.googleapis.com/auth/gmail.send"],
+    subject: key,
+  });
+  try {
+    await jwt.authorize();
+    canSendCache.set(key, { at: Date.now(), ok: true, reason: null });
+    return { ok: true, reason: null };
+  } catch (e) {
+    const d = (e as { response?: { data?: { error?: string; error_description?: string } } }).response?.data;
+    if (d?.error === "invalid_grant" || d?.error === "unauthorized_client") {
+      const domain = key.split("@")[1] ?? "";
+      const reason = `Google won't let Reply Router send as ${key} yet — the ${domain} Google Workspace hasn't allowed it. Its admin allows it once: Admin console → Security → Access and data control → API controls → Domain-wide delegation → Add new, Client ID 101742147373154360078, scope https://www.googleapis.com/auth/gmail.send.`;
+      canSendCache.set(key, { at: Date.now(), ok: false, reason });
+      return { ok: false, reason };
+    }
+    return { ok: false, reason: `Couldn't check sending as ${key} just now (${d?.error_description || d?.error || (e as Error).message}) — try again in a moment.` };
+  }
+}
+
 /** Sends as m.fromEmail. Returns Gmail's message id. Throws with Google's reason on failure. */
 export async function sendEmailAs(m: OutgoingEmail): Promise<{ id: string; threadId: string }> {
   const raw = Buffer.from(buildMime(m), "utf8").toString("base64url");
